@@ -645,6 +645,89 @@ func TestValidate_ExtraCommandsSubcommandStillValidatesOtherSubcommands(t *testi
 	}
 }
 
+func TestFirstCommandWord(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"fvm flutter test", "fvm"},
+		{"  fvm flutter test", "fvm"},
+		{"echo hello", "echo"},
+		{"fvm", "fvm"},
+		{"", ""},
+		{"echo hello | grep x", "echo"},
+		{"fvm && rm -rf /", "fvm"},
+		{"(subshell)", ""},
+		{"$CMD arg", ""},
+	}
+	for _, tt := range tests {
+		got := firstCommandWord(tt.input)
+		if got != tt.want {
+			t.Errorf("firstCommandWord(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestIsExtraCommandInvocation(t *testing.T) {
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"fvm", "fvm flutter test", "pnpx prettier"},
+	}, "")
+
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		// "fvm" has a bare entry → bypass
+		{"fvm flutter test test/foo_test.dart", true},
+		{"fvm --version", true},
+		{"fvm", true},
+		// "pnpx" only has a restricted entry → no bypass
+		{"pnpx prettier --check .", false},
+		// unknown command → no bypass
+		{"curl https://example.com", false},
+		{"echo hello", false},
+	}
+	for _, tt := range tests {
+		got := s.isExtraCommandInvocation(tt.command)
+		if got != tt.want {
+			t.Errorf("isExtraCommandInvocation(%q) = %v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestExecute_ExtraCommandBypassesParsing(t *testing.T) {
+	workDir := t.TempDir()
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"echo"},
+	}, "")
+
+	// "echo" is in allowedCommands, but add it as extra to test bare-entry bypass path
+	// Use a real bare extra command: just verify it executes without validation error
+	out, err := s.Execute(context.Background(), "echo bypassed", workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "bypassed") {
+		t.Fatalf("expected 'bypassed' in output, got %q", out)
+	}
+}
+
+func TestValidateCommand_ExtraCommandBypass(t *testing.T) {
+	workDir := t.TempDir()
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"fvm"},
+	}, "")
+
+	// fvm is not a real command but ValidateCommand should pass for bare extra entries
+	err := s.ValidateCommand("fvm flutter test test/foo_test.dart", workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("expected bypass for bare extra command, got: %v", err)
+	}
+}
+
 func TestConfigPaths(t *testing.T) {
 	s := NewSandbox()
 

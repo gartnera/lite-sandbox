@@ -44,6 +44,10 @@ type Sandbox struct {
 	// A nil slice means no restriction (bare command entry); a non-nil slice
 	// means only those first args are allowed.
 	extraSubCommands map[string][]string
+	// bareExtraCommands tracks commands that have a bare entry in extra_commands
+	// (i.e., the entry has no subcommand restriction). These commands bypass
+	// bash AST parsing and are executed directly with the real bash.
+	bareExtraCommands map[string]bool
 	imdsEndpoint     string
 	runtimeReadPaths []string
 	osSandbox        bool
@@ -69,6 +73,7 @@ func NewSandbox() *Sandbox {
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	m := make(map[string]bool, len(cfg.ExtraCommands))
 	sub := make(map[string][]string)
+	bare := make(map[string]bool)
 	for _, c := range cfg.ExtraCommands {
 		// Entries may be "command" or "command subcommand" (space-separated).
 		// The latter restricts the command to only that first argument.
@@ -78,6 +83,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			sub[cmd] = append(sub[cmd], firstArg)
 		} else {
 			m[c] = true
+			bare[c] = true
 		}
 	}
 	// Detect runtime paths for read-only access (e.g., GOPATH, GOCACHE, pnpm store)
@@ -90,6 +96,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.cfg = cfg
 	s.extraCommands = m
 	s.extraSubCommands = sub
+	s.bareExtraCommands = bare
 	s.runtimeReadPaths = runtimeReadPaths
 
 	// Store worker config for lazy start / restart.
@@ -518,6 +525,10 @@ func extraSubCommandMatches(extraSub map[string][]string, cmdName string, args [
 // readAllowedPaths are absolute directories that read-only commands may access.
 // writeAllowedPaths are absolute directories that write commands may access.
 func (s *Sandbox) ValidateCommand(command string, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	// Bare extra_commands entries bypass AST parsing; treat as valid.
+	if s.isExtraCommandInvocation(command) {
+		return nil
+	}
 	f, err := ParseBash(command)
 	if err != nil {
 		return err
@@ -671,6 +682,64 @@ func (s *Sandbox) validateSourceFileArg(args []*syntax.Word, workDir string, rea
 	return s.validateScriptFile(filePath, workDir, readAllowedPaths, writeAllowedPaths, depth)
 }
 
+// firstCommandWord extracts the first word from a command string, stopping at
+// the first whitespace or shell metacharacter. Returns empty string if the
+// command starts with a metacharacter or is empty.
+func firstCommandWord(s string) string {
+	s = strings.TrimLeft(s, " \t\n")
+	for i, ch := range s {
+		switch ch {
+		case ' ', '\t', '\n', '|', '&', ';', '(', ')', '<', '>', '`', '$', '#', '!':
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// getBareExtraCommands returns a snapshot of the bare (unrestricted) extra commands.
+func (s *Sandbox) getBareExtraCommands() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bareExtraCommands
+}
+
+// isExtraCommandInvocation reports whether the command string should bypass
+// bash AST parsing because its leading command is a bare extra_commands entry
+// (i.e., added without a subcommand restriction).
+func (s *Sandbox) isExtraCommandInvocation(command string) bool {
+	word := firstCommandWord(command)
+	if word == "" {
+		return false
+	}
+	return s.getBareExtraCommands()[word]
+}
+
+// executeRaw executes a command string directly using the system bash without
+// going through AST parsing or validation. Used for bare extra_commands entries.
+func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string) (string, error) {
+	s.mu.RLock()
+	imdsEndpoint := s.imdsEndpoint
+	s.mu.RUnlock()
+
+	env := os.Environ()
+	if imdsEndpoint != "" {
+		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
+	}
+
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd.Dir = workDir
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	cmd.Env = env
+
+	if err := cmd.Run(); err != nil {
+		output := out.String()
+		return output, &CommandFailedError{Err: err, Output: output}
+	}
+	return out.String(), nil
+}
+
 // Execute parses, validates, and executes a bash command.
 // workDir is the working directory for the command and for resolving relative paths.
 // readAllowedPaths are absolute directories that read-only commands may access.
@@ -678,6 +747,12 @@ func (s *Sandbox) validateSourceFileArg(args []*syntax.Word, workDir string, rea
 // It returns the combined stdout and stderr output.
 func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (string, error) {
 	slog.InfoContext(ctx, "executing sandboxed bash", "command", command)
+
+	// Bare extra_commands entries bypass bash AST parsing entirely and are
+	// executed directly with the real bash for maximum compatibility.
+	if s.isExtraCommandInvocation(command) {
+		return s.executeRaw(ctx, command, workDir)
+	}
 
 	// Parse and validate
 	f, err := ParseBash(command)
