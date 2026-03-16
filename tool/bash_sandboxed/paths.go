@@ -234,6 +234,57 @@ func IsUnderAllowedPaths(path string, allowedPaths []string) bool {
 	return false
 }
 
+// grepNonPathArgIndices returns the set of argument indices (within args) that
+// are grep pattern or non-path flag values and should be excluded from file-path
+// security checks. For grep/egrep/fgrep:
+//   - Arguments following -e/--regexp are regex patterns (not file paths).
+//   - Arguments following -f/--file ARE file paths and must be path-checked.
+//   - Arguments following numeric-value flags (-m, -A, -B, -C, etc.) are numbers.
+//   - The first positional (non-flag) argument is the regex pattern (not a path).
+//   - Subsequent positional arguments are file paths and must be path-checked.
+func grepNonPathArgIndices(args []string) map[int]bool {
+	skip := make(map[int]bool)
+	patternSeen := false
+	i := 1
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			// Everything after -- is a file path; stop skipping.
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			switch arg {
+			case "-e", "--regexp":
+				i++
+				if i < len(args) {
+					skip[i] = true // regex pattern value
+				}
+				patternSeen = true // -e supplies the pattern; next positional is a file
+			case "-f", "--file":
+				i++ // file path value — NOT skipped
+			case "-m", "--max-count",
+				"-A", "--after-context",
+				"-B", "--before-context",
+				"-C", "--context":
+				i++ // numeric value — not a path, skip silently
+				if i < len(args) {
+					skip[i] = true
+				}
+			}
+			i++
+			continue
+		}
+		// First non-flag positional arg is the regex pattern.
+		if !patternSeen {
+			patternSeen = true
+			skip[i] = true
+		}
+		// Subsequent positional args are file paths — path-checked normally.
+		i++
+	}
+	return skip
+}
+
 // validateExpandedPaths checks command arguments after variable expansion.
 // This is called by the interpreter's CallHandler, where all variables and
 // command substitutions have been resolved to their actual values.
@@ -243,11 +294,26 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 	if len(args) == 0 {
 		return nil
 	}
+	cmdName := args[0]
 	allowedPaths := readAllowedPaths
-	if writeCommands[args[0]] {
+	if writeCommands[cmdName] {
 		allowedPaths = writeAllowedPaths
 	}
-	for _, arg := range args[1:] {
+
+	// For grep-family commands, identify which arg positions are patterns/values
+	// (not file paths) so we don't incorrectly flag regex patterns like ".git/"
+	// as .git directory access attempts.
+	var nonPathIndices map[int]bool
+	switch cmdName {
+	case "grep", "egrep", "fgrep":
+		nonPathIndices = grepNonPathArgIndices(args)
+	}
+
+	for i, arg := range args[1:] {
+		argIdx := i + 1
+		if nonPathIndices[argIdx] {
+			continue
+		}
 		if arg == ".git" || strings.HasPrefix(arg, ".git/") || strings.HasPrefix(arg, ".git\\") {
 			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
 		}

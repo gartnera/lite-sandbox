@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/os_sandbox"
@@ -779,6 +780,33 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 	return s.executeWithInterp(ctx, f, workDir, readAllowedPaths, writeAllowedPaths)
 }
 
+// syncBuffer is a goroutine-safe bytes.Buffer for capturing interpreter output.
+// It is needed because executeWithInterp may return before runner.Run completes
+// (when the context is cancelled and the runner is stuck on blocked io.Pipe ops).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// runnerKillGracePeriod is the extra time allowed for runner.Run to return
+// after the context is already cancelled. mvdan.cc/sh pipelines can have
+// internal goroutines blocked on io.Pipe that SIGKILL cannot unblock; this
+// grace period bounds how long we wait before giving up and returning a timeout
+// error to the caller.
+const runnerKillGracePeriod = 5 * time.Second
+
 // executeWithInterp executes the parsed command using interp.
 // If OS sandbox is enabled, ExecHandler delegates to the worker.
 func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) (string, error) {
@@ -787,7 +815,7 @@ func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir
 	imdsEndpoint := s.imdsEndpoint
 	s.mu.RUnlock()
 
-	var out bytes.Buffer
+	var out syncBuffer
 
 	// Build environment with IMDS endpoint if AWS is enabled
 	// IMPORTANT: Set as actual environment variable so subprocesses (like aws cli) can see it
@@ -820,12 +848,42 @@ func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir
 		return "", fmt.Errorf("failed to create interpreter: %w", err)
 	}
 
-	err = runner.Run(ctx, f)
-	output := out.String()
-	if err != nil {
-		return output, &CommandFailedError{Err: err, Output: output}
+	// Run the interpreter in a goroutine so we can enforce a hard deadline.
+	// runner.Run(ctx, f) may not return promptly after context cancellation when
+	// a pipeline stage fails inside the CallHandler (before becoming an OS process):
+	// the adjacent stages' io.Pipe copy goroutines block indefinitely because
+	// io.Pipe operations are not context-aware and SIGKILL only kills OS processes.
+	type runResult struct{ err error }
+	done := make(chan runResult, 1)
+	go func() {
+		done <- runResult{runner.Run(ctx, f)}
+	}()
+
+	select {
+	case r := <-done:
+		output := out.String()
+		if r.err != nil {
+			return output, &CommandFailedError{Err: r.err, Output: output}
+		}
+		return output, nil
+	case <-ctx.Done():
+		// Context cancelled (timeout). Give the runner a short grace period to
+		// clean up before we abandon it.
+		timer := time.NewTimer(runnerKillGracePeriod)
+		defer timer.Stop()
+		select {
+		case r := <-done:
+			output := out.String()
+			if r.err != nil {
+				return output, &CommandFailedError{Err: r.err, Output: output}
+			}
+			return output, nil
+		case <-timer.C:
+			// runner.Run is stuck (blocked io.Pipe goroutines). Return the
+			// timeout error; the goroutine may leak but is otherwise harmless.
+			return out.String(), fmt.Errorf("command timed out: %w", ctx.Err())
+		}
 	}
-	return output, nil
 }
 
 // execInWorker sends a command to the worker for execution in the OS sandbox.

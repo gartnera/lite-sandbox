@@ -644,3 +644,44 @@ func TestBashSandboxed_ReadWriteSeparation_Integration(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
+	workDir := t.TempDir()
+	os.MkdirAll(filepath.Join(workDir, ".git"), 0o755)
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+		errMsg  string
+	}{
+		// Grep pattern args should NOT trigger .git path checks
+		{"grep -v .git/ pattern", []string{"grep", "-v", ".git/"}, false, ""},
+		{"grep -v .git pattern", []string{"grep", "-v", ".git"}, false, ""},
+		{"grep pattern from stdin", []string{"grep", ".git/config"}, false, ""},
+		{"grep -e pattern", []string{"grep", "-e", ".git/config"}, false, ""},
+		// File args for grep SHOULD be path-checked
+		{"grep pattern .git/config blocked", []string{"grep", "pattern", ".git/config"}, true, "accesses .git directory"},
+		{"grep -e pat .git/config blocked", []string{"grep", "-e", "pat", ".git/config"}, true, "accesses .git directory"},
+		// Non-grep commands still block .git/ args
+		{"cat .git/ blocked", []string{"cat", ".git/"}, true, "accesses .git directory"},
+		{"ls .git blocked", []string{"ls", ".git"}, true, "accesses .git directory"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExpandedPaths(tt.args, workDir, []string{workDir}, []string{workDir})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected validation error, got nil")
+				}
+				if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+					t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
