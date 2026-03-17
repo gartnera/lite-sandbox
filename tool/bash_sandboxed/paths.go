@@ -83,7 +83,11 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 			}
 			var pathToCheck string
 			if strings.HasPrefix(lit, "-") {
-				// Extract any path embedded in a flag (e.g., -f/etc/passwd, --file=/etc/passwd)
+				// Extract any path embedded in a flag (e.g., -f/etc/passwd, --file=/etc/passwd).
+				// Skip for commands whose flag values are never paths (e.g., cut -d/).
+				if noFlagPathExtractionCommands[cmdName] {
+					continue
+				}
 				pathToCheck = extractPathFromFlag(lit)
 			} else {
 				pathToCheck = lit
@@ -177,6 +181,15 @@ func isGitInternalPath(resolved string) bool {
 		}
 	}
 	return false
+}
+
+// noFlagPathExtractionCommands is the set of commands whose short-flag values
+// are never file paths (e.g., cut -d/ uses / as a delimiter, not a path).
+// For these commands, extractPathFromFlag is skipped to avoid false positives.
+var noFlagPathExtractionCommands = map[string]bool{
+	"cut":  true, // -d<delim>, -f<fields>, -b<bytes>, -c<chars>
+	"sort": true, // -t<sep>
+	"tr":   true, // operands are char classes, not paths
 }
 
 // looksLikePath returns true if the string looks like it references a filesystem
@@ -462,6 +475,10 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 		}
 		var pathToCheck string
 		if strings.HasPrefix(arg, "-") {
+			// Skip flag-path extraction for commands whose flag values are never paths.
+			if noFlagPathExtractionCommands[cmdName] {
+				continue
+			}
 			pathToCheck = extractPathFromFlag(arg)
 		} else {
 			pathToCheck = arg

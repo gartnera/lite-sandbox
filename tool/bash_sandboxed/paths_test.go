@@ -181,6 +181,8 @@ func TestValidatePaths_Allowed(t *testing.T) {
 		name    string
 		command string
 	}{
+		{"cut -d/ delimiter", "cut -d/ -f1-2 file.txt"},
+		{"sort -t/ separator", "sort -t/ -k1 file.txt"},
 		{"sed address range expr", "sed -n '/UpgradeOldLoadoutMessage/,/^}/p' file.go"},
 		{"sed inline expr", "sed '/pattern/d' file.txt"},
 		{"sed substitute expr", "sed 's/old/new/' file.txt"},
