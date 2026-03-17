@@ -181,6 +181,14 @@ func TestValidatePaths_Allowed(t *testing.T) {
 		name    string
 		command string
 	}{
+		{"sed address range expr", "sed -n '/UpgradeOldLoadoutMessage/,/^}/p' file.go"},
+		{"sed inline expr", "sed '/pattern/d' file.txt"},
+		{"sed substitute expr", "sed 's/old/new/' file.txt"},
+		{"sed -e expr outside", "sed -e '/StartsWith//,/^}/p' -e 's/a/b/' file.go"},
+		{"git -C outside sandbox", "git -C /tmp status"},
+		{"git -C absolute allowed", "git -C " + workDir + " status"},
+		{"git --git-dir outside sandbox", "git --git-dir /tmp/.git status"},
+		{"git --work-tree outside sandbox", "git --work-tree /tmp status"},
 		{"simple filename", "cat file.txt"},
 		{"dot path", "ls ."},
 		{"dot slash", "cat ./file.txt"},

@@ -9,6 +9,32 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// gitGlobalPathFlags lists git global flags whose next argument is a path
+// that controls where git runs (not a file being read/written). These
+// arguments are exempt from sandbox path validation because they determine
+// git's working context; git's own command validator enforces what operations
+// are permitted within that context.
+var gitGlobalPathFlags = map[string]bool{
+	"-C":             true,
+	"--git-dir":      true,
+	"--work-tree":    true,
+	"--super-prefix": true,
+}
+
+// gitGlobalPathArgIndices returns a set of argument indices (within args)
+// that are path values for git's global flags (e.g., -C /path). These
+// should be excluded from file-path security checks.
+func gitGlobalPathArgIndices(args []*syntax.Word) map[int]bool {
+	skip := make(map[int]bool)
+	for i, arg := range args {
+		lit := arg.Lit()
+		if gitGlobalPathFlags[lit] && i+1 < len(args) {
+			skip[i+1] = true
+		}
+	}
+	return skip
+}
+
 // validatePaths checks that all path-like arguments in the AST resolve to
 // locations under the allowed directories. This prevents reading files outside
 // the sandbox boundary (e.g., cat /etc/passwd, cat ../../../etc/shadow).
@@ -26,15 +52,30 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 		}
 		// Determine which allowed paths to use based on command name
 		allowedPaths := readAllowedPaths
+		var cmdName string
 		if len(callExpr.Args) > 0 {
-			cmdName := extractCommandName(callExpr.Args[0])
+			cmdName = extractCommandName(callExpr.Args[0])
 			if writeCommands[cmdName] {
 				allowedPaths = writeAllowedPaths
 			}
 		}
+		// For git, identify argument positions that are path values for global
+		// flags (e.g., -C /repo). These control where git runs, not what files
+		// are accessed, so they are exempt from sandbox path validation.
+		// For sed, identify which arguments are script expressions (not paths).
+		var skipIndices map[int]bool
+		switch cmdName {
+		case "git":
+			skipIndices = gitGlobalPathArgIndices(callExpr.Args)
+		case "sed":
+			skipIndices = sedNonPathArgIndicesAST(callExpr.Args)
+		}
 		for i, arg := range callExpr.Args {
 			if i == 0 {
 				continue // skip command name
+			}
+			if skipIndices[i] {
+				continue // skip git global flag path values or sed expressions
 			}
 			lit := arg.Lit()
 			if lit == "" {
@@ -234,6 +275,83 @@ func IsUnderAllowedPaths(path string, allowedPaths []string) bool {
 	return false
 }
 
+// sedNonPathArgIndicesAST returns the set of argument indices (within
+// []*syntax.Word args) that are sed script expressions (not file paths).
+// Used by the static AST-based validatePaths.
+func sedNonPathArgIndicesAST(args []*syntax.Word) map[int]bool {
+	skip := make(map[int]bool)
+	scriptSeen := false
+	i := 1
+	for i < len(args) {
+		lit := args[i].Lit()
+		if lit == "--" {
+			break
+		}
+		if strings.HasPrefix(lit, "-") {
+			switch lit {
+			case "-e", "--expression":
+				i++
+				if i < len(args) {
+					skip[i] = true // expression value, not a path
+					scriptSeen = true
+				}
+			case "-f", "--file":
+				i++ // file path value — NOT skipped (already blocked by validateSedArgs)
+			}
+			i++
+			continue
+		}
+		// First non-flag positional arg is the sed script expression.
+		if !scriptSeen {
+			scriptSeen = true
+			skip[i] = true
+		}
+		// Subsequent positional args are file paths — path-checked normally.
+		i++
+	}
+	return skip
+}
+
+// sedNonPathArgIndices returns the set of argument indices (within args) that
+// are sed script expressions (not file paths) and should be excluded from
+// file-path security checks. For sed:
+//   - Arguments following -e/--expression are script expressions (not paths).
+//   - The first positional (non-flag) argument is the sed script (not a path).
+//   - Subsequent positional arguments are file paths and must be path-checked.
+func sedNonPathArgIndices(args []string) map[int]bool {
+	skip := make(map[int]bool)
+	scriptSeen := false
+	i := 1
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			switch arg {
+			case "-e", "--expression":
+				i++
+				if i < len(args) {
+					skip[i] = true // expression value, not a path
+					scriptSeen = true
+				}
+			case "-f", "--file":
+				i++ // file path value — NOT skipped (already blocked by validateSedArgs)
+			}
+			i++
+			continue
+		}
+		// First non-flag positional arg is the sed script expression.
+		if !scriptSeen {
+			scriptSeen = true
+			skip[i] = true
+		}
+		// Subsequent positional args are file paths — path-checked normally.
+		i++
+	}
+	return skip
+}
+
 // grepNonPathArgIndices returns the set of argument indices (within args) that
 // are grep pattern or non-path flag values and should be excluded from file-path
 // security checks. For grep/egrep/fgrep:
@@ -285,6 +403,19 @@ func grepNonPathArgIndices(args []string) map[int]bool {
 	return skip
 }
 
+// gitGlobalPathArgIndicesExpanded returns a set of argument indices (within
+// string args) that are path values for git's global flags (e.g., -C /path).
+// These should be excluded from file-path security checks.
+func gitGlobalPathArgIndicesExpanded(args []string) map[int]bool {
+	skip := make(map[int]bool)
+	for i, arg := range args {
+		if gitGlobalPathFlags[arg] && i+1 < len(args) {
+			skip[i+1] = true
+		}
+	}
+	return skip
+}
+
 // validateExpandedPaths checks command arguments after variable expansion.
 // This is called by the interpreter's CallHandler, where all variables and
 // command substitutions have been resolved to their actual values.
@@ -300,19 +431,31 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 		allowedPaths = writeAllowedPaths
 	}
 
-	// For grep-family commands, identify which arg positions are patterns/values
-	// (not file paths) so we don't incorrectly flag regex patterns like ".git/"
-	// as .git directory access attempts.
+	// For grep-family and sed commands, identify which arg positions are
+	// patterns/expressions (not file paths) so we don't incorrectly flag
+	// expressions like ".git/" or "/pattern/" as path access attempts.
 	var nonPathIndices map[int]bool
 	switch cmdName {
 	case "grep", "egrep", "fgrep":
 		nonPathIndices = grepNonPathArgIndices(args)
+	case "sed":
+		nonPathIndices = sedNonPathArgIndices(args)
+	}
+
+	// For git, identify argument positions that are path values for global
+	// flags (e.g., -C /repo). These are exempt from sandbox path validation.
+	var gitSkipIndices map[int]bool
+	if cmdName == "git" {
+		gitSkipIndices = gitGlobalPathArgIndicesExpanded(args)
 	}
 
 	for i, arg := range args[1:] {
 		argIdx := i + 1
 		if nonPathIndices[argIdx] {
 			continue
+		}
+		if gitSkipIndices[argIdx] {
+			continue // skip git global flag path values (e.g., -C /path)
 		}
 		if arg == ".git" || strings.HasPrefix(arg, ".git/") || strings.HasPrefix(arg, ".git\\") {
 			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
