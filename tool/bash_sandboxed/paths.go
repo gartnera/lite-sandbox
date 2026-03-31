@@ -53,10 +53,12 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 		// Determine which allowed paths to use based on command name
 		allowedPaths := readAllowedPaths
 		var cmdName string
+		isWriteCmd := false
 		if len(callExpr.Args) > 0 {
 			cmdName = extractCommandName(callExpr.Args[0])
 			if writeCommands[cmdName] {
 				allowedPaths = writeAllowedPaths
+				isWriteCmd = true
 			}
 		}
 		// For git, identify argument positions that are path values for global
@@ -101,6 +103,14 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 				continue
 			}
 			resolved := ResolvePath(pathToCheck, workDir)
+			// For read commands with absolute paths, skip validation if the path
+			// doesn't exist locally. Non-existent absolute paths are likely URL
+			// path arguments (e.g., /v3/api/endpoint?query=value passed to curl)
+			// rather than real filesystem paths; they can't be read from disk.
+			// Relative paths are always validated to prevent traversal attempts.
+			if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
+				continue
+			}
 			if !IsUnderAllowedPaths(resolved, allowedPaths) {
 				validationErr = fmt.Errorf("path %q resolves to %q which is outside allowed directories", lit, resolved)
 				return false
@@ -440,7 +450,8 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 	}
 	cmdName := args[0]
 	allowedPaths := readAllowedPaths
-	if writeCommands[cmdName] {
+	isWriteCmd := writeCommands[cmdName]
+	if isWriteCmd {
 		allowedPaths = writeAllowedPaths
 	}
 
@@ -487,6 +498,13 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 			continue
 		}
 		resolved := ResolvePath(pathToCheck, workDir)
+		// For read commands with absolute paths, skip validation if the path
+		// doesn't exist locally. Non-existent absolute paths are likely URL
+		// path arguments passed to curl rather than real filesystem paths.
+		// Relative paths are always validated to prevent traversal attempts.
+		if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
+			continue
+		}
 		if !IsUnderAllowedPaths(resolved, allowedPaths) {
 			return fmt.Errorf("path %q resolves to %q which is outside allowed directories", arg, resolved)
 		}
@@ -506,11 +524,18 @@ func validateOpenPath(path string, flag int, workDir string, readAllowedPaths, w
 	if path == "/dev/null" {
 		return nil
 	}
+	isWrite := isWriteFlag(flag)
 	allowedPaths := readAllowedPaths
-	if isWriteFlag(flag) {
+	if isWrite {
 		allowedPaths = writeAllowedPaths
 	}
 	resolved := ResolvePath(path, workDir)
+	// For read redirects with absolute paths, skip validation if the path
+	// doesn't exist locally — it cannot be read and poses no security risk.
+	// Relative paths are always validated to prevent traversal attempts.
+	if !isWrite && filepath.IsAbs(path) && !pathExistsLocally(resolved) {
+		return nil
+	}
 	if !IsUnderAllowedPaths(resolved, allowedPaths) {
 		return fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
 	}
@@ -524,4 +549,10 @@ func validateOpenPath(path string, flag int, workDir string, readAllowedPaths, w
 func isWriteFlag(flag int) bool {
 	const writeBits = os.O_WRONLY | os.O_RDWR | os.O_CREATE | os.O_APPEND | os.O_TRUNC
 	return flag&writeBits != 0
+}
+
+// pathExistsLocally returns true if the path exists on the local filesystem.
+func pathExistsLocally(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

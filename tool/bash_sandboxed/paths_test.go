@@ -234,8 +234,8 @@ func TestValidatePaths_Blocked(t *testing.T) {
 		{"dot dot simple", "cat ../outside", "outside allowed directories"},
 		{"absolute tmp", "ls /tmp", "outside allowed directories"},
 		{"absolute bin", "strings /bin/ls", "outside allowed directories"},
-		{"stat outside", "stat /etc/hostname", "outside allowed directories"},
-		{"head outside", "head -5 /etc/hostname", "outside allowed directories"},
+		{"stat outside", "stat /etc/hosts", "outside allowed directories"},
+		{"head outside", "head -5 /etc/hosts", "outside allowed directories"},
 		{"du outside", "du -sh /tmp", "outside allowed directories"},
 		{"diff outside", "diff /dev/null /dev/null", "outside allowed directories"},
 		{"short flag embedded path", "grep -f/etc/passwd pattern", "outside allowed directories"},
@@ -401,11 +401,11 @@ func TestBashSandboxed_VariableExpansionPathBlocked(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"cat HOME var", `cat $HOME/secret`, "outside allowed directories"},
-		{"cat HOME braces", `cat ${HOME}/secret`, "outside allowed directories"},
-		{"cat env var absolute", `HOME=/etc cat $HOME/passwd`, "outside allowed directories"},
-		{"head HOME var", `head $HOME/secret`, "outside allowed directories"},
-		{"redirect input var", `cat < $HOME/secret`, "outside allowed directories"},
+		{"cat var outside existing", `MYPATH=/etc/hosts; cat $MYPATH`, "outside allowed directories"},
+		{"cat var braces outside existing", `MYPATH=/etc/hosts; cat ${MYPATH}`, "outside allowed directories"},
+		{"cat inline var outside existing", `ETCDIR=/etc; cat $ETCDIR/hosts`, "outside allowed directories"},
+		{"head var outside existing", `MYPATH=/etc/hosts; head $MYPATH`, "outside allowed directories"},
+		{"redirect input var outside existing", `MYPATH=/etc/hosts; cat < $MYPATH`, "outside allowed directories"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -653,6 +653,61 @@ func TestBashSandboxed_ReadWriteSeparation_Integration(t *testing.T) {
 			t.Fatal("expected error for output redirect to read-only path")
 		}
 	})
+}
+
+func TestValidatePaths_NonExistentPathsAllowed(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Non-existent absolute paths (e.g., URL paths passed to curl) should not
+	// be blocked for read commands since they can't actually be read from disk.
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"curl URL path arg", "agctl curl /v3/clickhouse/organization-summary?range=last30"},
+		{"non-existent absolute path", "cat /nonexistent/path/that/does/not/exist"},
+		{"non-existent with query string", "curl /api/v1/data?foo=bar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := validatePaths(f, workDir, []string{workDir}, []string{workDir}); err != nil {
+				t.Fatalf("expected non-existent path to be allowed for read command, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePaths_ExistingPathsStillBlocked(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Existing paths outside allowed dirs should still be blocked.
+	tests := []struct {
+		name    string
+		command string
+		errMsg  string
+	}{
+		{"existing /etc/passwd", "cat /etc/passwd", "outside allowed directories"},
+		{"existing /tmp", "ls /tmp", "outside allowed directories"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = validatePaths(f, workDir, []string{workDir}, []string{workDir})
+			if err == nil {
+				t.Fatal("expected path validation error for existing path outside allowed dirs")
+			}
+			if !strings.Contains(err.Error(), tt.errMsg) {
+				t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
+			}
+		})
+	}
 }
 
 func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
