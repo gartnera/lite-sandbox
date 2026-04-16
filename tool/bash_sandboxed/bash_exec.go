@@ -512,6 +512,17 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					return s.executeBash(ctx, args)
 				}
 				if isScriptPath(cmdName) {
+					// Bare extra_commands entries are explicitly opted in by the
+					// user — run them directly without reading/validating script
+					// contents. This mirrors the top-level executeRaw fast path
+					// so that `cd X && ./my-script.sh` behaves the same as
+					// `./my-script.sh` when ./my-script.sh is in extra_commands.
+					if s.getBareExtraCommands()[cmdName] {
+						if useOSSandbox {
+							return s.execInWorker(ctx, args)
+						}
+						return interp.DefaultExecHandler(-1)(ctx, args)
+					}
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
 						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
 					}

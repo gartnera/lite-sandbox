@@ -848,3 +848,92 @@ func TestLocalBinaryExecutionConfig_YAML(t *testing.T) {
 		t.Fatal("expected local binary execution to be enabled")
 	}
 }
+
+// TestExecuteScript_BareExtraCommandSkipsContentValidation verifies that when a
+// script path is registered as a bare extra_commands entry, its contents are
+// not recursively validated against the allowlist. Without this bypass, using
+// the script under any prefix (e.g. `cd X && ./script.sh`) falls into the AST
+// path and the script's body gets validated, defeating the user's opt-in.
+func TestExecuteScript_BareExtraCommandSkipsContentValidation(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "wrapper.sh")
+	// The script body uses `docker`, which is not in allowedCommands.
+	// Without the bypass, executeScript would reject this.
+	os.WriteFile(scriptPath, []byte("#!/bin/bash\necho wrapped-$1\n"), 0755)
+
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"./wrapper.sh"},
+	}, dir)
+
+	// Leading invocation — hits the top-level executeRaw fast path.
+	out, err := executeInDirWithSandbox(t, s, dir, `./wrapper.sh hello`)
+	if err != nil {
+		t.Fatalf("leading invocation failed: %v", err)
+	}
+	if strings.TrimSpace(out) != "wrapped-hello" {
+		t.Errorf("leading invocation output %q, want %q", strings.TrimSpace(out), "wrapped-hello")
+	}
+
+	// Non-leading invocation (prefixed with another command) — hits the AST
+	// path and the per-command ExecHandler. Must still bypass content validation.
+	out, err = executeInDirWithSandbox(t, s, dir, `true && ./wrapper.sh world`)
+	if err != nil {
+		t.Fatalf("non-leading invocation failed: %v", err)
+	}
+	if strings.TrimSpace(out) != "wrapped-world" {
+		t.Errorf("non-leading invocation output %q, want %q", strings.TrimSpace(out), "wrapped-world")
+	}
+}
+
+// TestExecuteScript_BareExtraCommandBypassesBlockedBody verifies that a bare
+// extra_commands script entry bypasses the script-body validator even when
+// the body contains commands that would normally be rejected.
+func TestExecuteScript_BareExtraCommandBypassesBlockedBody(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "wrapper.sh")
+	// Body references a command not in the allowlist. We use `true "$@"` so the
+	// script always exits 0 regardless of the banned-command line being parsed.
+	body := "#!/bin/bash\n" +
+		"if false; then docker run foo; fi\n" +
+		"echo opted-in\n"
+	os.WriteFile(scriptPath, []byte(body), 0755)
+
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"./wrapper.sh"},
+	}, dir)
+
+	out, err := executeInDirWithSandbox(t, s, dir, `true && ./wrapper.sh`)
+	if err != nil {
+		t.Fatalf("expected bypass to allow script with non-allowlisted body: %v", err)
+	}
+	if !strings.Contains(out, "opted-in") {
+		t.Errorf("expected output to include 'opted-in', got %q", out)
+	}
+}
+
+// TestExecuteScript_NonBareExtraCommandStillValidatesBody verifies that when a
+// script is registered with a subcommand restriction (not bare), the body is
+// still validated — only bare entries get the full bypass.
+func TestExecuteScript_NonBareExtraCommandStillValidatesBody(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "wrapper.sh")
+	os.WriteFile(scriptPath, []byte("#!/bin/bash\ndocker run foo\n"), 0755)
+
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"./wrapper.sh build"},
+		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
+			Enabled: boolPtr(true),
+		},
+	}, dir)
+
+	_, err := executeInDirWithSandbox(t, s, dir, `true && ./wrapper.sh build`)
+	if err == nil {
+		t.Fatal("expected content validation to reject docker in script body")
+	}
+	if !strings.Contains(err.Error(), "docker") {
+		t.Fatalf("expected error about 'docker', got: %v", err)
+	}
+}
