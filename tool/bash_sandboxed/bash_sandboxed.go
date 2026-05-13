@@ -40,11 +40,12 @@ type Sandbox struct {
 	mu               sync.RWMutex
 	cfg              *config.Config
 	extraCommands    map[string]bool
-	// extraSubCommands holds per-command first-arg restrictions parsed from
-	// extra_commands entries that contain a space (e.g. "pnpx prettier").
-	// A nil slice means no restriction (bare command entry); a non-nil slice
-	// means only those first args are allowed.
-	extraSubCommands map[string][]string
+	// extraSubCommands holds per-command argument-prefix restrictions parsed
+	// from extra_commands entries that contain a space (e.g. "pnpx prettier"
+	// or "uv run pyright"). Each inner slice is one allowed prefix of
+	// non-flag arguments; an invocation matches when its leading non-flag
+	// args start with any of those sequences.
+	extraSubCommands map[string][][]string
 	// bareExtraCommands tracks commands that have a bare entry in extra_commands
 	// (i.e., the entry has no subcommand restriction). These commands bypass
 	// bash AST parsing and are executed directly with the real bash.
@@ -73,18 +74,24 @@ func NewSandbox() *Sandbox {
 // UpdateConfig replaces the sandbox configuration with the provided config.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	m := make(map[string]bool, len(cfg.ExtraCommands))
-	sub := make(map[string][]string)
+	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
 	for _, c := range cfg.ExtraCommands {
-		// Entries may be "command" or "command subcommand" (space-separated).
-		// The latter restricts the command to only that first argument.
-		if idx := strings.IndexByte(c, ' '); idx > 0 {
-			cmd, firstArg := c[:idx], c[idx+1:]
-			m[cmd] = true
-			sub[cmd] = append(sub[cmd], firstArg)
+		// Entries are whitespace-separated. A single token (e.g. "fvm") is a
+		// bare entry that allows the command with any arguments. Multiple
+		// tokens (e.g. "pnpx prettier", "uv run pyright") restrict the
+		// command so that its leading non-flag arguments must match the
+		// remaining tokens as a prefix.
+		fields := strings.Fields(c)
+		if len(fields) == 0 {
+			continue
+		}
+		cmd := fields[0]
+		m[cmd] = true
+		if len(fields) == 1 {
+			bare[cmd] = true
 		} else {
-			m[c] = true
-			bare[c] = true
+			sub[cmd] = append(sub[cmd], fields[1:])
 		}
 	}
 	// Detect runtime paths for read-only access (e.g., GOPATH, GOCACHE, pnpm store)
@@ -148,10 +155,11 @@ func (s *Sandbox) getExtraCommands() map[string]bool {
 	return s.extraCommands
 }
 
-// getExtraSubCommands returns the per-command first-arg restriction map.
-// A nil slice for a command means no restriction (any first arg allowed).
-// A non-nil slice means only those first args are permitted.
-func (s *Sandbox) getExtraSubCommands() map[string][]string {
+// getExtraSubCommands returns the per-command argument-prefix restriction map.
+// A nil entry for a command means no restriction (any args allowed).
+// A non-nil entry means the invocation's leading non-flag args must match
+// one of the recorded token sequences as a prefix.
+func (s *Sandbox) getExtraSubCommands() map[string][][]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.extraSubCommands
@@ -499,27 +507,43 @@ func extractCommandName(w *syntax.Word) string {
 //
 //   - If extraSub has no entry for cmdName, the bare command is in extra_commands
 //     with no restriction, so it always matches (returns true).
-//   - If extraSub has an entry, the first non-flag argument in args must appear
-//     in the allowed list.
-func extraSubCommandMatches(extraSub map[string][]string, cmdName string, args []*syntax.Word) bool {
+//   - If extraSub has an entry, the invocation's leading non-flag arguments
+//     must match one of the recorded token sequences as a prefix.
+//   - If the invocation has no non-flag arguments at all, it is allowed
+//     (typically prints help).
+func extraSubCommandMatches(extraSub map[string][][]string, cmdName string, args []*syntax.Word) bool {
 	allowed, hasRestriction := extraSub[cmdName]
 	if !hasRestriction {
 		return true // bare "cmd" entry, no subcommand restriction
 	}
-	// Find first non-flag argument (the subcommand / package name).
+	// Collect non-flag arguments in order.
+	var nonFlag []string
 	for _, arg := range args[1:] {
 		lit := arg.Lit()
 		if lit == "" || strings.HasPrefix(lit, "-") {
 			continue
 		}
-		for _, a := range allowed {
-			if a == lit {
-				return true
+		nonFlag = append(nonFlag, lit)
+	}
+	if len(nonFlag) == 0 {
+		return true // no subcommand argument — safe (prints help)
+	}
+	for _, seq := range allowed {
+		if len(seq) > len(nonFlag) {
+			continue
+		}
+		match := true
+		for i, tok := range seq {
+			if nonFlag[i] != tok {
+				match = false
+				break
 			}
 		}
-		return false // first non-flag arg not in allowed list
+		if match {
+			return true
+		}
 	}
-	return true // no subcommand argument — safe (prints help)
+	return false
 }
 
 // ValidateCommand parses and validates a bash command without executing it.

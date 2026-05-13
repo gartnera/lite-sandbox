@@ -565,6 +565,44 @@ func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 			wantErr:   true,
 			errSubstr: `"curl" is not allowed`,
 		},
+		{
+			name:      "multi-token restriction allows exact prefix",
+			extraCmds: []string{"uv run pyright"},
+			command:   "uv run pyright",
+			wantErr:   false,
+		},
+		{
+			name:      "multi-token restriction allows extra trailing args",
+			extraCmds: []string{"uv run pyright"},
+			command:   "uv run pyright src/",
+			wantErr:   false,
+		},
+		{
+			name:      "multi-token restriction ignores interleaved flags",
+			extraCmds: []string{"uv run pyright"},
+			command:   "uv --quiet run pyright --verbose",
+			wantErr:   false,
+		},
+		{
+			name:      "multi-token restriction blocks different second token",
+			extraCmds: []string{"uv run pyright"},
+			command:   "uv run ruff",
+			wantErr:   true,
+			errSubstr: `"uv" is not allowed`,
+		},
+		{
+			name:      "multi-token restriction blocks different first token",
+			extraCmds: []string{"uv run pyright"},
+			command:   "uv pip install foo",
+			wantErr:   true,
+			errSubstr: `"uv" is not allowed`,
+		},
+		{
+			name:      "multi-token restriction with multiple entries",
+			extraCmds: []string{"uv run pyright", "uv run pytest"},
+			command:   "uv run pytest tests/",
+			wantErr:   false,
+		},
 	}
 
 	for _, tt := range tests {
