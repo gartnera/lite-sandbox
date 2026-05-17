@@ -107,9 +107,13 @@ func runPreflightHook() error {
 		sandbox.UpdateConfig(cfg, cwd)
 	}
 
-	// Construct paths the same way serve.go does (minus runtime paths)
-	readPaths := []string{cwd}
-	writePaths := []string{cwd}
+	// Mirror serve.go's path construction so a command we'd accept here is
+	// the same set a command serve.go would accept. Diverging here breaks
+	// the redirect contract: preflight rejects → Claude falls back to the
+	// unsandboxed Bash tool, even though the sandbox would have accepted it.
+	readPaths := append([]string{cwd}, sandbox.RuntimeReadPaths()...)
+	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
+	writePaths := append([]string{cwd}, sandbox.ConfigWritePaths()...)
 
 	// Validate against sandbox
 	if err := sandbox.ValidateCommand(command, cwd, readPaths, writePaths); err != nil {
