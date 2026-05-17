@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jellydator/ttlcache/v3"
 )
 
 func TestNewServer_RandomPort(t *testing.T) {
@@ -79,6 +81,71 @@ func TestServer_SecretToken(t *testing.T) {
 
 	t.Logf("Token 1 length: %d", len(server1.secretToken))
 	t.Logf("Token 2 length: %d", len(server2.secretToken))
+}
+
+// TestServer_SessionEviction verifies that expired session tokens drop out of
+// the cache instead of accumulating forever (the previous map-based store
+// never deleted entries, leaking ~100B + map overhead per /latest/api/token
+// hit until process exit).
+func TestServer_SessionEviction(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", "default")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	// Run eviction in the background, like Start() does for the real server.
+	go server.sessions.Start()
+
+	// Set a very short TTL directly to keep the test fast.
+	const shortTTL = 50 * time.Millisecond
+	for i := 0; i < 200; i++ {
+		server.sessions.Set("token-"+strings.Repeat("x", i), struct{}{}, shortTTL)
+	}
+
+	if got := server.sessions.Len(); got != 200 {
+		t.Fatalf("expected 200 entries pre-expiry, got %d", got)
+	}
+
+	// Wait for entries to expire + the eviction loop to sweep them. ttlcache's
+	// default sweep interval is short for sub-second TTLs; give it generous
+	// time so this isn't flaky on slow CI.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if server.sessions.Len() == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("entries did not evict; %d remain", server.sessions.Len())
+}
+
+// TestServer_DisableTouchOnHit verifies that checking a session token's
+// presence does not silently extend its TTL — otherwise an attacker could
+// keep a token alive past its negotiated lifetime by polling.
+func TestServer_DisableTouchOnHit(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", "default")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	const ttl = 100 * time.Millisecond
+	server.sessions.Set("tok", struct{}{}, ttl)
+
+	// Repeatedly check Has() during the TTL window. If touch-on-hit were
+	// active, the entry's expiry would keep getting bumped forward.
+	for i := 0; i < 5; i++ {
+		time.Sleep(ttl / 4)
+		server.sessions.Has("tok")
+	}
+
+	// After the original TTL has elapsed, the token must be gone regardless
+	// of how many Has() calls happened in between.
+	time.Sleep(ttl)
+	if server.sessions.Get("tok", ttlcache.WithDisableTouchOnHit[string, struct{}]()) != nil {
+		t.Fatal("session token outlived its negotiated TTL — touch-on-hit is leaking lifetime")
+	}
 }
 
 func TestServer_GracefulShutdown(t *testing.T) {

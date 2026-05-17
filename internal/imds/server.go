@@ -15,19 +15,20 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/jellydator/ttlcache/v3"
 )
 
 // Server implements an IMDSv2-compatible HTTP server that provides AWS credentials
 // to sandboxed commands without requiring file access to ~/.aws/credentials.
 // Credentials are fetched via AWS STS GetSessionToken and cached until expiry.
 type Server struct {
-	addr         string
-	profile      string
-	secretToken  string
-	credCache    *credentialCache
-	sessionStore *sessionStore
-	server       *http.Server
-	listener     net.Listener
+	addr        string
+	profile     string
+	secretToken string
+	credCache   *credentialCache
+	sessions    *ttlcache.Cache[string, struct{}]
+	server      *http.Server
+	listener    net.Listener
 }
 
 // credentialCache stores AWS credentials and their expiry time.
@@ -35,12 +36,6 @@ type credentialCache struct {
 	mu        sync.RWMutex
 	awsCreds  *aws.Credentials
 	expiresAt time.Time
-}
-
-// sessionStore stores IMDSv2 session tokens and their expiry times.
-type sessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]time.Time // token -> expiry
 }
 
 // NewServer creates a new IMDS server that will listen on the given address
@@ -61,15 +56,21 @@ func NewServer(addr string, profile string) (*Server, error) {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
+	// ttlcache evicts entries automatically once their TTL elapses, so the
+	// session store stays bounded even under heavy /latest/api/token traffic.
+	// Touch-on-hit is disabled — validateSession must not silently extend a
+	// token's lifetime past the TTL the AWS SDK negotiated.
+	sessions := ttlcache.New[string, struct{}](
+		ttlcache.WithDisableTouchOnHit[string, struct{}](),
+	)
+
 	return &Server{
 		addr:        listener.Addr().String(), // Use actual bound address
 		profile:     profile,
 		secretToken: secretToken,
 		credCache:   &credentialCache{},
-		sessionStore: &sessionStore{
-			sessions: make(map[string]time.Time),
-		},
-		listener: listener,
+		sessions:    sessions,
+		listener:    listener,
 	}, nil
 }
 
@@ -98,12 +99,17 @@ func (s *Server) Start() error {
 		Handler: mux,
 	}
 
+	// Run the background eviction loop so expired session tokens are dropped
+	// from memory rather than accumulating until shutdown.
+	go s.sessions.Start()
+
 	slog.Info("starting IMDS server", "addr", s.addr, "profile", s.profile)
 	return s.server.Serve(s.listener)
 }
 
 // Shutdown gracefully shuts down the IMDS server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.sessions.Stop()
 	if s.server != nil {
 		err := s.server.Shutdown(ctx)
 		// Close listener if server shutdown didn't close it
@@ -136,10 +142,8 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) {
 	}
 	token := base64.URLEncoding.EncodeToString(tokenBytes)
 
-	// Store session with expiry
-	s.sessionStore.mu.Lock()
-	s.sessionStore.sessions[token] = time.Now().Add(time.Duration(ttl) * time.Second)
-	s.sessionStore.mu.Unlock()
+	// Store session with explicit TTL; ttlcache evicts it once expired.
+	s.sessions.Set(token, struct{}{}, time.Duration(ttl)*time.Second)
 
 	slog.Debug("generated IMDSv2 session token", "ttl", ttl)
 
@@ -203,27 +207,19 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateSession checks if the request has a valid IMDSv2 session token.
+// ttlcache.Has reports presence without extending the entry's lifetime, and
+// expired entries are treated as absent regardless of whether the background
+// eviction goroutine has run yet.
 func (s *Server) validateSession(r *http.Request) bool {
 	token := r.Header.Get("X-aws-ec2-metadata-token")
 	if token == "" {
 		slog.Warn("request missing IMDSv2 session token")
 		return false
 	}
-
-	s.sessionStore.mu.RLock()
-	expiry, exists := s.sessionStore.sessions[token]
-	s.sessionStore.mu.RUnlock()
-
-	if !exists {
-		slog.Warn("request with unknown session token")
+	if !s.sessions.Has(token) {
+		slog.Warn("request with unknown or expired session token")
 		return false
 	}
-
-	if time.Now().After(expiry) {
-		slog.Warn("request with expired session token")
-		return false
-	}
-
 	return true
 }
 
