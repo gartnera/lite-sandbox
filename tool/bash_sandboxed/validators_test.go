@@ -182,6 +182,45 @@ func TestValidate_RecursiveFindAndXargs(t *testing.T) {
 	}
 }
 
+// TestValidate_BlockedSubCommandShells verifies that bash, sh, and awk are
+// rejected as find -exec / xargs subcommands. Their sandbox safety relies on
+// runtime hooks (executeBash, executeAwk) that don't fire when find or xargs
+// spawn them as native processes, so allowing them would bypass validation
+// of the -c content or awk program.
+func TestValidate_BlockedSubCommandShells(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"find -exec sh -c", `find . -exec sh -c 'cat /etc/passwd' \;`},
+		{"find -exec bash -c", `find . -exec bash -c 'rm -rf /' \;`},
+		{"find -execdir sh -c", `find . -execdir sh -c 'echo x' +`},
+		{"find -ok bash -c", `find . -ok bash -c 'cat' \;`},
+		{"find -exec awk", `find . -exec awk 'BEGIN{system("id")}' \;`},
+		{"xargs sh -c", `find . | xargs sh -c 'cat /etc/passwd'`},
+		{"xargs bash -c", `find . | xargs bash -c 'echo'`},
+		{"xargs -I sh -c", `find . | xargs -I{} sh -c 'cat {}'`},
+		{"xargs -- sh", `find . | xargs -- sh -c 'echo'`},
+		{"xargs awk", `find . | xargs awk 'BEGIN{system("id")}'`},
+		{"find -exec xargs sh -c", `find . -exec xargs sh -c 'echo' \;`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = newTestSandbox().validate(f)
+			if err == nil {
+				t.Fatal("expected validation error for shell subcommand via find/xargs")
+			}
+			if !strings.Contains(err.Error(), "not allowed as a find -exec or xargs subcommand") {
+				t.Fatalf("expected subcommand denylist error, got %q", err.Error())
+			}
+		})
+	}
+}
+
 func TestValidate_BlockedTarFlags(t *testing.T) {
 	tests := []struct {
 		name    string

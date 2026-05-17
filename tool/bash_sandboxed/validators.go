@@ -107,6 +107,22 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
+// subCommandDenylist names commands that are unsafe to invoke via find -exec
+// or xargs because their sandbox safety relies on runtime hooks that only
+// fire when the sandbox interpreter is the direct caller:
+//   - bash, sh: validateBashArgs explicitly defers -c content validation to
+//     executeBash, which only runs when the sandbox interp invokes them.
+//   - awk: executeAwk swaps the binary for goawk with NoExec/NoFileWrites,
+//     but find/xargs spawn the system awk that has system() etc.
+//
+// When find or xargs spawns these as native processes, the runtime hooks are
+// bypassed entirely, so the -c / awk program would execute unvalidated.
+var subCommandDenylist = map[string]bool{
+	"bash": true,
+	"sh":   true,
+	"awk":  true,
+}
+
 // validateSubCommand validates a command name and its arguments against the
 // whitelist, including any per-command argument validators. args[0] must be
 // the command name. Used for recursive validation of commands embedded in
@@ -118,6 +134,9 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	cmdName := args[0].Lit()
 	if cmdName == "" {
 		return fmt.Errorf("dynamic command names are not allowed")
+	}
+	if subCommandDenylist[cmdName] {
+		return fmt.Errorf("command %q is not allowed as a find -exec or xargs subcommand", cmdName)
 	}
 	extra := s.getExtraCommands()
 	if !allowedCommands[cmdName] && !extra[cmdName] {
