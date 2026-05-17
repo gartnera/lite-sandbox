@@ -22,17 +22,18 @@ var gitShowCmd = &cobra.Command{
 			return err
 		}
 		g := cfg.Git
-		fmt.Printf("local_read:   %v\n", g.GitLocalRead())
-		fmt.Printf("local_write:  %v\n", g.GitLocalWrite())
-		fmt.Printf("remote_read:  %v\n", g.GitRemoteRead())
-		fmt.Printf("remote_write: %v\n", g.GitRemoteWrite())
+		fmt.Printf("local_read:            %v\n", g.GitLocalRead())
+		fmt.Printf("local_write:           %v\n", g.GitLocalWrite())
+		fmt.Printf("remote_read:           %v\n", g.GitRemoteRead())
+		fmt.Printf("remote_write:          %v\n", g.GitRemoteWrite())
+		fmt.Printf("allow_worktree_parent: %v\n", g.AllowsWorktreeParent())
 		return nil
 	},
 }
 
 var gitSetCmd = &cobra.Command{
 	Use:   "set <key> <true|false>",
-	Short: "Set a git permission (local_read, local_write, remote_read, remote_write)",
+	Short: "Set a git permission (local_read, local_write, remote_read, remote_write, allow_worktree_parent)",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
@@ -64,8 +65,10 @@ var gitSetCmd = &cobra.Command{
 			cfg.Git.RemoteRead = &val
 		case "remote_write":
 			cfg.Git.RemoteWrite = &val
+		case "allow_worktree_parent":
+			cfg.Git.AllowWorktreeParent = &val
 		default:
-			return fmt.Errorf("unknown git permission key %q; valid keys: local_read, local_write, remote_read, remote_write", key)
+			return fmt.Errorf("unknown git permission key %q; valid keys: local_read, local_write, remote_read, remote_write, allow_worktree_parent", key)
 		}
 
 		if err := saveConfig(cfg); err != nil {

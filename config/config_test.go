@@ -156,6 +156,27 @@ func TestWatch(t *testing.T) {
 	}
 }
 
+func TestGitConfig_AllowsWorktreeParent(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	tests := []struct {
+		name string
+		cfg  *GitConfig
+		want bool
+	}{
+		{"nil config", nil, false},
+		{"unset", &GitConfig{}, false},
+		{"true", &GitConfig{AllowWorktreeParent: bp(true)}, true},
+		{"false", &GitConfig{AllowWorktreeParent: bp(false)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.AllowsWorktreeParent(); got != tt.want {
+				t.Errorf("AllowsWorktreeParent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLocalBinaryExecutionConfig_IsEnabled(t *testing.T) {
 	boolPtr := func(b bool) *bool { return &b }
 

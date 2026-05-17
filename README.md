@@ -107,10 +107,11 @@ Git commands are enabled by default with granular permission levels that can be 
 
 ```yaml
 git:
-  local_read: true   # git status, log, diff, show (default: true)
-  local_write: true  # git add, commit, branch, tag (default: true)
-  remote_read: true  # git fetch, pull, clone (default: true)
-  remote_write: false # git push (default: false)
+  local_read: true             # git status, log, diff, show (default: true)
+  local_write: true            # git add, commit, branch, tag (default: true)
+  remote_read: true            # git fetch, pull, clone (default: true)
+  remote_write: false          # git push (default: false)
+  allow_worktree_parent: false # if cwd is a linked worktree, also allow read+write to the main worktree (default: false)
 ```
 
 Remote write operations (`git push`) are disabled by default since they affect shared state. Enable them only if you want to allow Claude to push commits:

@@ -114,6 +114,10 @@ func runPreflightHook() error {
 	readPaths := append([]string{cwd}, sandbox.RuntimeReadPaths()...)
 	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
 	writePaths := append([]string{cwd}, sandbox.ConfigWritePaths()...)
+	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
+		readPaths = append(readPaths, parent)
+		writePaths = append(writePaths, parent)
+	}
 
 	// Validate against sandbox
 	if err := sandbox.ValidateCommand(command, cwd, readPaths, writePaths); err != nil {

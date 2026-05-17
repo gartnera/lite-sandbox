@@ -15,10 +15,11 @@ const appName = "lite-sandbox"
 
 // GitConfig controls granular git permission levels.
 type GitConfig struct {
-	LocalRead   *bool `yaml:"local_read,omitempty"`
-	LocalWrite  *bool `yaml:"local_write,omitempty"`
-	RemoteRead  *bool `yaml:"remote_read,omitempty"`
-	RemoteWrite *bool `yaml:"remote_write,omitempty"`
+	LocalRead           *bool `yaml:"local_read,omitempty"`
+	LocalWrite          *bool `yaml:"local_write,omitempty"`
+	RemoteRead          *bool `yaml:"remote_read,omitempty"`
+	RemoteWrite         *bool `yaml:"remote_write,omitempty"`
+	AllowWorktreeParent *bool `yaml:"allow_worktree_parent,omitempty"`
 }
 
 // GitLocalRead returns whether local read git operations are allowed (default: true).
@@ -51,6 +52,16 @@ func (g *GitConfig) GitRemoteWrite() bool {
 		return false
 	}
 	return *g.RemoteWrite
+}
+
+// AllowsWorktreeParent returns whether the sandbox should extend its read/write
+// paths to include the main worktree when the working directory is inside a
+// linked git worktree (default: false).
+func (g *GitConfig) AllowsWorktreeParent() bool {
+	if g == nil || g.AllowWorktreeParent == nil {
+		return false
+	}
+	return *g.AllowWorktreeParent
 }
 
 // GoConfig controls granular Go runtime permission levels.
