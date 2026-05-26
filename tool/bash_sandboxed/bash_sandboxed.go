@@ -50,6 +50,13 @@ type Sandbox struct {
 	// (i.e., the entry has no subcommand restriction). These commands bypass
 	// bash AST parsing and are executed directly with the real bash.
 	bareExtraCommands map[string]bool
+	// bareExtraScriptPaths is the set of absolute paths corresponding to
+	// path-like bare entries in extra_commands (e.g., "./scripts/foo.sh"
+	// resolved against workDir at config-update time). The ExecHandler uses
+	// this so that invoking the same script from a different cwd (after a
+	// `cd`) still hits the bare-extra bypass — interp tracks cwd in
+	// HandlerContext, so the lookup is done with the post-`cd` directory.
+	bareExtraScriptPaths map[string]bool
 	imdsEndpoint     string
 	runtimeReadPaths []string
 	osSandbox        bool
@@ -76,6 +83,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	m := make(map[string]bool, len(cfg.ExtraCommands))
 	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
+	bareScripts := make(map[string]bool)
 	for _, c := range cfg.ExtraCommands {
 		// Entries are whitespace-separated. A single token (e.g. "fvm") is a
 		// bare entry that allows the command with any arguments. Multiple
@@ -90,6 +98,9 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		m[cmd] = true
 		if len(fields) == 1 {
 			bare[cmd] = true
+			if isScriptPath(cmd) && workDir != "" {
+				bareScripts[absPath(cmd, workDir)] = true
+			}
 		} else {
 			sub[cmd] = append(sub[cmd], fields[1:])
 		}
@@ -105,6 +116,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.extraCommands = m
 	s.extraSubCommands = sub
 	s.bareExtraCommands = bare
+	s.bareExtraScriptPaths = bareScripts
 	s.runtimeReadPaths = runtimeReadPaths
 
 	// Store worker config for lazy start / restart.
@@ -728,6 +740,17 @@ func (s *Sandbox) getBareExtraCommands() map[string]bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.bareExtraCommands
+}
+
+// getBareExtraScriptPaths returns a snapshot of the absolute paths of
+// path-like bare extra commands (entries like "./scripts/foo.sh" resolved
+// against the sandbox's workDir at config-update time). The ExecHandler uses
+// this to recognize the same script invoked from a different cwd, since
+// interp's HandlerContext tracks the post-`cd` directory.
+func (s *Sandbox) getBareExtraScriptPaths() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bareExtraScriptPaths
 }
 
 // isExtraCommandInvocation reports whether the command string should bypass

@@ -512,12 +512,18 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					return s.executeBash(ctx, args)
 				}
 				if isScriptPath(cmdName) {
+					hc := interp.HandlerCtx(ctx)
+					path := absPath(cmdName, hc.Dir)
 					// Bare extra_commands entries are explicitly opted in by the
 					// user — run them directly without reading/validating script
-					// contents. This mirrors the top-level executeRaw fast path
-					// so that `cd X && ./my-script.sh` behaves the same as
-					// `./my-script.sh` when ./my-script.sh is in extra_commands.
-					if s.getBareExtraCommands()[cmdName] {
+					// contents. Match either by the literal invocation string
+					// (e.g. the entry was registered as `./my-script.sh` and is
+					// invoked the same way) or by the script's absolute path,
+					// which lets the same script registered as e.g.
+					// `./web/foo/build.sh` still match when invoked as
+					// `./build.sh` from inside `web/foo`. interp tracks cwd in
+					// HandlerContext, so the resolution sees the post-`cd` dir.
+					if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
 						if useOSSandbox {
 							return s.execInWorker(ctx, args)
 						}
@@ -527,8 +533,6 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
 					}
 					// Check if file is a compiled binary (ELF/Mach-O)
-					hc := interp.HandlerCtx(ctx)
-					path := absPath(cmdName, hc.Dir)
 					if isBinaryExecutable(path) {
 						if useOSSandbox {
 							return s.execInWorker(ctx, args)

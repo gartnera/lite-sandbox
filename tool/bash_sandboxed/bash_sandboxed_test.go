@@ -734,6 +734,61 @@ func TestIsExtraCommandInvocation(t *testing.T) {
 	}
 }
 
+// TestBareExtraScriptPath_CdThenInvoke verifies that a path-like bare entry
+// such as "./sub/foo.sh" registered against the sandbox's workDir is matched
+// by ExecHandler when the script is invoked as "./foo.sh" after a `cd` —
+// i.e., cd-tolerance falls out of interp's cwd tracking rather than any
+// special-casing of cd at the AST level. The script body intentionally
+// references a command that is NOT on the allowlist, so the test would fail
+// with a validation error if the bypass were skipped.
+func TestBareExtraScriptPath_CdThenInvoke(t *testing.T) {
+	workDir := t.TempDir()
+	subDir := filepath.Join(workDir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	scriptPath := filepath.Join(subDir, "foo.sh")
+	// `cmd_definitely_not_on_allowlist_xyz` is not in allowedCommands. With
+	// the bypass, bash tries to run it, fails with "command not found"
+	// (stderr swallowed), then `echo` runs and succeeds — the script's
+	// overall exit code is 0. Without the bypass, executeScript would
+	// validate the body and reject the unknown command.
+	scriptBody := "#!/usr/bin/env bash\ncmd_definitely_not_on_allowlist_xyz 2>/dev/null\necho \"hello from $(pwd)\"\n"
+	if err := os.WriteFile(scriptPath, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands:        []string{"./sub/foo.sh"},
+		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: boolPtr(true)},
+	}, workDir)
+
+	// Invoking via the registered relative path from workDir matches the
+	// literal bareExtraCommands entry (no abs-path lookup needed).
+	out, err := s.Execute(context.Background(), "./sub/foo.sh", workDir,
+		[]string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("direct invoke failed: %v", err)
+	}
+	if !strings.Contains(out, "hello from") {
+		t.Fatalf("direct invoke output: %q", out)
+	}
+
+	// `cd sub && ./foo.sh` resolves `./foo.sh` to the same abs path at
+	// ExecHandler time (interp updates hc.Dir after cd), so the abs-path
+	// lookup hits even though the literal first word is `cd` and the
+	// script-path string is different from the registered entry.
+	out, err = s.Execute(context.Background(), "cd sub && ./foo.sh", workDir,
+		[]string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("cd+invoke failed: %v", err)
+	}
+	if !strings.Contains(out, "hello from") {
+		t.Fatalf("cd+invoke output: %q", out)
+	}
+}
+
 func TestExecute_ExtraCommandBypassesParsing(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
