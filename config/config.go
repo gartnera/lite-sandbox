@@ -193,6 +193,22 @@ type RuntimesConfig struct {
 	Rust *RustConfig `yaml:"rust,omitempty"`
 }
 
+// RtkConfig controls the rtk (https://github.com/rtk-ai/rtk) integration.
+// When enabled, supported read-only/dev commands are transparently rerouted
+// through the rtk proxy (e.g. "git status" -> "rtk git status") so their output
+// is filtered and compressed before reaching the model, reducing token usage.
+type RtkConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// RtkEnabled returns whether the rtk integration is enabled (default: false).
+func (r *RtkConfig) RtkEnabled() bool {
+	if r == nil || r.Enabled == nil {
+		return false
+	}
+	return *r.Enabled
+}
+
 // Config holds all user configuration. New fields can be added over time;
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
@@ -201,6 +217,7 @@ type Config struct {
 	WritablePaths []string        `yaml:"writable_paths,omitempty"`
 	Git           *GitConfig      `yaml:"git,omitempty"`
 	Runtimes      *RuntimesConfig `yaml:"runtimes,omitempty"`
+	Rtk           *RtkConfig      `yaml:"rtk,omitempty"`
 	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
 	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`

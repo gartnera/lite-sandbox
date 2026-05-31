@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +108,10 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	}
 	// Detect runtime paths for read-only access (e.g., GOPATH, GOCACHE, pnpm store)
 	runtimeReadPaths := detectRuntimeBinds(cfg.Runtimes)
+	// When rtk is enabled, expose its data directory so the model can read the
+	// full, unfiltered output rtk saves for failed commands (and so rtk can
+	// write those files inside the OS sandbox).
+	runtimeReadPaths = append(runtimeReadPaths, detectRtkBinds(cfg.Rtk)...)
 
 	// Determine if AWS credentials should be blocked
 	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
@@ -246,6 +251,29 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 	}
 
 	return binds
+}
+
+// detectRtkBinds returns the rtk data directory (default ~/.local/share/rtk, or
+// $XDG_DATA_HOME/rtk) when the rtk integration is enabled. rtk writes the full,
+// unfiltered output of failed commands under <dir>/tee/ so the model can read it
+// back without re-running the command. Exposing the directory makes those files
+// readable (and writable inside the OS sandbox, where rtk runs as a subprocess).
+func detectRtkBinds(rtk *config.RtkConfig) []string {
+	if !rtk.RtkEnabled() {
+		return nil
+	}
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Warn("failed to detect rtk data path", "error", err)
+			return nil
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	rtkDir := filepath.Join(dataHome, "rtk")
+	slog.Info("detected rtk data path", "path", rtkDir)
+	return []string{rtkDir}
 }
 
 // detectGoBinds detects Go environment paths that need to be writable.

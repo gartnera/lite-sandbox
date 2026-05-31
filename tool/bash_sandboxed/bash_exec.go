@@ -541,6 +541,10 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					}
 					return s.executeScript(ctx, args)
 				}
+				// Transparently reroute supported commands through rtk so their
+				// output is filtered/compressed. Done here, after validation, so
+				// the original command name drove all security checks.
+				args = rerouteThroughRtk(cmdName, args, s.rtkEnabled())
 			}
 			if useOSSandbox {
 				return s.execInWorker(ctx, args)
