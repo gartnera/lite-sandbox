@@ -167,6 +167,7 @@ var allowedCommands = map[string]bool{
 
 	// Runtimes (config-gated, validated by commandArgValidators)
 	"go":    true,
+	"gofmt": true,
 	"pnpm":  true,
 	"cargo": true,
 	"rustc": true,
@@ -242,6 +243,7 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"sed":   validateSedArgs,
 	"git":   validateGitCommand,
 	"go":    validateGoCommand,
+	"gofmt": validateGofmtCommand,
 	"pnpm":  validatePnpmCommand,
 	"cargo": validateCargoCommand,
 	"rustc": validateRustcCommand,
@@ -259,6 +261,18 @@ func validateGoCommand(s *Sandbox, args []*syntax.Word) error {
 		return fmt.Errorf("command \"go\" is not allowed (runtimes.go.enabled is disabled)")
 	}
 	return validateGoArgs(args, cfg.Runtimes.Go)
+}
+
+// validateGofmtCommand gates the standalone gofmt binary behind the Go runtime.
+// gofmt is a pure source formatter with no code-execution path, so beyond the
+// runtime check there are no arguments to validate; its only side effect (-w
+// writing files in place) is confined by the OS sandbox like go fmt itself.
+func validateGofmtCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Runtimes == nil || cfg.Runtimes.Go == nil || !cfg.Runtimes.Go.GoEnabled() {
+		return fmt.Errorf("command \"gofmt\" is not allowed (runtimes.go.enabled is disabled)")
+	}
+	return nil
 }
 
 func validatePnpmCommand(s *Sandbox, args []*syntax.Word) error {

@@ -227,6 +227,65 @@ func TestValidateGoArgs(t *testing.T) {
 	}
 }
 
+func TestValidateGofmtCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		runtimes  *config.RuntimesConfig
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:     "gofmt allowed when go runtime enabled",
+			command:  "gofmt -w main.go",
+			runtimes: &config.RuntimesConfig{Go: &config.GoConfig{Enabled: boolPtr(true)}},
+			wantErr:  false,
+		},
+		{
+			name:     "gofmt list allowed when go runtime enabled",
+			command:  "gofmt -l .",
+			runtimes: &config.RuntimesConfig{Go: &config.GoConfig{Enabled: boolPtr(true)}},
+			wantErr:  false,
+		},
+		{
+			name:      "gofmt blocked when go runtime disabled",
+			command:   "gofmt -w main.go",
+			runtimes:  &config.RuntimesConfig{Go: &config.GoConfig{Enabled: boolPtr(false)}},
+			wantErr:   true,
+			errSubstr: `command "gofmt" is not allowed (runtimes.go.enabled is disabled)`,
+		},
+		{
+			name:      "gofmt blocked by default",
+			command:   "gofmt -w main.go",
+			runtimes:  nil,
+			wantErr:   true,
+			errSubstr: `command "gofmt" is not allowed (runtimes.go.enabled is disabled)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestSandboxWithRuntimesConfig(tt.runtimes)
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("failed to parse command: %v", err)
+			}
+			err = s.validate(f)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errSubstr)
+				} else if tt.errSubstr != "" && !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("expected error containing %q, got %q", tt.errSubstr, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(substr) == 0 || len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsSubstring(s, substr))
 }
