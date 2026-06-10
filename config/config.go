@@ -186,11 +186,62 @@ func (r *RustConfig) RustPublish() bool {
 	return *r.Publish
 }
 
+// DenoConfig controls granular Deno runtime permission levels.
+type DenoConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+	// AutoSandbox, when enabled, automatically injects --allow-read and
+	// --allow-write flags scoped to the sandbox's allowed paths into deno
+	// commands, so Deno's own permission model mirrors the sandbox filesystem
+	// policy.
+	AutoSandbox *bool `yaml:"auto_sandbox,omitempty"`
+	// AllowNetwork controls whether deno commands may access the network when
+	// auto_sandbox is enabled. When false (default), auto_sandbox forces
+	// --deny-net so the invoker cannot grant network access via --allow-net or
+	// --allow-all. Set to true to let the invoker request network themselves.
+	AllowNetwork *bool `yaml:"allow_network,omitempty"`
+}
+
+// DenoEnabled returns whether deno commands are allowed (default: false).
+func (d *DenoConfig) DenoEnabled() bool {
+	if d == nil || d.Enabled == nil {
+		return false
+	}
+	return *d.Enabled
+}
+
+// DenoPublish returns whether deno publish is allowed (default: false).
+func (d *DenoConfig) DenoPublish() bool {
+	if d == nil || d.Publish == nil {
+		return false
+	}
+	return *d.Publish
+}
+
+// DenoAutoSandbox returns whether deno commands should have --allow-read and
+// --allow-write automatically configured from the sandbox paths (default: false).
+func (d *DenoConfig) DenoAutoSandbox() bool {
+	if d == nil || d.AutoSandbox == nil {
+		return false
+	}
+	return *d.AutoSandbox
+}
+
+// DenoAllowNetwork returns whether deno commands may access the network under
+// auto_sandbox (default: false). When false, auto_sandbox forces --deny-net.
+func (d *DenoConfig) DenoAllowNetwork() bool {
+	if d == nil || d.AllowNetwork == nil {
+		return false
+	}
+	return *d.AllowNetwork
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
 	Go   *GoConfig   `yaml:"go,omitempty"`
 	Pnpm *PnpmConfig `yaml:"pnpm,omitempty"`
 	Rust *RustConfig `yaml:"rust,omitempty"`
+	Deno *DenoConfig `yaml:"deno,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;

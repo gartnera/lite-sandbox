@@ -193,6 +193,60 @@ Security features:
 - `pnpm dlx` is blocked (downloads and executes remote packages)
 - `pnpm publish` requires explicit opt-in since it affects the npm registry (shared state)
 
+## Deno Runtime Support
+
+Deno commands are disabled by default. Enable them via config:
+
+```yaml
+runtimes:
+  deno:
+    enabled: true        # Allow deno run, test, fmt, lint, task, etc. (default: false)
+    publish: false       # Allow deno publish to JSR (default: false)
+    auto_sandbox: false  # Auto-configure deno's own permissions (default: false)
+    allow_network: false # Allow network under auto_sandbox (default: false)
+```
+
+Enable deno via CLI:
+
+```bash
+# Enable deno commands
+lite-sandbox config runtimes deno enable
+
+# Enable with auto-sandbox (mirror sandbox paths into deno's permissions)
+lite-sandbox config runtimes deno enable --with-auto-sandbox
+
+# Also allow network access under auto-sandbox
+lite-sandbox config runtimes deno enable --with-auto-sandbox --with-network
+
+# Show current deno configuration
+lite-sandbox config runtimes deno show
+```
+
+Deno runtime commands enable safe development workflows:
+
+```bash
+deno run main.ts
+deno test
+deno fmt
+deno lint
+deno task build
+```
+
+Security features:
+- `deno publish` requires explicit opt-in since it affects the JSR registry (shared state)
+- `deno upgrade` is blocked (modifies the deno installation in place)
+- **Auto-sandbox** (`auto_sandbox: true`) — Deno has its own permission model
+  (`--allow-read`, `--allow-write`, `--allow-net`, …) and prompts interactively
+  when a script requests access it wasn't granted. When auto-sandbox is enabled,
+  lite-sandbox automatically injects `--allow-read`/`--allow-write` scoped to the
+  sandbox's allowed paths for permissioned subcommands (`run`, `test`, `eval`,
+  `bench`, `repl`, `serve`, `compile`, `install`), so Deno's permission model
+  mirrors the sandbox filesystem policy and runs non-interactively.
+- **Network off by default** — Under auto-sandbox, network access is denied via
+  `--deny-net`, which takes precedence over any `--allow-net` or `--allow-all`
+  the invoker passes. Set `allow_network: true` to let the invoker request
+  network access themselves.
+
 ## Security Model
 
 Commands go through multiple validation layers:

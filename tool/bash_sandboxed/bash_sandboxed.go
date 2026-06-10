@@ -245,6 +245,12 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 		binds = append(binds, rustBinds...)
 	}
 
+	// Detect Deno paths if Deno runtime is enabled
+	if runtimes.Deno != nil && runtimes.Deno.DenoEnabled() {
+		denoBinds := detectDenoBinds()
+		binds = append(binds, denoBinds...)
+	}
+
 	return binds
 }
 
@@ -329,6 +335,47 @@ func detectRustBinds() []string {
 
 	if len(paths) > 0 {
 		slog.Info("detected Rust runtime paths", "paths", paths)
+	}
+
+	return paths
+}
+
+// detectDenoBinds detects Deno paths that need to be writable.
+// Returns DENO_DIR (module/npm cache) and DENO_INSTALL_ROOT (global scripts
+// installed via `deno install -g`).
+func detectDenoBinds() []string {
+	var paths []string
+
+	// Detect DENO_DIR (module and npm cache). Defaults to the OS cache dir
+	// joined with "deno" (e.g. ~/.cache/deno on Linux).
+	denoDir := os.Getenv("DENO_DIR")
+	if denoDir == "" {
+		if cacheDir, err := os.UserCacheDir(); err == nil {
+			denoDir = cacheDir + "/deno"
+		}
+	}
+	if denoDir != "" {
+		if _, err := os.Stat(denoDir); err == nil {
+			paths = append(paths, denoDir)
+		}
+	}
+
+	// Detect DENO_INSTALL_ROOT (global executables). Defaults to ~/.deno.
+	installRoot := os.Getenv("DENO_INSTALL_ROOT")
+	if installRoot == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			installRoot = home + "/.deno"
+		}
+	}
+	if installRoot != "" {
+		if _, err := os.Stat(installRoot); err == nil {
+			paths = append(paths, installRoot)
+		}
+	}
+
+	if len(paths) > 0 {
+		slog.Info("detected Deno runtime paths", "paths", paths)
 	}
 
 	return paths

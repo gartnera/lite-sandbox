@@ -171,6 +171,7 @@ var allowedCommands = map[string]bool{
 	"pnpm":  true,
 	"cargo": true,
 	"rustc": true,
+	"deno":  true,
 
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
@@ -247,6 +248,7 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"pnpm":  validatePnpmCommand,
 	"cargo": validateCargoCommand,
 	"rustc": validateRustcCommand,
+	"deno":  validateDenoCommand,
 	"aws":   validateAWSCommand,
 	"xargs": validateXargsArgs,
 }
@@ -305,6 +307,14 @@ func validateRustcCommand(s *Sandbox, args []*syntax.Word) error {
 		return fmt.Errorf("command \"rustc\" is not allowed (runtimes.rust.enabled is disabled)")
 	}
 	return nil
+}
+
+func validateDenoCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Runtimes == nil || cfg.Runtimes.Deno == nil || !cfg.Runtimes.Deno.DenoEnabled() {
+		return fmt.Errorf("command \"deno\" is not allowed (runtimes.deno.enabled is disabled)")
+	}
+	return validateDenoArgs(args, cfg.Runtimes.Deno)
 }
 
 func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {

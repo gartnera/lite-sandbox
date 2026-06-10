@@ -505,6 +505,15 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						return fmt.Errorf("command %q is not allowed", cmdName)
 					}
 				}
+				// Auto-configure deno's permission flags to mirror the sandbox
+				// paths. The runtime gate (deno enabled) is enforced earlier by
+				// the AST validator, so by here deno is known to be allowed.
+				if cmdName == "deno" {
+					cfg := s.getConfig()
+					if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil && cfg.Runtimes.Deno.DenoAutoSandbox() {
+						args = applyDenoAutoSandbox(args, readAllowedPaths, writeAllowedPaths, cfg.Runtimes.Deno.DenoAllowNetwork())
+					}
+				}
 				switch cmdName {
 				case "awk":
 					return executeAwk(ctx, args)
