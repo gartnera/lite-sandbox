@@ -16,9 +16,8 @@ var installCmd = &cobra.Command{
 	Short: "Automatically configure Claude Code to use lite-sandbox",
 	Long: `Automatically configures Claude Code by:
 1. Adding the MCP server to ~/.claude.json (user-scoped)
-2. Adding auto-allow permission to ~/.claude/settings.json
-3. Adding usage directive to ~/.claude/CLAUDE.md
-4. Installing the preflight hook to redirect Bash to lite-sandbox`,
+2. Adding auto-allow permission for mcp__lite-sandbox__bash and denying the built-in Bash tool in ~/.claude/settings.json
+3. Adding usage directive to ~/.claude/CLAUDE.md`,
 	RunE: runInstall,
 }
 
@@ -56,24 +55,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("✓ Added MCP server to ~/.claude.json")
 
-	// 2. Configure permissions
+	// 2. Configure permissions (allow the sandbox tool, deny the built-in Bash tool)
 	if err := configurePermissions(claudeDir); err != nil {
 		return fmt.Errorf("failed to configure permissions: %w", err)
 	}
-	fmt.Println("✓ Added auto-allow permission to ~/.claude/settings.json")
+	fmt.Println("✓ Allowed mcp__lite-sandbox__bash and denied built-in Bash in ~/.claude/settings.json")
 
 	// 3. Configure CLAUDE.md
 	if err := configureCLAUDEMD(claudeDir); err != nil {
 		return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
 	}
 	fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
-
-	// 4. Configure preflight hook
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := configurePreflightHook(settingsPath, binPath); err != nil {
-		return fmt.Errorf("failed to configure preflight hook: %w", err)
-	}
-	fmt.Println("✓ Installed preflight hook to ~/.claude/settings.json")
 
 	fmt.Println("\n✓ Installation complete!")
 	fmt.Println("\nRestart Claude Code for the changes to take effect.")
@@ -132,6 +124,7 @@ func configureMCPServer(claudeJsonPath, binPath string) error {
 
 type permissionsConfig struct {
 	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
 }
 
 // readSettingsFile reads and parses a settings.json file into a generic map,
@@ -176,10 +169,16 @@ func configurePermissions(claudeDir string) error {
 		}
 	}
 
-	// Add the permission if not already present
-	permission := "mcp__lite-sandbox__bash"
-	if !slices.Contains(perms.Allow, permission) {
-		perms.Allow = append(perms.Allow, permission)
+	// Auto-allow the sandboxed bash tool
+	allowPermission := "mcp__lite-sandbox__bash"
+	if !slices.Contains(perms.Allow, allowPermission) {
+		perms.Allow = append(perms.Allow, allowPermission)
+	}
+
+	// Ban the built-in Bash tool outright so Claude must use the sandbox
+	denyPermission := "Bash"
+	if !slices.Contains(perms.Deny, denyPermission) {
+		perms.Deny = append(perms.Deny, denyPermission)
 	}
 
 	// Marshal permissions back into the config
@@ -195,7 +194,7 @@ func configurePermissions(claudeDir string) error {
 func configureCLAUDEMD(claudeDir string) error {
 	claudeMDPath := filepath.Join(claudeDir, "CLAUDE.md")
 
-	directive := `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands instead of the built-in Bash tool. The sandboxed tool is pre-approved and requires no permission prompts. Only fall back to Bash if the sandboxed tool cannot handle the command.`
+	directive := `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.`
 
 	// Check if the file exists and already contains the directive
 	data, err := os.ReadFile(claudeMDPath)

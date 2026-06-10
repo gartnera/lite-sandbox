@@ -140,6 +140,10 @@ func TestConfigurePermissions(t *testing.T) {
 		t.Errorf("expected permission %s not found in %v", expected, perms.Allow)
 	}
 
+	if !slices.Contains(perms.Deny, "Bash") {
+		t.Errorf("expected built-in Bash to be denied, got deny list %v", perms.Deny)
+	}
+
 	// Test that running again doesn't duplicate
 	err = configurePermissions(tmpDir)
 	if err != nil {
@@ -167,6 +171,16 @@ func TestConfigurePermissions(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected permission to appear once, got %d times", count)
+	}
+
+	denyCount := 0
+	for _, p := range perms.Deny {
+		if p == "Bash" {
+			denyCount++
+		}
+	}
+	if denyCount != 1 {
+		t.Errorf("expected Bash deny to appear once, got %d times", denyCount)
 	}
 }
 

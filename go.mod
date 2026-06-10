@@ -10,7 +10,6 @@ require (
 	github.com/jellydator/ttlcache/v3 v3.4.0
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/term v0.32.0
 	gopkg.in/yaml.v3 v3.0.1
 	mvdan.cc/sh/v3 v3.12.0
 )
@@ -40,4 +39,5 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/term v0.32.0 // indirect
 )

@@ -590,10 +590,10 @@ func (s *Sandbox) ValidateCommand(command string, workDir string, readAllowedPat
 // validateScriptContents walks the AST looking for script invocations
 // (direct script paths like ./script.sh or bash/sh with a script file),
 // reads the script contents, and validates them recursively. This catches
-// cases where a script file contains blocked commands that would fail at
-// runtime, allowing the preflight hook to let Bash handle the command directly.
+// cases where a script file contains blocked commands that would otherwise
+// only fail once reached at runtime, rejecting the command up front instead.
 // Errors reading files are silently ignored (fail-open) since the file may
-// not exist yet at preflight time.
+// not exist yet at validation time.
 func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	if depth >= maxBashDepth {
 		return fmt.Errorf("script nesting depth exceeded (max %d)", maxBashDepth)
@@ -636,7 +636,7 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil // fail-open: file may not exist at preflight time
+		return nil // fail-open: file may not exist at validation time
 	}
 	script := string(data)
 	if strings.HasPrefix(script, "#!") {

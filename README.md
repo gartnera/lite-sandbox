@@ -14,8 +14,10 @@ lite-sandbox install
 
 This automatically:
 1. Adds the MCP server to `~/.claude.json` (user-scoped)
-2. Adds auto-allow permission to `~/.claude/settings.json`
+2. Adds auto-allow permission for `mcp__lite-sandbox__bash` **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Adds usage directive to `~/.claude/CLAUDE.md`
+
+Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
 
 Restart Claude Code after running the install command.
 
@@ -41,26 +43,31 @@ Add this to `.mcp.json` in your project root (project-scoped) or `~/.claude.json
 
 Replace `/path/to/lite-sandbox` with the actual path to the built binary.
 
-#### 2. Auto-allow the tool
+#### 2. Auto-allow the sandbox tool and deny built-in Bash
 
-Add this to `~/.claude/settings.json` so Claude Code never prompts for permission:
+Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandboxed tool and can no longer use the built-in `Bash` tool:
 
 ```json
 {
   "permissions": {
     "allow": [
       "mcp__lite-sandbox__bash"
+    ],
+    "deny": [
+      "Bash"
     ]
   }
 }
 ```
 
-#### 3. Direct Claude to prefer the sandboxed tool
+Denying `Bash` is what makes the sandbox enforceable — without it, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
+
+#### 3. Direct Claude to use the sandboxed tool
 
 Add the following to your `~/.claude/CLAUDE.md` (global) or project-level `CLAUDE.md`:
 
 ```markdown
-ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands instead of the built-in Bash tool. The sandboxed tool is pre-approved and requires no permission prompts. Only fall back to Bash if the sandboxed tool cannot handle the command.
+ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.
 ```
 
 > **Note**: The tool name follows the pattern `mcp__<server-name>__<tool-name>`. If you named the server differently in your MCP config, adjust the tool name accordingly.
