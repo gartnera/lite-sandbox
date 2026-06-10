@@ -198,14 +198,14 @@ func TestApplyDenoAutoSandbox(t *testing.T) {
 		want     []string
 	}{
 		{
-			name:  "run gets read, write, and deny-net injected after subcommand",
+			name:  "run gets read, write, deny-net and deny-import injected after subcommand",
 			args:  []string{"deno", "run", "main.ts"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts"},
+			want:  []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
 		},
 		{
-			name:     "allow_network true omits deny-net",
+			name:     "allow_network true omits deny-net and deny-import",
 			args:     []string{"deno", "run", "main.ts"},
 			read:     read,
 			write:    write,
@@ -217,21 +217,35 @@ func TestApplyDenoAutoSandbox(t *testing.T) {
 			args:  []string{"deno", "--quiet", "run", "main.ts"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "--quiet", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts"},
+			want:  []string{"deno", "--quiet", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
 		},
 		{
 			name:  "existing allow-read is not duplicated but net still denied",
 			args:  []string{"deno", "run", "--allow-read=/custom", "main.ts"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "run", "--allow-write=/work", "--deny-net", "--allow-read=/custom", "main.ts"},
+			want:  []string{"deno", "run", "--allow-write=/work", "--deny-net", "--deny-import", "--allow-read=/custom", "main.ts"},
 		},
 		{
-			name:  "allow-all keeps fs scope but net is force-denied",
+			name:  "short -R and -W are recognized as read/write grants",
+			args:  []string{"deno", "run", "-R", "-W", "main.ts"},
+			read:  read,
+			write: write,
+			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-R", "-W", "main.ts"},
+		},
+		{
+			name:  "bundled short -RW is recognized as read and write grants",
+			args:  []string{"deno", "run", "-RW", "main.ts"},
+			read:  read,
+			write: write,
+			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-RW", "main.ts"},
+		},
+		{
+			name:  "allow-all keeps fs scope but net and import are force-denied",
 			args:  []string{"deno", "run", "-A", "main.ts"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "run", "--deny-net", "-A", "main.ts"},
+			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
 		},
 		{
 			name:     "allow-all with allow_network true is untouched",
@@ -242,11 +256,11 @@ func TestApplyDenoAutoSandbox(t *testing.T) {
 			want:     []string{"deno", "run", "-A", "main.ts"},
 		},
 		{
-			name:  "existing deny-net not duplicated",
-			args:  []string{"deno", "run", "--deny-net", "-A", "main.ts"},
+			name:  "existing deny-net and deny-import not duplicated",
+			args:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "run", "--deny-net", "-A", "main.ts"},
+			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
 		},
 		{
 			name:  "non-permission subcommand is untouched",
@@ -260,14 +274,14 @@ func TestApplyDenoAutoSandbox(t *testing.T) {
 			args:  []string{"deno", "install"},
 			read:  read,
 			write: write,
-			want:  []string{"deno", "install", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net"},
+			want:  []string{"deno", "install", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import"},
 		},
 		{
-			name:  "empty paths still deny net",
+			name:  "empty paths still deny net and import",
 			args:  []string{"deno", "run", "main.ts"},
 			read:  nil,
 			write: nil,
-			want:  []string{"deno", "run", "--deny-net", "main.ts"},
+			want:  []string{"deno", "run", "--deny-net", "--deny-import", "main.ts"},
 		},
 		{
 			name:     "empty paths and allow_network true inject nothing",
@@ -307,11 +321,16 @@ func TestDenoConfig(t *testing.T) {
 		cfg         *config.DenoConfig
 		wantEnabled bool
 		wantPublish bool
+		wantAuto    bool
+		wantNetwork bool
 	}{
-		{"nil config", nil, false, false},
-		{"empty config", &config.DenoConfig{}, false, false},
-		{"enabled", &config.DenoConfig{Enabled: boolPtr(true)}, true, false},
-		{"enabled with publish", &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)}, true, true},
+		// auto_sandbox defaults to true; everything else defaults to false.
+		{"nil config", nil, false, false, true, false},
+		{"empty config", &config.DenoConfig{}, false, false, true, false},
+		{"enabled", &config.DenoConfig{Enabled: boolPtr(true)}, true, false, true, false},
+		{"enabled with publish", &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)}, true, true, true, false},
+		{"auto_sandbox disabled", &config.DenoConfig{Enabled: boolPtr(true), AutoSandbox: boolPtr(false)}, true, false, false, false},
+		{"network allowed", &config.DenoConfig{Enabled: boolPtr(true), AllowNetwork: boolPtr(true)}, true, false, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,6 +339,12 @@ func TestDenoConfig(t *testing.T) {
 			}
 			if got := tt.cfg.DenoPublish(); got != tt.wantPublish {
 				t.Errorf("DenoPublish() = %v, want %v", got, tt.wantPublish)
+			}
+			if got := tt.cfg.DenoAutoSandbox(); got != tt.wantAuto {
+				t.Errorf("DenoAutoSandbox() = %v, want %v", got, tt.wantAuto)
+			}
+			if got := tt.cfg.DenoAllowNetwork(); got != tt.wantNetwork {
+				t.Errorf("DenoAllowNetwork() = %v, want %v", got, tt.wantNetwork)
 			}
 		})
 	}

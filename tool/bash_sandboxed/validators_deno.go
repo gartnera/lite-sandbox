@@ -82,17 +82,76 @@ var denoPermissionSubcommands = map[string]bool{
 	"install": true,
 }
 
+// denoPerms records which permission grants/denials are already present on a
+// deno subcommand's argument list.
+type denoPerms struct {
+	allowAll   bool
+	allowRead  bool
+	allowWrite bool
+	denyNet    bool
+	denyImport bool
+}
+
+// scanDenoPerms inspects the args following a deno subcommand for existing
+// permission flags. It understands both long forms (--allow-read[=...]) and
+// the short forms documented by `deno run --help`: -A (allow-all), -R
+// (allow-read), -W (allow-write), including bundled short flags like -RW.
+// Network/import allows are intentionally not tracked: a forced --deny-* always
+// takes precedence over any --allow-* or -A, so detecting them is unnecessary.
+func scanDenoPerms(args []string) denoPerms {
+	var p denoPerms
+	for _, a := range args {
+		switch {
+		case a == "-A" || a == "--allow-all":
+			p.allowAll = true
+		case a == "--allow-read" || strings.HasPrefix(a, "--allow-read=") ||
+			a == "-R" || strings.HasPrefix(a, "-R="):
+			p.allowRead = true
+		case a == "--allow-write" || strings.HasPrefix(a, "--allow-write=") ||
+			a == "-W" || strings.HasPrefix(a, "-W="):
+			p.allowWrite = true
+		case a == "--deny-net" || strings.HasPrefix(a, "--deny-net="):
+			p.denyNet = true
+		case a == "--deny-import" || strings.HasPrefix(a, "--deny-import="):
+			p.denyImport = true
+		default:
+			// Bundled short permission flags, e.g. -RW or -AR. Only single-dash
+			// tokens; strip any attached =value before inspecting the letters.
+			if len(a) > 1 && a[0] == '-' && a[1] != '-' {
+				letters := a[1:]
+				if i := strings.IndexByte(letters, '='); i >= 0 {
+					letters = letters[:i]
+				}
+				if strings.ContainsRune(letters, 'A') {
+					p.allowAll = true
+				}
+				if strings.ContainsRune(letters, 'R') {
+					p.allowRead = true
+				}
+				if strings.ContainsRune(letters, 'W') {
+					p.allowWrite = true
+				}
+			}
+		}
+	}
+	return p
+}
+
 // applyDenoAutoSandbox rewrites a deno command (post-expansion argv) so Deno's
 // own permission model mirrors the lite-sandbox policy:
 //
 //   - --allow-read / --allow-write are scoped to the sandbox's allowed paths.
-//   - Network is denied unless allowNetwork is true; when denied, --deny-net is
-//     forced, which takes precedence over any --allow-net or --allow-all the
-//     invoker supplied (so it cannot be bypassed).
+//   - Network is denied unless allowNetwork is true. Deno's network surface is
+//     two distinct permissions: --allow-net (sockets) and --allow-import
+//     (fetching remote modules, which defaults to an allowlist of hosts like
+//     deno.land/jsr.io even with no flags). Both are force-denied via
+//     --deny-net and --deny-import, which take precedence over any --allow-*
+//     or --allow-all the invoker supplied, so network access cannot be
+//     bypassed.
 //
 // It is a no-op unless the subcommand accepts permission flags. Existing
-// --allow-read / --allow-write flags (or a blanket --allow-all / -A) are left
-// in place for the filesystem scope, but never override the network denial.
+// read/write grants (or a blanket --allow-all / -A) are left in place for the
+// filesystem scope, but never override the network denial.
 func applyDenoAutoSandbox(args []string, readPaths, writePaths []string, allowNetwork bool) []string {
 	if len(args) < 2 {
 		return args
@@ -111,36 +170,27 @@ func applyDenoAutoSandbox(args []string, readPaths, writePaths []string, allowNe
 		return args
 	}
 
-	// Inspect existing permission flags to avoid clobbering explicit intent.
-	hasAllowAll := false
-	hasAllowRead := false
-	hasAllowWrite := false
-	hasDenyNet := false
-	for _, a := range args[subIdx+1:] {
-		switch {
-		case a == "-A" || a == "--allow-all":
-			hasAllowAll = true
-		case a == "--allow-read" || strings.HasPrefix(a, "--allow-read="):
-			hasAllowRead = true
-		case a == "--allow-write" || strings.HasPrefix(a, "--allow-write="):
-			hasAllowWrite = true
-		case a == "--deny-net" || strings.HasPrefix(a, "--deny-net="):
-			hasDenyNet = true
-		}
-	}
+	perms := scanDenoPerms(args[subIdx+1:])
 
 	var inject []string
 	// Filesystem scope: only inject when the invoker hasn't already granted it
 	// (an explicit --allow-read/-write or a blanket -A means they chose a scope).
-	if !hasAllowAll && !hasAllowRead && len(readPaths) > 0 {
+	if !perms.allowAll && !perms.allowRead && len(readPaths) > 0 {
 		inject = append(inject, "--allow-read="+strings.Join(readPaths, ","))
 	}
-	if !hasAllowAll && !hasAllowWrite && len(writePaths) > 0 {
+	if !perms.allowAll && !perms.allowWrite && len(writePaths) > 0 {
 		inject = append(inject, "--allow-write="+strings.Join(writePaths, ","))
 	}
-	// Network: force a deny that overrides any allow the invoker supplied.
-	if !allowNetwork && !hasDenyNet {
-		inject = append(inject, "--deny-net")
+	// Network: force denials that override any allow the invoker supplied.
+	// --deny-import is required because remote module imports are allowed by
+	// default and are not covered by --deny-net.
+	if !allowNetwork {
+		if !perms.denyNet {
+			inject = append(inject, "--deny-net")
+		}
+		if !perms.denyImport {
+			inject = append(inject, "--deny-import")
+		}
 	}
 	if len(inject) == 0 {
 		return args

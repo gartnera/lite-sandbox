@@ -62,7 +62,7 @@ var runtimesShowCmd = &cobra.Command{
 			fmt.Println("  deno: (defaults)")
 			fmt.Printf("    enabled:       %v\n", false)
 			fmt.Printf("    publish:       %v\n", false)
-			fmt.Printf("    auto_sandbox:  %v\n", false)
+			fmt.Printf("    auto_sandbox:  %v\n", true)
 			fmt.Printf("    allow_network: %v\n", false)
 		}
 		return nil
@@ -453,8 +453,14 @@ var denoRuntimeDisableCmd = &cobra.Command{
 		}
 
 		falseVal := false
-		cfg.Runtimes.Deno.Enabled = &falseVal
 
+		// With a sub-setting flag, only that sub-setting is turned off and the
+		// runtime stays enabled (e.g. disable auto_sandbox while keeping deno).
+		// With no flags, the whole runtime is disabled.
+		anySub := withPublish || withAutoSandbox || withNetwork
+		if !anySub {
+			cfg.Runtimes.Deno.Enabled = &falseVal
+		}
 		if withPublish {
 			cfg.Runtimes.Deno.Publish = &falseVal
 		}
@@ -469,7 +475,9 @@ var denoRuntimeDisableCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("runtimes.deno.enabled set to false")
+		if !anySub {
+			fmt.Println("runtimes.deno.enabled set to false")
+		}
 		if withPublish {
 			fmt.Println("runtimes.deno.publish set to false")
 		}

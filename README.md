@@ -202,21 +202,21 @@ runtimes:
   deno:
     enabled: true        # Allow deno run, test, fmt, lint, task, etc. (default: false)
     publish: false       # Allow deno publish to JSR (default: false)
-    auto_sandbox: false  # Auto-configure deno's own permissions (default: false)
+    auto_sandbox: true   # Auto-configure deno's own permissions (default: true)
     allow_network: false # Allow network under auto_sandbox (default: false)
 ```
 
 Enable deno via CLI:
 
 ```bash
-# Enable deno commands
+# Enable deno commands (auto-sandbox is on by default)
 lite-sandbox config runtimes deno enable
 
-# Enable with auto-sandbox (mirror sandbox paths into deno's permissions)
-lite-sandbox config runtimes deno enable --with-auto-sandbox
+# Allow network access under auto-sandbox
+lite-sandbox config runtimes deno enable --with-network
 
-# Also allow network access under auto-sandbox
-lite-sandbox config runtimes deno enable --with-auto-sandbox --with-network
+# Turn off auto-sandbox but keep deno enabled
+lite-sandbox config runtimes deno disable --with-auto-sandbox
 
 # Show current deno configuration
 lite-sandbox config runtimes deno show
@@ -235,17 +235,22 @@ deno task build
 Security features:
 - `deno publish` requires explicit opt-in since it affects the JSR registry (shared state)
 - `deno upgrade` is blocked (modifies the deno installation in place)
-- **Auto-sandbox** (`auto_sandbox: true`) — Deno has its own permission model
-  (`--allow-read`, `--allow-write`, `--allow-net`, …) and prompts interactively
-  when a script requests access it wasn't granted. When auto-sandbox is enabled,
-  lite-sandbox automatically injects `--allow-read`/`--allow-write` scoped to the
-  sandbox's allowed paths for permissioned subcommands (`run`, `test`, `eval`,
-  `bench`, `repl`, `serve`, `compile`, `install`), so Deno's permission model
-  mirrors the sandbox filesystem policy and runs non-interactively.
-- **Network off by default** — Under auto-sandbox, network access is denied via
-  `--deny-net`, which takes precedence over any `--allow-net` or `--allow-all`
-  the invoker passes. Set `allow_network: true` to let the invoker request
-  network access themselves.
+- **Auto-sandbox** (`auto_sandbox: true`, the default) — Deno runs with no
+  permissions by default and prompts interactively when a script requests
+  access it wasn't granted, which would hang a non-interactive sandbox. With
+  auto-sandbox enabled, lite-sandbox automatically injects
+  `--allow-read`/`--allow-write` scoped to the sandbox's allowed paths for
+  permissioned subcommands (`run`, `test`, `eval`, `bench`, `repl`, `serve`,
+  `compile`, `install`), so Deno's permission model mirrors the sandbox
+  filesystem policy and runs non-interactively. Existing read/write grants on
+  the command (including short `-R`/`-W` or a blanket `-A`) are respected.
+- **Network off by default** — Under auto-sandbox, both of Deno's network
+  surfaces are denied: `--deny-net` (sockets) and `--deny-import` (fetching
+  remote modules, which Deno otherwise allows from a default host allowlist
+  such as `deno.land`/`jsr.io`). Deno's `--deny-*` flags take precedence over
+  any `--allow-net`/`--allow-import`/`--allow-all` the invoker passes, so the
+  denial cannot be bypassed. Set `allow_network: true` to let the invoker
+  request network access themselves.
 
 ## Security Model
 

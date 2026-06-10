@@ -219,10 +219,12 @@ func (d *DenoConfig) DenoPublish() bool {
 }
 
 // DenoAutoSandbox returns whether deno commands should have --allow-read and
-// --allow-write automatically configured from the sandbox paths (default: false).
+// --allow-write automatically configured from the sandbox paths (default: true).
+// Deno runs with no permissions by default, so auto-sandbox grants read/write
+// scoped to the sandbox paths and runs non-interactively out of the box.
 func (d *DenoConfig) DenoAutoSandbox() bool {
 	if d == nil || d.AutoSandbox == nil {
-		return false
+		return true
 	}
 	return *d.AutoSandbox
 }
