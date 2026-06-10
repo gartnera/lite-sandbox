@@ -175,6 +175,9 @@ var allowedCommands = map[string]bool{
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
 
+	// Token-reducing command proxy (config-gated; proxied command validated recursively)
+	"rtk": true,
+
 	// Scoped write commands (path-validated to stay within allowedPaths)
 	"cp":    true,
 	"mv":    true,
@@ -248,6 +251,7 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"cargo": validateCargoCommand,
 	"rustc": validateRustcCommand,
 	"aws":   validateAWSCommand,
+	"rtk":   validateRtkCommand,
 	"xargs": validateXargsArgs,
 }
 

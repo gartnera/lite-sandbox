@@ -186,6 +186,52 @@ Security features:
 - `pnpm dlx` is blocked (downloads and executes remote packages)
 - `pnpm publish` requires explicit opt-in since it affects the npm registry (shared state)
 
+## rtk Support
+
+[rtk](https://github.com/rtk-ai/rtk) is a command proxy that filters and
+compresses the output of common dev commands, reducing the number of tokens the
+model has to read. The integration is disabled by default. When enabled,
+supported read-only/dev commands are transparently rerouted through rtk (e.g.
+`git status` runs as `rtk git status`), so the model keeps issuing normal
+commands while receiving the compacted output.
+
+```yaml
+rtk:
+  enabled: true   # Reroute supported commands through rtk (default: false)
+```
+
+Enable rtk via CLI:
+
+```bash
+# Enable the rtk integration
+lite-sandbox config rtk enable
+
+# Show current rtk configuration
+lite-sandbox config rtk show
+
+# Disable the rtk integration
+lite-sandbox config rtk disable
+```
+
+Commands rerouted through rtk (only when each is otherwise permitted): `git`,
+`ls`, `grep`, `find`, `diff`, `cargo`, `go`, `aws`, `pnpm`. The proxied command
+is validated exactly as if it had been run directly — rtk only changes how the
+output is rendered, not what is allowed. `rtk` may also be invoked directly
+(e.g. `rtk gain`, `rtk discover`); `rtk init` is blocked because it writes hook
+configuration.
+
+Reading the full output:
+
+- When a command fails, rtk saves the complete, unfiltered output under
+  `~/.local/share/rtk/tee/` (respects `$XDG_DATA_HOME`) and references the file
+  path in its compacted output.
+- Enabling rtk automatically adds that directory to the sandbox's readable
+  paths, so the model can `cat` the referenced file to review the full output
+  without re-running the command.
+
+The `rtk` binary must be installed and on `PATH`. See the
+[rtk install instructions](https://github.com/rtk-ai/rtk#installation).
+
 ## Security Model
 
 Commands go through multiple validation layers:

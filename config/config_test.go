@@ -198,3 +198,25 @@ func TestLocalBinaryExecutionConfig_IsEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestRtkConfig_RtkEnabled(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name string
+		cfg  *RtkConfig
+		want bool
+	}{
+		{"nil config", nil, false},
+		{"nil enabled field", &RtkConfig{}, false},
+		{"enabled true", &RtkConfig{Enabled: boolPtr(true)}, true},
+		{"enabled false", &RtkConfig{Enabled: boolPtr(false)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.RtkEnabled(); got != tt.want {
+				t.Errorf("RtkEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
