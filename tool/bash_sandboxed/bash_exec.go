@@ -514,7 +514,11 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					cfg := s.getConfig()
 					if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil {
 						d := cfg.Runtimes.Deno
-						args = applyDenoSandbox(args, readAllowedPaths, writeAllowedPaths, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
+						// Deno needs real directories for --allow-read/-write, so strip
+						// any descendants-only "/*" markers down to their base subtree.
+						denoRead := stripNestedOnlyMarkers(readAllowedPaths)
+						denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
+						args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
 					}
 				}
 				switch cmdName {

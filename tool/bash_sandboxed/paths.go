@@ -279,19 +279,83 @@ func resolveExistingPrefix(path string) string {
 	return filepath.Join(resolveExistingPrefix(dir), base)
 }
 
+// nestedOnlyMarker is the trailing path segment that, when appended to a
+// configured readable/writable path, grants access to everything *nested
+// below* that directory while denying access to the directory itself. A bare
+// path (no marker) grants the directory and all of its contents.
+//
+// The motivating case: a worktree container like ~/.superconductor/worktrees
+// holds many sibling worktrees. Granting the bare container lets a single
+// read/grep/glob sweep every worktree at once. Marking it as "<container>/*"
+// instead permits reading an individual worktree under it (e.g. a peer) while
+// blocking the container itself as a target, so no single call can span them all.
+const nestedOnlyMarker = "*"
+
+// splitNestedOnly separates an allowed-path entry into its base directory and
+// whether it carries the descendants-only marker (a trailing "/*"). The base is
+// returned with the marker removed. A degenerate entry that trims to empty or
+// the filesystem root is treated as a literal (no marker), so it can never be
+// (mis)used to widen access to everything below "/".
+func splitNestedOnly(allowed string) (base string, nestedOnly bool) {
+	marker := string(filepath.Separator) + nestedOnlyMarker
+	if !strings.HasSuffix(allowed, marker) {
+		return allowed, false
+	}
+	trimmed := strings.TrimSuffix(allowed, marker)
+	if trimmed == "" || trimmed == string(filepath.Separator) {
+		return allowed, false
+	}
+	return trimmed, true
+}
+
+// StripNestedOnlyMarker returns the base directory of an allowed-path entry,
+// removing any trailing descendants-only "/*" marker. Use this where a real
+// directory is required (e.g. granting a runtime its own read scope) rather
+// than a path-matching boundary, since the marker is a lite-sandbox construct
+// that those consumers don't understand.
+func StripNestedOnlyMarker(allowed string) string {
+	base, _ := splitNestedOnly(allowed)
+	return base
+}
+
+// stripNestedOnlyMarkers maps allowed-path entries to their base directories,
+// dropping any descendants-only "/*" markers. Used when handing the paths to a
+// runtime (e.g. deno --allow-read) that needs real directories; such a runtime
+// is granted the base subtree, since its permission model can't express
+// "everything below but not the directory itself".
+func stripNestedOnlyMarkers(paths []string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = StripNestedOnlyMarker(p)
+	}
+	return out
+}
+
 // IsUnderAllowedPaths checks whether the resolved path is equal to or nested
 // under one of the allowed directories. It resolves symlinks in the allowed
 // paths to ensure comparisons work correctly on systems where directories
 // may be accessed through symlinks (e.g., /var -> /private/var on macOS).
+//
+// An allowed entry carrying the descendants-only marker (a trailing "/*") only
+// matches paths strictly nested below the directory, never the directory
+// itself, so a single read/grep/glob cannot target the container and sweep
+// every child at once.
 func IsUnderAllowedPaths(path string, allowedPaths []string) bool {
 	for _, allowed := range allowedPaths {
+		base, nestedOnly := splitNestedOnly(allowed)
 		// Resolve symlinks in the allowed path for accurate comparison
-		resolvedAllowed, err := filepath.EvalSymlinks(allowed)
+		resolvedAllowed, err := filepath.EvalSymlinks(base)
 		if err != nil {
 			// If we can't resolve, try the original path
-			resolvedAllowed = allowed
+			resolvedAllowed = base
 		}
-		if path == resolvedAllowed || strings.HasPrefix(path, resolvedAllowed+string(filepath.Separator)) {
+		if !nestedOnly && path == resolvedAllowed {
+			return true
+		}
+		if strings.HasPrefix(path, resolvedAllowed+string(filepath.Separator)) {
 			return true
 		}
 	}

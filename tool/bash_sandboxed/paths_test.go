@@ -710,6 +710,102 @@ func TestValidatePaths_ExistingPathsStillBlocked(t *testing.T) {
 	}
 }
 
+func TestIsUnderAllowedPaths_NestedOnly(t *testing.T) {
+	// container stands in for a worktree container like
+	// ~/.superconductor/worktrees/haystack that holds many sibling worktrees.
+	container := t.TempDir()
+	peer := filepath.Join(container, "peer-worktree")
+	if err := os.MkdirAll(filepath.Join(peer, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	nested := []string{container + "/*"}
+
+	cases := []struct {
+		name    string
+		path    string
+		allowed bool
+	}{
+		{"container itself denied", container, false},
+		{"peer worktree allowed", peer, true},
+		{"nested file allowed", filepath.Join(peer, "src", "x.go"), true},
+		{"parent of container denied", filepath.Dir(container), false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved := ResolvePath(tt.path, container)
+			if got := IsUnderAllowedPaths(resolved, nested); got != tt.allowed {
+				t.Fatalf("IsUnderAllowedPaths(%q, %v) = %v, want %v", resolved, nested, got, tt.allowed)
+			}
+		})
+	}
+
+	// A bare entry (no marker) still grants the directory itself, so the marker
+	// is opt-in and doesn't change existing behavior.
+	bare := []string{container}
+	if !IsUnderAllowedPaths(ResolvePath(container, container), bare) {
+		t.Fatal("bare allowed path should match the directory itself")
+	}
+}
+
+func TestSplitNestedOnly(t *testing.T) {
+	sep := string(filepath.Separator)
+	cases := []struct {
+		in         string
+		wantBase   string
+		wantNested bool
+	}{
+		{"/a/b/*", "/a/b", true},
+		{"/a/b", "/a/b", false},
+		{"/a/b/", "/a/b/", false}, // trailing slash is not the marker
+		{sep + "*", sep + "*", false}, // degenerate: "/*" must not grant all of "/"
+		{"*", "*", false},             // no separator, treated literally
+	}
+	for _, tt := range cases {
+		t.Run(tt.in, func(t *testing.T) {
+			base, nested := splitNestedOnly(tt.in)
+			if base != tt.wantBase || nested != tt.wantNested {
+				t.Fatalf("splitNestedOnly(%q) = (%q, %v), want (%q, %v)", tt.in, base, nested, tt.wantBase, tt.wantNested)
+			}
+		})
+	}
+}
+
+// TestValidatePaths_NestedOnlyMarker proves the bash path validator honors the
+// marker: a single read targeting the container is blocked (this is the
+// "search all worktrees at once" case), while reading a file inside a nested
+// worktree is allowed.
+func TestValidatePaths_NestedOnlyMarker(t *testing.T) {
+	workDir := t.TempDir()
+	container := t.TempDir()
+	peer := filepath.Join(container, "peer")
+	if err := os.MkdirAll(peer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(peer, "f.txt"), []byte("x"), 0o644)
+
+	readPaths := []string{workDir, container + "/*"}
+	writePaths := []string{workDir}
+
+	f, err := ParseBash("cat " + filepath.Join(peer, "f.txt"))
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if err := validatePaths(f, workDir, readPaths, writePaths); err != nil {
+		t.Fatalf("nested read should be allowed, got: %v", err)
+	}
+
+	f, err = ParseBash("ls " + container)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if err := validatePaths(f, workDir, readPaths, writePaths); err == nil {
+		t.Fatal("expected container listing to be blocked (would span all worktrees)")
+	} else if !strings.Contains(err.Error(), "outside allowed directories") {
+		t.Fatalf("expected outside allowed directories error, got %q", err.Error())
+	}
+}
+
 func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
 	workDir := t.TempDir()
 	os.MkdirAll(filepath.Join(workDir, ".git"), 0o755)

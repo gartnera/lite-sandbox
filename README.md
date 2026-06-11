@@ -116,6 +116,27 @@ lite-sandbox config extra-commands list
 lite-sandbox config extra-commands remove curl
 ```
 
+### Readable / writable paths
+
+By default the sandbox confines reads and writes to the working directory. Extra
+locations can be granted via `readable_paths` / `writable_paths`:
+
+```yaml
+readable_paths:
+  - ~/reference-data                 # this dir and everything under it
+  - ~/.superconductor/worktrees/haystack/*  # only paths NESTED below it
+writable_paths:
+  - ~/scratch
+```
+
+A bare path grants the directory **and** all of its contents. A trailing `/*`
+grants only paths **nested below** the directory — the directory itself is not a
+valid read/search target. This is useful for a container that holds many sibling
+directories (e.g. a worktree parent): `worktrees/haystack/*` lets the sandbox
+read an individual peer worktree while blocking a single `grep`/`ls` from
+sweeping every worktree at once. Manage these with
+`lite-sandbox config readable-paths add <path>` / `writable-paths add <path>`.
+
 ## Git Support
 
 Git commands are enabled by default with granular permission levels that can be configured:
