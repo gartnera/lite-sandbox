@@ -240,6 +240,7 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"pip", "pip install requests", `command "pip" is not allowed`},
 		{"pip3", "pip3 install requests", `command "pip3" is not allowed`},
 		{"cargo", "cargo build", `command "cargo" is not allowed (runtimes.rust.enabled is disabled)`},
+		{"deno", "deno run main.ts", `command "deno" is not allowed (runtimes.deno.enabled is disabled)`},
 
 		// Networking (data exfiltration / remote code fetch)
 		{"curl", "curl https://example.com", `command "curl" is not allowed`},

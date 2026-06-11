@@ -186,11 +186,82 @@ func (r *RustConfig) RustPublish() bool {
 	return *r.Publish
 }
 
+// DenoConfig controls granular Deno runtime permission levels.
+type DenoConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+	// AutoSandbox, when enabled, automatically injects --allow-read and
+	// --allow-write flags scoped to the sandbox's allowed paths into deno
+	// commands, so Deno's own permission model mirrors the sandbox filesystem
+	// policy.
+	AutoSandbox *bool `yaml:"auto_sandbox,omitempty"`
+	// AllowNetwork controls whether deno commands may open outbound network
+	// sockets (--allow-net). When false (default), the sandbox forces
+	// --deny-net so the invoker cannot grant socket access via --allow-net or
+	// --allow-all. This is enforced whenever deno is enabled, independent of
+	// auto_sandbox.
+	AllowNetwork *bool `yaml:"allow_network,omitempty"`
+	// AllowImport controls whether deno may fetch remote modules
+	// (--allow-import, plus the CLI fetch subcommands cache/add/install). Deno
+	// allows imports from a default host allowlist (deno.land/jsr.io/...) out of
+	// the box, so this defaults to true. When false, the sandbox forces
+	// --deny-import on code-executing subcommands and blocks the fetch
+	// subcommands, independent of auto_sandbox.
+	AllowImport *bool `yaml:"allow_import,omitempty"`
+}
+
+// DenoEnabled returns whether deno commands are allowed (default: false).
+func (d *DenoConfig) DenoEnabled() bool {
+	if d == nil || d.Enabled == nil {
+		return false
+	}
+	return *d.Enabled
+}
+
+// DenoPublish returns whether deno publish is allowed (default: false).
+func (d *DenoConfig) DenoPublish() bool {
+	if d == nil || d.Publish == nil {
+		return false
+	}
+	return *d.Publish
+}
+
+// DenoAutoSandbox returns whether deno commands should have --allow-read and
+// --allow-write automatically configured from the sandbox paths (default: true).
+// Deno runs with no permissions by default, so auto-sandbox grants read/write
+// scoped to the sandbox paths and runs non-interactively out of the box.
+func (d *DenoConfig) DenoAutoSandbox() bool {
+	if d == nil || d.AutoSandbox == nil {
+		return true
+	}
+	return *d.AutoSandbox
+}
+
+// DenoAllowNetwork returns whether deno commands may open network sockets
+// (default: false). When false, the sandbox forces --deny-net.
+func (d *DenoConfig) DenoAllowNetwork() bool {
+	if d == nil || d.AllowNetwork == nil {
+		return false
+	}
+	return *d.AllowNetwork
+}
+
+// DenoAllowImport returns whether deno may fetch remote modules (default: true).
+// When false, the sandbox forces --deny-import and blocks the fetch
+// subcommands (cache/add/install).
+func (d *DenoConfig) DenoAllowImport() bool {
+	if d == nil || d.AllowImport == nil {
+		return true
+	}
+	return *d.AllowImport
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
 	Go   *GoConfig   `yaml:"go,omitempty"`
 	Pnpm *PnpmConfig `yaml:"pnpm,omitempty"`
 	Rust *RustConfig `yaml:"rust,omitempty"`
+	Deno *DenoConfig `yaml:"deno,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;
