@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -343,6 +344,12 @@ func detectRustBinds() []string {
 // detectDenoBinds detects Deno paths that need to be writable.
 // Returns DENO_DIR (module/npm cache) and DENO_INSTALL_ROOT (global scripts
 // installed via `deno install -g`).
+//
+// Unlike the other runtimes, deno creates its cache lazily on first run, so
+// these directories frequently do not exist yet. We create them up front: a
+// bind mount source must exist for the OS sandbox to mount it writable, and
+// the sandbox cannot create the directory itself (its parent is not bound), so
+// without this the very first `deno run` would fail to populate its cache.
 func detectDenoBinds() []string {
 	var paths []string
 
@@ -351,27 +358,22 @@ func detectDenoBinds() []string {
 	denoDir := os.Getenv("DENO_DIR")
 	if denoDir == "" {
 		if cacheDir, err := os.UserCacheDir(); err == nil {
-			denoDir = cacheDir + "/deno"
+			denoDir = filepath.Join(cacheDir, "deno")
 		}
 	}
-	if denoDir != "" {
-		if _, err := os.Stat(denoDir); err == nil {
-			paths = append(paths, denoDir)
-		}
+	if p := ensureDir(denoDir); p != "" {
+		paths = append(paths, p)
 	}
 
 	// Detect DENO_INSTALL_ROOT (global executables). Defaults to ~/.deno.
 	installRoot := os.Getenv("DENO_INSTALL_ROOT")
 	if installRoot == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			installRoot = home + "/.deno"
+		if home, err := os.UserHomeDir(); err == nil {
+			installRoot = filepath.Join(home, ".deno")
 		}
 	}
-	if installRoot != "" {
-		if _, err := os.Stat(installRoot); err == nil {
-			paths = append(paths, installRoot)
-		}
+	if p := ensureDir(installRoot); p != "" {
+		paths = append(paths, p)
 	}
 
 	if len(paths) > 0 {
@@ -379,6 +381,20 @@ func detectDenoBinds() []string {
 	}
 
 	return paths
+}
+
+// ensureDir creates dir (and parents) if needed and returns it, or "" if dir
+// is empty or cannot be created. Used to materialize runtime cache directories
+// so they exist as bind-mount sources for the OS sandbox.
+func ensureDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("failed to create deno runtime directory", "path", dir, "error", err)
+		return ""
+	}
+	return dir
 }
 
 // ParseBash parses a command string as bash and returns the AST.

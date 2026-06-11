@@ -110,15 +110,27 @@ type denoPerms struct {
 	denyImport bool
 }
 
-// scanDenoPerms inspects the args following a deno subcommand for existing
-// permission flags. It understands both long forms (--allow-read[=...]) and
-// the short forms documented by `deno run --help`: -A (allow-all), -R
-// (allow-read), -W (allow-write), including bundled short flags like -RW.
+// scanDenoPerms inspects the permission-flag region of a deno subcommand (the
+// tokens between the subcommand and the script target) for existing permission
+// flags. It understands both long forms (--allow-read[=...]) and the short
+// forms documented by `deno run --help`: -A (allow-all), -R (allow-read), -W
+// (allow-write), including bundled short flags like -RW.
+//
+// Scanning STOPS at the first non-flag token, which is the script target (or a
+// task name); everything after it is an argument to the script, not a Deno
+// permission, and must not be interpreted here. Deno's permission flags only
+// take attached values (--allow-read=PATH), never a separate argument, so a
+// bare token is always the script boundary.
+//
 // Network/import allows are intentionally not tracked: a forced --deny-* always
 // takes precedence over any --allow-* or -A, so detecting them is unnecessary.
 func scanDenoPerms(args []string) denoPerms {
 	var p denoPerms
 	for _, a := range args {
+		// First bare (non-flag) token is the script target; stop before its args.
+		if !strings.HasPrefix(a, "-") {
+			break
+		}
 		switch {
 		case a == "-A" || a == "--allow-all":
 			p.allowAll = true

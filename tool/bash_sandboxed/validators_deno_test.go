@@ -319,6 +319,25 @@ func TestApplyDenoSandbox(t *testing.T) {
 			want:        []string{"deno", "run", "--deny-net", "-R", "-W", "main.ts"},
 		},
 		{
+			// Script args after the script file must NOT be read as deno perms.
+			name:        "permission-looking script args after script are not treated as grants",
+			args:        []string{"deno", "run", "main.ts", "-A", "-W", "--allow-read=/etc"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts", "-A", "-W", "--allow-read=/etc"},
+		},
+		{
+			name:        "deno flags before the script are still scanned",
+			args:        []string{"deno", "run", "--allow-read=/custom", "main.ts", "-A"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--allow-write=/work", "--deny-net", "--allow-read=/custom", "main.ts", "-A"},
+		},
+		{
 			name:        "bundled short -RW is recognized as read and write grants",
 			args:        []string{"deno", "run", "-RW", "main.ts"},
 			read:        read,
