@@ -95,10 +95,11 @@ func TestValidateDenoArgs(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "deno eval allowed",
-			command: "deno eval 'console.log(1)'",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
-			wantErr: false,
+			name:      "deno eval blocked (implicit all-permissions, unconfinable)",
+			command:   "deno eval 'console.log(1)'",
+			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true)},
+			wantErr:   true,
+			errSubstr: "not allowed",
 		},
 
 		// deno publish
@@ -245,13 +246,13 @@ func TestApplyDenoSandbox(t *testing.T) {
 			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts"},
 		},
 		{
-			name:        "allow_import false adds deny-import",
+			name:        "allow_import false blocks remote graph and runtime imports",
 			args:        []string{"deno", "run", "main.ts"},
 			read:        read,
 			write:       write,
 			autoSandbox: true,
 			allowImport: false,
-			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
+			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--no-remote", "--no-npm", "--deny-import", "main.ts"},
 		},
 		{
 			name:        "auto_sandbox off still denies net (no allow-read/write injected)",
@@ -263,13 +264,23 @@ func TestApplyDenoSandbox(t *testing.T) {
 			want:        []string{"deno", "run", "--deny-net", "main.ts"},
 		},
 		{
-			name:        "auto_sandbox off with allow_import false denies net and import only",
+			name:        "auto_sandbox off with allow_import false denies net and blocks imports",
 			args:        []string{"deno", "run", "main.ts"},
 			read:        read,
 			write:       write,
 			autoSandbox: false,
 			allowImport: false,
-			want:        []string{"deno", "run", "--deny-net", "--deny-import", "main.ts"},
+			want:        []string{"deno", "run", "--deny-net", "--no-remote", "--no-npm", "--deny-import", "main.ts"},
+		},
+		{
+			name:        "allow_import false does not duplicate existing --no-remote/--no-npm",
+			args:        []string{"deno", "run", "--no-remote", "--no-npm", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: false,
+			allowNet:    true,
+			allowImport: false,
+			want:        []string{"deno", "run", "--deny-import", "--no-remote", "--no-npm", "main.ts"},
 		},
 		{
 			name:        "allow_network true and allow_import true inject only fs scope",

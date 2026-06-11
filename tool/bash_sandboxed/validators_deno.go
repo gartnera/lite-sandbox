@@ -9,9 +9,15 @@ import (
 )
 
 // blockedDenoSubcommands are dangerous subcommands that affect shared state
-// outside the sandbox (the registry or the deno installation itself).
+// outside the sandbox (the registry or the deno installation itself) or that
+// cannot be confined by Deno's permission flags.
 var blockedDenoSubcommands = map[string]string{
 	"upgrade": "upgrades the deno binary in place (modifies the deno installation)",
+	// `deno eval` runs with implicit access to ALL permissions and rejects every
+	// --allow-*/--deny-* flag, so the sandbox cannot scope its filesystem access
+	// or deny its network access — it is an unconfined code-execution escape
+	// hatch, like shell `eval`/`exec` which the base whitelist also blocks.
+	"eval": "runs with implicit all-permissions and cannot be confined by permission flags",
 }
 
 // denoFetchSubcommands perform remote module/package fetches as a CLI
@@ -81,17 +87,18 @@ func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
 		return fmt.Errorf("deno %s is not allowed (runtimes.deno.allow_import is disabled)", subcommand)
 	}
 
-	// All other subcommands are allowed (run, eval, test, bench, check, fmt,
-	// lint, doc, info, task, compile, add, remove, install, uninstall, etc.).
+	// All other subcommands are allowed (run, test, bench, check, fmt, lint,
+	// doc, info, task, compile, add, remove, install, uninstall, etc.).
 	return nil
 }
 
-// denoPermissionSubcommands are deno subcommands that accept --allow-* runtime
-// permission flags. Auto-sandbox injection only targets these so we never pass
-// permission flags to a subcommand that would reject them.
+// denoPermissionSubcommands are deno subcommands that accept --allow-*/--deny-*
+// runtime permission flags and run user code under them. Injection only targets
+// these so we never pass permission flags to a subcommand that would reject
+// them. Note: `deno eval` is intentionally excluded — it has implicit
+// all-permissions and rejects these flags, so it is blocked outright instead.
 var denoPermissionSubcommands = map[string]bool{
 	"run":     true,
-	"eval":    true,
 	"test":    true,
 	"bench":   true,
 	"repl":    true,
@@ -108,6 +115,8 @@ type denoPerms struct {
 	allowWrite bool
 	denyNet    bool
 	denyImport bool
+	noRemote   bool
+	noNpm      bool
 }
 
 // scanDenoPerms inspects the permission-flag region of a deno subcommand (the
@@ -144,6 +153,10 @@ func scanDenoPerms(args []string) denoPerms {
 			p.denyNet = true
 		case a == "--deny-import" || strings.HasPrefix(a, "--deny-import="):
 			p.denyImport = true
+		case a == "--no-remote":
+			p.noRemote = true
+		case a == "--no-npm":
+			p.noNpm = true
 		default:
 			// Bundled short permission flags, e.g. -RW or -AR. Only single-dash
 			// tokens; strip any attached =value before inspecting the letters.
@@ -174,10 +187,12 @@ func scanDenoPerms(args []string) denoPerms {
 //     are scoped to the sandbox's allowed paths, unless the invoker already
 //     chose a scope (explicit --allow-read/-write or a blanket --allow-all/-A).
 //   - Sockets: --deny-net is forced unless allowNetwork is true.
-//   - Remote imports: --deny-import is forced unless allowImport is true. Deno
-//     allows imports from a default host allowlist (deno.land/jsr.io/...) out
-//     of the box and they are not covered by --deny-net, so import is a
-//     separate lever.
+//   - Remote imports: forced off unless allowImport is true. This needs three
+//     flags, because --deny-import alone only governs the runtime import
+//     permission (dynamically-computed import() specifiers) and does NOT stop
+//     the static module graph from being fetched. --no-remote blocks https/jsr
+//     specifiers, --no-npm blocks npm specifiers, and --deny-import covers
+//     runtime dynamic imports.
 //
 // The network/import denials are applied independent of autoSandbox so the
 // policy holds even when filesystem auto-scoping is turned off. Deno's --deny-*
@@ -221,8 +236,18 @@ func applyDenoSandbox(args []string, readPaths, writePaths []string, autoSandbox
 	if !allowNetwork && !perms.denyNet {
 		inject = append(inject, "--deny-net")
 	}
-	if !allowImport && !perms.denyImport {
-		inject = append(inject, "--deny-import")
+	if !allowImport {
+		// Block the static module graph (--no-remote: https/jsr, --no-npm: npm)
+		// and the runtime import permission (--deny-import).
+		if !perms.noRemote {
+			inject = append(inject, "--no-remote")
+		}
+		if !perms.noNpm {
+			inject = append(inject, "--no-npm")
+		}
+		if !perms.denyImport {
+			inject = append(inject, "--deny-import")
+		}
 	}
 	if len(inject) == 0 {
 		return args

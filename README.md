@@ -239,26 +239,32 @@ deno task build
 Security features:
 - `deno publish` requires explicit opt-in since it affects the JSR registry (shared state)
 - `deno upgrade` is blocked (modifies the deno installation in place)
+- `deno eval` is blocked — it runs with implicit access to *all* permissions and
+  rejects every `--allow-*`/`--deny-*` flag, so it cannot be confined (an
+  unsandboxable code-execution escape hatch, like shell `eval`/`exec`).
 - **Auto-sandbox** (`auto_sandbox: true`, the default) — Deno runs with no
   permissions by default and prompts interactively when a script requests
   access it wasn't granted, which would hang a non-interactive sandbox. With
   auto-sandbox enabled, lite-sandbox automatically injects
   `--allow-read`/`--allow-write` scoped to the sandbox's allowed paths for
-  permissioned subcommands (`run`, `test`, `eval`, `bench`, `repl`, `serve`,
-  `compile`, `install`), so Deno's permission model mirrors the sandbox
-  filesystem policy and runs non-interactively. Existing read/write grants on
-  the command (including short `-R`/`-W` or a blanket `-A`) are respected.
+  permissioned subcommands (`run`, `test`, `bench`, `repl`, `serve`, `compile`,
+  `install`), so Deno's permission model mirrors the sandbox filesystem policy
+  and runs non-interactively. Existing read/write grants on the command
+  (including short `-R`/`-W` or a blanket `-A`) are respected.
 - **Network sockets off by default** — `--deny-net` is forced unless
   `allow_network: true`. This is enforced whenever deno is enabled, independent
   of auto-sandbox, so turning auto-sandbox off does not re-open the network.
+  `--deny-net` takes precedence over any `--allow-net`/`-A` the invoker passes.
 - **Remote imports on by default, behind a flag** — Deno fetches remote modules
   from a default host allowlist (`deno.land`/`jsr.io`/…) out of the box, which
   is core to normal usage, so imports are allowed by default. Setting
-  `allow_import: false` forces `--deny-import` on code-executing subcommands and
-  blocks the CLI fetch subcommands (`deno cache`, `deno add`, `deno install`),
-  which fetch at the CLI level where an injected flag cannot stop them. Deno's
-  `--deny-*` flags take precedence over any `--allow-*`/`-A` the invoker passes,
-  so the denials cannot be bypassed.
+  `allow_import: false` blocks remote module fetching on code-executing
+  subcommands with `--no-remote` (https/jsr) + `--no-npm` (npm) — the levers
+  that actually stop the module graph from being fetched — plus `--deny-import`
+  for runtime dynamic imports. It also blocks the CLI fetch subcommands
+  (`deno cache`, `deno add`, `deno install`), which fetch at the CLI level where
+  an injected flag cannot stop them. (Already-cached modules can still load;
+  with `allow_import: false` from the start, nothing new is fetched or cached.)
 
 ## Security Model
 
