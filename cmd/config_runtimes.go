@@ -58,12 +58,14 @@ var runtimesShowCmd = &cobra.Command{
 			fmt.Printf("    publish:       %v\n", cfg.Runtimes.Deno.DenoPublish())
 			fmt.Printf("    auto_sandbox:  %v\n", cfg.Runtimes.Deno.DenoAutoSandbox())
 			fmt.Printf("    allow_network: %v\n", cfg.Runtimes.Deno.DenoAllowNetwork())
+			fmt.Printf("    allow_import:  %v\n", cfg.Runtimes.Deno.DenoAllowImport())
 		} else {
 			fmt.Println("  deno: (defaults)")
 			fmt.Printf("    enabled:       %v\n", false)
 			fmt.Printf("    publish:       %v\n", false)
 			fmt.Printf("    auto_sandbox:  %v\n", true)
 			fmt.Printf("    allow_network: %v\n", false)
+			fmt.Printf("    allow_import:  %v\n", true)
 		}
 		return nil
 	},
@@ -379,6 +381,7 @@ var denoRuntimeShowCmd = &cobra.Command{
 		fmt.Printf("publish:       %v\n", d.DenoPublish())
 		fmt.Printf("auto_sandbox:  %v\n", d.DenoAutoSandbox())
 		fmt.Printf("allow_network: %v\n", d.DenoAllowNetwork())
+		fmt.Printf("allow_import:  %v\n", d.DenoAllowImport())
 		return nil
 	},
 }
@@ -390,6 +393,7 @@ var denoRuntimeEnableCmd = &cobra.Command{
 		withPublish, _ := cmd.Flags().GetBool("with-publish")
 		withAutoSandbox, _ := cmd.Flags().GetBool("with-auto-sandbox")
 		withNetwork, _ := cmd.Flags().GetBool("with-network")
+		withImport, _ := cmd.Flags().GetBool("with-import")
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -414,6 +418,9 @@ var denoRuntimeEnableCmd = &cobra.Command{
 		if withNetwork {
 			cfg.Runtimes.Deno.AllowNetwork = &trueVal
 		}
+		if withImport {
+			cfg.Runtimes.Deno.AllowImport = &trueVal
+		}
 
 		if err := saveConfig(cfg); err != nil {
 			return err
@@ -429,6 +436,9 @@ var denoRuntimeEnableCmd = &cobra.Command{
 		if withNetwork {
 			fmt.Println("runtimes.deno.allow_network set to true")
 		}
+		if withImport {
+			fmt.Println("runtimes.deno.allow_import set to true")
+		}
 		return nil
 	},
 }
@@ -440,6 +450,7 @@ var denoRuntimeDisableCmd = &cobra.Command{
 		withPublish, _ := cmd.Flags().GetBool("with-publish")
 		withAutoSandbox, _ := cmd.Flags().GetBool("with-auto-sandbox")
 		withNetwork, _ := cmd.Flags().GetBool("with-network")
+		withImport, _ := cmd.Flags().GetBool("with-import")
 
 		cfg, err := loadConfig()
 		if err != nil {
@@ -457,7 +468,7 @@ var denoRuntimeDisableCmd = &cobra.Command{
 		// With a sub-setting flag, only that sub-setting is turned off and the
 		// runtime stays enabled (e.g. disable auto_sandbox while keeping deno).
 		// With no flags, the whole runtime is disabled.
-		anySub := withPublish || withAutoSandbox || withNetwork
+		anySub := withPublish || withAutoSandbox || withNetwork || withImport
 		if !anySub {
 			cfg.Runtimes.Deno.Enabled = &falseVal
 		}
@@ -469,6 +480,9 @@ var denoRuntimeDisableCmd = &cobra.Command{
 		}
 		if withNetwork {
 			cfg.Runtimes.Deno.AllowNetwork = &falseVal
+		}
+		if withImport {
+			cfg.Runtimes.Deno.AllowImport = &falseVal
 		}
 
 		if err := saveConfig(cfg); err != nil {
@@ -486,6 +500,9 @@ var denoRuntimeDisableCmd = &cobra.Command{
 		}
 		if withNetwork {
 			fmt.Println("runtimes.deno.allow_network set to false")
+		}
+		if withImport {
+			fmt.Println("runtimes.deno.allow_import set to false")
 		}
 		return nil
 	},
@@ -522,10 +539,12 @@ func init() {
 	// Add deno enable/disable flags
 	denoRuntimeEnableCmd.Flags().Bool("with-publish", false, "Also enable deno publish")
 	denoRuntimeEnableCmd.Flags().Bool("with-auto-sandbox", false, "Also auto-configure --allow-read/--allow-write from sandbox paths")
-	denoRuntimeEnableCmd.Flags().Bool("with-network", false, "Also allow network access under auto-sandbox (default: denied)")
+	denoRuntimeEnableCmd.Flags().Bool("with-network", false, "Also allow outbound network sockets (default: denied)")
+	denoRuntimeEnableCmd.Flags().Bool("with-import", false, "Also allow remote module imports (default: allowed)")
 	denoRuntimeDisableCmd.Flags().Bool("with-publish", false, "Also disable deno publish")
 	denoRuntimeDisableCmd.Flags().Bool("with-auto-sandbox", false, "Also disable deno auto-sandbox")
-	denoRuntimeDisableCmd.Flags().Bool("with-network", false, "Also disable deno network access under auto-sandbox")
+	denoRuntimeDisableCmd.Flags().Bool("with-network", false, "Also disable outbound network sockets")
+	denoRuntimeDisableCmd.Flags().Bool("with-import", false, "Also disable remote module imports (blocks fetch subcommands)")
 
 	// Add deno subcommands
 	denoRuntimeCmd.AddCommand(denoRuntimeShowCmd)

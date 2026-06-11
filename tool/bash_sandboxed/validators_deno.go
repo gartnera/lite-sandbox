@@ -14,15 +14,26 @@ var blockedDenoSubcommands = map[string]string{
 	"upgrade": "upgrades the deno binary in place (modifies the deno installation)",
 }
 
+// denoFetchSubcommands perform remote module/package fetches as a CLI
+// operation (not as a runtime import in executed code), so an injected
+// --deny-import does not stop them. They are gated at validation time behind
+// runtimes.deno.allow_import instead.
+var denoFetchSubcommands = map[string]bool{
+	"cache":   true,
+	"add":     true,
+	"install": true,
+}
+
 // validateDenoArgs validates deno commands according to the runtime config.
 //
 // Deno is itself a permissioned runtime: `deno run` only gains filesystem,
 // network, or env access when granted explicit --allow-* flags, and the OS
 // sandbox confines whatever access is granted. We therefore allow the usual
 // development subcommands (run, test, check, fmt, lint, bench, task, compile,
-// add, install, etc.) and only gate the operations that reach shared state:
-// `deno publish` (JSR registry) behind runtimes.deno.publish, and `deno
-// upgrade` (self-modifying binary) unconditionally.
+// add, install, etc.) and gate the operations that reach shared state or the
+// network: `deno publish` (JSR registry) behind runtimes.deno.publish, `deno
+// upgrade` (self-modifying binary) unconditionally, and the remote-fetch
+// subcommands behind runtimes.deno.allow_import.
 func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
 	if len(args) < 2 {
 		// bare "deno" with no subcommand is fine (prints help)
@@ -61,6 +72,13 @@ func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
 	// Check for other blocked subcommands.
 	if reason, blocked := blockedDenoSubcommands[subcommand]; blocked {
 		return fmt.Errorf("deno subcommand %q is not allowed: %s", subcommand, reason)
+	}
+
+	// Gate remote-fetch subcommands behind allow_import. These fetch at the CLI
+	// level, so the runtime --deny-import injected for code-executing
+	// subcommands cannot stop them; blocking the subcommand is the only lever.
+	if denoFetchSubcommands[subcommand] && !denoCfg.DenoAllowImport() {
+		return fmt.Errorf("deno %s is not allowed (runtimes.deno.allow_import is disabled)", subcommand)
 	}
 
 	// All other subcommands are allowed (run, eval, test, bench, check, fmt,
@@ -137,22 +155,25 @@ func scanDenoPerms(args []string) denoPerms {
 	return p
 }
 
-// applyDenoAutoSandbox rewrites a deno command (post-expansion argv) so Deno's
-// own permission model mirrors the lite-sandbox policy:
+// applyDenoSandbox rewrites a deno command (post-expansion argv) so Deno's own
+// permission model mirrors the lite-sandbox policy:
 //
-//   - --allow-read / --allow-write are scoped to the sandbox's allowed paths.
-//   - Network is denied unless allowNetwork is true. Deno's network surface is
-//     two distinct permissions: --allow-net (sockets) and --allow-import
-//     (fetching remote modules, which defaults to an allowlist of hosts like
-//     deno.land/jsr.io even with no flags). Both are force-denied via
-//     --deny-net and --deny-import, which take precedence over any --allow-*
-//     or --allow-all the invoker supplied, so network access cannot be
-//     bypassed.
+//   - Filesystem (only when autoSandbox is true): --allow-read / --allow-write
+//     are scoped to the sandbox's allowed paths, unless the invoker already
+//     chose a scope (explicit --allow-read/-write or a blanket --allow-all/-A).
+//   - Sockets: --deny-net is forced unless allowNetwork is true.
+//   - Remote imports: --deny-import is forced unless allowImport is true. Deno
+//     allows imports from a default host allowlist (deno.land/jsr.io/...) out
+//     of the box and they are not covered by --deny-net, so import is a
+//     separate lever.
 //
-// It is a no-op unless the subcommand accepts permission flags. Existing
-// read/write grants (or a blanket --allow-all / -A) are left in place for the
-// filesystem scope, but never override the network denial.
-func applyDenoAutoSandbox(args []string, readPaths, writePaths []string, allowNetwork bool) []string {
+// The network/import denials are applied independent of autoSandbox so the
+// policy holds even when filesystem auto-scoping is turned off. Deno's --deny-*
+// flags take precedence over any --allow-* or --allow-all the invoker supplied,
+// so the denial cannot be bypassed.
+//
+// It is a no-op unless the subcommand accepts permission flags.
+func applyDenoSandbox(args []string, readPaths, writePaths []string, autoSandbox, allowNetwork, allowImport bool) []string {
 	if len(args) < 2 {
 		return args
 	}
@@ -173,24 +194,23 @@ func applyDenoAutoSandbox(args []string, readPaths, writePaths []string, allowNe
 	perms := scanDenoPerms(args[subIdx+1:])
 
 	var inject []string
-	// Filesystem scope: only inject when the invoker hasn't already granted it
-	// (an explicit --allow-read/-write or a blanket -A means they chose a scope).
-	if !perms.allowAll && !perms.allowRead && len(readPaths) > 0 {
-		inject = append(inject, "--allow-read="+strings.Join(readPaths, ","))
-	}
-	if !perms.allowAll && !perms.allowWrite && len(writePaths) > 0 {
-		inject = append(inject, "--allow-write="+strings.Join(writePaths, ","))
-	}
-	// Network: force denials that override any allow the invoker supplied.
-	// --deny-import is required because remote module imports are allowed by
-	// default and are not covered by --deny-net.
-	if !allowNetwork {
-		if !perms.denyNet {
-			inject = append(inject, "--deny-net")
+	// Filesystem scope: only when auto-sandbox is on, and only when the invoker
+	// hasn't already granted read/write (an explicit --allow-read/-write or a
+	// blanket -A means they chose a scope).
+	if autoSandbox {
+		if !perms.allowAll && !perms.allowRead && len(readPaths) > 0 {
+			inject = append(inject, "--allow-read="+strings.Join(readPaths, ","))
 		}
-		if !perms.denyImport {
-			inject = append(inject, "--deny-import")
+		if !perms.allowAll && !perms.allowWrite && len(writePaths) > 0 {
+			inject = append(inject, "--allow-write="+strings.Join(writePaths, ","))
 		}
+	}
+	// Network/import: force denials that override any allow the invoker supplied.
+	if !allowNetwork && !perms.denyNet {
+		inject = append(inject, "--deny-net")
+	}
+	if !allowImport && !perms.denyImport {
+		inject = append(inject, "--deny-import")
 	}
 	if len(inject) == 0 {
 		return args

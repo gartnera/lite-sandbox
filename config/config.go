@@ -195,11 +195,19 @@ type DenoConfig struct {
 	// commands, so Deno's own permission model mirrors the sandbox filesystem
 	// policy.
 	AutoSandbox *bool `yaml:"auto_sandbox,omitempty"`
-	// AllowNetwork controls whether deno commands may access the network when
-	// auto_sandbox is enabled. When false (default), auto_sandbox forces
-	// --deny-net so the invoker cannot grant network access via --allow-net or
-	// --allow-all. Set to true to let the invoker request network themselves.
+	// AllowNetwork controls whether deno commands may open outbound network
+	// sockets (--allow-net). When false (default), the sandbox forces
+	// --deny-net so the invoker cannot grant socket access via --allow-net or
+	// --allow-all. This is enforced whenever deno is enabled, independent of
+	// auto_sandbox.
 	AllowNetwork *bool `yaml:"allow_network,omitempty"`
+	// AllowImport controls whether deno may fetch remote modules
+	// (--allow-import, plus the CLI fetch subcommands cache/add/install). Deno
+	// allows imports from a default host allowlist (deno.land/jsr.io/...) out of
+	// the box, so this defaults to true. When false, the sandbox forces
+	// --deny-import on code-executing subcommands and blocks the fetch
+	// subcommands, independent of auto_sandbox.
+	AllowImport *bool `yaml:"allow_import,omitempty"`
 }
 
 // DenoEnabled returns whether deno commands are allowed (default: false).
@@ -229,13 +237,23 @@ func (d *DenoConfig) DenoAutoSandbox() bool {
 	return *d.AutoSandbox
 }
 
-// DenoAllowNetwork returns whether deno commands may access the network under
-// auto_sandbox (default: false). When false, auto_sandbox forces --deny-net.
+// DenoAllowNetwork returns whether deno commands may open network sockets
+// (default: false). When false, the sandbox forces --deny-net.
 func (d *DenoConfig) DenoAllowNetwork() bool {
 	if d == nil || d.AllowNetwork == nil {
 		return false
 	}
 	return *d.AllowNetwork
+}
+
+// DenoAllowImport returns whether deno may fetch remote modules (default: true).
+// When false, the sandbox forces --deny-import and blocks the fetch
+// subcommands (cache/add/install).
+func (d *DenoConfig) DenoAllowImport() bool {
+	if d == nil || d.AllowImport == nil {
+		return true
+	}
+	return *d.AllowImport
 }
 
 // RuntimesConfig controls code execution runtime permissions.

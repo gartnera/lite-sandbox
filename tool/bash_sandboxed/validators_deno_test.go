@@ -138,6 +138,41 @@ func TestValidateDenoArgs(t *testing.T) {
 			errSubstr: "not allowed",
 		},
 
+		// Fetch subcommands gated behind allow_import
+		{
+			name:      "deno cache blocked when allow_import disabled",
+			command:   "deno cache https://example.com/mod.ts",
+			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
+			wantErr:   true,
+			errSubstr: "runtimes.deno.allow_import is disabled",
+		},
+		{
+			name:      "deno add blocked when allow_import disabled",
+			command:   "deno add jsr:@std/path",
+			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
+			wantErr:   true,
+			errSubstr: "runtimes.deno.allow_import is disabled",
+		},
+		{
+			name:      "deno install blocked when allow_import disabled",
+			command:   "deno install",
+			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
+			wantErr:   true,
+			errSubstr: "runtimes.deno.allow_import is disabled",
+		},
+		{
+			name:    "deno cache allowed when allow_import enabled (default)",
+			command: "deno cache https://example.com/mod.ts",
+			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
+			wantErr: false,
+		},
+		{
+			name:    "deno run not gated by allow_import (handled via injected deny-import)",
+			command: "deno run main.ts",
+			denoCfg: &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
+			wantErr: false,
+		},
+
 		// Edge cases
 		{
 			name:    "bare deno command allowed",
@@ -185,124 +220,182 @@ func TestValidateDenoArgs(t *testing.T) {
 	}
 }
 
-func TestApplyDenoAutoSandbox(t *testing.T) {
+func TestApplyDenoSandbox(t *testing.T) {
 	read := []string{"/work", "/tmp"}
 	write := []string{"/work"}
 
 	tests := []struct {
-		name     string
-		args     []string
-		read     []string
-		write    []string
-		allowNet bool
-		want     []string
+		name        string
+		args        []string
+		read        []string
+		write       []string
+		autoSandbox bool
+		allowNet    bool
+		allowImport bool
+		want        []string
 	}{
 		{
-			name:  "run gets read, write, deny-net and deny-import injected after subcommand",
-			args:  []string{"deno", "run", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
+			// Defaults: auto_sandbox on, network off, imports allowed.
+			name:        "default: read, write, deny-net injected (imports allowed, no deny-import)",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts"},
 		},
 		{
-			name:     "allow_network true omits deny-net and deny-import",
-			args:     []string{"deno", "run", "main.ts"},
-			read:     read,
-			write:    write,
-			allowNet: true,
-			want:     []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "main.ts"},
+			name:        "allow_import false adds deny-import",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: false,
+			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
 		},
 		{
-			name:  "global flags before subcommand are preserved",
-			args:  []string{"deno", "--quiet", "run", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "--quiet", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import", "main.ts"},
+			name:        "auto_sandbox off still denies net (no allow-read/write injected)",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: false,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "main.ts"},
 		},
 		{
-			name:  "existing allow-read is not duplicated but net still denied",
-			args:  []string{"deno", "run", "--allow-read=/custom", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--allow-write=/work", "--deny-net", "--deny-import", "--allow-read=/custom", "main.ts"},
+			name:        "auto_sandbox off with allow_import false denies net and import only",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: false,
+			allowImport: false,
+			want:        []string{"deno", "run", "--deny-net", "--deny-import", "main.ts"},
 		},
 		{
-			name:  "short -R and -W are recognized as read/write grants",
-			args:  []string{"deno", "run", "-R", "-W", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-R", "-W", "main.ts"},
+			name:        "allow_network true and allow_import true inject only fs scope",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowNet:    true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "main.ts"},
 		},
 		{
-			name:  "bundled short -RW is recognized as read and write grants",
-			args:  []string{"deno", "run", "-RW", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-RW", "main.ts"},
+			name:        "all allowed and auto_sandbox off is a no-op",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: false,
+			allowNet:    true,
+			allowImport: true,
+			want:        []string{"deno", "run", "main.ts"},
 		},
 		{
-			name:  "allow-all keeps fs scope but net and import are force-denied",
-			args:  []string{"deno", "run", "-A", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
+			name:        "global flags before subcommand are preserved",
+			args:        []string{"deno", "--quiet", "run", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "--quiet", "run", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "main.ts"},
 		},
 		{
-			name:     "allow-all with allow_network true is untouched",
-			args:     []string{"deno", "run", "-A", "main.ts"},
-			read:     read,
-			write:    write,
-			allowNet: true,
-			want:     []string{"deno", "run", "-A", "main.ts"},
+			name:        "existing allow-read is not duplicated but net still denied",
+			args:        []string{"deno", "run", "--allow-read=/custom", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--allow-write=/work", "--deny-net", "--allow-read=/custom", "main.ts"},
 		},
 		{
-			name:  "existing deny-net and deny-import not duplicated",
-			args:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "run", "--deny-net", "--deny-import", "-A", "main.ts"},
+			name:        "short -R and -W are recognized as read/write grants",
+			args:        []string{"deno", "run", "-R", "-W", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "-R", "-W", "main.ts"},
 		},
 		{
-			name:  "non-permission subcommand is untouched",
-			args:  []string{"deno", "fmt"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "fmt"},
+			name:        "bundled short -RW is recognized as read and write grants",
+			args:        []string{"deno", "run", "-RW", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "-RW", "main.ts"},
 		},
 		{
-			name:  "install gets flags injected",
-			args:  []string{"deno", "install"},
-			read:  read,
-			write: write,
-			want:  []string{"deno", "install", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net", "--deny-import"},
+			name:        "allow-all keeps fs scope but net is force-denied",
+			args:        []string{"deno", "run", "-A", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "-A", "main.ts"},
 		},
 		{
-			name:  "empty paths still deny net and import",
-			args:  []string{"deno", "run", "main.ts"},
-			read:  nil,
-			write: nil,
-			want:  []string{"deno", "run", "--deny-net", "--deny-import", "main.ts"},
+			name:        "allow-all with network and imports allowed is untouched",
+			args:        []string{"deno", "run", "-A", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowNet:    true,
+			allowImport: true,
+			want:        []string{"deno", "run", "-A", "main.ts"},
 		},
 		{
-			name:     "empty paths and allow_network true inject nothing",
-			args:     []string{"deno", "run", "main.ts"},
-			read:     nil,
-			write:    nil,
-			allowNet: true,
-			want:     []string{"deno", "run", "main.ts"},
+			name:        "existing deny-net not duplicated",
+			args:        []string{"deno", "run", "--deny-net", "-A", "main.ts"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "-A", "main.ts"},
 		},
 		{
-			name:  "bare deno untouched",
-			args:  []string{"deno"},
-			read:  read,
-			write: write,
-			want:  []string{"deno"},
+			name:        "non-permission subcommand is untouched",
+			args:        []string{"deno", "fmt"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "fmt"},
+		},
+		{
+			name:        "install gets flags injected",
+			args:        []string{"deno", "install"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "install", "--allow-read=/work,/tmp", "--allow-write=/work", "--deny-net"},
+		},
+		{
+			name:        "empty paths still deny net",
+			args:        []string{"deno", "run", "main.ts"},
+			read:        nil,
+			write:       nil,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno", "run", "--deny-net", "main.ts"},
+		},
+		{
+			name:        "bare deno untouched",
+			args:        []string{"deno"},
+			read:        read,
+			write:       write,
+			autoSandbox: true,
+			allowImport: true,
+			want:        []string{"deno"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyDenoAutoSandbox(tt.args, tt.read, tt.write, tt.allowNet)
+			got := applyDenoSandbox(tt.args, tt.read, tt.write, tt.autoSandbox, tt.allowNet, tt.allowImport)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
@@ -323,14 +416,16 @@ func TestDenoConfig(t *testing.T) {
 		wantPublish bool
 		wantAuto    bool
 		wantNetwork bool
+		wantImport  bool
 	}{
-		// auto_sandbox defaults to true; everything else defaults to false.
-		{"nil config", nil, false, false, true, false},
-		{"empty config", &config.DenoConfig{}, false, false, true, false},
-		{"enabled", &config.DenoConfig{Enabled: boolPtr(true)}, true, false, true, false},
-		{"enabled with publish", &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)}, true, true, true, false},
-		{"auto_sandbox disabled", &config.DenoConfig{Enabled: boolPtr(true), AutoSandbox: boolPtr(false)}, true, false, false, false},
-		{"network allowed", &config.DenoConfig{Enabled: boolPtr(true), AllowNetwork: boolPtr(true)}, true, false, true, true},
+		// auto_sandbox and allow_import default to true; the rest default to false.
+		{"nil config", nil, false, false, true, false, true},
+		{"empty config", &config.DenoConfig{}, false, false, true, false, true},
+		{"enabled", &config.DenoConfig{Enabled: boolPtr(true)}, true, false, true, false, true},
+		{"enabled with publish", &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)}, true, true, true, false, true},
+		{"auto_sandbox disabled", &config.DenoConfig{Enabled: boolPtr(true), AutoSandbox: boolPtr(false)}, true, false, false, false, true},
+		{"network allowed", &config.DenoConfig{Enabled: boolPtr(true), AllowNetwork: boolPtr(true)}, true, false, true, true, true},
+		{"import disabled", &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)}, true, false, true, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -345,6 +440,9 @@ func TestDenoConfig(t *testing.T) {
 			}
 			if got := tt.cfg.DenoAllowNetwork(); got != tt.wantNetwork {
 				t.Errorf("DenoAllowNetwork() = %v, want %v", got, tt.wantNetwork)
+			}
+			if got := tt.cfg.DenoAllowImport(); got != tt.wantImport {
+				t.Errorf("DenoAllowImport() = %v, want %v", got, tt.wantImport)
 			}
 		})
 	}

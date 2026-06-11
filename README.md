@@ -202,8 +202,9 @@ runtimes:
   deno:
     enabled: true        # Allow deno run, test, fmt, lint, task, etc. (default: false)
     publish: false       # Allow deno publish to JSR (default: false)
-    auto_sandbox: true   # Auto-configure deno's own permissions (default: true)
-    allow_network: false # Allow network under auto_sandbox (default: false)
+    auto_sandbox: true   # Auto-scope --allow-read/--allow-write to sandbox paths (default: true)
+    allow_network: false # Allow outbound network sockets (default: false)
+    allow_import: true   # Allow fetching remote modules (default: true)
 ```
 
 Enable deno via CLI:
@@ -212,8 +213,11 @@ Enable deno via CLI:
 # Enable deno commands (auto-sandbox is on by default)
 lite-sandbox config runtimes deno enable
 
-# Allow network access under auto-sandbox
+# Allow outbound network sockets
 lite-sandbox config runtimes deno enable --with-network
+
+# Lock down remote module imports (also blocks deno cache/add/install)
+lite-sandbox config runtimes deno disable --with-import
 
 # Turn off auto-sandbox but keep deno enabled
 lite-sandbox config runtimes deno disable --with-auto-sandbox
@@ -244,13 +248,17 @@ Security features:
   `compile`, `install`), so Deno's permission model mirrors the sandbox
   filesystem policy and runs non-interactively. Existing read/write grants on
   the command (including short `-R`/`-W` or a blanket `-A`) are respected.
-- **Network off by default** — Under auto-sandbox, both of Deno's network
-  surfaces are denied: `--deny-net` (sockets) and `--deny-import` (fetching
-  remote modules, which Deno otherwise allows from a default host allowlist
-  such as `deno.land`/`jsr.io`). Deno's `--deny-*` flags take precedence over
-  any `--allow-net`/`--allow-import`/`--allow-all` the invoker passes, so the
-  denial cannot be bypassed. Set `allow_network: true` to let the invoker
-  request network access themselves.
+- **Network sockets off by default** — `--deny-net` is forced unless
+  `allow_network: true`. This is enforced whenever deno is enabled, independent
+  of auto-sandbox, so turning auto-sandbox off does not re-open the network.
+- **Remote imports on by default, behind a flag** — Deno fetches remote modules
+  from a default host allowlist (`deno.land`/`jsr.io`/…) out of the box, which
+  is core to normal usage, so imports are allowed by default. Setting
+  `allow_import: false` forces `--deny-import` on code-executing subcommands and
+  blocks the CLI fetch subcommands (`deno cache`, `deno add`, `deno install`),
+  which fetch at the CLI level where an injected flag cannot stop them. Deno's
+  `--deny-*` flags take precedence over any `--allow-*`/`-A` the invoker passes,
+  so the denials cannot be bypassed.
 
 ## Security Model
 

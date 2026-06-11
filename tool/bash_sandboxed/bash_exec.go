@@ -505,13 +505,16 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						return fmt.Errorf("command %q is not allowed", cmdName)
 					}
 				}
-				// Auto-configure deno's permission flags to mirror the sandbox
-				// paths. The runtime gate (deno enabled) is enforced earlier by
-				// the AST validator, so by here deno is known to be allowed.
+				// Configure deno's permission flags to mirror the sandbox policy.
+				// The runtime gate (deno enabled) is enforced earlier by the AST
+				// validator, so by here deno is known to be allowed. Network and
+				// import denials are applied independent of auto_sandbox so the
+				// policy holds even when filesystem auto-scoping is off.
 				if cmdName == "deno" {
 					cfg := s.getConfig()
-					if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil && cfg.Runtimes.Deno.DenoAutoSandbox() {
-						args = applyDenoAutoSandbox(args, readAllowedPaths, writeAllowedPaths, cfg.Runtimes.Deno.DenoAllowNetwork())
+					if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil {
+						d := cfg.Runtimes.Deno
+						args = applyDenoSandbox(args, readAllowedPaths, writeAllowedPaths, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
 					}
 				}
 				switch cmdName {
