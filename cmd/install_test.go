@@ -113,7 +113,7 @@ func TestConfigurePermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Test with non-existent file
-	err := configurePermissions(tmpDir)
+	err := configurePermissions(tmpDir, false)
 	if err != nil {
 		t.Fatalf("configurePermissions failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestConfigurePermissions(t *testing.T) {
 	}
 
 	// Test that running again doesn't duplicate
-	err = configurePermissions(tmpDir)
+	err = configurePermissions(tmpDir, false)
 	if err != nil {
 		t.Fatalf("configurePermissions failed on second run: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestConfigurePermissionsPreservesUnknownKeys(t *testing.T) {
 		t.Fatalf("failed to write existing settings.json: %v", err)
 	}
 
-	err := configurePermissions(tmpDir)
+	err := configurePermissions(tmpDir, false)
 	if err != nil {
 		t.Fatalf("configurePermissions failed: %v", err)
 	}

@@ -11,17 +11,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var installWithToolHook bool
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Automatically configure Claude Code to use lite-sandbox",
 	Long: `Automatically configures Claude Code by:
 1. Adding the MCP server to ~/.claude.json (user-scoped)
 2. Adding auto-allow permission for mcp__lite-sandbox__bash and denying the built-in Bash tool in ~/.claude/settings.json
-3. Adding usage directive to ~/.claude/CLAUDE.md`,
+3. Adding usage directive to ~/.claude/CLAUDE.md
+
+With --with-tool-hook, registers a PreToolUse hook that governs the built-in
+tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
+message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
+sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
+matching the boundaries the bash tool enforces.`,
 	RunE: runInstall,
 }
 
 func init() {
+	installCmd.Flags().BoolVar(&installWithToolHook, "with-tool-hook", false,
+		"register a PreToolUse hook that redirects built-in Bash to the MCP tool and confines built-in Read/Write/Edit to the sandbox's readable/writable paths")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -55,17 +65,31 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("✓ Added MCP server to ~/.claude.json")
 
-	// 2. Configure permissions (allow the sandbox tool, deny the built-in Bash tool)
-	if err := configurePermissions(claudeDir); err != nil {
+	// 2. Configure permissions (allow the sandbox tool; deny built-in Bash unless
+	// the tool hook will govern it with a redirect message instead).
+	if err := configurePermissions(claudeDir, installWithToolHook); err != nil {
 		return fmt.Errorf("failed to configure permissions: %w", err)
 	}
-	fmt.Println("✓ Allowed mcp__lite-sandbox__bash and denied built-in Bash in ~/.claude/settings.json")
+	if installWithToolHook {
+		fmt.Println("✓ Allowed mcp__lite-sandbox__bash in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
+	} else {
+		fmt.Println("✓ Allowed mcp__lite-sandbox__bash and denied built-in Bash in ~/.claude/settings.json")
+	}
 
 	// 3. Configure CLAUDE.md
 	if err := configureCLAUDEMD(claudeDir); err != nil {
 		return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
 	}
 	fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
+
+	// 4. Optionally register the built-in tool PreToolUse hook
+	if installWithToolHook {
+		hookCommand := binPath + " hook"
+		if err := configurePreToolUseHook(claudeDir, hookCommand, hookToolMatcher); err != nil {
+			return fmt.Errorf("failed to configure tool hook: %w", err)
+		}
+		fmt.Println("✓ Registered PreToolUse hook to redirect built-in Bash and confine reads/writes to sandbox paths in ~/.claude/settings.json")
+	}
 
 	fmt.Println("\n✓ Installation complete!")
 	fmt.Println("\nRestart Claude Code for the changes to take effect.")
@@ -153,7 +177,13 @@ func writeSettingsFile(settingsPath string, cfg map[string]json.RawMessage) erro
 	return os.WriteFile(settingsPath, data, 0644)
 }
 
-func configurePermissions(claudeDir string) error {
+// configurePermissions auto-allows the sandboxed bash tool and controls the
+// built-in Bash tool. When toolHook is false, Bash is hard-denied via a
+// permission rule so Claude must use the sandbox. When toolHook is true, the
+// PreToolUse hook governs Bash instead (so it can return a redirect message the
+// model actually sees) — a permission deny would take precedence over the hook
+// and suppress that message, so any existing Bash deny is removed.
+func configurePermissions(claudeDir string, toolHook bool) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	cfg, err := readSettingsFile(settingsPath)
@@ -175,9 +205,13 @@ func configurePermissions(claudeDir string) error {
 		perms.Allow = append(perms.Allow, allowPermission)
 	}
 
-	// Ban the built-in Bash tool outright so Claude must use the sandbox
-	denyPermission := "Bash"
-	if !slices.Contains(perms.Deny, denyPermission) {
+	const denyPermission = "Bash"
+	if toolHook {
+		// Let the hook own the Bash block; a deny rule would suppress its
+		// redirect message. Strip any Bash deny a prior install added.
+		perms.Deny = slices.DeleteFunc(perms.Deny, func(p string) bool { return p == denyPermission })
+	} else if !slices.Contains(perms.Deny, denyPermission) {
+		// Ban the built-in Bash tool outright so Claude must use the sandbox.
 		perms.Deny = append(perms.Deny, denyPermission)
 	}
 
@@ -189,6 +223,95 @@ func configurePermissions(claudeDir string) error {
 	cfg["permissions"] = permsRaw
 
 	return writeSettingsFile(settingsPath, cfg)
+}
+
+// configurePreToolUseHook registers (or updates) a PreToolUse hook entry in
+// settings.json that invokes `command` for the given tool matcher. Existing
+// settings and other hooks are preserved, and the operation is idempotent:
+// re-running with the same command/matcher does not duplicate the entry. The
+// hooks subtree is manipulated as untyped JSON so unrelated events
+// (PostToolUse, etc.) and fields (timeouts) survive the round-trip.
+func configurePreToolUseHook(claudeDir, command, matcher string) error {
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+
+	cfg, err := readSettingsFile(settingsPath)
+	if err != nil {
+		return err
+	}
+
+	var hooks map[string]any
+	if raw, ok := cfg["hooks"]; ok {
+		if err := json.Unmarshal(raw, &hooks); err != nil {
+			return fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+		}
+	}
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+
+	pre := asSlice(hooks["PreToolUse"])
+	entry := map[string]any{"type": "command", "command": command}
+
+	// Find an existing matcher group; update it in place if present.
+	updated := false
+	for i, raw := range pre {
+		group := asMap(raw)
+		if asString(group["matcher"]) != matcher {
+			continue
+		}
+		cmds := asSlice(group["hooks"])
+		// Replace any existing entry with the same command, else append.
+		replaced := false
+		for j, c := range cmds {
+			if asString(asMap(c)["command"]) == command {
+				cmds[j] = entry
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cmds = append(cmds, entry)
+		}
+		group["hooks"] = cmds
+		pre[i] = group
+		updated = true
+		break
+	}
+	if !updated {
+		pre = append(pre, map[string]any{"matcher": matcher, "hooks": []any{entry}})
+	}
+	hooks["PreToolUse"] = pre
+
+	hooksRaw, err := json.Marshal(hooks)
+	if err != nil {
+		return err
+	}
+	cfg["hooks"] = hooksRaw
+
+	return writeSettingsFile(settingsPath, cfg)
+}
+
+// Helpers tolerant of the untyped map[string]any decoded from arbitrary JSON.
+
+func asMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+func asSlice(v any) []any {
+	if s, ok := v.([]any); ok {
+		return s
+	}
+	return nil
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func configureCLAUDEMD(claudeDir string) error {

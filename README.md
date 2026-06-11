@@ -19,6 +19,14 @@ This automatically:
 
 Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
 
+To extend the sandbox to Claude Code's **built-in tools**, add `--with-tool-hook`:
+
+```bash
+lite-sandbox install --with-tool-hook
+```
+
+This registers a `PreToolUse` hook that (1) blocks the built-in `Bash` tool with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is optional and off by default. When used, the hook governs `Bash` instead of the blunt permission `deny` (so the redirect message actually reaches the model).
+
 Restart Claude Code after running the install command.
 
 <details>
@@ -132,6 +140,34 @@ lite-sandbox config show
 ```
 
 Git commands use runtime path validation to ensure repository paths stay within allowed directories, even when variables are expanded (e.g., `git -C $REPO_DIR status` validates the expanded path).
+
+## Built-in tool boundaries
+
+The bash tool confines shell commands to the sandbox's readable and writable paths. But Claude Code's **built-in tools** bypass the sandbox entirely: the built-in `Bash` tool runs unvalidated shell, and `Read`/`Write`/`Edit`/`NotebookEdit` (plus the `Grep`/`Glob` path argument) read and write anywhere — so an agent could read `~/.ssh/id_rsa` or write outside the project through them. The optional tool hook closes that gap.
+
+Enable it at install time:
+
+```bash
+lite-sandbox install --with-tool-hook
+```
+
+This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.json`. On each matching tool call it:
+
+- **redirects `Bash`** — the built-in Bash tool is denied with a message telling the model to use `mcp__lite-sandbox__bash` instead;
+- **denies reads** (`Read`, and `Grep`/`Glob` with an explicit `path`) that resolve outside the readable paths;
+- **denies writes** (`Write`, `Edit`, `NotebookEdit`) that resolve outside the writable paths;
+- **defers** everything in-bounds to Claude Code's normal permission flow.
+
+The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go`): the working directory plus any `readable_paths`/`writable_paths` from config, plus the worktree parent when `git.allow_worktree_parent` is set. Writable paths are also treated as readable. Denials carry a clear reason telling the model the path is out of bounds and that the user can widen the boundary with `lite-sandbox config readable-paths add` / `writable-paths add`.
+
+### Bash: hook vs. permission deny
+
+`PreToolUse` hooks run *after* `permissions.deny`, and a matching deny rule blocks a call regardless of what the hook returns — so a `deny` rule and the hook can't both apply to `Bash`. The two install modes therefore handle `Bash` differently:
+
+- **`lite-sandbox install`** (default) — hard-denies `Bash` via a `permissions.deny` rule. Strongest, but the model only sees a terse rejection; the [`CLAUDE.md` directive](#automatic-installation) is what points it to the MCP tool.
+- **`lite-sandbox install --with-tool-hook`** — leaves `Bash` out of `deny` (removing it if a prior install added it) and lets the hook block it with the actionable redirect message. If the hook ever fails to run, `Bash` falls back to a normal user permission prompt rather than executing silently.
+
+The hook is **fail-open**: any internal error (unparseable event, missing working directory) defers rather than blocking work. It reads config fresh on each call, so boundary changes take effect without reinstalling. To remove it, delete the `PreToolUse` entry for `lite-sandbox hook` from `settings.json`.
 
 ## Go Runtime Support
 
