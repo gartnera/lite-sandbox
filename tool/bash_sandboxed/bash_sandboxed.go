@@ -846,6 +846,15 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 	cmd.Stderr = &out
 	cmd.Env = env
 
+	// Bound how long Wait blocks on I/O after the context is cancelled. Without
+	// this, a backgrounded grandchild (e.g. `npm run dev &`) inherits the stdout
+	// pipe's write end and keeps it open after bash exits, so cmd.Run would block
+	// until that child exits — pinning the calling MCP worker indefinitely and
+	// ignoring the timeout entirely. WaitDelay makes the runtime close the pipes
+	// and return once the delay elapses after cancellation. CommandContext has
+	// already installed a Cancel func that kills bash on ctx.Done().
+	cmd.WaitDelay = runnerKillGracePeriod
+
 	if err := cmd.Run(); err != nil {
 		output := out.String()
 		return output, &CommandFailedError{Err: err, Output: output}
