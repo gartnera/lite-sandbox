@@ -41,6 +41,10 @@ func gitGlobalPathArgIndices(args []*syntax.Word) map[int]bool {
 // Write commands (cp, mv, rm, etc.) are checked against writeAllowedPaths;
 // all other commands are checked against readAllowedPaths.
 func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	// Resolve each allowed-path set once and reuse across every node, rather
+	// than re-resolving symlinks for every argument of every command.
+	resolvedRead := resolveAllowedPaths(readAllowedPaths)
+	resolvedWrite := resolveAllowedPaths(writeAllowedPaths)
 	var validationErr error
 	syntax.Walk(f, func(node syntax.Node) bool {
 		if validationErr != nil {
@@ -51,13 +55,13 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 			return true
 		}
 		// Determine which allowed paths to use based on command name
-		allowedPaths := readAllowedPaths
+		allowedPaths := resolvedRead
 		var cmdName string
 		isWriteCmd := false
 		if len(callExpr.Args) > 0 {
 			cmdName = extractCommandName(callExpr.Args[0])
 			if writeCommands[cmdName] {
-				allowedPaths = writeAllowedPaths
+				allowedPaths = resolvedWrite
 				isWriteCmd = true
 			}
 		}
@@ -111,7 +115,7 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 			if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
 				continue
 			}
-			if !IsUnderAllowedPaths(resolved, allowedPaths) {
+			if !isUnderResolvedAllowedPaths(resolved, allowedPaths) {
 				validationErr = fmt.Errorf("path %q resolves to %q which is outside allowed directories", lit, resolved)
 				return false
 			}
@@ -131,6 +135,8 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 // Input redirects are checked against readAllowedPaths; output redirects are
 // checked against writeAllowedPaths. Output redirects to /dev/null are always allowed.
 func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	resolvedRead := resolveAllowedPaths(readAllowedPaths)
+	resolvedWrite := resolveAllowedPaths(writeAllowedPaths)
 	var validationErr error
 	syntax.Walk(f, func(node syntax.Node) bool {
 		if validationErr != nil {
@@ -143,16 +149,16 @@ func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, wri
 		for _, r := range stmt.Redirs {
 			// Only check redirects that reference file paths.
 			// fd dups (DplIn, DplOut) and heredocs don't have file targets.
-			var allowedPaths []string
+			var allowedPaths []resolvedAllowedPath
 			switch r.Op {
 			case syntax.RdrIn:
-				allowedPaths = readAllowedPaths
+				allowedPaths = resolvedRead
 			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut,
 				syntax.RdrAll, syntax.AppAll:
-				allowedPaths = writeAllowedPaths
+				allowedPaths = resolvedWrite
 			case syntax.RdrInOut:
 				// Read+write; must satisfy write permissions
-				allowedPaths = writeAllowedPaths
+				allowedPaths = resolvedWrite
 			default:
 				continue
 			}
@@ -165,7 +171,7 @@ func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, wri
 				continue
 			}
 			resolved := ResolvePath(lit, workDir)
-			if !IsUnderAllowedPaths(resolved, allowedPaths) {
+			if !isUnderResolvedAllowedPaths(resolved, allowedPaths) {
 				validationErr = fmt.Errorf("redirect path %q resolves to %q which is outside allowed directories", lit, resolved)
 				return false
 			}
@@ -344,18 +350,44 @@ func stripNestedOnlyMarkers(paths []string) []string {
 // itself, so a single read/grep/glob cannot target the container and sweep
 // every child at once.
 func IsUnderAllowedPaths(path string, allowedPaths []string) bool {
-	for _, allowed := range allowedPaths {
+	return isUnderResolvedAllowedPaths(path, resolveAllowedPaths(allowedPaths))
+}
+
+// resolvedAllowedPath is an allowed-path entry with its symlinks already
+// resolved and its descendants-only marker already parsed. Resolving is a
+// per-entry filesystem syscall (EvalSymlinks), so callers that check many
+// argument paths against the same allowed set should resolve the set once with
+// resolveAllowedPaths and reuse the result, rather than re-resolving inside the
+// per-argument loop.
+type resolvedAllowedPath struct {
+	base       string
+	nestedOnly bool
+}
+
+// resolveAllowedPaths resolves the symlinks of each allowed-path entry once.
+func resolveAllowedPaths(allowedPaths []string) []resolvedAllowedPath {
+	out := make([]resolvedAllowedPath, len(allowedPaths))
+	for i, allowed := range allowedPaths {
 		base, nestedOnly := splitNestedOnly(allowed)
-		// Resolve symlinks in the allowed path for accurate comparison
-		resolvedAllowed, err := filepath.EvalSymlinks(base)
+		resolved, err := filepath.EvalSymlinks(base)
 		if err != nil {
-			// If we can't resolve, try the original path
-			resolvedAllowed = base
+			// If we can't resolve, fall back to the original path.
+			resolved = base
 		}
-		if !nestedOnly && path == resolvedAllowed {
+		out[i] = resolvedAllowedPath{base: resolved, nestedOnly: nestedOnly}
+	}
+	return out
+}
+
+// isUnderResolvedAllowedPaths reports whether path is equal to or nested under
+// one of the pre-resolved allowed paths. See IsUnderAllowedPaths for the
+// descendants-only semantics.
+func isUnderResolvedAllowedPaths(path string, allowed []resolvedAllowedPath) bool {
+	for _, a := range allowed {
+		if !a.nestedOnly && path == a.base {
 			return true
 		}
-		if strings.HasPrefix(path, resolvedAllowed+string(filepath.Separator)) {
+		if strings.HasPrefix(path, a.base+string(filepath.Separator)) {
 			return true
 		}
 	}
@@ -537,6 +569,11 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 		gitSkipIndices = gitGlobalPathArgIndicesExpanded(args)
 	}
 
+	// Resolve the allowed-path set once; a single command (e.g. a glob) can
+	// expand to thousands of args, and re-resolving inside the loop would do
+	// O(args × allowedPaths) EvalSymlinks syscalls.
+	resolvedAllowed := resolveAllowedPaths(allowedPaths)
+
 	for i, arg := range args[1:] {
 		argIdx := i + 1
 		if nonPathIndices[argIdx] {
@@ -569,7 +606,7 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 		if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
 			continue
 		}
-		if !IsUnderAllowedPaths(resolved, allowedPaths) {
+		if !isUnderResolvedAllowedPaths(resolved, resolvedAllowed) {
 			return fmt.Errorf("path %q resolves to %q which is outside allowed directories", arg, resolved)
 		}
 		if isGitInternalPath(resolved) {
