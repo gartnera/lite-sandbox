@@ -53,9 +53,29 @@ func detectWorktreeParent(workDir string) string {
 // WorktreeParentPath returns the absolute main-worktree path to grant access
 // to when workDir is inside a linked git worktree and the config flag
 // git.allow_worktree_parent is enabled. Returns "" otherwise.
+//
+// Detection forks git, so the result is memoized per workDir until the next
+// UpdateConfig; whether a directory is a linked worktree does not change over
+// the lifetime of a session.
 func (s *Sandbox) WorktreeParentPath(workDir string) string {
 	if !s.getConfig().Git.AllowsWorktreeParent() {
 		return ""
 	}
-	return detectWorktreeParent(workDir)
+
+	s.mu.RLock()
+	parent, ok := s.worktreeParentCache[workDir]
+	s.mu.RUnlock()
+	if ok {
+		return parent
+	}
+
+	parent = detectWorktreeParent(workDir)
+
+	s.mu.Lock()
+	if s.worktreeParentCache == nil {
+		s.worktreeParentCache = make(map[string]string)
+	}
+	s.worktreeParentCache[workDir] = parent
+	s.mu.Unlock()
+	return parent
 }
