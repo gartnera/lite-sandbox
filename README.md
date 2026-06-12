@@ -27,6 +27,15 @@ lite-sandbox install --with-tool-hook
 
 This registers a `PreToolUse` hook that (1) blocks the built-in `Bash` tool with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is optional and off by default. When used, the hook governs `Bash` instead of the blunt permission `deny` (so the redirect message actually reaches the model).
 
+If you'd rather keep using Claude Code's own `Bash` tool but still put a static gate in front of it, add `--bash-ast-hook-mode`:
+
+```bash
+lite-sandbox install --bash-ast-hook-mode                  # AST-check Bash only
+lite-sandbox install --with-tool-hook --bash-ast-hook-mode # AST-check Bash + confine Read/Write/Edit
+```
+
+`--bash-ast-hook-mode` changes how the hook treats `Bash`: instead of redirecting it to the MCP tool, the hook parses each `Bash` command's AST and checks it against the same whitelist and path boundaries as the bash tool — allowing it when it passes (no permission prompt) and denying it with the validation error when it doesn't. **`Bash` itself still runs unsandboxed** — there is no runtime enforcement, only this up-front static check, so it's a weaker guarantee than routing execution through the MCP tool (see [Built-in tool boundaries](#built-in-tool-boundaries) for the trade-off). Because nothing redirects to the MCP tool, this mode **does not configure the MCP server** (no MCP allow, no `CLAUDE.md` directive). On its own it governs only `Bash`; combine it with `--with-tool-hook` to also confine the built-in `Read`/`Write`/`Edit` tools to the sandbox's paths.
+
 Restart Claude Code after running the install command.
 
 <details>
@@ -189,6 +198,17 @@ The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go
 - **`lite-sandbox install --with-tool-hook`** — leaves `Bash` out of `deny` (removing it if a prior install added it) and lets the hook block it with the actionable redirect message. If the hook ever fails to run, `Bash` falls back to a normal user permission prompt rather than executing silently.
 
 The hook is **fail-open**: any internal error (unparseable event, missing working directory) defers rather than blocking work. It reads config fresh on each call, so boundary changes take effect without reinstalling. To remove it, delete the `PreToolUse` entry for `lite-sandbox hook` from `settings.json`.
+
+### AST-check mode (`--bash-ast-hook-mode`)
+
+`--bash-ast-hook-mode` registers the hook as `lite-sandbox hook --validate-bash` so it **statically AST-checks** the built-in `Bash` command rather than redirecting it. On each `Bash` call it parses the command, runs the sandbox's AST whitelist and path checks, then:
+
+- **allows** the call (skipping the permission prompt) when it passes — so Claude keeps using its own `Bash` tool, gated by the static check;
+- **denies** it with the validation error when it fails, so the model can correct the command.
+
+This mode configures no MCP server, adds no `Bash` deny, and writes no `CLAUDE.md` directive — it's purely the AST-checking hook. On its own it matches only `Bash`; combined with `--with-tool-hook` it uses the full matcher, so `Bash` is AST-checked while `Read`/`Write`/`Edit` are confined to the sandbox's paths. Switching install modes is idempotent: a later `install` / `--with-tool-hook` / `--bash-ast-hook-mode` replaces the previous lite-sandbox hook entry rather than stacking a conflicting one.
+
+> **Trade-off — `Bash` runs unsandboxed:** the hook checks the command *statically* and then the real, unsandboxed `Bash` tool executes it. There is no runtime enforcement, so it misses what the MCP tool's interpreter catches at execution (`OpenHandler`/expansion checks for e.g. `cat $VAR`, or reads of paths that don't exist at validation time). The AST whitelist (no `curl`/`nc`/`eval`/shell escapes/etc.) and static path checks on literal arguments still apply in full, but this is a weaker guarantee. For the strongest enforcement, prefer the default or `--with-tool-hook` modes, which route execution through the sandbox.
 
 ## Go Runtime Support
 

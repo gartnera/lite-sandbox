@@ -19,6 +19,16 @@ import (
 // that avoids invoking the binary for unrelated tools.
 const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep"
 
+// bashValidateMatcher is the matcher used in --bash-ast-hook-mode, where the
+// hook only governs the built-in Bash tool (validating its command rather than
+// redirecting it) and leaves the filesystem tools to Claude Code's normal flow.
+const bashValidateMatcher = "Bash"
+
+// hookValidateBash selects the --bash-ast-hook-mode behavior: instead of denying the
+// built-in Bash tool, parse and validate its command against the sandbox and
+// allow it when it passes. Set by the --validate-bash flag.
+var hookValidateBash bool
+
 var hookCmd = &cobra.Command{
 	Use:   "hook",
 	Short: "Evaluate a Claude Code PreToolUse event from stdin",
@@ -26,21 +36,26 @@ var hookCmd = &cobra.Command{
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
 		"writes outside the writable paths are denied. All other calls defer to " +
 		"Claude Code's normal permission flow. Invoked by Claude Code; register it " +
-		"with `lite-sandbox install --with-fs-hook`.",
+		"with `lite-sandbox install --with-tool-hook`.\n\n" +
+		"With --validate-bash, the built-in Bash tool is validated through the " +
+		"sandbox (AST whitelist + path boundaries) and allowed when it passes " +
+		"instead of being redirected to the MCP tool.",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runHook(cmd)
+		return runHook(cmd, hookValidateBash)
 	},
 }
 
 func init() {
+	hookCmd.Flags().BoolVar(&hookValidateBash, "validate-bash", false,
+		"validate the built-in Bash command through the sandbox and allow it when it passes, instead of denying it")
 	rootCmd.AddCommand(hookCmd)
 }
 
 // runHook is the hot path Claude Code invokes per tool call. It is deliberately
 // fail-open: any internal error (unparseable event, missing cwd) defers to
 // Claude Code's normal permission flow rather than blocking the user's work.
-func runHook(cmd *cobra.Command) error {
+func runHook(cmd *cobra.Command, validateBash bool) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -59,7 +74,7 @@ func runHook(cmd *cobra.Command) error {
 		return nil
 	}
 
-	decision := evaluate(event)
+	decision := evaluate(event, validateBash)
 	if decision == nil {
 		// Nothing to enforce: defer to normal permission flow (no JSON).
 		return nil
@@ -67,12 +82,17 @@ func runHook(cmd *cobra.Command) error {
 	return decision.Write(out)
 }
 
-// evaluate returns a deny decision for a governed tool call, or nil to defer to
-// Claude Code's normal permission flow. The built-in Bash tool is redirected to
-// the sandboxed MCP tool; filesystem tools are checked against path boundaries.
-func evaluate(event *hook.Event) *hook.Decision {
-	if d := denyBuiltinBash(event); d != nil {
-		return d
+// evaluate returns a decision for a governed tool call, or nil to defer to
+// Claude Code's normal permission flow. For the built-in Bash tool: when
+// validateBash is set (--bash-ast-hook-mode) the command is validated through
+// the sandbox and allowed when it passes; otherwise it is redirected to the
+// sandboxed MCP tool. Filesystem tools are checked against path boundaries.
+func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
+	if event.ToolName == hook.ToolBash {
+		if validateBash {
+			return validateBuiltinBash(event)
+		}
+		return denyBuiltinBash(event)
 	}
 	return evaluatePathPolicy(event)
 }
@@ -97,6 +117,48 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 		what,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
+}
+
+// validateBuiltinBash parses and validates the built-in Bash tool's command
+// through the sandbox (AST whitelist + read/write path boundaries). A command
+// that passes is allowed outright (skipping the permission prompt, mirroring the
+// MCP tool's pre-approval); a command that fails is denied with the validation
+// error so the model can correct it. Any inability to inspect the command
+// (missing input, no cwd) fails open to Claude Code's normal flow.
+func validateBuiltinBash(event *hook.Event) *hook.Decision {
+	in, ok := event.ToolInput.(*hook.BashInput)
+	if !ok || in.Command == "" {
+		// Could not see the command; defer rather than guess.
+		return nil
+	}
+
+	cwd := event.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if cwd == "" {
+		// Without a working directory we cannot resolve path boundaries; defer.
+		return nil
+	}
+
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+	readPaths, writePaths := computeSandboxPaths(sb, cwd)
+
+	if err := sb.ValidateCommand(in.Command, cwd, readPaths, writePaths); err != nil {
+		reason := fmt.Sprintf(
+			"Blocked by lite-sandbox: this command did not pass sandbox validation.\n"+
+				"Attempted action: %s\n"+
+				"Reason: %v\n"+
+				"What to do instead: rework the command to use only sandbox-approved, "+
+				"non-destructive operations within the project's paths. If this command "+
+				"is genuinely needed, ask the user to permit it via `lite-sandbox config` "+
+				"(e.g. extra-commands or readable/writable paths).",
+			in.Describe(), err,
+		)
+		return hook.NewDecision(hook.DecisionDeny, reason)
+	}
+	return hook.NewDecision(hook.DecisionAllow, "Validated by lite-sandbox: command passed the sandbox AST whitelist and path boundaries.")
 }
 
 // evaluatePathPolicy returns a deny decision when a filesystem tool targets a
@@ -175,17 +237,29 @@ func fsTarget(e *hook.Event) (path string, write bool, governed bool) {
 	return "", false, false
 }
 
-// sandboxPaths computes the readable and writable path sets for cwd, mirroring
-// the boundaries the bash tool enforces (see cmd/serve.go) so the filesystem
-// hook and the bash sandbox agree on what is in-bounds. Writable paths are also
-// readable, so they are folded into the read set.
-func sandboxPaths(cwd string) (readPaths, writePaths []string) {
+// configuredSandbox builds a sandbox for cwd with the user's config applied,
+// matching how the MCP server constructs it. The caller owns Close().
+func configuredSandbox(cwd string) *bash_sandboxed.Sandbox {
 	sb := bash_sandboxed.NewSandbox()
-	defer sb.Close()
 	if cfg, err := config.Load(); err == nil && cfg != nil {
 		sb.UpdateConfig(cfg, cwd)
 	}
+	return sb
+}
 
+// sandboxPaths computes the readable and writable path sets for cwd, mirroring
+// the boundaries the bash tool enforces (see cmd/serve.go) so the filesystem
+// hook and the bash sandbox agree on what is in-bounds.
+func sandboxPaths(cwd string) (readPaths, writePaths []string) {
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+	return computeSandboxPaths(sb, cwd)
+}
+
+// computeSandboxPaths derives the readable and writable path sets from an
+// already-configured sandbox. Writable paths are also readable, so they are
+// folded into the read set.
+func computeSandboxPaths(sb *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
 	readPaths = append([]string{cwd}, sb.RuntimeReadPaths()...)
 	readPaths = append(readPaths, sb.ConfigReadPaths()...)
 	readPaths = append(readPaths, sb.ConfigWritePaths()...)

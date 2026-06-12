@@ -175,7 +175,7 @@ func TestRunHookDenyOutput(t *testing.T) {
 		c.SetIn(bytes.NewReader(payload))
 		c.SetOut(&out)
 		c.SetErr(&bytes.Buffer{})
-		if err := runHook(c); err != nil {
+		if err := runHook(c, false); err != nil {
 			t.Fatalf("runHook returned error: %v", err)
 		}
 		return out.String()
@@ -217,7 +217,7 @@ func TestRunHookFailOpen(t *testing.T) {
 	c.SetIn(strings.NewReader("not json"))
 	c.SetOut(&out)
 	c.SetErr(&bytes.Buffer{})
-	if err := runHook(c); err != nil {
+	if err := runHook(c, false); err != nil {
 		t.Fatalf("runHook should fail-open, got error: %v", err)
 	}
 	if out.String() != "" {
@@ -234,7 +234,7 @@ func TestDenyBuiltinBash(t *testing.T) {
 		CWD:       cwd,
 		ToolInput: &hook.BashInput{Command: "ls -la"},
 	}
-	got := evaluate(event)
+	got := evaluate(event, false)
 	if got == nil {
 		t.Fatal("expected Bash to be denied, got nil (defer)")
 	}
@@ -247,8 +247,87 @@ func TestDenyBuiltinBash(t *testing.T) {
 
 	// Bash is denied even when tool_input failed to parse (ToolInput nil).
 	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}
-	if evaluate(bare) == nil {
+	if evaluate(bare, false) == nil {
 		t.Error("expected Bash to be denied even without parsed tool input")
+	}
+}
+
+func TestValidateBuiltinBash(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	outside := t.TempDir()
+
+	// The hook validates statically (no execution), and static path validation
+	// only flags absolute read paths that exist locally — so the secret must
+	// exist on disk to be caught at validation time.
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("top secret"), 0644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		command   string
+		wantAllow bool
+		wantInMsg string // substring expected in a deny reason
+	}{
+		{
+			name:      "whitelisted read-only command is allowed",
+			command:   "ls -la",
+			wantAllow: true,
+		},
+		{
+			name:      "pipeline of read-only commands is allowed",
+			command:   "cat foo.txt | grep bar | head -n 5",
+			wantAllow: true,
+		},
+		{
+			name:      "non-whitelisted command is denied",
+			command:   "curl https://example.com",
+			wantInMsg: "did not pass sandbox validation",
+		},
+		{
+			name:      "read of an existing file outside the sandbox is denied",
+			command:   "cat " + secret,
+			wantInMsg: "did not pass sandbox validation",
+		},
+		{
+			name:      "relative traversal outside the sandbox is denied",
+			command:   "cat ../../etc/passwd",
+			wantInMsg: "did not pass sandbox validation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := &hook.Event{
+				ToolName:  hook.ToolBash,
+				CWD:       cwd,
+				ToolInput: &hook.BashInput{Command: tt.command},
+			}
+			got := evaluate(event, true)
+			if got == nil {
+				t.Fatal("expected a decision in validate-bash mode, got nil (defer)")
+			}
+			if tt.wantAllow {
+				if got.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+					t.Fatalf("expected allow, got %q: %s", got.HookSpecificOutput.PermissionDecision, got.HookSpecificOutput.PermissionDecisionReason)
+				}
+				return
+			}
+			if got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny {
+				t.Fatalf("expected deny, got %q", got.HookSpecificOutput.PermissionDecision)
+			}
+			if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, tt.wantInMsg) {
+				t.Errorf("reason %q does not contain %q", got.HookSpecificOutput.PermissionDecisionReason, tt.wantInMsg)
+			}
+		})
+	}
+
+	// Without a parseable command, defer rather than guess.
+	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}
+	if got := evaluate(bare, true); got != nil {
+		t.Errorf("expected defer (nil) without a command, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 
@@ -262,8 +341,8 @@ func TestConfigurePermissionsToolHook(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	if err := configurePermissions(tmpDir, true); err != nil {
-		t.Fatalf("configurePermissions(toolHook=true) failed: %v", err)
+	if err := configurePermissions(tmpDir, true, false); err != nil {
+		t.Fatalf("configurePermissions(allowMCP=true, denyBash=false) failed: %v", err)
 	}
 
 	data, err := os.ReadFile(settingsPath)
@@ -336,6 +415,75 @@ func TestConfigurePreToolUseHook(t *testing.T) {
 	}
 	if cmds := asSlice(asMap(pre[0])["hooks"]); len(cmds) != 1 {
 		t.Fatalf("expected command not duplicated, got %d", len(cmds))
+	}
+}
+
+// TestReconcilePreToolUseHook verifies that switching install modes replaces the
+// lite-sandbox hook entry rather than leaving a stale, conflicting one behind,
+// and that unrelated hooks survive.
+func TestReconcilePreToolUseHook(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+	binPath := "/usr/local/bin/lite-sandbox"
+
+	// An unrelated hook from another tool must always survive.
+	existing := `{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/other/tool guard"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	// lite-sandbox commands registered across the modes.
+	liteCmds := func() []string {
+		t.Helper()
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings.json: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("parse settings.json: %v", err)
+		}
+		var got []string
+		otherSurvived := false
+		for _, g := range asSlice(asMap(raw["hooks"])["PreToolUse"]) {
+			for _, c := range asSlice(asMap(g)["hooks"]) {
+				cmd := asString(asMap(c)["command"])
+				if strings.HasPrefix(cmd, binPath) {
+					got = append(got, cmd)
+				}
+				if cmd == "/other/tool guard" {
+					otherSurvived = true
+				}
+			}
+		}
+		if !otherSurvived {
+			t.Error("unrelated PreToolUse hook from another tool was lost")
+		}
+		return got
+	}
+
+	// Install --with-tool-hook.
+	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook", hookToolMatcher); err != nil {
+		t.Fatalf("reconcile (tool hook) failed: %v", err)
+	}
+	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook" {
+		t.Fatalf("expected exactly the tool hook command, got %v", got)
+	}
+
+	// Switch to --bash-ast-hook-mode: the old command must be replaced, not added to.
+	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook --validate-bash", bashValidateMatcher); err != nil {
+		t.Fatalf("reconcile (bash hook) failed: %v", err)
+	}
+	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook --validate-bash" {
+		t.Fatalf("expected exactly the validate-bash command after switch, got %v", got)
+	}
+
+	// Switch to default (no hook): the lite-sandbox entry must be removed.
+	if err := reconcilePreToolUseHook(tmpDir, binPath, "", hookToolMatcher); err != nil {
+		t.Fatalf("reconcile (no hook) failed: %v", err)
+	}
+	if got := liteCmds(); len(got) != 0 {
+		t.Fatalf("expected no lite-sandbox hook commands after switching to default, got %v", got)
 	}
 }
 

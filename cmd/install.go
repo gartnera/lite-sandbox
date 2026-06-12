@@ -12,6 +12,7 @@ import (
 )
 
 var installWithToolHook bool
+var installBashASTHookMode bool
 
 var installCmd = &cobra.Command{
 	Use:   "install",
@@ -25,13 +26,24 @@ With --with-tool-hook, registers a PreToolUse hook that governs the built-in
 tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
 message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
 sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
-matching the boundaries the bash tool enforces.`,
+matching the boundaries the bash tool enforces.
+
+With --bash-ast-hook-mode, the MCP server is NOT configured. Instead, the PreToolUse
+hook statically parses each built-in Bash command's AST and checks it against the
+sandbox's whitelist and path boundaries, allowing it when it passes and denying it
+otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
+enforcement, only this up-front static check — so it is a weaker guarantee than
+routing execution through the MCP tool. Combine it with --with-tool-hook to also
+confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
+governs only Bash.`,
 	RunE: runInstall,
 }
 
 func init() {
 	installCmd.Flags().BoolVar(&installWithToolHook, "with-tool-hook", false,
 		"register a PreToolUse hook that redirects built-in Bash to the MCP tool and confines built-in Read/Write/Edit to the sandbox's readable/writable paths")
+	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
+		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -58,40 +70,87 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to access ~/.claude directory: %w", err)
 	}
 
-	// 1. Configure MCP server in ~/.claude.json (user-scoped)
 	claudeJsonPath := filepath.Join(homeDir, ".claude.json")
-	if err := configureMCPServer(claudeJsonPath, binPath); err != nil {
-		return fmt.Errorf("failed to configure MCP server: %w", err)
-	}
-	fmt.Println("✓ Added MCP server to ~/.claude.json")
 
-	// 2. Configure permissions (allow the sandbox tool; deny built-in Bash unless
-	// the tool hook will govern it with a redirect message instead).
-	if err := configurePermissions(claudeDir, installWithToolHook); err != nil {
+	// Resolve the install mode from the (composable) flags:
+	//   wantHook    — register a PreToolUse hook at all.
+	//   validateBash — the hook validates Bash's AST and allows it on pass,
+	//                  rather than redirecting it to the MCP tool.
+	//   governFS    — the hook also confines Read/Write/Edit/Glob/Grep paths,
+	//                  so it matches those tools (full matcher).
+	//   configMCP   — configure the MCP server (and its allow + CLAUDE.md
+	//                  directive). Skipped when Bash is validated in place,
+	//                  since nothing redirects to the MCP tool then.
+	validateBash := installBashASTHookMode
+	governFS := installWithToolHook
+	wantHook := installWithToolHook || installBashASTHookMode
+	configMCP := !installBashASTHookMode
+
+	// 1. Configure MCP server in ~/.claude.json (user-scoped)
+	if configMCP {
+		if err := configureMCPServer(claudeJsonPath, binPath); err != nil {
+			return fmt.Errorf("failed to configure MCP server: %w", err)
+		}
+		fmt.Println("✓ Added MCP server to ~/.claude.json")
+	}
+
+	// 2. Configure permissions. Allow the MCP tool only when it's configured.
+	// Deny the built-in Bash tool only in the default mode; when a hook governs
+	// Bash, a deny rule would override the hook's decision, so it's left off.
+	denyBash := !wantHook
+	if err := configurePermissions(claudeDir, configMCP, denyBash); err != nil {
 		return fmt.Errorf("failed to configure permissions: %w", err)
 	}
-	if installWithToolHook {
-		fmt.Println("✓ Allowed mcp__lite-sandbox__bash in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
-	} else {
+	switch {
+	case denyBash:
 		fmt.Println("✓ Allowed mcp__lite-sandbox__bash and denied built-in Bash in ~/.claude/settings.json")
+	case configMCP:
+		fmt.Println("✓ Allowed mcp__lite-sandbox__bash in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
+	default:
+		fmt.Println("✓ Ensured built-in Bash is not denied in ~/.claude/settings.json (governed by the validating hook)")
 	}
 
-	// 3. Configure CLAUDE.md
-	if err := configureCLAUDEMD(claudeDir); err != nil {
-		return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
-	}
-	fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
-
-	// 4. Optionally register the built-in tool PreToolUse hook
-	if installWithToolHook {
-		hookCommand := binPath + " hook"
-		if err := configurePreToolUseHook(claudeDir, hookCommand, hookToolMatcher); err != nil {
-			return fmt.Errorf("failed to configure tool hook: %w", err)
+	// 3. Configure CLAUDE.md (only meaningful when the MCP tool exists for the
+	// directive to point at).
+	if configMCP {
+		if err := configureCLAUDEMD(claudeDir); err != nil {
+			return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
 		}
+		fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
+	}
+
+	// 4. Reconcile the built-in tool PreToolUse hook (register the right one for
+	// the chosen mode, removing any stale lite-sandbox hook from a prior install).
+	hookCommand := ""
+	matcher := hookToolMatcher
+	if wantHook {
+		if validateBash {
+			hookCommand = binPath + " hook --validate-bash"
+		} else {
+			hookCommand = binPath + " hook"
+		}
+		// On its own, --bash-ast-hook-mode governs only Bash; with --with-tool-hook
+		// it also confines the filesystem tools, so it matches all of them.
+		if !governFS {
+			matcher = bashValidateMatcher
+		}
+	}
+	if err := reconcilePreToolUseHook(claudeDir, binPath, hookCommand, matcher); err != nil {
+		return fmt.Errorf("failed to configure tool hook: %w", err)
+	}
+	switch {
+	case governFS && validateBash:
+		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) and confine reads/writes to sandbox paths in ~/.claude/settings.json")
+	case governFS:
 		fmt.Println("✓ Registered PreToolUse hook to redirect built-in Bash and confine reads/writes to sandbox paths in ~/.claude/settings.json")
+	case validateBash:
+		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in ~/.claude/settings.json")
 	}
 
 	fmt.Println("\n✓ Installation complete!")
+	if installBashASTHookMode {
+		fmt.Println("(--bash-ast-hook-mode: MCP server not configured)")
+	}
 	fmt.Println("\nRestart Claude Code for the changes to take effect.")
 	return nil
 }
@@ -177,13 +236,14 @@ func writeSettingsFile(settingsPath string, cfg map[string]json.RawMessage) erro
 	return os.WriteFile(settingsPath, data, 0644)
 }
 
-// configurePermissions auto-allows the sandboxed bash tool and controls the
-// built-in Bash tool. When toolHook is false, Bash is hard-denied via a
-// permission rule so Claude must use the sandbox. When toolHook is true, the
-// PreToolUse hook governs Bash instead (so it can return a redirect message the
-// model actually sees) — a permission deny would take precedence over the hook
-// and suppress that message, so any existing Bash deny is removed.
-func configurePermissions(claudeDir string, toolHook bool) error {
+// configurePermissions controls the sandboxed bash tool allow and the built-in
+// Bash deny. allowMCP adds the mcp__lite-sandbox__bash auto-allow (skipped in
+// --bash-ast-hook-mode, which doesn't configure the MCP server). denyBash
+// hard-denies the built-in Bash tool via a permission rule so Claude must use
+// the sandbox; when false (a hook governs Bash instead) any existing Bash deny
+// is removed, since a permission deny takes precedence over the hook's
+// allow/redirect decision and would suppress it.
+func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	cfg, err := readSettingsFile(settingsPath)
@@ -201,14 +261,14 @@ func configurePermissions(claudeDir string, toolHook bool) error {
 
 	// Auto-allow the sandboxed bash tool
 	allowPermission := "mcp__lite-sandbox__bash"
-	if !slices.Contains(perms.Allow, allowPermission) {
+	if allowMCP && !slices.Contains(perms.Allow, allowPermission) {
 		perms.Allow = append(perms.Allow, allowPermission)
 	}
 
 	const denyPermission = "Bash"
-	if toolHook {
+	if !denyBash {
 		// Let the hook own the Bash block; a deny rule would suppress its
-		// redirect message. Strip any Bash deny a prior install added.
+		// decision. Strip any Bash deny a prior install added.
 		perms.Deny = slices.DeleteFunc(perms.Deny, func(p string) bool { return p == denyPermission })
 	} else if !slices.Contains(perms.Deny, denyPermission) {
 		// Ban the built-in Bash tool outright so Claude must use the sandbox.
@@ -221,6 +281,79 @@ func configurePermissions(claudeDir string, toolHook bool) error {
 		return err
 	}
 	cfg["permissions"] = permsRaw
+
+	return writeSettingsFile(settingsPath, cfg)
+}
+
+// reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook
+// match the requested install mode. It first removes any stale lite-sandbox hook
+// entry (so switching between modes — or back to no hook — doesn't leave a
+// conflicting one behind), then registers `command` under `matcher` when command
+// is non-empty. binPath identifies our hook entries to remove.
+func reconcilePreToolUseHook(claudeDir, binPath, command, matcher string) error {
+	if err := removeLiteSandboxHooks(claudeDir, binPath); err != nil {
+		return err
+	}
+	if command == "" {
+		return nil
+	}
+	return configurePreToolUseHook(claudeDir, command, matcher)
+}
+
+// removeLiteSandboxHooks strips any PreToolUse hook entry that invokes the
+// lite-sandbox binary (command `<binPath> hook ...`), dropping matcher groups
+// that become empty. Other hooks and settings are preserved. It is a no-op when
+// no hooks are configured.
+func removeLiteSandboxHooks(claudeDir, binPath string) error {
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+
+	cfg, err := readSettingsFile(settingsPath)
+	if err != nil {
+		return err
+	}
+	raw, ok := cfg["hooks"]
+	if !ok {
+		return nil
+	}
+	var hooks map[string]any
+	if err := json.Unmarshal(raw, &hooks); err != nil {
+		return fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+	}
+
+	hookPrefix := binPath + " hook"
+	isOurs := func(cmd string) bool {
+		return cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ")
+	}
+
+	pre := asSlice(hooks["PreToolUse"])
+	var kept []any
+	for _, rawGroup := range pre {
+		group := asMap(rawGroup)
+		var cmds []any
+		for _, c := range asSlice(group["hooks"]) {
+			if isOurs(asString(asMap(c)["command"])) {
+				continue
+			}
+			cmds = append(cmds, c)
+		}
+		if len(cmds) == 0 {
+			// Whole group was lite-sandbox's; drop it.
+			continue
+		}
+		group["hooks"] = cmds
+		kept = append(kept, group)
+	}
+	if len(kept) == 0 {
+		delete(hooks, "PreToolUse")
+	} else {
+		hooks["PreToolUse"] = kept
+	}
+
+	hooksRaw, err := json.Marshal(hooks)
+	if err != nil {
+		return err
+	}
+	cfg["hooks"] = hooksRaw
 
 	return writeSettingsFile(settingsPath, cfg)
 }
