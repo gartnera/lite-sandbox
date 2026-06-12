@@ -31,8 +31,14 @@ type runtimeCacheFile struct {
 }
 
 // runtimeCachePath returns the persistent cache file location, or "" when no
-// user cache directory is available (caching is then skipped).
+// user cache directory is available (caching is then skipped). The
+// LITE_SANDBOX_RUNTIME_CACHE env var overrides the location (mirroring
+// LITE_SANDBOX_CONFIG); tests rely on this since os.UserCacheDir ignores
+// XDG_CACHE_HOME on macOS.
 func runtimeCachePath() string {
+	if p := os.Getenv("LITE_SANDBOX_RUNTIME_CACHE"); p != "" {
+		return p
+	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return ""

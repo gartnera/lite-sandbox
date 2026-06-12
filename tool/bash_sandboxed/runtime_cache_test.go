@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
-// setCacheDir points os.UserCacheDir at a temp directory for the test.
+// setCacheDir points the runtime cache at a file in a temp directory. The
+// explicit override is required for hermeticity: os.UserCacheDir ignores
+// XDG_CACHE_HOME on macOS, so redirecting via env cache dirs is not portable.
 func setCacheDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", dir)
+	t.Setenv("LITE_SANDBOX_RUNTIME_CACHE", filepath.Join(dir, "runtime-paths.json"))
 	return dir
 }
 
