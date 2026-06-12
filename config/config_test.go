@@ -146,13 +146,20 @@ func TestWatch(t *testing.T) {
 		t.Fatalf("save error: %v", err)
 	}
 
-	select {
-	case got := <-changed:
-		if len(got.ExtraCommands) != 1 || got.ExtraCommands[0] != "python3" {
-			t.Fatalf("expected [python3], got %v", got.ExtraCommands)
+	// fsnotify may deliver the Create event before the file content is
+	// written, producing a notification with an empty config first. Wait for
+	// the notification that carries the saved config rather than asserting on
+	// the first one.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case got := <-changed:
+			if len(got.ExtraCommands) == 1 && got.ExtraCommands[0] == "python3" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for config change notification with saved content")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for config change notification")
 	}
 }
 
