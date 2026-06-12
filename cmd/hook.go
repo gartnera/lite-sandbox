@@ -183,7 +183,25 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		return nil
 	}
 
-	readPaths, writePaths := sandboxPaths(cwd)
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+
+	resolved := bash_sandboxed.ResolvePath(path, cwd)
+
+	// Cheap boundary first: cwd plus the user-configured paths cover the vast
+	// majority of accesses and need no runtime detection or git invocation.
+	cheap := append([]string{cwd}, sb.ConfigWritePaths()...)
+	if !write {
+		cheap = append(cheap, sb.ConfigReadPaths()...)
+	}
+	if bash_sandboxed.IsUnderAllowedPaths(resolved, cheap) {
+		// Inside the boundary: defer to Claude Code's normal permission flow.
+		return nil
+	}
+
+	// Outside the cheap set: compute the full boundary, which adds detected
+	// runtime paths (read side) and the worktree parent before deciding.
+	readPaths, writePaths := computeSandboxPaths(sb, cwd)
 	allowed := readPaths
 	boundary := "readable"
 	configNoun := "readable"
@@ -193,7 +211,6 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		configNoun = "writable"
 	}
 
-	resolved := bash_sandboxed.ResolvePath(path, cwd)
 	if bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
 		// Inside the boundary: defer to Claude Code's normal permission flow.
 		return nil
@@ -245,15 +262,6 @@ func configuredSandbox(cwd string) *bash_sandboxed.Sandbox {
 		sb.UpdateConfig(cfg, cwd)
 	}
 	return sb
-}
-
-// sandboxPaths computes the readable and writable path sets for cwd, mirroring
-// the boundaries the bash tool enforces (see cmd/serve.go) so the filesystem
-// hook and the bash sandbox agree on what is in-bounds.
-func sandboxPaths(cwd string) (readPaths, writePaths []string) {
-	sb := configuredSandbox(cwd)
-	defer sb.Close()
-	return computeSandboxPaths(sb, cwd)
 }
 
 // computeSandboxPaths derives the readable and writable path sets from an

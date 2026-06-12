@@ -38,9 +38,9 @@ func (e *CommandFailedError) Unwrap() error {
 // Sandbox executes bash commands after parsing and validating them against
 // the built-in allowlist plus any extra commands from config.
 type Sandbox struct {
-	mu               sync.RWMutex
-	cfg              *config.Config
-	extraCommands    map[string]bool
+	mu            sync.RWMutex
+	cfg           *config.Config
+	extraCommands map[string]bool
 	// extraSubCommands holds per-command argument-prefix restrictions parsed
 	// from extra_commands entries that contain a space (e.g. "pnpx prettier"
 	// or "uv run pyright"). Each inner slice is one allowed prefix of
@@ -58,13 +58,20 @@ type Sandbox struct {
 	// `cd`) still hits the bare-extra bypass — interp tracks cwd in
 	// HandlerContext, so the lookup is done with the post-`cd` directory.
 	bareExtraScriptPaths map[string]bool
-	imdsEndpoint     string
+	imdsEndpoint         string
+	// runtimeReadPaths is the lazily computed result of detectRuntimeBinds for
+	// the current config; runtimeDetected marks it as valid. Detection spawns
+	// subprocesses (go, pnpm), so it is deferred until a caller actually needs
+	// the paths rather than run eagerly on every UpdateConfig.
 	runtimeReadPaths []string
-	osSandbox        bool
-	worker           *os_sandbox.Worker
-	workerWorkDir    string
-	workerRuntimeBinds []string
-	workerBlockAWS   bool
+	runtimeDetected  bool
+	// worktreeParentCache memoizes detectWorktreeParent per working directory
+	// so long-lived callers (the MCP server) don't fork git on every command.
+	worktreeParentCache map[string]string
+	osSandbox           bool
+	worker              *os_sandbox.Worker
+	workerWorkDir       string
+	workerBlockAWS      bool
 	// argValidators holds a reference to commandArgValidators so that
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
@@ -106,9 +113,6 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			sub[cmd] = append(sub[cmd], fields[1:])
 		}
 	}
-	// Detect runtime paths for read-only access (e.g., GOPATH, GOCACHE, pnpm store)
-	runtimeReadPaths := detectRuntimeBinds(cfg.Runtimes)
-
 	// Determine if AWS credentials should be blocked
 	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
 
@@ -118,11 +122,16 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.extraSubCommands = sub
 	s.bareExtraCommands = bare
 	s.bareExtraScriptPaths = bareScripts
-	s.runtimeReadPaths = runtimeReadPaths
+
+	// Invalidate lazily computed state derived from the previous config.
+	// Runtime paths (GOPATH, GOCACHE, pnpm store, ...) are detected on first
+	// use via RuntimeReadPaths, since detection spawns subprocesses.
+	s.runtimeReadPaths = nil
+	s.runtimeDetected = false
+	s.worktreeParentCache = nil
 
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
-	s.workerRuntimeBinds = runtimeReadPaths
 	s.workerBlockAWS = blockAWSCredentials
 
 	// Handle OS sandbox enable/disable
@@ -188,10 +197,31 @@ func (s *Sandbox) SetIMDSEndpoint(endpoint string) {
 // RuntimeReadPaths returns the detected runtime paths that should be
 // readable (but not writable) by sandboxed commands. These include paths
 // like GOPATH, GOCACHE, and pnpm store directories.
+//
+// Detection runs lazily on first use (it spawns subprocesses) and the result
+// is cached until the next UpdateConfig. Concurrent first calls may detect
+// twice; both store the same result.
 func (s *Sandbox) RuntimeReadPaths() []string {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.runtimeReadPaths
+	if s.runtimeDetected {
+		paths := s.runtimeReadPaths
+		s.mu.RUnlock()
+		return paths
+	}
+	runtimes := s.cfg.Runtimes
+	s.mu.RUnlock()
+
+	paths := detectRuntimeBinds(runtimes)
+
+	s.mu.Lock()
+	// Only cache if the config didn't change while detection ran without the
+	// lock held; a stale result must not outlive an UpdateConfig.
+	if s.cfg.Runtimes == runtimes {
+		s.runtimeReadPaths = paths
+		s.runtimeDetected = true
+	}
+	s.mu.Unlock()
+	return paths
 }
 
 // ConfigReadPaths returns the user-configured readable paths (with ~ expanded).
@@ -228,15 +258,17 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 
 	var binds []string
 
-	// Detect Go paths if Go runtime is enabled
+	// Detect Go paths if Go runtime is enabled. Detection shells out to
+	// `go env`, so results are persisted across processes (see runtime_cache.go).
 	if runtimes.Go != nil && runtimes.Go.GoEnabled() {
-		goBinds := detectGoBinds()
+		goBinds := cachedDetect("go", []string{"GOPATH", "GOCACHE", "GOENV", "HOME"}, detectGoBinds)
 		binds = append(binds, goBinds...)
 	}
 
-	// Detect pnpm paths if pnpm runtime is enabled
+	// Detect pnpm paths if pnpm runtime is enabled. `pnpm store path` boots
+	// node and costs hundreds of milliseconds, so it is cached persistently.
 	if runtimes.Pnpm != nil && runtimes.Pnpm.PnpmEnabled() {
-		pnpmBinds := detectPnpmBinds()
+		pnpmBinds := cachedDetect("pnpm", []string{"PNPM_HOME", "XDG_DATA_HOME", "HOME"}, detectPnpmBinds)
 		binds = append(binds, pnpmBinds...)
 	}
 
@@ -1038,14 +1070,24 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 // is nil or dead. Must be called without holding s.mu.
 func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.worker != nil && !s.worker.IsDead() {
+		w := s.worker
+		s.mu.Unlock()
+		return w, nil
+	}
+	s.mu.Unlock()
 
+	// Resolve runtime binds outside the lock; this may run lazy detection.
+	runtimeBinds := s.RuntimeReadPaths()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.worker != nil && !s.worker.IsDead() {
 		return s.worker, nil
 	}
 
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", s.workerBlockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, s.workerRuntimeBinds, s.workerBlockAWS)
+	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, runtimeBinds, s.workerBlockAWS)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}
