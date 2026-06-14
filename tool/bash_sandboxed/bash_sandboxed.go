@@ -170,6 +170,15 @@ func (s *Sandbox) getConfig() *config.Config {
 	return s.cfg
 }
 
+// osSandboxEnabled reports whether the OS sandbox (bwrap/sandbox-exec worker)
+// is currently active. Used to gate process-control commands that are only
+// safe when execution is contained.
+func (s *Sandbox) osSandboxEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.osSandbox
+}
+
 // getExtraCommands returns a snapshot of the current extra commands.
 func (s *Sandbox) getExtraCommands() map[string]bool {
 	s.mu.RLock()
@@ -569,7 +578,11 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 				// Restricted entries (e.g. "pnpx prettier") only match when the
 				// first non-flag argument matches the restriction.
 				inExtra := extra[cmdName] && (bare[cmdName] || extraSubCommandMatches(extraSub, cmdName, n.Args))
-				if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] {
+				// Process-control commands (kill, pkill) are allowed only when the
+				// OS sandbox is active, where they are contained to sandbox-spawned
+				// processes.
+				osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
+				if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] && !osOnly {
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
 						validationErr = fmt.Errorf("command %q is not allowed", cmdName)
 						return false

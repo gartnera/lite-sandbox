@@ -28,6 +28,15 @@ func newTestSandboxWithRuntimesConfig(runtimesCfg *config.RuntimesConfig) *Sandb
 	return s
 }
 
+// newTestSandboxWithOSSandbox returns a Sandbox with the OS sandbox enabled.
+// Worker startup is lazy, so this only flips the osSandbox flag (no bwrap is
+// spawned until a command is actually executed).
+func newTestSandboxWithOSSandbox() *Sandbox {
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{OSSandbox: boolPtr(true)}, "")
+	return s
+}
+
 // newTestSandboxWithLocalBinaryExecution returns a Sandbox with local binary execution enabled.
 func newTestSandboxWithLocalBinaryExecution() *Sandbox {
 	s := NewSandbox()

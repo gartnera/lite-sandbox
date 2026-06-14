@@ -210,6 +210,19 @@ var allowedCommands = map[string]bool{
 	"xargs": true,
 }
 
+// osSandboxOnlyCommands are process-control commands that are permitted ONLY
+// when the OS sandbox is enabled. On the bare host they are unsafe because they
+// can signal arbitrary processes, but inside the OS sandbox they are contained:
+// on Linux the worker runs in its own PID namespace (so only sandbox-spawned
+// processes are visible/signalable), and on macOS the seatbelt profile denies
+// signaling any process outside the worker's process group. This lets an agent
+// start a background server and then stop it (e.g. `srv & ...; pkill -f srv`)
+// without being able to reach host processes.
+var osSandboxOnlyCommands = map[string]bool{
+	"kill":  true,
+	"pkill": true,
+}
+
 // writeCommands is the set of commands that perform write operations.
 // Path arguments to these commands are validated against writeAllowedPaths
 // rather than readAllowedPaths. This matches the "Scoped write commands"
