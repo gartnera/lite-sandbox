@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -76,6 +77,9 @@ type Sandbox struct {
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
 	argValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+	// bg tracks background ("run_in_background") processes started via
+	// ExecuteBackground, mirroring the Claude Code Bash/BashOutput/KillShell tools.
+	bg *backgroundManager
 }
 
 // NewSandbox creates a Sandbox with no extra commands.
@@ -83,6 +87,7 @@ func NewSandbox() *Sandbox {
 	return &Sandbox{
 		cfg:           &config.Config{},
 		argValidators: commandArgValidators,
+		bg:            newBackgroundManager(),
 	}
 }
 
@@ -247,8 +252,13 @@ func (s *Sandbox) ConfigWritePaths() []string {
 	return s.cfg.ExpandedWritablePaths()
 }
 
-// Close shuts down the sandbox, closing the worker if running.
+// Close shuts down the sandbox, killing any background processes and closing
+// the worker if running.
 func (s *Sandbox) Close() error {
+	if s.bg != nil {
+		s.bg.killAll()
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -875,6 +885,19 @@ func (s *Sandbox) isExtraCommandInvocation(command string) bool {
 // executeRaw executes a command string directly using the system bash without
 // going through AST parsing or validation. Used for bare extra_commands entries.
 func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string) (string, error) {
+	var out bytes.Buffer
+	if err := s.runRawToWriter(ctx, command, workDir, &out); err != nil {
+		output := out.String()
+		return output, &CommandFailedError{Err: err, Output: output}
+	}
+	return out.String(), nil
+}
+
+// runRawToWriter executes a command string directly with the system bash,
+// streaming combined stdout/stderr to out. It performs no AST parsing or
+// validation and is used both by executeRaw (bare extra_commands) and by
+// background execution of those commands.
+func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer) error {
 	s.mu.RLock()
 	imdsEndpoint := s.imdsEndpoint
 	s.mu.RUnlock()
@@ -884,11 +907,10 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
 	}
 
-	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = workDir
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	cmd.Stdout = out
+	cmd.Stderr = out
 	cmd.Env = env
 
 	// Bound how long Wait blocks on I/O after the context is cancelled. Without
@@ -900,11 +922,7 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 	// already installed a Cancel func that kills bash on ctx.Done().
 	cmd.WaitDelay = runnerKillGracePeriod
 
-	if err := cmd.Run(); err != nil {
-		output := out.String()
-		return output, &CommandFailedError{Err: err, Output: output}
-	}
-	return out.String(), nil
+	return cmd.Run()
 }
 
 // Execute parses, validates, and executes a bash command.
@@ -971,15 +989,16 @@ func (b *syncBuffer) String() string {
 // error to the caller.
 const runnerKillGracePeriod = 5 * time.Second
 
-// executeWithInterp executes the parsed command using interp.
-// If OS sandbox is enabled, ExecHandler delegates to the worker.
-func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) (string, error) {
+// runInterpToWriter builds a sandboxed interpreter and runs the parsed command,
+// streaming combined stdout/stderr to out. It applies the same security
+// handlers as the foreground path and is shared by executeWithInterp and
+// background execution. It blocks until the runner returns (which honors ctx
+// cancellation for OS-level subprocesses).
+func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, out io.Writer) error {
 	s.mu.RLock()
 	useOSSandbox := s.osSandbox
 	imdsEndpoint := s.imdsEndpoint
 	s.mu.RUnlock()
-
-	var out syncBuffer
 
 	// Build environment with IMDS endpoint if AWS is enabled. The interpreter
 	// hands this env to every spawned subprocess (e.g. aws cli), so there is
@@ -998,7 +1017,7 @@ func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir
 	// Build interpreter options
 	opts := []interp.RunnerOption{
 		interp.Dir(workDir),
-		interp.StdIO(nil, &out, &out),
+		interp.StdIO(nil, out, out),
 		interp.Env(expand.ListEnviron(env...)),
 	}
 
@@ -1007,8 +1026,16 @@ func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir
 
 	runner, err := interp.New(opts...)
 	if err != nil {
-		return "", fmt.Errorf("failed to create interpreter: %w", err)
+		return fmt.Errorf("failed to create interpreter: %w", err)
 	}
+
+	return runner.Run(ctx, f)
+}
+
+// executeWithInterp executes the parsed command using interp.
+// If OS sandbox is enabled, ExecHandler delegates to the worker.
+func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) (string, error) {
+	var out syncBuffer
 
 	// Run the interpreter in a goroutine so we can enforce a hard deadline.
 	// runner.Run(ctx, f) may not return promptly after context cancellation when
@@ -1018,7 +1045,7 @@ func (s *Sandbox) executeWithInterp(ctx context.Context, f *syntax.File, workDir
 	type runResult struct{ err error }
 	done := make(chan runResult, 1)
 	go func() {
-		done <- runResult{runner.Run(ctx, f)}
+		done <- runResult{s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, &out)}
 	}()
 
 	select {

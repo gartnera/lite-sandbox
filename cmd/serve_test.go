@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -108,11 +109,14 @@ func TestListTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools failed: %v", err)
 	}
-	if len(tools.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools.Tools))
+	got := make(map[string]bool)
+	for _, tool := range tools.Tools {
+		got[tool.Name] = true
 	}
-	if tools.Tools[0].Name != "bash" {
-		t.Fatalf("expected tool name 'bash', got %q", tools.Tools[0].Name)
+	for _, want := range []string{"bash", "bash_output", "kill_shell", "list_shells"} {
+		if !got[want] {
+			t.Fatalf("expected tool %q to be registered, got tools %v", want, got)
+		}
 	}
 }
 
@@ -285,6 +289,139 @@ func TestBashSandboxedTool_ValidationErrorNoFallbackHint(t *testing.T) {
 				t.Fatalf("validation errors should NOT contain fallback hint, got: %q", text.Text)
 			}
 		}
+	}
+}
+
+// callBash is a small helper that invokes a tool and returns the first text content.
+func callTextTool(t *testing.T, c *client.Client, name string, args map[string]any) (string, bool) {
+	t.Helper()
+	result, err := c.CallTool(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: name, Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("CallTool %s failed: %v", name, err)
+	}
+	if len(result.Content) == 0 {
+		return "", result.IsError
+	}
+	text, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent from %s, got %T", name, result.Content[0])
+	}
+	return text.Text, result.IsError
+}
+
+func extractShellID(t *testing.T, s string) string {
+	t.Helper()
+	start := strings.Index(s, "shell id \"")
+	if start < 0 {
+		t.Fatalf("could not find shell id in %q", s)
+	}
+	rest := s[start+len("shell id \""):]
+	end := strings.Index(rest, "\"")
+	if end < 0 {
+		t.Fatalf("could not parse shell id in %q", s)
+	}
+	return rest[:end]
+}
+
+func TestBashBackground_OutputAndStatus(t *testing.T) {
+	c := setupClient(t)
+
+	text, isErr := callTextTool(t, c, "bash", map[string]any{
+		"command":           "echo background-hello",
+		"run_in_background": true,
+	})
+	if isErr {
+		t.Fatalf("expected success starting background, got error: %q", text)
+	}
+	id := extractShellID(t, text)
+
+	// Poll bash_output until the process completes.
+	var out string
+	for i := 0; i < 200; i++ {
+		var isErr bool
+		out, isErr = callTextTool(t, c, "bash_output", map[string]any{"bash_id": id})
+		if isErr {
+			t.Fatalf("bash_output returned error: %q", out)
+		}
+		if strings.Contains(out, "<status>completed</status>") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(out, "background-hello") {
+		t.Fatalf("expected background output to contain greeting, got %q", out)
+	}
+	if !strings.Contains(out, "<status>completed</status>") {
+		t.Fatalf("expected completed status, got %q", out)
+	}
+	if !strings.Contains(out, "<exit_code>0</exit_code>") {
+		t.Fatalf("expected exit code 0, got %q", out)
+	}
+}
+
+func TestBashBackground_Kill(t *testing.T) {
+	c := setupClient(t)
+
+	text, isErr := callTextTool(t, c, "bash", map[string]any{
+		"command":           "sleep 30",
+		"run_in_background": true,
+	})
+	if isErr {
+		t.Fatalf("expected success starting background, got error: %q", text)
+	}
+	id := extractShellID(t, text)
+
+	killText, isErr := callTextTool(t, c, "kill_shell", map[string]any{"shell_id": id})
+	if isErr {
+		t.Fatalf("kill_shell returned error: %q", killText)
+	}
+
+	// list_shells should report it as killed eventually.
+	var listOut string
+	for i := 0; i < 200; i++ {
+		listOut, _ = callTextTool(t, c, "list_shells", nil)
+		if strings.Contains(listOut, "killed") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(listOut, id) || !strings.Contains(listOut, "killed") {
+		t.Fatalf("expected list_shells to show %q as killed, got %q", id, listOut)
+	}
+}
+
+func TestBashBackground_ValidationError(t *testing.T) {
+	c := setupClient(t)
+
+	text, isErr := callTextTool(t, c, "bash", map[string]any{
+		"command":           "python evil.py",
+		"run_in_background": true,
+	})
+	if !isErr {
+		t.Fatalf("expected validation error for disallowed background command, got %q", text)
+	}
+}
+
+func TestBashOutput_UnknownID(t *testing.T) {
+	c := setupClient(t)
+
+	text, isErr := callTextTool(t, c, "bash_output", map[string]any{"bash_id": "bash_404"})
+	if !isErr {
+		t.Fatalf("expected error for unknown id, got %q", text)
+	}
+}
+
+func TestListShells_Empty(t *testing.T) {
+	c := setupClient(t)
+
+	text, isErr := callTextTool(t, c, "list_shells", nil)
+	if isErr {
+		t.Fatalf("list_shells returned error: %q", text)
+	}
+	if !strings.Contains(text, "No background processes") {
+		t.Fatalf("expected empty message, got %q", text)
 	}
 }
 
