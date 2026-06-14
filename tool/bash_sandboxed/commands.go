@@ -349,6 +349,13 @@ func validateDockerCommand(s *Sandbox, args []*syntax.Word) error {
 	if cfg.Docker == nil || !cfg.Docker.DockerEnabled() {
 		return fmt.Errorf("command \"docker\" is not allowed (docker.enabled is disabled)")
 	}
+	// Require the OS sandbox: only it can mask the real daemon socket so the
+	// proxy is unbypassable. Without it a command can just `unset DOCKER_HOST`
+	// (or pass -H) and talk to /var/run/docker.sock directly. allow_unsandboxed
+	// opts into that weaker, bypassable boundary explicitly.
+	if !s.osSandboxEnabled() && !cfg.Docker.AllowsUnsandboxed() {
+		return fmt.Errorf("command \"docker\" is not allowed without the OS sandbox (enable os_sandbox, or set docker.allow_unsandboxed to accept a bypassable boundary)")
+	}
 	// Fail closed: only allow docker when the filtering proxy is actually wired
 	// in (DOCKER_HOST will be injected). Without this, a command run before the
 	// proxy is started — e.g. docker enabled via a live config reload, which

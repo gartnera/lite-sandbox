@@ -134,7 +134,10 @@ func getSSHPrivateKeyPaths(sshDir string) []string {
 // extraBinds specifies additional writable paths to bind mount (e.g., for runtimes).
 // blockAWSCredentials specifies whether to block ~/.aws directory.
 // Note: ~/.ssh private keys are ALWAYS blocked regardless of this parameter.
-func StartWorker(ctx context.Context, workDir string, extraBinds []string, blockAWSCredentials bool) (*Worker, error) {
+// maskPaths are filesystem paths made unreachable inside the worker (e.g. the
+// real Docker daemon socket), so a sandboxed command cannot bypass a broker by
+// connecting to the underlying resource directly.
+func StartWorker(ctx context.Context, workDir string, extraBinds []string, blockAWSCredentials bool, maskPaths []string) (*Worker, error) {
 	// Find our own binary path to pass to the sandbox
 	self, err := os.Executable()
 	if err != nil {
@@ -223,6 +226,14 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 			}
 		}
 
+		// Mask broker sockets (e.g. the real /var/run/docker.sock) so the only
+		// reachable daemon is the proxy whose socket dir is bind-mounted via
+		// extraBinds. Overlaying /dev/null turns the path into a char device, so
+		// connect() fails — defeating `unset DOCKER_HOST`/`-H` style bypasses.
+		for _, p := range maskPaths {
+			args = append(args, "--ro-bind", "/dev/null", p)
+		}
+
 		// Add runtime bind mounts (e.g., GOPATH for Go runtime)
 		for _, path := range extraBinds {
 			// Create the directory if it doesn't exist
@@ -251,7 +262,7 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 	case "darwin":
 		// Build sandbox-exec command
 		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds
-		profile := generateSBPLProfile(realWorkDir, extraBinds, blockAWSCredentials)
+		profile := generateSBPLProfile(realWorkDir, extraBinds, blockAWSCredentials, maskPaths)
 
 		// sandbox-exec -p <profile> <binary> <args>
 		cmd = exec.CommandContext(ctx, "sandbox-exec", "-p", profile, self, "sandbox-worker")
@@ -323,7 +334,7 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 // to specific directories (workDir, extraBinds, and system temp directories).
 // blockAWSCredentials controls whether ~/.aws is blocked.
 // Note: ~/.ssh private keys are ALWAYS blocked regardless of blockAWSCredentials.
-func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredentials bool) string {
+func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredentials bool, maskPaths []string) string {
 	var sb strings.Builder
 
 	sb.WriteString("(version 1)\n")
@@ -348,6 +359,14 @@ func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredential
 	if blockAWSCredentials {
 		awsDir := filepath.Join(homeDir, ".aws")
 		sb.WriteString(fmt.Sprintf("(deny file-read* (subpath \"%s\"))\n", awsDir))
+	}
+
+	// Mask broker sockets (e.g. the real Docker daemon socket): deny both file
+	// access and outbound connection so a sandboxed command can only reach the
+	// proxy, not the underlying socket directly.
+	for _, p := range maskPaths {
+		sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (literal \"%s\"))\n", p))
+		sb.WriteString(fmt.Sprintf("(deny network-outbound (literal \"%s\"))\n", p))
 	}
 
 	// Allow write access to workDir and its resolved path

@@ -67,6 +67,10 @@ type Sandbox struct {
 	// the worker can connect to it.
 	dockerHost      string
 	dockerSocketDir string
+	// dockerMaskPaths are real daemon socket paths to mask inside the OS sandbox
+	// worker (e.g. /var/run/docker.sock) so the proxy is the only reachable
+	// daemon and cannot be bypassed.
+	dockerMaskPaths []string
 	// runtimeReadPaths is the lazily computed result of detectRuntimeBinds for
 	// the current config; runtimeDetected marks it as valid. Detection spawns
 	// subprocesses (go, pnpm), so it is deferred until a caller actually needs
@@ -228,13 +232,36 @@ func (s *Sandbox) DockerHostConfigured() bool {
 
 // SetDockerHost sets the DOCKER_HOST value (the docker proxy socket) and the
 // directory holding that socket. The directory is bind-mounted into the OS
-// sandbox worker so sandboxed commands can reach the proxy. Passing an empty
-// host disables docker access for subsequent commands.
-func (s *Sandbox) SetDockerHost(host, socketDir string) {
+// sandbox worker so sandboxed commands can reach the proxy, and maskSockets are
+// the real daemon socket paths masked inside the worker so the proxy cannot be
+// bypassed (e.g. via `unset DOCKER_HOST`). Passing an empty host disables
+// docker access for subsequent commands.
+func (s *Sandbox) SetDockerHost(host, socketDir string, maskSockets ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dockerHost = host
 	s.dockerSocketDir = socketDir
+	s.dockerMaskPaths = dedupeMaskPaths(maskSockets)
+}
+
+// dedupeMaskPaths returns the non-empty, de-duplicated socket paths to mask,
+// always including the conventional /var/run/docker.sock so a sandboxed command
+// cannot reach the default socket even when a custom upstream is configured.
+func dedupeMaskPaths(sockets []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	for _, p := range sockets {
+		add(p)
+	}
+	add("/var/run/docker.sock")
+	return out
 }
 
 // RuntimeReadPaths returns the detected runtime paths that should be
@@ -1187,9 +1214,14 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	runtimeBinds := s.RuntimeReadPaths()
 
 	// Bind the docker proxy socket dir into the worker so sandboxed commands
-	// can reach the proxy via DOCKER_HOST.
+	// can reach the proxy via DOCKER_HOST, and mask the real daemon socket(s)
+	// so the proxy cannot be bypassed.
 	s.mu.RLock()
 	dockerSocketDir := s.dockerSocketDir
+	var dockerMaskPaths []string
+	if dockerSocketDir != "" {
+		dockerMaskPaths = append([]string(nil), s.dockerMaskPaths...)
+	}
 	s.mu.RUnlock()
 	if dockerSocketDir != "" {
 		runtimeBinds = append(runtimeBinds, dockerSocketDir)
@@ -1202,7 +1234,7 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", s.workerBlockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, runtimeBinds, s.workerBlockAWS)
+	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, runtimeBinds, s.workerBlockAWS, dockerMaskPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}

@@ -292,8 +292,9 @@ func runServe() error {
 		sandbox.SetIMDSEndpoint(imdsServer.Endpoint())
 	}
 
-	// Start docker proxy if docker is enabled.
-	if cfg != nil && cfg.Docker.DockerEnabled() {
+	// Start docker proxy if docker is enabled and usable (the docker command is
+	// only permitted under the OS sandbox, unless allow_unsandboxed is set).
+	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
 		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
 		if err != nil {
@@ -321,7 +322,7 @@ func runServe() error {
 			}
 		}()
 
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir())
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), cfg.Docker.UpstreamSocket())
 	}
 
 	go func() {

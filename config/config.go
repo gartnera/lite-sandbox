@@ -159,6 +159,12 @@ type DockerConfig struct {
 	Enabled         *bool  `yaml:"enabled,omitempty"`
 	SocketPath      string `yaml:"socket_path,omitempty"`      // upstream daemon socket, default /var/run/docker.sock
 	AllowPrivileged *bool  `yaml:"allow_privileged,omitempty"` // default false
+	// AllowUnsandboxed permits the docker command without the OS sandbox. By
+	// default docker requires os_sandbox, because only the OS sandbox can mask
+	// the real daemon socket and make the filtering proxy unbypassable — without
+	// it a command can simply `unset DOCKER_HOST` (or pass -H) and talk to the
+	// real socket directly. Setting this accepts that weaker, bypassable boundary.
+	AllowUnsandboxed *bool `yaml:"allow_unsandboxed,omitempty"`
 }
 
 // DefaultDockerSocket is the upstream Docker daemon socket used when SocketPath
@@ -189,6 +195,16 @@ func (d *DockerConfig) AllowsPrivileged() bool {
 		return false
 	}
 	return *d.AllowPrivileged
+}
+
+// AllowsUnsandboxed returns whether the docker command may run without the OS
+// sandbox (default: false). When false, docker requires os_sandbox so the real
+// daemon socket can be masked and the proxy cannot be bypassed.
+func (d *DockerConfig) AllowsUnsandboxed() bool {
+	if d == nil || d.AllowUnsandboxed == nil {
+		return false
+	}
+	return *d.AllowUnsandboxed
 }
 
 // LocalBinaryExecutionConfig controls whether direct path execution

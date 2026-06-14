@@ -546,19 +546,33 @@ func TestValidate_DockerRequiresProxy(t *testing.T) {
 	}
 
 	enabled := true
-	// Enabled in config but proxy not wired (DOCKER_HOST unset) → fail closed.
+	// Enabled but no OS sandbox and not allow_unsandboxed → rejected: only the
+	// OS sandbox can mask the real socket and make the proxy unbypassable.
 	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled}}, "")
-	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "docker proxy is not running") {
-		t.Fatalf("expected docker rejected when proxy not running, got: %v", err)
+	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "without the OS sandbox") {
+		t.Fatalf("expected OS-sandbox requirement, got: %v", err)
 	}
 
-	// Once the proxy endpoint is wired in, the command is allowed.
-	s.SetDockerHost("unix:///tmp/x/docker.sock", "/tmp/x")
+	// allow_unsandboxed lifts the OS-sandbox requirement, but the proxy must
+	// still be wired in (fail closed).
+	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled, AllowUnsandboxed: &enabled}}, "")
+	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "docker proxy is not running") {
+		t.Fatalf("expected proxy-not-running rejection, got: %v", err)
+	}
+
+	// With the proxy endpoint wired in, the command is allowed.
+	s.SetDockerHost("unix:///tmp/x/docker.sock", "/tmp/x", "/var/run/docker.sock")
 	if err := s.validate(f); err != nil {
 		t.Fatalf("expected docker allowed once proxy is running, got: %v", err)
 	}
 
-	// Disabled in config → rejected regardless of the proxy being up.
+	// The OS sandbox alone satisfies the requirement (no allow_unsandboxed needed).
+	s.UpdateConfig(&config.Config{OSSandbox: &enabled, Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	if err := s.validate(f); err != nil {
+		t.Fatalf("expected docker allowed under OS sandbox, got: %v", err)
+	}
+
+	// Disabled in config → rejected regardless of sandbox/proxy state.
 	s.UpdateConfig(&config.Config{}, "")
 	if err := s.validate(f); err == nil {
 		t.Fatal("expected docker blocked when docker is disabled")

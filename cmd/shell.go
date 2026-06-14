@@ -87,9 +87,10 @@ func runShell() error {
 	readPaths := append([]string{startDir}, sandbox.RuntimeReadPaths()...)
 	writePaths := []string{startDir}
 
-	// Start docker proxy if docker is enabled, validating bind mounts against
-	// the same path boundary the shell enforces.
-	if cfg != nil && cfg.Docker.DockerEnabled() {
+	// Start docker proxy if docker is enabled and usable, validating bind mounts
+	// against the same path boundary the shell enforces. The docker command is
+	// only permitted under the OS sandbox unless allow_unsandboxed is set.
+	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
@@ -116,7 +117,7 @@ func runShell() error {
 			}
 		}()
 
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir())
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), cfg.Docker.UpstreamSocket())
 		os.Setenv("DOCKER_HOST", dockerSrv.Endpoint())
 	}
 

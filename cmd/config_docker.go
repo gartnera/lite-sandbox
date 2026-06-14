@@ -37,6 +37,11 @@ var dockerShowCmd = &cobra.Command{
 		} else {
 			fmt.Println("  Privileged: blocked (--privileged, --cap-add, host namespaces rejected)")
 		}
+		if cfg.Docker.AllowsUnsandboxed() {
+			fmt.Println("  OS sandbox: NOT required (allow_unsandboxed; proxy is bypassable)")
+		} else {
+			fmt.Println("  OS sandbox: required (docker is blocked unless os_sandbox is enabled)")
+		}
 		return nil
 	},
 }
@@ -77,6 +82,45 @@ Use --socket to point at a non-default upstream Docker socket.`,
 		fmt.Println("Docker enabled via filtering proxy")
 		fmt.Printf("  Upstream socket: %s\n", cfg.Docker.UpstreamSocket())
 		fmt.Println("  Privileged containers are blocked (use 'config docker allow-privileged' to permit)")
+		if !cfg.Docker.AllowsUnsandboxed() {
+			fmt.Println("  Requires the OS sandbox (enable os_sandbox, or 'config docker allow-unsandboxed')")
+		}
+		return nil
+	},
+}
+
+var dockerAllowUnsandboxedCmd = &cobra.Command{
+	Use:   "allow-unsandboxed",
+	Short: "Allow docker without the OS sandbox (less secure; proxy becomes bypassable)",
+	Long: `Permit the docker command when the OS sandbox is disabled.
+
+By default docker requires os_sandbox, because only the OS sandbox can mask the
+real Docker socket and make the filtering proxy unbypassable. Without it, a
+sandboxed command can simply 'unset DOCKER_HOST' (or pass -H) and talk to the
+real /var/run/docker.sock directly, defeating the proxy's privileged and
+bind-mount policy.
+
+Setting this accepts that weaker, bypassable boundary. Prefer enabling
+os_sandbox instead.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		if cfg.Docker == nil {
+			cfg.Docker = &config.DockerConfig{}
+		}
+		t := true
+		cfg.Docker.Enabled = &t
+		cfg.Docker.AllowUnsandboxed = &t
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("Docker allowed without the OS sandbox")
+		fmt.Println("  Warning: the filtering proxy is bypassable without os_sandbox")
 		return nil
 	},
 }
@@ -139,6 +183,7 @@ func init() {
 	dockerCmd.AddCommand(dockerShowCmd)
 	dockerCmd.AddCommand(dockerEnableCmd)
 	dockerCmd.AddCommand(dockerAllowPrivilegedCmd)
+	dockerCmd.AddCommand(dockerAllowUnsandboxedCmd)
 	dockerCmd.AddCommand(dockerDisableCmd)
 	configCmd.AddCommand(dockerCmd)
 }
