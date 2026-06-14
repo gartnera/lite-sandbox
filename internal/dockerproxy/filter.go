@@ -83,6 +83,16 @@ var allowRules = []allowRule{
 	rule("POST", `/images/load`),
 	rule("POST", `/build`),
 	rule("POST", `/build/prune`),
+
+	// BuildKit (the default `docker build` backend) tunnels its control protocol
+	// over these hijacked endpoints: /session carries the gRPC session (build
+	// context FileSync, secrets, auth) and /grpc is the buildx "docker" driver's
+	// controller. They are opaque bidirectional streams, so unlike /containers/create
+	// their contents cannot be body-inspected; build-time mounts synced over the
+	// session are therefore not subject to the bind-path policy (they can only
+	// ingest files the sandboxed client itself can already read).
+	rule("POST", `/session`),
+	rule("POST", `/grpc`),
 	rule("DELETE", `/images/[^/]+`),
 	rule("POST", `/images/prune`),
 

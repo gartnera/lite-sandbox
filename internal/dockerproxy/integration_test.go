@@ -128,6 +128,36 @@ func TestIntegration_RunPrivilegedRejected(t *testing.T) {
 	}
 }
 
+func TestIntegration_BuildWorks(t *testing.T) {
+	requireDockerIntegration(t)
+	workDir := t.TempDir()
+	dockerfile := "FROM " + integrationImage + "\nRUN echo lite-sandbox-built > /built.txt\n"
+	if err := os.WriteFile(filepath.Join(workDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	host := startProxyForCLI(t, workDir, false)
+
+	const tag = "lite-sandbox-build-test:latest"
+	t.Cleanup(func() {
+		rm := exec.Command("docker", "image", "rm", "-f", tag)
+		rm.Env = append(os.Environ(), "DOCKER_HOST="+host)
+		rm.Run()
+	})
+
+	// Build with the default (BuildKit) builder, exercising the hijacked
+	// /session + /grpc endpoints through the proxy.
+	out, err := dockerCLI(t, host, "build", "-t", tag, workDir)
+	if err != nil {
+		t.Fatalf("docker build failed: %v\n%s", err, out)
+	}
+
+	// Confirm the image was actually produced and is queryable through the proxy
+	// (GET /images/{name}/json), rather than parsing builder-specific output.
+	if insp, err := dockerCLI(t, host, "image", "inspect", tag); err != nil {
+		t.Fatalf("built image not found via proxy: %v\n%s", err, insp)
+	}
+}
+
 func TestIntegration_DeniedEndpoint(t *testing.T) {
 	requireDockerIntegration(t)
 	host := startProxyForCLI(t, t.TempDir(), false)

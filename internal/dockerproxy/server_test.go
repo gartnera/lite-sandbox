@@ -372,6 +372,8 @@ func TestIsAllowed(t *testing.T) {
 		{"GET", "/v1.43/containers/json"},
 		{"HEAD", "/_ping"},
 		{"POST", "/v1.43/build"},
+		{"POST", "/session"},
+		{"POST", "/v1.43/grpc"},
 	}
 	for _, a := range allowed {
 		if !isAllowed(a[0], a[1]) {
