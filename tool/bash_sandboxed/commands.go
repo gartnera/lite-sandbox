@@ -96,8 +96,8 @@ var allowedCommands = map[string]bool{
 	"iconv":   true,
 
 	// JSON/structured data and text processing (stdin/stdout processors)
-	"jq":  true,
-	"yq":  true,
+	"jq": true,
+	"yq": true,
 	// awk is executed via goawk with system() and file-writes disabled.
 	"awk":    true,
 	"base64": true,
@@ -176,6 +176,9 @@ var allowedCommands = map[string]bool{
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
 
+	// Container tooling (config-gated, daemon access via filtering proxy)
+	"docker": true,
+
 	// Scoped write commands (path-validated to stay within allowedPaths)
 	"cp":    true,
 	"mv":    true,
@@ -248,22 +251,23 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"sh":     validateBashCommand,
 	"source": validateSourceCommand,
 	".":      validateSourceCommand,
-	"rg":    validateRgArgs,
-	"find":  validateFindArgs,
-	"tar":   validateTarArgs,
-	"unzip": validateUnzipArgs,
-	"ar":    validateArArgs,
-	"rm":    validateRmArgs,
-	"sed":   validateSedArgs,
-	"git":   validateGitCommand,
-	"go":    validateGoCommand,
-	"gofmt": validateGofmtCommand,
-	"pnpm":  validatePnpmCommand,
-	"cargo": validateCargoCommand,
-	"rustc": validateRustcCommand,
-	"deno":  validateDenoCommand,
-	"aws":   validateAWSCommand,
-	"xargs": validateXargsArgs,
+	"rg":     validateRgArgs,
+	"find":   validateFindArgs,
+	"tar":    validateTarArgs,
+	"unzip":  validateUnzipArgs,
+	"ar":     validateArArgs,
+	"rm":     validateRmArgs,
+	"sed":    validateSedArgs,
+	"git":    validateGitCommand,
+	"go":     validateGoCommand,
+	"gofmt":  validateGofmtCommand,
+	"pnpm":   validatePnpmCommand,
+	"cargo":  validateCargoCommand,
+	"rustc":  validateRustcCommand,
+	"deno":   validateDenoCommand,
+	"aws":    validateAWSCommand,
+	"docker": validateDockerCommand,
+	"xargs":  validateXargsArgs,
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
@@ -337,5 +341,31 @@ func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	// AWS CLI credentials will come from IMDS endpoint, not files
 	// No additional argument validation needed - all aws subcommands allowed
+	return nil
+}
+
+func validateDockerCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Docker == nil || !cfg.Docker.DockerEnabled() {
+		return fmt.Errorf("command \"docker\" is not allowed (docker.enabled is disabled)")
+	}
+	// Require the OS sandbox: only it can mask the real daemon socket so the
+	// proxy is unbypassable. Without it a command can just `unset DOCKER_HOST`
+	// (or pass -H) and talk to /var/run/docker.sock directly. allow_unsandboxed
+	// opts into that weaker, bypassable boundary explicitly.
+	if !s.osSandboxEnabled() && !cfg.Docker.AllowsUnsandboxed() {
+		return fmt.Errorf("command \"docker\" is not allowed without the OS sandbox (enable os_sandbox, or set docker.allow_unsandboxed to accept a bypassable boundary)")
+	}
+	// Fail closed: only allow docker when the filtering proxy is actually wired
+	// in (DOCKER_HOST will be injected). Without this, a command run before the
+	// proxy is started — e.g. docker enabled via a live config reload, which
+	// does not start the proxy — would fall back to the real /var/run/docker.sock
+	// and bypass the privileged/bind-mount policy entirely.
+	if !s.DockerHostConfigured() {
+		return fmt.Errorf("command \"docker\" is not allowed (docker proxy is not running; restart required after enabling docker)")
+	}
+	// The docker CLI talks to the filtering proxy via DOCKER_HOST; the proxy
+	// enforces the privileged and bind-mount policy on the wire, so no
+	// argument-level validation is needed here.
 	return nil
 }

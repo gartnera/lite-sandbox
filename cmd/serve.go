@@ -16,6 +16,7 @@ import (
 	"mvdan.cc/sh/v3/interp"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	"github.com/gartnera/lite-sandbox/internal/imds"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -226,6 +227,20 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 	return readPaths, writePaths
 }
 
+// dockerSocketBaseDir returns the base directory for the docker proxy socket.
+// XDG_RUNTIME_DIR is the standard per-user runtime socket location (user-owned
+// 0700, tmpfs on Linux, auto-cleaned on logout); its short path also keeps the
+// socket well under macOS's ~104-byte sun_path limit. Falls back to the system
+// temp dir when it is unset or missing (e.g. on macOS).
+func dockerSocketBaseDir() string {
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			return d
+		}
+	}
+	return os.TempDir()
+}
+
 func runServe() error {
 	slog.Info("starting MCP server")
 
@@ -275,6 +290,42 @@ func runServe() error {
 
 		// Set IMDS endpoint in sandbox
 		sandbox.SetIMDSEndpoint(imdsServer.Endpoint())
+	}
+
+	// Start docker proxy if docker is enabled and usable (the docker command is
+	// only permitted under the OS sandbox, unless allow_unsandboxed is set).
+	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
+		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		// Resolve the upstream socket once and reuse it for both the proxy and
+		// the OS-sandbox mask so they can't disagree.
+		upstream := cfg.Docker.UpstreamSocket()
+		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
+		if err != nil {
+			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
+		}
+		defer os.RemoveAll(socketDir)
+
+		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
+			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged())
+		if err != nil {
+			return fmt.Errorf("failed to create docker proxy: %w", err)
+		}
+
+		go func() {
+			slog.Info("docker proxy endpoint", "host", dockerSrv.Endpoint())
+			if err := dockerSrv.Start(); err != nil && err != http.ErrServerClosed {
+				slog.Error("docker proxy failed", "error", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := dockerSrv.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown docker proxy", "error", err)
+			}
+		}()
+
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
 	}
 
 	go func() {

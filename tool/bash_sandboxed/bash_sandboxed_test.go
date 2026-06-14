@@ -538,13 +538,54 @@ func TestValidate_ExtraCommands(t *testing.T) {
 	}
 }
 
+func TestValidate_DockerRequiresProxy(t *testing.T) {
+	s := NewSandbox()
+	f, err := ParseBash("docker ps")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	enabled := true
+	// Enabled but no OS sandbox and not allow_unsandboxed → rejected: only the
+	// OS sandbox can mask the real socket and make the proxy unbypassable.
+	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "without the OS sandbox") {
+		t.Fatalf("expected OS-sandbox requirement, got: %v", err)
+	}
+
+	// allow_unsandboxed lifts the OS-sandbox requirement, but the proxy must
+	// still be wired in (fail closed).
+	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled, AllowUnsandboxed: &enabled}}, "")
+	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "docker proxy is not running") {
+		t.Fatalf("expected proxy-not-running rejection, got: %v", err)
+	}
+
+	// With the proxy endpoint wired in, the command is allowed.
+	s.SetDockerHost("unix:///tmp/x/docker.sock", "/tmp/x", "/var/run/docker.sock")
+	if err := s.validate(f); err != nil {
+		t.Fatalf("expected docker allowed once proxy is running, got: %v", err)
+	}
+
+	// The OS sandbox alone satisfies the requirement (no allow_unsandboxed needed).
+	s.UpdateConfig(&config.Config{OSSandbox: &enabled, Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	if err := s.validate(f); err != nil {
+		t.Fatalf("expected docker allowed under OS sandbox, got: %v", err)
+	}
+
+	// Disabled in config → rejected regardless of sandbox/proxy state.
+	s.UpdateConfig(&config.Config{}, "")
+	if err := s.validate(f); err == nil {
+		t.Fatal("expected docker blocked when docker is disabled")
+	}
+}
+
 func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 	tests := []struct {
-		name        string
-		extraCmds   []string
-		command     string
-		wantErr     bool
-		errSubstr   string
+		name      string
+		extraCmds []string
+		command   string
+		wantErr   bool
+		errSubstr string
 	}{
 		{
 			name:      "pnpx allowed when exact entry matches",

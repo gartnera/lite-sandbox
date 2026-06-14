@@ -2,10 +2,14 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
@@ -150,6 +154,149 @@ func (a *AWSConfig) IMDSProfile() string {
 	return a.ForceProfile
 }
 
+// DockerConfig controls access to the Docker daemon. When enabled, a local
+// filtering proxy is started in front of the real Docker socket and the
+// sandboxed `docker` CLI talks to it via DOCKER_HOST. The proxy rejects
+// privileged containers and bind mounts whose host source falls outside the
+// sandbox's readable/writable path boundary.
+type DockerConfig struct {
+	Enabled         *bool  `yaml:"enabled,omitempty"`
+	SocketPath      string `yaml:"socket_path,omitempty"`      // upstream daemon socket, default /var/run/docker.sock
+	AllowPrivileged *bool  `yaml:"allow_privileged,omitempty"` // default false
+	// AllowUnsandboxed permits the docker command without the OS sandbox. By
+	// default docker requires os_sandbox, because only the OS sandbox can mask
+	// the real daemon socket and make the filtering proxy unbypassable — without
+	// it a command can simply `unset DOCKER_HOST` (or pass -H) and talk to the
+	// real socket directly. Setting this accepts that weaker, bypassable boundary.
+	AllowUnsandboxed *bool `yaml:"allow_unsandboxed,omitempty"`
+}
+
+// DefaultDockerSocket is the upstream Docker daemon socket used when SocketPath
+// is not configured.
+const DefaultDockerSocket = "/var/run/docker.sock"
+
+// DockerEnabled returns whether docker commands are allowed (default: false).
+func (d *DockerConfig) DockerEnabled() bool {
+	if d == nil || d.Enabled == nil {
+		return false
+	}
+	return *d.Enabled
+}
+
+// UpstreamSocket returns the upstream Docker daemon socket path the proxy
+// forwards to. An explicit socket_path wins; otherwise it is autodetected the
+// way the docker CLI resolves the daemon (DOCKER_HOST, active context, then
+// well-known locations), falling back to /var/run/docker.sock.
+func (d *DockerConfig) UpstreamSocket() string {
+	if d != nil && d.SocketPath != "" {
+		return d.SocketPath
+	}
+	return DetectDockerSocket()
+}
+
+// DetectDockerSocket resolves the host's Docker daemon unix socket the way the
+// docker CLI would: the DOCKER_HOST env var, then the active docker context's
+// endpoint, then well-known per-tool locations (Docker Desktop, OrbStack,
+// Colima), falling back to /var/run/docker.sock. Only unix sockets are
+// supported (the proxy dials a unix socket); a tcp:// DOCKER_HOST is ignored.
+func DetectDockerSocket() string {
+	if p := socketFromDockerHost(os.Getenv("DOCKER_HOST")); p != "" {
+		return p
+	}
+	if p := socketFromDockerContext(); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		for _, c := range []string{
+			filepath.Join(home, ".docker", "run", "docker.sock"),     // Docker Desktop (macOS)
+			filepath.Join(home, ".orbstack", "run", "docker.sock"),   // OrbStack
+			filepath.Join(home, ".colima", "default", "docker.sock"), // Colima
+		} {
+			if isUnixSocket(c) {
+				return c
+			}
+		}
+	}
+	return DefaultDockerSocket
+}
+
+// socketFromDockerHost extracts the filesystem path from a unix:// DOCKER_HOST
+// value, returning "" for empty, tcp://, or other non-unix endpoints.
+func socketFromDockerHost(host string) string {
+	if strings.HasPrefix(host, "unix://") {
+		return strings.TrimPrefix(host, "unix://")
+	}
+	return ""
+}
+
+// socketFromDockerContext resolves the active docker context's unix endpoint by
+// reading ~/.docker (the current context name, then its meta.json, whose
+// directory is named with the sha256 hex digest of the context name).
+func socketFromDockerContext() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	name := os.Getenv("DOCKER_CONTEXT")
+	if name == "" {
+		if data, err := os.ReadFile(filepath.Join(home, ".docker", "config.json")); err == nil {
+			var cfg struct {
+				CurrentContext string `json:"currentContext"`
+			}
+			_ = json.Unmarshal(data, &cfg)
+			name = cfg.CurrentContext
+		}
+	}
+	if name == "" || name == "default" {
+		return ""
+	}
+
+	digest := sha256.Sum256([]byte(name))
+	metaPath := filepath.Join(home, ".docker", "contexts", "meta", hex.EncodeToString(digest[:]), "meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Endpoints struct {
+			Docker struct {
+				Host string `json:"Host"`
+			} `json:"docker"`
+		} `json:"Endpoints"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return socketFromDockerHost(meta.Endpoints.Docker.Host)
+}
+
+// isUnixSocket reports whether path exists and is a unix socket.
+func isUnixSocket(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
+}
+
+// AllowsPrivileged returns whether privileged containers (and equivalent
+// escalation vectors) are permitted through the proxy (default: false).
+func (d *DockerConfig) AllowsPrivileged() bool {
+	if d == nil || d.AllowPrivileged == nil {
+		return false
+	}
+	return *d.AllowPrivileged
+}
+
+// AllowsUnsandboxed returns whether the docker command may run without the OS
+// sandbox (default: false). When false, docker requires os_sandbox so the real
+// daemon socket can be masked and the proxy cannot be bypassed.
+func (d *DockerConfig) AllowsUnsandboxed() bool {
+	if d == nil || d.AllowUnsandboxed == nil {
+		return false
+	}
+	return *d.AllowUnsandboxed
+}
+
 // LocalBinaryExecutionConfig controls whether direct path execution
 // (./binary, ../binary, /path/to/binary) is allowed.
 type LocalBinaryExecutionConfig struct {
@@ -267,12 +414,13 @@ type RuntimesConfig struct {
 // Config holds all user configuration. New fields can be added over time;
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
-	ExtraCommands []string        `yaml:"extra_commands,omitempty"`
-	ReadablePaths []string        `yaml:"readable_paths,omitempty"`
-	WritablePaths []string        `yaml:"writable_paths,omitempty"`
-	Git           *GitConfig      `yaml:"git,omitempty"`
-	Runtimes      *RuntimesConfig `yaml:"runtimes,omitempty"`
+	ExtraCommands        []string                    `yaml:"extra_commands,omitempty"`
+	ReadablePaths        []string                    `yaml:"readable_paths,omitempty"`
+	WritablePaths        []string                    `yaml:"writable_paths,omitempty"`
+	Git                  *GitConfig                  `yaml:"git,omitempty"`
+	Runtimes             *RuntimesConfig             `yaml:"runtimes,omitempty"`
 	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
+	Docker               *DockerConfig               `yaml:"docker,omitempty"`
 	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
 }
