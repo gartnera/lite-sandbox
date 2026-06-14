@@ -28,12 +28,13 @@ func shortSocketDir(t *testing.T) string {
 	return dir
 }
 
-// fakeDaemon is a minimal upstream Docker daemon that records the last request
-// path and replies 200.
+// fakeDaemon is a minimal upstream Docker daemon that records each request's
+// method+path and body (as the daemon would receive it) and replies 200.
 type fakeDaemon struct {
-	socket   string
-	server   *http.Server
-	gotPaths []string
+	socket    string
+	server    *http.Server
+	gotPaths  []string
+	gotBodies []string
 }
 
 func startFakeDaemon(t *testing.T) *fakeDaemon {
@@ -45,7 +46,9 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 	}
 	fd := &fakeDaemon{socket: socket}
 	fd.server = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		fd.gotPaths = append(fd.gotPaths, r.Method+" "+r.URL.Path)
+		fd.gotBodies = append(fd.gotBodies, string(body))
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, `{"ok":true}`)
 	})}
@@ -299,6 +302,30 @@ func TestValidateVolumeCreateBody(t *testing.T) {
 	// ordinary named volume (no device) is allowed.
 	if err := validateVolumeCreateBody([]byte(`{"Name":"data"}`), writeDir, read, write); err != nil {
 		t.Fatalf("expected plain named volume allowed, got: %v", err)
+	}
+}
+
+// TestProxy_UnknownFieldsPassThrough guards the invariant that body inspection
+// validates a parsed copy but forwards the original bytes verbatim, so fields
+// the proxy does not model (new API fields, labels, etc.) reach the daemon
+// unchanged. If a future change ever re-serializes the body, unknown fields
+// would be silently dropped and this test fails.
+func TestProxy_UnknownFieldsPassThrough(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	// Known-good HostConfig (in-boundary bind) plus fields the proxy structs omit.
+	body := `{"Image":"alpine","Labels":{"k":"v"},"HostConfig":{"Binds":["` + dir + `:/w"]},"FutureField":{"nested":[1,2,3]}}`
+	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusOK {
+		t.Fatalf("expected forwarded 200, got %d", status)
+	}
+	if len(fd.gotBodies) != 1 {
+		t.Fatalf("expected exactly one forwarded body, got %d", len(fd.gotBodies))
+	}
+	if fd.gotBodies[0] != body {
+		t.Fatalf("body was altered in transit:\n sent: %s\n recv: %s", body, fd.gotBodies[0])
 	}
 }
 
