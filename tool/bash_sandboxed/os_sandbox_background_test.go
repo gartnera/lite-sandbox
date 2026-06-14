@@ -25,6 +25,7 @@ func newOSSandboxForTest(t *testing.T, workDir string) *Sandbox {
 // TestOSSandboxBackgroundExecuteAndOutput runs a background command through the
 // real OS sandbox worker and reads its output and exit code back.
 func TestOSSandboxBackgroundExecuteAndOutput(t *testing.T) {
+	requireOSSandbox(t)
 	tmpDir := t.TempDir()
 	s := newOSSandboxForTest(t, tmpDir)
 
@@ -61,6 +62,7 @@ func TestOSSandboxBackgroundExecuteAndOutput(t *testing.T) {
 // (HostMsgCancel), and output stops flowing afterward. The loop spawns `sleep`
 // in the sandbox each iteration, so the worker's kill path is exercised.
 func TestOSSandboxBackgroundKill(t *testing.T) {
+	requireOSSandbox(t)
 	tmpDir := t.TempDir()
 	s := newOSSandboxForTest(t, tmpDir)
 

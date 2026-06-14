@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -153,9 +152,7 @@ func TestWorkerExecCancelGraceful(t *testing.T) {
 // TestWorkerExecCancelReapsForkedChild verifies that cancelling a worker command
 // tears down its whole process group, including a child it forked.
 func TestWorkerExecCancelReapsForkedChild(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("worker process-group reaping is linux-only (macOS sandbox signal confinement)")
-	}
+	requireLinux(t)
 	w := startBareWorker(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -177,9 +174,7 @@ func TestWorkerExecCancelReapsForkedChild(t *testing.T) {
 // TestProcRegistryKillReapsGroup unit-tests the registry's graceful group kill
 // directly, without the worker binary (only needs bash).
 func TestProcRegistryKillReapsGroup(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process-group reaping is linux-only here")
-	}
+	requireLinux(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	cmd := exec.Command("bash", "-c", "sleep 300 & echo $! > "+pidFile+"; wait")

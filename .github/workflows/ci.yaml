@@ -24,6 +24,8 @@ jobs:
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
+        env:
+          OS_SANDBOX_TESTS: "1"
 
   test-macos:
     runs-on: macos-latest
@@ -36,3 +38,5 @@ jobs:
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
+        env:
+          OS_SANDBOX_TESTS: "1"
