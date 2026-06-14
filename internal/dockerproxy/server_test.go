@@ -241,7 +241,16 @@ func TestValidateCreateBody(t *testing.T) {
 		{"device", `{"HostConfig":{"Devices":[{"PathOnHost":"/dev/sda"}]}}`, "devices"},
 		{"host pid", `{"HostConfig":{"PidMode":"host"}}`, "PID namespace"},
 		{"host network", `{"HostConfig":{"NetworkMode":"host"}}`, "network namespace"},
+		{"container pid namespace", `{"HostConfig":{"PidMode":"container:abc123"}}`, "PID namespace"},
+		{"container network namespace", `{"HostConfig":{"NetworkMode":"container:abc123"}}`, "network namespace"},
 		{"seccomp unconfined", `{"HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}`, "security-opt"},
+		{"device requests", `{"HostConfig":{"DeviceRequests":[{"Count":-1}]}}`, "host devices"},
+		{"device cgroup rules", `{"HostConfig":{"DeviceCgroupRules":["a *:* rwm"]}}`, "device cgroup"},
+		{"ambiguous bind colon in source", `{"HostConfig":{"Binds":["/host:dir:/container"]}}`, "ambiguous"},
+		{"ambiguous bind four fields", `{"HostConfig":{"Binds":["/a:/b:/c:ro"]}}`, "ambiguous"},
+		{"volume driver bind inside boundary", fmt.Sprintf(`{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"%s/d"}}}}]}}`, writeDir), ""},
+		{"volume driver bind outside boundary", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`, "outside the sandbox boundary"},
+		{"volume driver nfs device allowed", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"nfs","device":":/exports/data","o":"addr=10.0.0.1"}}}}]}}`, ""},
 	}
 
 	for _, tc := range tests {
@@ -257,6 +266,99 @@ func TestValidateCreateBody(t *testing.T) {
 				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestValidateExecBody(t *testing.T) {
+	if err := validateExecBody([]byte(`{"Privileged":true}`), false); err == nil || !strings.Contains(err.Error(), "privileged exec") {
+		t.Fatalf("expected privileged exec rejection, got: %v", err)
+	}
+	if err := validateExecBody([]byte(`{"Privileged":false}`), false); err != nil {
+		t.Fatalf("expected non-privileged exec allowed, got: %v", err)
+	}
+	if err := validateExecBody([]byte(`{"Privileged":true}`), true); err != nil {
+		t.Fatalf("expected privileged exec allowed when configured, got: %v", err)
+	}
+}
+
+func TestValidateVolumeCreateBody(t *testing.T) {
+	writeDir := "/srv/write"
+	read := []string{writeDir}
+	write := []string{writeDir}
+
+	// local driver binding a host path outside the boundary must be rejected.
+	out := `{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/etc"}}`
+	if err := validateVolumeCreateBody([]byte(out), writeDir, read, write); err == nil || !strings.Contains(err.Error(), "outside the sandbox boundary") {
+		t.Fatalf("expected out-of-boundary volume device rejected, got: %v", err)
+	}
+	// inside the boundary is allowed.
+	in := fmt.Sprintf(`{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"%s/d"}}`, writeDir)
+	if err := validateVolumeCreateBody([]byte(in), writeDir, read, write); err != nil {
+		t.Fatalf("expected in-boundary volume device allowed, got: %v", err)
+	}
+	// ordinary named volume (no device) is allowed.
+	if err := validateVolumeCreateBody([]byte(`{"Name":"data"}`), writeDir, read, write); err != nil {
+		t.Fatalf("expected plain named volume allowed, got: %v", err)
+	}
+}
+
+func TestProxy_ExecPrivilegedRejected(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	status, msg := do(t, client, "POST", "/v1.43/containers/abc123/exec", `{"Privileged":true,"Cmd":["sh"]}`)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (%s)", status, msg)
+	}
+	if len(fd.gotPaths) != 0 {
+		t.Fatalf("rejected exec should not reach upstream: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_VolumeDriverBindOutsideRejected(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	body := `{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/etc"}}`
+	status, msg := do(t, client, "POST", "/v1.43/volumes/create", body)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (%s)", status, msg)
+	}
+	if len(fd.gotPaths) != 0 {
+		t.Fatalf("rejected volume create should not reach upstream: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_BuildHostNetworkRejected(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	status, msg := do(t, client, "POST", "/v1.43/build?networkmode=host", "")
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (%s)", status, msg)
+	}
+	if !strings.Contains(msg, "network namespace mode") {
+		t.Fatalf("unexpected message: %s", msg)
+	}
+	if len(fd.gotPaths) != 0 {
+		t.Fatalf("rejected build should not reach upstream: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_BuildDefaultNetworkForwarded(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	status, _ := do(t, client, "POST", "/v1.43/build", "")
+	if status != http.StatusOK {
+		t.Fatalf("expected build to be forwarded, got %d", status)
+	}
+	if len(fd.gotPaths) != 1 {
+		t.Fatalf("build should reach upstream once: %v", fd.gotPaths)
 	}
 }
 

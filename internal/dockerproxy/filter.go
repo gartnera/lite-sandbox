@@ -114,10 +114,37 @@ func isAllowed(method, path string) bool {
 	return false
 }
 
+// The following matchers identify endpoints whose request must receive extra
+// scrutiny beyond the allowlist (body inspection or query checks). Keeping them
+// as POST + anchored-pattern pairs mirrors the allowlist so the "is this
+// allowed" and "how is it validated" decisions stay in lockstep.
+var (
+	containerCreatePattern = regexp.MustCompile(versionPrefix + `/containers/create$`)
+	execCreatePattern      = regexp.MustCompile(versionPrefix + `/containers/[^/]+/exec$`)
+	volumeCreatePattern    = regexp.MustCompile(versionPrefix + `/volumes/create$`)
+	buildPattern           = regexp.MustCompile(versionPrefix + `/build$`)
+)
+
 // isContainerCreate reports whether the request targets the container-create
 // endpoint, which must be body-inspected for privileged/bind-mount policy.
-var containerCreatePattern = regexp.MustCompile(versionPrefix + `/containers/create$`)
-
 func isContainerCreate(method, path string) bool {
 	return method == "POST" && containerCreatePattern.MatchString(path)
+}
+
+// isExecCreate reports whether the request creates an exec instance, whose body
+// must be inspected for the Privileged flag.
+func isExecCreate(method, path string) bool {
+	return method == "POST" && execCreatePattern.MatchString(path)
+}
+
+// isVolumeCreate reports whether the request creates a volume, whose body must
+// be inspected for a local-driver host bind ("device" option).
+func isVolumeCreate(method, path string) bool {
+	return method == "POST" && volumeCreatePattern.MatchString(path)
+}
+
+// isBuild reports whether the request is an image build, whose namespace mode
+// arrives as a query parameter rather than a JSON body.
+func isBuild(method, path string) bool {
+	return method == "POST" && buildPattern.MatchString(path)
 }

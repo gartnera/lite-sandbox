@@ -349,6 +349,14 @@ func validateDockerCommand(s *Sandbox, args []*syntax.Word) error {
 	if cfg.Docker == nil || !cfg.Docker.DockerEnabled() {
 		return fmt.Errorf("command \"docker\" is not allowed (docker.enabled is disabled)")
 	}
+	// Fail closed: only allow docker when the filtering proxy is actually wired
+	// in (DOCKER_HOST will be injected). Without this, a command run before the
+	// proxy is started — e.g. docker enabled via a live config reload, which
+	// does not start the proxy — would fall back to the real /var/run/docker.sock
+	// and bypass the privileged/bind-mount policy entirely.
+	if !s.DockerHostConfigured() {
+		return fmt.Errorf("command \"docker\" is not allowed (docker proxy is not running; restart required after enabling docker)")
+	}
 	// The docker CLI talks to the filtering proxy via DOCKER_HOST; the proxy
 	// enforces the privileged and bind-mount policy on the wire, so no
 	// argument-level validation is needed here.

@@ -128,10 +128,23 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isContainerCreate(r.Method, r.URL.Path) {
-		if err := s.inspectCreate(r); err != nil {
-			slog.Warn("docker proxy rejected container create", "error", err)
+	// Body-inspected endpoints (create container, exec, create volume) share one
+	// read-and-restore path; the matched validator enforces the policy.
+	if validate := s.bodyInspector(r.Method, r.URL.Path); validate != nil {
+		if err := s.inspectBody(r, validate); err != nil {
+			slog.Warn("docker proxy rejected request", "method", r.Method, "path", r.URL.Path, "error", err)
 			writeDockerError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	// Build requests carry their namespace mode as a query parameter rather than
+	// a JSON body, so check it here (mirrors the container-create namespace rule).
+	if isBuild(r.Method, r.URL.Path) && !s.allowPrivileged {
+		if mode := r.URL.Query().Get("networkmode"); isDisallowedNamespace(mode) {
+			slog.Warn("docker proxy rejected build", "networkmode", mode)
+			writeDockerError(w, http.StatusForbidden,
+				fmt.Sprintf("build with network namespace mode %q is not allowed in the sandbox", mode))
 			return
 		}
 	}
@@ -139,18 +152,36 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.proxy.ServeHTTP(w, r)
 }
 
-// inspectCreate reads, validates, and restores the container-create body so it
-// can be forwarded unchanged once it passes policy.
-func (s *Server) inspectCreate(r *http.Request) error {
+// bodyInspector returns the validator for endpoints whose request body must be
+// inspected, or nil when the endpoint needs no body inspection.
+func (s *Server) bodyInspector(method, path string) func([]byte) error {
+	switch {
+	case isContainerCreate(method, path):
+		return func(b []byte) error {
+			return validateCreateBody(b, s.workDir, s.readPaths, s.writePaths, s.allowPrivileged)
+		}
+	case isExecCreate(method, path):
+		return func(b []byte) error { return validateExecBody(b, s.allowPrivileged) }
+	case isVolumeCreate(method, path):
+		return func(b []byte) error {
+			return validateVolumeCreateBody(b, s.workDir, s.readPaths, s.writePaths)
+		}
+	}
+	return nil
+}
+
+// inspectBody reads, validates, and restores the request body so it can be
+// forwarded unchanged once it passes policy.
+func (s *Server) inspectBody(r *http.Request, validate func([]byte) error) error {
 	body, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		return fmt.Errorf("failed to read container create request: %v", err)
+		return fmt.Errorf("failed to read request body: %v", err)
 	}
 	// Restore the body for the downstream proxy regardless of the outcome.
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
-	return validateCreateBody(body, s.workDir, s.readPaths, s.writePaths, s.allowPrivileged)
+	return validate(body)
 }
 
 // writeDockerError emits an error in the shape the Docker CLI expects so it is

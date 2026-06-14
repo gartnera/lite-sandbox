@@ -538,13 +538,40 @@ func TestValidate_ExtraCommands(t *testing.T) {
 	}
 }
 
+func TestValidate_DockerRequiresProxy(t *testing.T) {
+	s := NewSandbox()
+	f, err := ParseBash("docker ps")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	enabled := true
+	// Enabled in config but proxy not wired (DOCKER_HOST unset) → fail closed.
+	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "docker proxy is not running") {
+		t.Fatalf("expected docker rejected when proxy not running, got: %v", err)
+	}
+
+	// Once the proxy endpoint is wired in, the command is allowed.
+	s.SetDockerHost("unix:///tmp/x/docker.sock", "/tmp/x")
+	if err := s.validate(f); err != nil {
+		t.Fatalf("expected docker allowed once proxy is running, got: %v", err)
+	}
+
+	// Disabled in config → rejected regardless of the proxy being up.
+	s.UpdateConfig(&config.Config{}, "")
+	if err := s.validate(f); err == nil {
+		t.Fatal("expected docker blocked when docker is disabled")
+	}
+}
+
 func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 	tests := []struct {
-		name        string
-		extraCmds   []string
-		command     string
-		wantErr     bool
-		errSubstr   string
+		name      string
+		extraCmds []string
+		command   string
+		wantErr   bool
+		errSubstr string
 	}{
 		{
 			name:      "pnpx allowed when exact entry matches",

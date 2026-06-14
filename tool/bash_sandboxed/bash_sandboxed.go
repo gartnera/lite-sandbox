@@ -215,6 +215,17 @@ func (s *Sandbox) SetIMDSEndpoint(endpoint string) {
 	s.imdsEndpoint = endpoint
 }
 
+// DockerHostConfigured reports whether a docker proxy endpoint has been wired
+// in via SetDockerHost. Command gating uses this so the "docker" command is
+// only allowed when the filtering proxy is actually running and DOCKER_HOST
+// will be injected — otherwise a command would fall back to the real daemon
+// socket, bypassing the proxy.
+func (s *Sandbox) DockerHostConfigured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dockerHost != ""
+}
+
 // SetDockerHost sets the DOCKER_HOST value (the docker proxy socket) and the
 // directory holding that socket. The directory is bind-mounted into the OS
 // sandbox worker so sandboxed commands can reach the proxy. Passing an empty
