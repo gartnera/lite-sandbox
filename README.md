@@ -115,6 +115,19 @@ Background commands pass through the same AST validation, path confinement, and
 OS sandbox as foreground commands. They are terminated when the server shuts
 down.
 
+**Stopping background processes.** `kill_shell` (and shutdown) tears down the
+whole process group, so children the command forked — dev servers, daemons,
+`something &` — are reaped, not just the direct process:
+
+- Bare `extra_commands` background commands (where forking servers typically
+  run) lead their own process group on the host and are killed as a group.
+- Under the OS sandbox, the worker kills each command's process group on Linux;
+  on macOS the sandbox's signal confinement limits this to the direct process,
+  with the worker's own process group reaped on shutdown.
+- For validated commands run through the interpreter (not the OS sandbox), kill
+  signals the direct process; deeply forked grandchildren of those are reaped on
+  shutdown.
+
 ## Configuration
 
 Extra commands can be allowed via a config file at the platform-appropriate location:

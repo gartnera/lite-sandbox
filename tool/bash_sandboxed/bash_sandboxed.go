@@ -886,7 +886,7 @@ func (s *Sandbox) isExtraCommandInvocation(command string) bool {
 // going through AST parsing or validation. Used for bare extra_commands entries.
 func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string) (string, error) {
 	var out bytes.Buffer
-	if err := s.runRawToWriter(ctx, command, workDir, &out); err != nil {
+	if err := s.runRawToWriter(ctx, command, workDir, &out, false); err != nil {
 		output := out.String()
 		return output, &CommandFailedError{Err: err, Output: output}
 	}
@@ -897,7 +897,13 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 // streaming combined stdout/stderr to out. It performs no AST parsing or
 // validation and is used both by executeRaw (bare extra_commands) and by
 // background execution of those commands.
-func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer) error {
+//
+// When newProcessGroup is true the bash process leads its own process group and
+// cancellation SIGKILLs the whole group, so children the command forked (a dev
+// server, a daemon, `something &`) are reaped too — not just bash itself. This
+// is used for background runs; foreground runs keep the default behavior where
+// CommandContext kills only the direct process.
+func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup bool) error {
 	s.mu.RLock()
 	imdsEndpoint := s.imdsEndpoint
 	s.mu.RUnlock()
@@ -912,6 +918,13 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	cmd.Stdout = out
 	cmd.Stderr = out
 	cmd.Env = env
+
+	if newProcessGroup {
+		setProcessGroup(cmd)
+		// Override CommandContext's default Cancel (which kills only bash) so
+		// cancellation tears down the whole group.
+		cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	}
 
 	// Bound how long Wait blocks on I/O after the context is cancelled. Without
 	// this, a backgrounded grandchild (e.g. `npm run dev &`) inherits the stdout

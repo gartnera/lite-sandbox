@@ -1,9 +1,16 @@
 package bash_sandboxed
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gartnera/lite-sandbox/config"
 )
 
 // waitForStatus polls a background process until it reaches one of the wanted
@@ -197,6 +204,118 @@ func TestListBackground(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected process %q in list", proc.ID)
+	}
+}
+
+// TestBackgroundKillReapsForkedChildren verifies that killing a background bare
+// extra_commands invocation tears down the whole process group, including a
+// grandchild the command forked — not just the direct process.
+func TestBackgroundKillReapsForkedChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups not supported on windows")
+	}
+	s := NewSandbox()
+	cwd := t.TempDir()
+	// "bash" as a bare extra command routes through the executeRaw path, which
+	// runs the background command in its own process group.
+	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+
+	pidFile := filepath.Join(cwd, "child.pid")
+	// Fork a long-lived grandchild, record its pid, then wait so the command
+	// stays running until we kill it.
+	command := "bash -c 'sleep 300 & echo $! > " + pidFile + "; wait'"
+	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
+	if err != nil {
+		t.Fatalf("ExecuteBackground failed: %v", err)
+	}
+
+	// Wait for the grandchild pid to be recorded.
+	var childPid int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if p, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && p > 0 {
+				childPid = p
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPid == 0 {
+		t.Fatal("forked child pid was never recorded")
+	}
+	// Sanity: the grandchild is alive (signal 0 probes existence).
+	if err := syscall.Kill(childPid, 0); err != nil {
+		t.Fatalf("expected forked child %d alive before kill, got %v", childPid, err)
+	}
+
+	if err := s.KillBackground(proc.ID); err != nil {
+		t.Fatalf("KillBackground failed: %v", err)
+	}
+	waitForStatus(t, proc, 5*time.Second, "killed")
+
+	// The grandchild must be reaped along with the group.
+	reaped := false
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(childPid, 0); err != nil {
+			reaped = true // ESRCH: no such process
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reaped {
+		t.Fatalf("forked child %d survived the kill (process group not reaped)", childPid)
+	}
+}
+
+func TestBackgroundKilledExitCode(t *testing.T) {
+	s := newTestSandbox()
+	cwd := t.TempDir()
+
+	proc, err := s.ExecuteBackground("sleep 30", cwd, []string{cwd}, []string{cwd})
+	if err != nil {
+		t.Fatalf("ExecuteBackground failed: %v", err)
+	}
+	if err := s.KillBackground(proc.ID); err != nil {
+		t.Fatalf("KillBackground failed: %v", err)
+	}
+	waitForStatus(t, proc, 5*time.Second, "killed")
+
+	res, err := s.BackgroundOutput(proc.ID, "")
+	if err != nil {
+		t.Fatalf("BackgroundOutput failed: %v", err)
+	}
+	if res.Status != "killed" {
+		t.Fatalf("expected killed status, got %q", res.Status)
+	}
+	// A killed process must report the SIGKILL code, never 0, so status and
+	// exit code stay consistent.
+	if res.ExitCode != 137 {
+		t.Fatalf("expected exit code 137 for killed process, got %d", res.ExitCode)
+	}
+}
+
+// TestStreamBufferLineAlignedRead verifies the filter never sees a line split
+// across two reads: a partial line is held back until its newline arrives.
+func TestStreamBufferLineAlignedRead(t *testing.T) {
+	b := newStreamBuffer(1 << 20)
+
+	b.Write([]byte("ERR"))
+	if got := b.read(true); got != "" {
+		t.Fatalf("expected empty read while line is incomplete, got %q", got)
+	}
+	b.Write([]byte("OR: boom\nnext"))
+	if got := b.read(true); got != "ERROR: boom\n" {
+		t.Fatalf("expected the completed line, got %q", got)
+	}
+	// "next" has no newline yet -> still held back.
+	if got := b.read(true); got != "" {
+		t.Fatalf("expected partial line to be held, got %q", got)
+	}
+	// Process done: flush everything including the unterminated tail.
+	if got := b.read(false); got != "next" {
+		t.Fatalf("expected final flush of partial line, got %q", got)
 	}
 }
 

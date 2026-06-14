@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,9 +49,18 @@ func (b *streamBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// readNew returns all output produced since the previous readNew call and
-// advances the read cursor.
+// readNew returns all output produced since the previous read and advances the
+// read cursor.
 func (b *streamBuffer) readNew() string {
+	return b.read(false)
+}
+
+// read returns output produced since the previous read and advances the cursor.
+// When holdPartial is true, a trailing line that has not yet been terminated by
+// a newline is left unread (the cursor stops after the last newline), so callers
+// that match against whole lines never see a line split across two reads. If no
+// complete line is available, it returns "" and consumes nothing.
+func (b *streamBuffer) read(holdPartial bool) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	start := b.readPos - b.discarded
@@ -60,8 +70,17 @@ func (b *streamBuffer) readNew() string {
 	if start > len(b.buf) {
 		start = len(b.buf)
 	}
-	out := string(b.buf[start:])
-	b.readPos = b.discarded + len(b.buf)
+	avail := b.buf[start:]
+	end := len(avail)
+	if holdPartial {
+		nl := bytes.LastIndexByte(avail, '\n')
+		if nl < 0 {
+			return "" // no complete line yet; leave everything for next read
+		}
+		end = nl + 1
+	}
+	out := string(avail[:end])
+	b.readPos = b.discarded + start + end
 	return out
 }
 
@@ -70,16 +89,14 @@ type BackgroundProcess struct {
 	ID      string
 	Command string
 
-	output  *streamBuffer
-	cancel  context.CancelFunc
-	started time.Time
+	output *streamBuffer
+	cancel context.CancelFunc
 
 	mu       sync.Mutex
 	done     bool
 	killed   bool
 	exitCode int
 	runErr   error
-	ended    time.Time
 }
 
 // Status reports the current lifecycle state: "running", "completed",
@@ -122,29 +139,47 @@ type BackgroundStatus struct {
 }
 
 // backgroundManager owns the set of live background processes.
+//
+// All process execution contexts are derived from parentCtx, so cancelling it
+// once (via shutdown) tears down every background process and its worker exec at
+// once — no per-process iteration can miss one. Individual processes still get
+// their own cancel for targeted kill_shell.
 type backgroundManager struct {
 	mu      sync.Mutex
 	procs   map[string]*BackgroundProcess
 	counter int
+
+	parentCtx    context.Context
+	parentCancel context.CancelFunc
 }
 
 func newBackgroundManager() *backgroundManager {
-	return &backgroundManager{procs: make(map[string]*BackgroundProcess)}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &backgroundManager{
+		procs:        make(map[string]*BackgroundProcess),
+		parentCtx:    ctx,
+		parentCancel: cancel,
+	}
 }
 
-func (m *backgroundManager) create(command string) *BackgroundProcess {
+// create registers a new process and returns it together with the context its
+// goroutine should run under. The context derives from parentCtx (so shutdown
+// cancels it) and its cancel is stored on the process before it becomes
+// reachable, so a concurrent get/kill can never observe a nil cancel.
+func (m *backgroundManager) create(command string) (*BackgroundProcess, context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counter++
 	id := fmt.Sprintf("bash_%d", m.counter)
+	ctx, cancel := context.WithCancel(m.parentCtx)
 	p := &BackgroundProcess{
 		ID:      id,
 		Command: command,
 		output:  newStreamBuffer(maxBackgroundOutputBytes),
-		started: time.Now(),
+		cancel:  cancel,
 	}
 	m.procs[id] = p
-	return p
+	return p, ctx
 }
 
 func (m *backgroundManager) get(id string) (*BackgroundProcess, bool) {
@@ -168,35 +203,37 @@ func (m *backgroundManager) list() []*BackgroundProcess {
 func (m *backgroundManager) finish(p *BackgroundProcess, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.done {
+		return // already recorded (e.g. grace-period abandon raced the runner)
+	}
 	p.done = true
-	p.ended = time.Now()
 	p.runErr = err
 	p.exitCode = exitCodeFromErr(err, p.killed)
 }
 
-// killAll cancels every running background process. Used on sandbox shutdown.
+// killAll terminates every background process. It marks each running process as
+// killed (for status reporting) and cancels the shared parent context, which
+// tears down all derived process contexts and their worker execs at once.
 func (m *backgroundManager) killAll() {
 	for _, p := range m.list() {
 		p.mu.Lock()
-		alreadyDone := p.done
-		if !alreadyDone {
+		if !p.done {
 			p.killed = true
 		}
-		cancel := p.cancel
 		p.mu.Unlock()
-		if !alreadyDone && cancel != nil {
-			cancel()
-		}
 	}
+	m.parentCancel()
 }
 
-// exitCodeFromErr maps a runner error to a conventional exit code.
+// exitCodeFromErr maps a runner error to a conventional exit code. A killed
+// process always reports the SIGKILL code regardless of how the runner returned,
+// so its exit code stays consistent with its "killed" status.
 func exitCodeFromErr(err error, killed bool) int {
-	if err == nil {
-		return 0
-	}
 	if killed {
 		return 137 // 128 + SIGKILL
+	}
+	if err == nil {
+		return 0
 	}
 	var status interp.ExitStatus
 	if errors.As(err, &status) {
@@ -231,22 +268,42 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 		}
 	}
 
-	proc := s.bg.create(command)
-
-	// Detached from any request context so the process outlives the call.
-	// Cancellation is driven by KillBackground / Close via the stored cancel.
-	ctx, cancel := context.WithCancel(context.Background())
-	proc.cancel = cancel
+	// create derives the run context from the manager's shared parent (so
+	// shutdown cancels it) and stores its cancel before the process becomes
+	// reachable. Cancellation is driven by KillBackground / Close.
+	proc, ctx := s.bg.create(command)
 
 	go func() {
-		defer cancel()
-		var err error
-		if isExtra {
-			err = s.runRawToWriter(ctx, command, workDir, proc.output)
-		} else {
-			err = s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
+		defer proc.cancel()
+
+		// Run in an inner goroutine so a runner that hangs after cancellation
+		// (mvdan.cc/sh pipelines can block on non-context-aware io.Pipe copies
+		// that SIGKILL cannot unblock) does not pin the process in "running"
+		// forever — mirroring the foreground executeWithInterp grace period.
+		runDone := make(chan error, 1)
+		go func() {
+			if isExtra {
+				// newProcessGroup=true: background bare commands often start
+				// servers/daemons that fork, so kill the whole group on stop.
+				runDone <- s.runRawToWriter(ctx, command, workDir, proc.output, true)
+			} else {
+				runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
+			}
+		}()
+
+		select {
+		case err := <-runDone:
+			s.bg.finish(proc, err)
+		case <-ctx.Done():
+			// Killed: give the runner a short grace period to return cleanly,
+			// otherwise abandon it and record the terminal state anyway.
+			select {
+			case err := <-runDone:
+				s.bg.finish(proc, err)
+			case <-time.After(runnerKillGracePeriod):
+				s.bg.finish(proc, fmt.Errorf("killed: runner did not exit within grace period: %w", ctx.Err()))
+			}
 		}
-		s.bg.finish(proc, err)
 	}()
 
 	return proc, nil
@@ -261,12 +318,22 @@ func (s *Sandbox) BackgroundOutput(id string, filter string) (*BackgroundOutputR
 		return nil, fmt.Errorf("no background process with id %q", id)
 	}
 
-	output := p.output.readNew()
+	var re *regexp.Regexp
 	if filter != "" {
-		re, err := regexp.Compile(filter)
+		var err error
+		re, err = regexp.Compile(filter)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter regex: %w", err)
 		}
+	}
+
+	// When filtering a still-running process, hold back any trailing partial
+	// line so a line is never split across two reads (which would make it miss
+	// the filter). Once the process is done there is no more output coming, so
+	// flush everything including a final unterminated line.
+	holdPartial := re != nil && p.Status() == "running"
+	output := p.output.read(holdPartial)
+	if re != nil {
 		output = filterLines(output, re)
 	}
 

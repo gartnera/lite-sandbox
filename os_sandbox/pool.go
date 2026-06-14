@@ -23,6 +23,7 @@ const (
 	HostMsgExec     HostMsgType = iota // Start a command (Args, Dir, Env)
 	HostMsgStdin                       // Stdin data chunk (Data)
 	HostMsgStdinEOF                    // No more stdin
+	HostMsgCancel                      // Kill a running command (ID)
 )
 
 // HostMsg is a message sent from the MCP server to a worker process.
@@ -438,24 +439,40 @@ func (w *Worker) Exec(ctx context.Context, args []string, dir string, env map[st
 		stdinDone <- w.pumpStdinForID(id, stdin)
 	}()
 
-	// Read responses from the per-execution channel until WorkerMsgDone (channel closed by dispatcher).
+	// Read responses from the per-execution channel until WorkerMsgDone (channel
+	// closed by dispatcher). If ctx is cancelled, tell the worker to kill this
+	// execution's process and keep draining until it reports done — the worker
+	// owns the process, so cancellation must round-trip through it.
 	var exitCode int
 	var execErr error
-	for msg := range ch {
-		switch msg.Type {
-		case WorkerMsgStdout:
-			if stdout != nil && len(msg.Data) > 0 {
-				stdout.Write(msg.Data) //nolint:errcheck
+	ctxDone := ctx.Done()
+loop:
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				break loop
 			}
-		case WorkerMsgStderr:
-			if stderr != nil && len(msg.Data) > 0 {
-				stderr.Write(msg.Data) //nolint:errcheck
+			switch msg.Type {
+			case WorkerMsgStdout:
+				if stdout != nil && len(msg.Data) > 0 {
+					stdout.Write(msg.Data) //nolint:errcheck
+				}
+			case WorkerMsgStderr:
+				if stderr != nil && len(msg.Data) > 0 {
+					stderr.Write(msg.Data) //nolint:errcheck
+				}
+			case WorkerMsgDone:
+				exitCode = msg.ExitCode
+				if msg.Error != "" {
+					execErr = fmt.Errorf("%s", msg.Error)
+				}
 			}
-		case WorkerMsgDone:
-			exitCode = msg.ExitCode
-			if msg.Error != "" {
-				execErr = fmt.Errorf("%s", msg.Error)
-			}
+		case <-ctxDone:
+			// Disable this case after firing once so we don't busy-loop while
+			// waiting for the worker's done message.
+			ctxDone = nil
+			_ = w.enc.send(HostMsg{ID: id, Type: HostMsgCancel})
 		}
 	}
 

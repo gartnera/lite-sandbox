@@ -8,8 +8,63 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
+	"syscall"
 )
+
+// procRegistry tracks the currently running commands by execution ID so a
+// HostMsgCancel can terminate the matching process.
+type procRegistry struct {
+	mu sync.Mutex
+	m  map[uint64]*exec.Cmd
+}
+
+func newProcRegistry() *procRegistry {
+	return &procRegistry{m: make(map[uint64]*exec.Cmd)}
+}
+
+func (r *procRegistry) add(id uint64, cmd *exec.Cmd) {
+	r.mu.Lock()
+	r.m[id] = cmd
+	r.mu.Unlock()
+}
+
+func (r *procRegistry) remove(id uint64) {
+	r.mu.Lock()
+	delete(r.m, id)
+	r.mu.Unlock()
+}
+
+// kill terminates the command registered for id, if any. On Linux the command
+// leads its own process group (see setProcGroup), so signaling the negative pid
+// reaps the whole subtree — including any children the command forked. The
+// direct-process kill is a fallback (and the only effect on platforms where the
+// command is not a group leader); any survivors are reaped when the worker
+// itself is torn down (see Worker.Close).
+func (r *procRegistry) kill(id uint64) {
+	r.mu.Lock()
+	cmd, ok := r.m[id]
+	r.mu.Unlock()
+	if !ok || cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = cmd.Process.Kill()
+}
+
+// setProcGroup makes cmd lead its own process group so its whole subtree can be
+// signaled at once. On macOS the sandbox profile denies signaling processes
+// outside the worker's own process group ("(deny signal (target others))"), so
+// placing a command in a separate group would make even a direct kill fail;
+// there we leave it in the worker's group and rely on per-process and
+// shutdown-time kills instead.
+func setProcGroup(cmd *exec.Cmd) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
 
 // lockedEncoder wraps a gob.Encoder with a mutex and buffered writer for concurrent use.
 type lockedEncoder struct {
@@ -58,6 +113,9 @@ func RunWorker() error {
 	stdinPipes := make(map[uint64]*io.PipeWriter)
 	var stdinMu sync.Mutex
 
+	// procs tracks running commands so HostMsgCancel can kill them.
+	procs := newProcRegistry()
+
 	for {
 		var msg HostMsg
 		if err := dec.Decode(&msg); err != nil {
@@ -76,7 +134,7 @@ func RunWorker() error {
 			stdinPipes[msg.ID] = pw
 			stdinMu.Unlock()
 			go func(m HostMsg, stdinReader io.Reader) {
-				if err := streamCommand(enc, m.ID, m, stdinReader); err != nil {
+				if err := streamCommand(enc, m.ID, m, stdinReader, procs); err != nil {
 					slog.Error("streamCommand error", "id", m.ID, "error", err)
 				}
 				// Clean up: close and remove the pipe writer if still present.
@@ -87,6 +145,17 @@ func RunWorker() error {
 				}
 				stdinMu.Unlock()
 			}(msg, pr)
+
+		case HostMsgCancel:
+			slog.Info("cancelling command", "id", msg.ID)
+			procs.kill(msg.ID)
+			// Also unblock any pending stdin writer for this execution.
+			stdinMu.Lock()
+			if pw, ok := stdinPipes[msg.ID]; ok {
+				pw.Close()
+				delete(stdinPipes, msg.ID)
+			}
+			stdinMu.Unlock()
 
 		case HostMsgStdin:
 			stdinMu.Lock()
@@ -117,13 +186,14 @@ func RunWorker() error {
 // streamCommand starts the command described by req, uses stdinReader for its stdin,
 // and streams stdout/stderr back via the encoder. Sends WorkerMsgDone when finished.
 // The id parameter is included in all outgoing WorkerMsg messages for multiplexing.
-func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Reader) error {
+func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Reader, procs *procRegistry) error {
 	if len(req.Args) == 0 {
 		return enc.send(WorkerMsg{ID: id, Type: WorkerMsgDone, ExitCode: 1, Error: "no command specified"})
 	}
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
 	cmd.Dir = req.Dir
+	setProcGroup(cmd)
 
 	if len(req.Env) > 0 {
 		env := make([]string, 0, len(req.Env))
@@ -148,6 +218,10 @@ func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Re
 	if err := cmd.Start(); err != nil {
 		return enc.send(WorkerMsg{ID: id, Type: WorkerMsgDone, ExitCode: 1, Error: "failed to start command: " + err.Error()})
 	}
+
+	// Register so a HostMsgCancel can kill this process; deregister on exit.
+	procs.add(id, cmd)
+	defer procs.remove(id)
 
 	var wg sync.WaitGroup
 
