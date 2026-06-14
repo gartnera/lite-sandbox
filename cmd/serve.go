@@ -227,6 +227,20 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 	return readPaths, writePaths
 }
 
+// dockerSocketBaseDir returns the base directory for the docker proxy socket.
+// XDG_RUNTIME_DIR is the standard per-user runtime socket location (user-owned
+// 0700, tmpfs on Linux, auto-cleaned on logout); its short path also keeps the
+// socket well under macOS's ~104-byte sun_path limit. Falls back to the system
+// temp dir when it is unset or missing (e.g. on macOS).
+func dockerSocketBaseDir() string {
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			return d
+		}
+	}
+	return os.TempDir()
+}
+
 func runServe() error {
 	slog.Info("starting MCP server")
 
@@ -281,8 +295,7 @@ func runServe() error {
 	// Start docker proxy if docker is enabled.
 	if cfg != nil && cfg.Docker.DockerEnabled() {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
-		// Short prefix keeps the socket path under macOS's ~104-byte sun_path limit.
-		socketDir, err := os.MkdirTemp("", "ls-docker-")
+		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 		}
