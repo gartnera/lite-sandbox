@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -48,13 +49,16 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 	bashTool := mcp.NewTool(
 		"bash",
-		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution. If a command fails at runtime (not validation), you may retry it using the Bash tool with dangerouslyDisableSandbox set to true."),
+		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution. If a command fails at runtime (not validation), you may retry it using the Bash tool with dangerouslyDisableSandbox set to true.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id you can poll with the bash_output tool and stop with the kill_shell tool."),
 		mcp.WithString("command",
 			mcp.Description("The bash command to execute"),
 			mcp.Required(),
 		),
 		mcp.WithNumber("timeout",
-			mcp.Description("Optional timeout in milliseconds (max 600000ms, default 120000ms)"),
+			mcp.Description("Optional timeout in milliseconds (max 600000ms, default 120000ms). Ignored when run_in_background is true."),
+		),
+		mcp.WithBoolean("run_in_background",
+			mcp.Description("Run the command in the background and return a shell id immediately instead of waiting for it to finish."),
 		),
 	)
 
@@ -64,9 +68,11 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
 
+		args, _ := request.Params.Arguments.(map[string]any)
+
 		// Extract optional timeout parameter (default 120000ms = 2 minutes)
 		timeoutMs := 120000.0 // default
-		if args, ok := request.Params.Arguments.(map[string]any); ok {
+		if args != nil {
 			if timeout, ok := args["timeout"]; ok {
 				if timeoutFloat, ok := timeout.(float64); ok {
 					if timeoutFloat > 600000 {
@@ -80,22 +86,36 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 			}
 		}
 
+		runInBackground := false
+		if args != nil {
+			if v, ok := args["run_in_background"].(bool); ok {
+				runInBackground = v
+			}
+		}
+
 		cwd, err := os.Getwd()
 		if err != nil {
 			return mcp.NewToolResultError("failed to get working directory: " + err.Error()), nil
+		}
+
+		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+
+		if runInBackground {
+			proc, err := sandbox.ExecuteBackground(command, cwd, readPaths, writePaths)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			msg := fmt.Sprintf(
+				"Started background process with shell id %q.\nUse the bash_output tool (bash_id=%q) to read its output and the kill_shell tool (shell_id=%q) to stop it.",
+				proc.ID, proc.ID, proc.ID,
+			)
+			return mcp.NewToolResultText(msg), nil
 		}
 
 		// Create a context with timeout
 		timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
 		defer cancel()
 
-		readPaths := append([]string{cwd}, sandbox.RuntimeReadPaths()...)
-		readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
-		writePaths := append([]string{cwd}, sandbox.ConfigWritePaths()...)
-		if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
-			readPaths = append(readPaths, parent)
-			writePaths = append(writePaths, parent)
-		}
 		output, err := sandbox.Execute(timeoutCtx, command, cwd, readPaths, writePaths)
 		if err != nil {
 			errMsg := err.Error()
@@ -109,7 +129,101 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 		return mcp.NewToolResultText(output), nil
 	})
+
+	bashOutputTool := mcp.NewTool(
+		"bash_output",
+		mcp.WithDescription("Retrieve output from a background command started with the bash tool (run_in_background=true). Returns only the output produced since the previous call, along with the process status (running, completed, failed, or killed) and exit code."),
+		mcp.WithString("bash_id",
+			mcp.Description("The shell id returned when the background command was started"),
+			mcp.Required(),
+		),
+		mcp.WithString("filter",
+			mcp.Description("Optional regular expression; only output lines matching it are returned"),
+		),
+	)
+
+	s.AddTool(bashOutputTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		bashID, err := request.RequireString("bash_id")
+		if err != nil {
+			return mcp.NewToolResultError("missing required parameter: bash_id"), nil
+		}
+		filter := ""
+		if args, ok := request.Params.Arguments.(map[string]any); ok {
+			if v, ok := args["filter"].(string); ok {
+				filter = v
+			}
+		}
+
+		res, err := sandbox.BackgroundOutput(bashID, filter)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "<status>%s</status>\n", res.Status)
+		if res.Done {
+			fmt.Fprintf(&b, "<exit_code>%d</exit_code>\n", res.ExitCode)
+		}
+		fmt.Fprintf(&b, "<output>\n%s</output>", res.Output)
+		return mcp.NewToolResultText(b.String()), nil
+	})
+
+	killShellTool := mcp.NewTool(
+		"kill_shell",
+		mcp.WithDescription("Stop a background command started with the bash tool (run_in_background=true)."),
+		mcp.WithString("shell_id",
+			mcp.Description("The shell id of the background process to stop"),
+			mcp.Required(),
+		),
+	)
+
+	s.AddTool(killShellTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		shellID, err := request.RequireString("shell_id")
+		if err != nil {
+			return mcp.NewToolResultError("missing required parameter: shell_id"), nil
+		}
+		if err := sandbox.KillBackground(shellID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Killed background process %q.", shellID)), nil
+	})
+
+	listShellsTool := mcp.NewTool(
+		"list_shells",
+		mcp.WithDescription("List all background commands started with the bash tool (run_in_background=true), with their shell id, status, and exit code."),
+	)
+
+	s.AddTool(listShellsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		procs := sandbox.ListBackground()
+		if len(procs) == 0 {
+			return mcp.NewToolResultText("No background processes."), nil
+		}
+		var b strings.Builder
+		for _, p := range procs {
+			fmt.Fprintf(&b, "%s\t%s", p.ID, p.Status)
+			if p.Status != "running" {
+				fmt.Fprintf(&b, " (exit %d)", p.ExitCode)
+			}
+			fmt.Fprintf(&b, "\t%s\n", p.Command)
+		}
+		return mcp.NewToolResultText(strings.TrimRight(b.String(), "\n")), nil
+	})
+
 	return s
+}
+
+// sandboxPaths computes the read- and write-allowed path lists for a command
+// executed from cwd, combining the working directory, detected runtime paths,
+// user-configured paths, and any git worktree parent.
+func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
+	readPaths = append([]string{cwd}, sandbox.RuntimeReadPaths()...)
+	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
+	writePaths = append([]string{cwd}, sandbox.ConfigWritePaths()...)
+	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
+		readPaths = append(readPaths, parent)
+		writePaths = append(writePaths, parent)
+	}
+	return readPaths, writePaths
 }
 
 func runServe() error {

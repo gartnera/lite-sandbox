@@ -14,6 +14,16 @@ import (
 var installWithToolHook bool
 var installBashASTHookMode bool
 
+// mcpToolPermissions are the Claude Code permission entries auto-allowed for the
+// lite-sandbox MCP server: the bash tool and its background-process management
+// companions. Keep in sync with the tools registered in newMCPServer.
+var mcpToolPermissions = []string{
+	"mcp__lite-sandbox__bash",
+	"mcp__lite-sandbox__bash_output",
+	"mcp__lite-sandbox__kill_shell",
+	"mcp__lite-sandbox__list_shells",
+}
+
 var installCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Automatically configure Claude Code to use lite-sandbox",
@@ -103,9 +113,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	switch {
 	case denyBash:
-		fmt.Println("✓ Allowed mcp__lite-sandbox__bash and denied built-in Bash in ~/.claude/settings.json")
+		fmt.Println("✓ Allowed lite-sandbox MCP tools and denied built-in Bash in ~/.claude/settings.json")
 	case configMCP:
-		fmt.Println("✓ Allowed mcp__lite-sandbox__bash in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
+		fmt.Println("✓ Allowed lite-sandbox MCP tools in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
 	default:
 		fmt.Println("✓ Ensured built-in Bash is not denied in ~/.claude/settings.json (governed by the validating hook)")
 	}
@@ -259,10 +269,15 @@ func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 		}
 	}
 
-	// Auto-allow the sandboxed bash tool
-	allowPermission := "mcp__lite-sandbox__bash"
-	if allowMCP && !slices.Contains(perms.Allow, allowPermission) {
-		perms.Allow = append(perms.Allow, allowPermission)
+	// Auto-allow every sandbox tool — the bash tool plus the background-process
+	// management tools (bash_output, kill_shell, list_shells) — so polling and
+	// stopping background commands never triggers a permission prompt.
+	if allowMCP {
+		for _, allowPermission := range mcpToolPermissions {
+			if !slices.Contains(perms.Allow, allowPermission) {
+				perms.Allow = append(perms.Allow, allowPermission)
+			}
+		}
 	}
 
 	const denyPermission = "Bash"

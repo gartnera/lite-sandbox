@@ -14,7 +14,7 @@ lite-sandbox install
 
 This automatically:
 1. Adds the MCP server to `~/.claude.json` (user-scoped)
-2. Adds auto-allow permission for `mcp__lite-sandbox__bash` **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
+2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Adds usage directive to `~/.claude/CLAUDE.md`
 
 Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
@@ -62,13 +62,16 @@ Replace `/path/to/lite-sandbox` with the actual path to the built binary.
 
 #### 2. Auto-allow the sandbox tool and deny built-in Bash
 
-Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandboxed tool and can no longer use the built-in `Bash` tool:
+Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandboxed tools and can no longer use the built-in `Bash` tool:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__lite-sandbox__bash"
+      "mcp__lite-sandbox__bash",
+      "mcp__lite-sandbox__bash_output",
+      "mcp__lite-sandbox__kill_shell",
+      "mcp__lite-sandbox__list_shells"
     ],
     "deny": [
       "Bash"
@@ -76,6 +79,10 @@ Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandb
   }
 }
 ```
+
+The `bash_output`, `kill_shell`, and `list_shells` entries cover the
+background-process tools, so polling and stopping background commands also run
+without prompts.
 
 Denying `Bash` is what makes the sandbox enforceable — without it, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 
@@ -90,6 +97,43 @@ ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The buil
 > **Note**: The tool name follows the pattern `mcp__<server-name>__<tool-name>`. If you named the server differently in your MCP config, adjust the tool name accordingly.
 
 </details>
+
+## Background processes
+
+The `bash` tool can run long-lived commands in the background, mirroring the
+Claude Code `Bash` / `BashOutput` / `KillShell` tools. Pass
+`run_in_background: true` to start a command without blocking; it returns a
+shell id immediately. Three companion tools manage these processes:
+
+- **`bash`** with `run_in_background: true` — validates the command (validation
+  errors are returned synchronously), starts it detached from the request, and
+  returns its shell id. The `timeout` parameter is ignored for background
+  commands.
+- **`bash_output`** (`bash_id`, optional `filter`) — returns the output produced
+  since the previous call, plus the process status (`running`, `completed`,
+  `failed`, or `killed`) and exit code once finished. `filter` is a regular
+  expression that keeps only matching output lines. Per-process output is capped
+  (oldest bytes are dropped) so chatty commands can't grow unbounded.
+- **`kill_shell`** (`shell_id`) — stops a running background process.
+- **`list_shells`** — lists all background processes with their id, status, and
+  exit code.
+
+Background commands pass through the same AST validation, path confinement, and
+OS sandbox as foreground commands. They are terminated when the server shuts
+down.
+
+**Stopping background processes.** `kill_shell` (and shutdown) tears down the
+whole process group, so children the command forked — dev servers, daemons,
+`something &` — are reaped, not just the direct process:
+
+- Bare `extra_commands` background commands (where forking servers typically
+  run) lead their own process group on the host and are killed as a group.
+- Under the OS sandbox, the worker kills each command's process group on Linux;
+  on macOS the sandbox's signal confinement limits this to the direct process,
+  with the worker's own process group reaped on shutdown.
+- For validated commands run through the interpreter (not the OS sandbox), kill
+  signals the direct process; deeply forked grandchildren of those are reaped on
+  shutdown.
 
 ## Configuration
 

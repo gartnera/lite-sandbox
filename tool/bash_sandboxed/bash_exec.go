@@ -546,7 +546,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						if useOSSandbox {
 							return s.execInWorker(ctx, args)
 						}
-						return interp.DefaultExecHandler(-1)(ctx, args)
+						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
 					}
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
 						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
@@ -556,7 +556,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						if useOSSandbox {
 							return s.execInWorker(ctx, args)
 						}
-						return interp.DefaultExecHandler(-1)(ctx, args)
+						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
 					}
 					return s.executeScript(ctx, args)
 				}
@@ -564,7 +564,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			if useOSSandbox {
 				return s.execInWorker(ctx, args)
 			}
-			return interp.DefaultExecHandler(-1)(ctx, args)
+			return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
 		}),
 	}
 }

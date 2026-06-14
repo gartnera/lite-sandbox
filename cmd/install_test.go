@@ -136,8 +136,10 @@ func TestConfigurePermissions(t *testing.T) {
 	}
 
 	expected := "mcp__lite-sandbox__bash"
-	if !slices.Contains(perms.Allow, expected) {
-		t.Errorf("expected permission %s not found in %v", expected, perms.Allow)
+	for _, want := range mcpToolPermissions {
+		if !slices.Contains(perms.Allow, want) {
+			t.Errorf("expected permission %s not found in %v", want, perms.Allow)
+		}
 	}
 
 	if !slices.Contains(perms.Deny, "Bash") {
