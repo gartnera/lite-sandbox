@@ -2,10 +2,14 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
@@ -180,12 +184,98 @@ func (d *DockerConfig) DockerEnabled() bool {
 }
 
 // UpstreamSocket returns the upstream Docker daemon socket path the proxy
-// forwards to (default: /var/run/docker.sock).
+// forwards to. An explicit socket_path wins; otherwise it is autodetected the
+// way the docker CLI resolves the daemon (DOCKER_HOST, active context, then
+// well-known locations), falling back to /var/run/docker.sock.
 func (d *DockerConfig) UpstreamSocket() string {
-	if d == nil || d.SocketPath == "" {
-		return DefaultDockerSocket
+	if d != nil && d.SocketPath != "" {
+		return d.SocketPath
 	}
-	return d.SocketPath
+	return DetectDockerSocket()
+}
+
+// DetectDockerSocket resolves the host's Docker daemon unix socket the way the
+// docker CLI would: the DOCKER_HOST env var, then the active docker context's
+// endpoint, then well-known per-tool locations (Docker Desktop, OrbStack,
+// Colima), falling back to /var/run/docker.sock. Only unix sockets are
+// supported (the proxy dials a unix socket); a tcp:// DOCKER_HOST is ignored.
+func DetectDockerSocket() string {
+	if p := socketFromDockerHost(os.Getenv("DOCKER_HOST")); p != "" {
+		return p
+	}
+	if p := socketFromDockerContext(); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		for _, c := range []string{
+			filepath.Join(home, ".docker", "run", "docker.sock"),     // Docker Desktop (macOS)
+			filepath.Join(home, ".orbstack", "run", "docker.sock"),   // OrbStack
+			filepath.Join(home, ".colima", "default", "docker.sock"), // Colima
+		} {
+			if isUnixSocket(c) {
+				return c
+			}
+		}
+	}
+	return DefaultDockerSocket
+}
+
+// socketFromDockerHost extracts the filesystem path from a unix:// DOCKER_HOST
+// value, returning "" for empty, tcp://, or other non-unix endpoints.
+func socketFromDockerHost(host string) string {
+	if strings.HasPrefix(host, "unix://") {
+		return strings.TrimPrefix(host, "unix://")
+	}
+	return ""
+}
+
+// socketFromDockerContext resolves the active docker context's unix endpoint by
+// reading ~/.docker (the current context name, then its meta.json, whose
+// directory is named with the sha256 hex digest of the context name).
+func socketFromDockerContext() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	name := os.Getenv("DOCKER_CONTEXT")
+	if name == "" {
+		if data, err := os.ReadFile(filepath.Join(home, ".docker", "config.json")); err == nil {
+			var cfg struct {
+				CurrentContext string `json:"currentContext"`
+			}
+			_ = json.Unmarshal(data, &cfg)
+			name = cfg.CurrentContext
+		}
+	}
+	if name == "" || name == "default" {
+		return ""
+	}
+
+	digest := sha256.Sum256([]byte(name))
+	metaPath := filepath.Join(home, ".docker", "contexts", "meta", hex.EncodeToString(digest[:]), "meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Endpoints struct {
+			Docker struct {
+				Host string `json:"Host"`
+			} `json:"docker"`
+		} `json:"Endpoints"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return socketFromDockerHost(meta.Endpoints.Docker.Host)
+}
+
+// isUnixSocket reports whether path exists and is a unix socket.
+func isUnixSocket(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
 // AllowsPrivileged returns whether privileged containers (and equivalent
