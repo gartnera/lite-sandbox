@@ -6,11 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build -o lite-sandbox        # Build binary
-go test ./...                    # Run all tests
+go test ./...                    # Run default suite (OS-sandbox-runtime tests skipped)
 go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
 cd e2e/claude && uv run pytest -v # Run e2e tests (Claude Agent SDK)
+
+# Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)
+# always compile but only run when OS_SANDBOX_TESTS is set (CI sets it). To run
+# the full suite locally:
+go build -o lite-sandbox && OS_SANDBOX_TESTS=1 go test ./...  # Linux needs bubblewrap + unprivileged userns
 ```
 
 ## Architecture

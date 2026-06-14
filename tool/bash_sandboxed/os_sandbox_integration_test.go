@@ -14,6 +14,7 @@ import (
 
 // TestOSSandboxBasicExecution tests that OS sandbox can execute basic commands.
 func TestOSSandboxBasicExecution(t *testing.T) {
+	requireOSSandbox(t)
 	// Create a temporary directory for testing
 	tmpDir := t.TempDir()
 
@@ -27,8 +28,14 @@ func TestOSSandboxBasicExecution(t *testing.T) {
 	s.UpdateConfig(cfg, tmpDir)
 	defer s.Close()
 
-	// Test basic command
-	output, err := s.Execute(context.Background(), "echo hello", tmpDir, []string{tmpDir}, []string{tmpDir})
+	// Run a real external command (cat) so the execution actually routes through
+	// the sandbox worker. A shell builtin like echo would never reach it.
+	srcFile := filepath.Join(tmpDir, "hello.txt")
+	if err := os.WriteFile(srcFile, []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	output, err := s.Execute(context.Background(), "cat "+srcFile, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -39,6 +46,7 @@ func TestOSSandboxBasicExecution(t *testing.T) {
 
 // TestOSSandboxFileIsolation tests that OS sandbox provides read-only root.
 func TestOSSandboxFileIsolation(t *testing.T) {
+	requireOSSandbox(t)
 	tmpDir := t.TempDir()
 
 	s := NewSandbox()
@@ -76,6 +84,7 @@ func TestOSSandboxFileIsolation(t *testing.T) {
 
 // TestOSSandboxWorkerPool tests that multiple workers can execute concurrently.
 func TestOSSandboxWorkerPool(t *testing.T) {
+	requireOSSandbox(t)
 	tmpDir := t.TempDir()
 
 	s := NewSandbox()
@@ -87,6 +96,13 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 	s.UpdateConfig(cfg, tmpDir)
 	defer s.Close()
 
+	// Run a real external command (cat) concurrently so each execution actually
+	// routes through the sandbox worker pool.
+	srcFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("test\n"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
 	// Execute multiple commands concurrently
 	type result struct {
 		output string
@@ -96,7 +112,7 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		go func(n int) {
-			output, err := s.Execute(context.Background(), "echo test", tmpDir, []string{tmpDir}, []string{tmpDir})
+			output, err := s.Execute(context.Background(), "cat "+srcFile, tmpDir, []string{tmpDir}, []string{tmpDir})
 			results <- result{output, err}
 		}(i)
 	}
@@ -115,6 +131,7 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 
 // TestOSSandboxGoRuntime tests that Go build, test, and install work in OS sandbox.
 func TestOSSandboxGoRuntime(t *testing.T) {
+	requireOSSandbox(t)
 	tmpDir := t.TempDir()
 
 	s := NewSandbox()

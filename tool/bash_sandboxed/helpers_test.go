@@ -1,6 +1,21 @@
 package bash_sandboxed
 
-import "github.com/gartnera/lite-sandbox/config"
+import (
+	"os"
+	"testing"
+
+	"github.com/gartnera/lite-sandbox/config"
+)
+
+// requireOSSandbox skips tests that exercise the real OS sandbox runtime
+// (bwrap on Linux / sandbox-exec on macOS). They always compile but only run
+// when OS_SANDBOX_TESTS is set, which CI does.
+func requireOSSandbox(t *testing.T) {
+	t.Helper()
+	if os.Getenv("OS_SANDBOX_TESTS") == "" {
+		t.Skip("requires OS sandbox runtime; set OS_SANDBOX_TESTS=1 to run (enabled in CI)")
+	}
+}
 
 // newTestSandbox returns a Sandbox with no extra commands for use in tests.
 // By default, git permissions use defaults (local_read=true, local_write=true,
