@@ -90,7 +90,8 @@ func runShell() error {
 	// Start docker proxy if docker is enabled, validating bind mounts against
 	// the same path boundary the shell enforces.
 	if cfg != nil && cfg.Docker.DockerEnabled() {
-		socketDir, err := os.MkdirTemp("", "lite-sandbox-docker-")
+		// Short prefix keeps the socket path under macOS's ~104-byte sun_path limit.
+		socketDir, err := os.MkdirTemp("", "ls-docker-")
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 		}

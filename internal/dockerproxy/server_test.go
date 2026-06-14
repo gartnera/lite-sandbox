@@ -7,11 +7,26 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// shortSocketDir returns a temp directory with a short path, suitable for unix
+// socket files. macOS limits a socket's sun_path to ~104 bytes, and
+// t.TempDir() paths under /var/folders/... routinely exceed that (yielding
+// "bind: invalid argument"), so sockets must live under a short base like /tmp.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "dp")
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
 
 // fakeDaemon is a minimal upstream Docker daemon that records the last request
 // path and replies 200.
@@ -23,7 +38,7 @@ type fakeDaemon struct {
 
 func startFakeDaemon(t *testing.T) *fakeDaemon {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "daemon.sock")
+	socket := filepath.Join(shortSocketDir(t), "d.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen upstream: %v", err)
@@ -44,7 +59,7 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 // client that dials its socket.
 func newTestProxy(t *testing.T, fd *fakeDaemon, readDir, writeDir string, allowPriv bool) (*Server, *http.Client) {
 	t.Helper()
-	srv, err := NewServer(t.TempDir(), fd.socket, []string{readDir}, []string{writeDir}, writeDir, allowPriv)
+	srv, err := NewServer(shortSocketDir(t), fd.socket, []string{readDir}, []string{writeDir}, writeDir, allowPriv)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -276,7 +291,7 @@ func TestIsAllowed(t *testing.T) {
 }
 
 func TestEndpointAndSocketDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	srv, err := NewServer(dir, "/var/run/docker.sock", nil, nil, dir, false)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

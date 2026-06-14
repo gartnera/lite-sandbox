@@ -42,7 +42,7 @@ func requireDockerIntegration(t *testing.T) {
 // boundary is workDir, and returns the DOCKER_HOST value pointing at it.
 func startProxyForCLI(t *testing.T, workDir string, allowPriv bool) string {
 	t.Helper()
-	srv, err := NewServer(t.TempDir(), "/var/run/docker.sock",
+	srv, err := NewServer(shortSocketDir(t), "/var/run/docker.sock",
 		[]string{workDir}, []string{workDir}, workDir, allowPriv)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
