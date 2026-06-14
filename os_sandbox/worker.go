@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // procRegistry tracks the currently running commands by execution ID so a
@@ -36,12 +37,13 @@ func (r *procRegistry) remove(id uint64) {
 	r.mu.Unlock()
 }
 
-// kill terminates the command registered for id, if any. On Linux the command
-// leads its own process group (see setProcGroup), so signaling the negative pid
-// reaps the whole subtree — including any children the command forked. The
-// direct-process kill is a fallback (and the only effect on platforms where the
-// command is not a group leader); any survivors are reaped when the worker
-// itself is torn down (see Worker.Close).
+// kill terminates the command registered for id, if any. It first asks the
+// process (and, on Linux, its whole process group — see setProcGroup) to exit
+// with SIGTERM, then SIGKILLs it after a grace period if it has not exited. The
+// group signal reaps any children the command forked; the direct-process signal
+// is a fallback (and the only effect on platforms where the command is not a
+// group leader). Any survivors are reaped when the worker is torn down (see
+// Worker.Close).
 func (r *procRegistry) kill(id uint64) {
 	r.mu.Lock()
 	cmd, ok := r.m[id]
@@ -49,8 +51,22 @@ func (r *procRegistry) kill(id uint64) {
 	if !ok || cmd.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	_ = cmd.Process.Kill()
+	pid := cmd.Process.Pid
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
+	time.AfterFunc(gracefulKillTimeout, func() {
+		// Skip the force-kill if the command already exited (and was
+		// deregistered), so we don't signal a recycled pid/group.
+		r.mu.Lock()
+		_, stillRunning := r.m[id]
+		r.mu.Unlock()
+		if !stillRunning {
+			return
+		}
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
+	})
 }
 
 // setProcGroup makes cmd lead its own process group so its whole subtree can be

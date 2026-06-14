@@ -269,6 +269,45 @@ func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 	}
 }
 
+// TestBackgroundKillIsGraceful verifies kill sends SIGTERM first, giving the
+// process a chance to clean up, before escalating to SIGKILL. A command that
+// traps SIGTERM and writes a marker proves the signal was delivered (an
+// immediate SIGKILL could not be trapped, so no marker would appear).
+func TestBackgroundKillIsGraceful(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signals not supported on windows")
+	}
+	s := NewSandbox()
+	cwd := t.TempDir()
+	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+
+	marker := filepath.Join(cwd, "termed")
+	ready := filepath.Join(cwd, "ready")
+	command := "bash -c 'trap \"echo yes > " + marker + "; exit 0\" TERM; touch " + ready + "; while true; do sleep 0.05; done'"
+	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
+	if err != nil {
+		t.Fatalf("ExecuteBackground failed: %v", err)
+	}
+
+	// Wait until the trap is installed before killing.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := s.KillBackground(proc.ID); err != nil {
+		t.Fatalf("KillBackground failed: %v", err)
+	}
+	waitForStatus(t, proc, 5*time.Second, "killed")
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected SIGTERM handler to run (marker file), got %v", err)
+	}
+}
+
 func TestBackgroundKilledExitCode(t *testing.T) {
 	s := newTestSandbox()
 	cwd := t.TempDir()

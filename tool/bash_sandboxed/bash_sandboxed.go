@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gartnera/lite-sandbox/config"
@@ -919,11 +920,23 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	cmd.Stderr = out
 	cmd.Env = env
 
+	var finished atomic.Bool
 	if newProcessGroup {
 		setProcessGroup(cmd)
 		// Override CommandContext's default Cancel (which kills only bash) so
-		// cancellation tears down the whole group.
-		cmd.Cancel = func() error { return killProcessGroup(cmd) }
+		// cancellation tears down the whole group. Escalate gracefully: SIGTERM
+		// first, then SIGKILL the group after a grace period if it has not
+		// exited. The finished guard avoids signaling a recycled pid/group once
+		// the command has returned.
+		cmd.Cancel = func() error {
+			terminateProcessGroup(cmd)
+			time.AfterFunc(gracefulKillTimeout, func() {
+				if !finished.Load() {
+					killProcessGroup(cmd)
+				}
+			})
+			return nil
+		}
 	}
 
 	// Bound how long Wait blocks on I/O after the context is cancelled. Without
@@ -932,10 +945,14 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	// until that child exits — pinning the calling MCP worker indefinitely and
 	// ignoring the timeout entirely. WaitDelay makes the runtime close the pipes
 	// and return once the delay elapses after cancellation. CommandContext has
-	// already installed a Cancel func that kills bash on ctx.Done().
+	// already installed a Cancel func that kills bash on ctx.Done(). It must
+	// exceed gracefulKillTimeout so the graceful SIGKILL lands before WaitDelay's
+	// force-kill of the direct process.
 	cmd.WaitDelay = runnerKillGracePeriod
 
-	return cmd.Run()
+	err := cmd.Run()
+	finished.Store(true)
+	return err
 }
 
 // Execute parses, validates, and executes a bash command.
