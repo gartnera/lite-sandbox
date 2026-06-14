@@ -3,9 +3,12 @@
 ## Building
 
 ```bash
-go build -o lite-sandbox
-./lite-sandbox install  # Automatically configure Claude Code
+go install .            # Build and install lite-sandbox to $GOPATH/bin
+lite-sandbox install    # Automatically configure Claude Code
 ```
+
+(`go build -o lite-sandbox` still works if you'd rather keep the binary in the
+working directory.)
 
 ## Development
 

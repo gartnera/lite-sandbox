@@ -6,7 +6,7 @@ Commands go through multiple validation layers.
 
 1. **Command whitelist** — Only explicitly allowed, non-destructive commands can run (e.g., `cat`, `ls`, `grep`, `find`). Code execution runtimes, networking tools, package managers, and shell escape commands are all blocked. Additional commands can be allowed via config.
 2. **Argument validation** — Per-command validators block dangerous flags (e.g., `find -exec`, `tar -x`, `git push`). Write commands (`cp`, `mv`, `rm`, `sed`, etc.) are allowed but path-validated.
-3. **Structural restrictions** — Process substitutions, coprocesses, read-write redirections, and dynamic command names are blocked.
+3. **Structural restrictions** — Coprocesses, read-write redirections (`<>`), and dynamic (non-literal) command names are blocked. Process substitutions (`<(...)`) are allowed, but the validator recurses into them so every command nested inside is checked against the same whitelist.
 4. **Static path validation** — Literal path-like arguments (including paths embedded in flags like `-f/path` and `--file=/path`) are resolved to absolute paths with symlink resolution and checked against an allowed directory list (defaults to cwd). Access to `.git` directories is blocked.
 
 ## Runtime validation (interpreter-level, during execution)
@@ -47,20 +47,30 @@ lite-sandbox config os-sandbox enable
 lite-sandbox config os-sandbox show
 ```
 
+### Common isolation (both platforms)
+
+The two backends use different mechanisms (bubblewrap mounts vs. SBPL rules) but
+enforce the same policy:
+
+- **Writes confined to the working directory** — Only the working directory (and its resolved symlink), configured `writable_paths`, and temp dirs are writable; everything else on the host is read-only.
+- **Writable temp directories** — `/tmp` and the platform's other temporary directories are writable, as required for build caches and `TMPDIR`.
+- **Runtime bind mounts** — Additional writable paths are granted for enabled runtimes (e.g., `$GOPATH/bin` for Go).
+- **Network preserved** — Network access is left intact.
+- **Process execution allowed** — Spawning subprocesses is permitted; enforcement is at the filesystem level.
+- **SSH key protection** — SSH **private** keys in `~/.ssh` are **always** denied read access; `known_hosts`, `config`, `authorized_keys`, and `*.pub` files remain accessible.
+- **AWS credential protection** — `~/.aws` is denied read access when AWS IMDS mode is configured (`aws.force_profile`; see [AWS & Docker access](aws-and-docker.md)).
+
 ### Linux (bubblewrap)
 
-Commands execute inside a lightweight container via Linux namespaces:
+Commands execute inside a lightweight container via Linux namespaces. On top of
+the common policy above, the Linux backend adds:
 
-**Isolation features:**
-- **Read-only root filesystem** — The entire host filesystem is mounted read-only, preventing writes outside allowed paths
-- **Writable working directory** — The project directory is bind-mounted as writable
-- **Writable /tmp** — A tmpfs is mounted at `/tmp` for temporary files and build caches
-- **Fresh /dev and /proc** — New device and process filesystems prevent access to host state
-- **Network sharing** — Network access is preserved (unshare all except network)
-- **Runtime bind mounts** — Additional writable paths are mounted for enabled runtimes (e.g., `$GOPATH/bin` for Go)
+- **Read-only root filesystem** — The entire host filesystem is mounted read-only via bubblewrap, with the writable paths bind-mounted back in.
+- **Fresh /dev and /proc** — New device and process filesystems prevent access to host state.
+- **Namespace isolation** — All namespaces are unshared except the network (`--unshare-all --share-net`), and the worker is killed if the server exits (`--die-with-parent`).
 
 **Requirements:**
-- **Linux only** — Requires Linux kernel with unprivileged user namespaces
+- **Linux only** — Requires a Linux kernel with unprivileged user namespaces
 - **bubblewrap installed** — Install via package manager (e.g., `apt install bubblewrap`, `pacman -S bubblewrap`)
 - **Kernel configuration** — Some systems require enabling unprivileged user namespaces:
   ```bash
@@ -76,15 +86,11 @@ Commands execute inside a lightweight container via Linux namespaces:
 
 ### macOS (sandbox-exec)
 
-Commands execute inside a dynamically generated SBPL (Scheme-based Profile Language) sandbox profile via `sandbox-exec`:
+Commands execute inside a dynamically generated SBPL (Scheme-based Profile
+Language) profile via `sandbox-exec`. On top of the common policy above, the
+macOS backend adds:
 
-**Isolation features:**
-- **Writable working directory** — Only the project directory (and its resolved symlink) is writable
-- **Writable temp directories** — `/tmp`, `/private/tmp`, `/var/folders`, and `/private/var/folders` are writable (required for build caches and `TMPDIR`)
-- **SSH key protection** — SSH private keys in `~/.ssh` are always denied read access; `known_hosts`, `config`, and `authorized_keys` remain accessible
-- **AWS credential protection** — `~/.aws` is denied read access when AWS IMDS is configured
-- **Network access** — Network access is preserved
-- **Process execution** — Full process execution is allowed (enforcement is at the filesystem level)
+- **Signal confinement** — The profile denies signaling processes outside the worker's own process group, so a sandboxed `kill`/`pkill` cannot reach host processes.
 
 **Requirements:**
 - **macOS only** — Uses the built-in `sandbox-exec` command (no additional software required)
@@ -93,7 +99,7 @@ Commands execute inside a dynamically generated SBPL (Scheme-based Profile Langu
 
 The OS sandbox provides defense-in-depth on top of the AST-level validation:
 - If a dangerous command bypasses AST validation, filesystem restrictions prevent writes outside the working directory
-- Process substitutions and command injections are still blocked at the AST level before reaching the OS sandbox
+- Disallowed commands are still blocked at the AST level (including any nested inside process substitutions or command substitutions) before reaching the OS sandbox
 - The OS sandbox does NOT replace AST validation — both layers work together
 
 ## Known Limitations
