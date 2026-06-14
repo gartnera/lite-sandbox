@@ -296,13 +296,16 @@ func runServe() error {
 	// only permitted under the OS sandbox, unless allow_unsandboxed is set).
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		// Resolve the upstream socket once and reuse it for both the proxy and
+		// the OS-sandbox mask so they can't disagree.
+		upstream := cfg.Docker.UpstreamSocket()
 		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 		}
 		defer os.RemoveAll(socketDir)
 
-		dockerSrv, err := dockerproxy.NewServer(socketDir, cfg.Docker.UpstreamSocket(),
+		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
 			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged())
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy: %w", err)
@@ -322,7 +325,7 @@ func runServe() error {
 			}
 		}()
 
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), cfg.Docker.UpstreamSocket())
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
 	}
 
 	go func() {

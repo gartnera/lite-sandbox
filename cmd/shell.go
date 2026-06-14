@@ -91,13 +91,16 @@ func runShell() error {
 	// against the same path boundary the shell enforces. The docker command is
 	// only permitted under the OS sandbox unless allow_unsandboxed is set.
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
+		// Resolve the upstream socket once and reuse it for both the proxy and
+		// the OS-sandbox mask so they can't disagree.
+		upstream := cfg.Docker.UpstreamSocket()
 		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 		}
 		defer os.RemoveAll(socketDir)
 
-		dockerSrv, err := dockerproxy.NewServer(socketDir, cfg.Docker.UpstreamSocket(),
+		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
 			readPaths, writePaths, startDir, cfg.Docker.AllowsPrivileged())
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy: %w", err)
@@ -117,7 +120,7 @@ func runShell() error {
 			}
 		}()
 
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), cfg.Docker.UpstreamSocket())
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
 		os.Setenv("DOCKER_HOST", dockerSrv.Endpoint())
 	}
 
