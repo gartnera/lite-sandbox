@@ -150,6 +150,47 @@ func (a *AWSConfig) IMDSProfile() string {
 	return a.ForceProfile
 }
 
+// DockerConfig controls access to the Docker daemon. When enabled, a local
+// filtering proxy is started in front of the real Docker socket and the
+// sandboxed `docker` CLI talks to it via DOCKER_HOST. The proxy rejects
+// privileged containers and bind mounts whose host source falls outside the
+// sandbox's readable/writable path boundary.
+type DockerConfig struct {
+	Enabled         *bool  `yaml:"enabled,omitempty"`
+	SocketPath      string `yaml:"socket_path,omitempty"`      // upstream daemon socket, default /var/run/docker.sock
+	AllowPrivileged *bool  `yaml:"allow_privileged,omitempty"` // default false
+}
+
+// DefaultDockerSocket is the upstream Docker daemon socket used when SocketPath
+// is not configured.
+const DefaultDockerSocket = "/var/run/docker.sock"
+
+// DockerEnabled returns whether docker commands are allowed (default: false).
+func (d *DockerConfig) DockerEnabled() bool {
+	if d == nil || d.Enabled == nil {
+		return false
+	}
+	return *d.Enabled
+}
+
+// UpstreamSocket returns the upstream Docker daemon socket path the proxy
+// forwards to (default: /var/run/docker.sock).
+func (d *DockerConfig) UpstreamSocket() string {
+	if d == nil || d.SocketPath == "" {
+		return DefaultDockerSocket
+	}
+	return d.SocketPath
+}
+
+// AllowsPrivileged returns whether privileged containers (and equivalent
+// escalation vectors) are permitted through the proxy (default: false).
+func (d *DockerConfig) AllowsPrivileged() bool {
+	if d == nil || d.AllowPrivileged == nil {
+		return false
+	}
+	return *d.AllowPrivileged
+}
+
 // LocalBinaryExecutionConfig controls whether direct path execution
 // (./binary, ../binary, /path/to/binary) is allowed.
 type LocalBinaryExecutionConfig struct {
@@ -267,12 +308,13 @@ type RuntimesConfig struct {
 // Config holds all user configuration. New fields can be added over time;
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
-	ExtraCommands []string        `yaml:"extra_commands,omitempty"`
-	ReadablePaths []string        `yaml:"readable_paths,omitempty"`
-	WritablePaths []string        `yaml:"writable_paths,omitempty"`
-	Git           *GitConfig      `yaml:"git,omitempty"`
-	Runtimes      *RuntimesConfig `yaml:"runtimes,omitempty"`
+	ExtraCommands        []string                    `yaml:"extra_commands,omitempty"`
+	ReadablePaths        []string                    `yaml:"readable_paths,omitempty"`
+	WritablePaths        []string                    `yaml:"writable_paths,omitempty"`
+	Git                  *GitConfig                  `yaml:"git,omitempty"`
+	Runtimes             *RuntimesConfig             `yaml:"runtimes,omitempty"`
 	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
+	Docker               *DockerConfig               `yaml:"docker,omitempty"`
 	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
 }

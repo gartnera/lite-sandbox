@@ -61,6 +61,12 @@ type Sandbox struct {
 	// HandlerContext, so the lookup is done with the post-`cd` directory.
 	bareExtraScriptPaths map[string]bool
 	imdsEndpoint         string
+	// dockerHost is the DOCKER_HOST value (unix://… proxy socket) injected into
+	// sandboxed commands when the docker proxy is running. dockerSocketDir is the
+	// directory holding that socket, bind-mounted into the OS sandbox worker so
+	// the worker can connect to it.
+	dockerHost      string
+	dockerSocketDir string
 	// runtimeReadPaths is the lazily computed result of detectRuntimeBinds for
 	// the current config; runtimeDetected marks it as valid. Detection spawns
 	// subprocesses (go, pnpm), so it is deferred until a caller actually needs
@@ -207,6 +213,17 @@ func (s *Sandbox) SetIMDSEndpoint(endpoint string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.imdsEndpoint = endpoint
+}
+
+// SetDockerHost sets the DOCKER_HOST value (the docker proxy socket) and the
+// directory holding that socket. The directory is bind-mounted into the OS
+// sandbox worker so sandboxed commands can reach the proxy. Passing an empty
+// host disables docker access for subsequent commands.
+func (s *Sandbox) SetDockerHost(host, socketDir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dockerHost = host
+	s.dockerSocketDir = socketDir
 }
 
 // RuntimeReadPaths returns the detected runtime paths that should be
@@ -907,11 +924,15 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup bool) error {
 	s.mu.RLock()
 	imdsEndpoint := s.imdsEndpoint
+	dockerHost := s.dockerHost
 	s.mu.RUnlock()
 
 	env := os.Environ()
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
+	}
+	if dockerHost != "" {
+		env = append(env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
 	}
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
@@ -1028,6 +1049,7 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	s.mu.RLock()
 	useOSSandbox := s.osSandbox
 	imdsEndpoint := s.imdsEndpoint
+	dockerHost := s.dockerHost
 	s.mu.RUnlock()
 
 	// Build environment with IMDS endpoint if AWS is enabled. The interpreter
@@ -1036,6 +1058,9 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	env := os.Environ()
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
+	}
+	if dockerHost != "" {
+		env = append(env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
 	}
 
 	// Store sandbox paths in context so nested bash/sh can access them
@@ -1149,6 +1174,15 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 
 	// Resolve runtime binds outside the lock; this may run lazy detection.
 	runtimeBinds := s.RuntimeReadPaths()
+
+	// Bind the docker proxy socket dir into the worker so sandboxed commands
+	// can reach the proxy via DOCKER_HOST.
+	s.mu.RLock()
+	dockerSocketDir := s.dockerSocketDir
+	s.mu.RUnlock()
+	if dockerSocketDir != "" {
+		runtimeBinds = append(runtimeBinds, dockerSocketDir)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

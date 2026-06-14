@@ -16,6 +16,7 @@ import (
 	"mvdan.cc/sh/v3/interp"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	"github.com/gartnera/lite-sandbox/internal/imds"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -275,6 +276,38 @@ func runServe() error {
 
 		// Set IMDS endpoint in sandbox
 		sandbox.SetIMDSEndpoint(imdsServer.Endpoint())
+	}
+
+	// Start docker proxy if docker is enabled.
+	if cfg != nil && cfg.Docker.DockerEnabled() {
+		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		socketDir, err := os.MkdirTemp("", "lite-sandbox-docker-")
+		if err != nil {
+			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
+		}
+		defer os.RemoveAll(socketDir)
+
+		dockerSrv, err := dockerproxy.NewServer(socketDir, cfg.Docker.UpstreamSocket(),
+			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged())
+		if err != nil {
+			return fmt.Errorf("failed to create docker proxy: %w", err)
+		}
+
+		go func() {
+			slog.Info("docker proxy endpoint", "host", dockerSrv.Endpoint())
+			if err := dockerSrv.Start(); err != nil && err != http.ErrServerClosed {
+				slog.Error("docker proxy failed", "error", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := dockerSrv.Shutdown(shutdownCtx); err != nil {
+				slog.Error("failed to shutdown docker proxy", "error", err)
+			}
+		}()
+
+		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir())
 	}
 
 	go func() {

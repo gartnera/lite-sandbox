@@ -96,8 +96,8 @@ var allowedCommands = map[string]bool{
 	"iconv":   true,
 
 	// JSON/structured data and text processing (stdin/stdout processors)
-	"jq":  true,
-	"yq":  true,
+	"jq": true,
+	"yq": true,
 	// awk is executed via goawk with system() and file-writes disabled.
 	"awk":    true,
 	"base64": true,
@@ -176,6 +176,9 @@ var allowedCommands = map[string]bool{
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
 
+	// Container tooling (config-gated, daemon access via filtering proxy)
+	"docker": true,
+
 	// Scoped write commands (path-validated to stay within allowedPaths)
 	"cp":    true,
 	"mv":    true,
@@ -248,22 +251,23 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"sh":     validateBashCommand,
 	"source": validateSourceCommand,
 	".":      validateSourceCommand,
-	"rg":    validateRgArgs,
-	"find":  validateFindArgs,
-	"tar":   validateTarArgs,
-	"unzip": validateUnzipArgs,
-	"ar":    validateArArgs,
-	"rm":    validateRmArgs,
-	"sed":   validateSedArgs,
-	"git":   validateGitCommand,
-	"go":    validateGoCommand,
-	"gofmt": validateGofmtCommand,
-	"pnpm":  validatePnpmCommand,
-	"cargo": validateCargoCommand,
-	"rustc": validateRustcCommand,
-	"deno":  validateDenoCommand,
-	"aws":   validateAWSCommand,
-	"xargs": validateXargsArgs,
+	"rg":     validateRgArgs,
+	"find":   validateFindArgs,
+	"tar":    validateTarArgs,
+	"unzip":  validateUnzipArgs,
+	"ar":     validateArArgs,
+	"rm":     validateRmArgs,
+	"sed":    validateSedArgs,
+	"git":    validateGitCommand,
+	"go":     validateGoCommand,
+	"gofmt":  validateGofmtCommand,
+	"pnpm":   validatePnpmCommand,
+	"cargo":  validateCargoCommand,
+	"rustc":  validateRustcCommand,
+	"deno":   validateDenoCommand,
+	"aws":    validateAWSCommand,
+	"docker": validateDockerCommand,
+	"xargs":  validateXargsArgs,
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
@@ -337,5 +341,16 @@ func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	// AWS CLI credentials will come from IMDS endpoint, not files
 	// No additional argument validation needed - all aws subcommands allowed
+	return nil
+}
+
+func validateDockerCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Docker == nil || !cfg.Docker.DockerEnabled() {
+		return fmt.Errorf("command \"docker\" is not allowed (docker.enabled is disabled)")
+	}
+	// The docker CLI talks to the filtering proxy via DOCKER_HOST; the proxy
+	// enforces the privileged and bind-mount policy on the wire, so no
+	// argument-level validation is needed here.
 	return nil
 }

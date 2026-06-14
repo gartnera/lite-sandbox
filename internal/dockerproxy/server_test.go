@@ -1,0 +1,313 @@
+package dockerproxy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeDaemon is a minimal upstream Docker daemon that records the last request
+// path and replies 200.
+type fakeDaemon struct {
+	socket   string
+	server   *http.Server
+	gotPaths []string
+}
+
+func startFakeDaemon(t *testing.T) *fakeDaemon {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "daemon.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	fd := &fakeDaemon{socket: socket}
+	fd.server = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fd.gotPaths = append(fd.gotPaths, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"ok":true}`)
+	})}
+	go fd.server.Serve(ln)
+	t.Cleanup(func() { fd.server.Close() })
+	return fd
+}
+
+// newTestProxy starts a proxy in front of fd whose writable boundary is
+// writeDir (read boundary is readDir), and returns the proxy plus an http
+// client that dials its socket.
+func newTestProxy(t *testing.T, fd *fakeDaemon, readDir, writeDir string, allowPriv bool) (*Server, *http.Client) {
+	t.Helper()
+	srv, err := NewServer(t.TempDir(), fd.socket, []string{readDir}, []string{writeDir}, writeDir, allowPriv)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	go srv.Start()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	})
+
+	socketPath := strings.TrimPrefix(srv.Endpoint(), "unix://")
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		},
+	}}
+	// Give the server goroutine a moment to begin serving.
+	waitForSocket(t, socketPath)
+	return srv, client
+}
+
+func waitForSocket(t *testing.T, path string) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		c, err := net.Dial("unix", path)
+		if err == nil {
+			c.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("proxy socket %s never became ready", path)
+}
+
+func do(t *testing.T, client *http.Client, method, path string, body string) (int, string) {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, "http://docker"+path, r)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func TestProxy_AllowedRequestForwarded(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	status, _ := do(t, client, "GET", "/v1.43/version", "")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if len(fd.gotPaths) != 1 || !strings.Contains(fd.gotPaths[0], "/version") {
+		t.Fatalf("upstream did not receive forwarded request: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_DeniedEndpoint(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	// /secret is not in the allowlist.
+	status, body := do(t, client, "GET", "/v1.43/secret", "")
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", status)
+	}
+	if !strings.Contains(body, "not permitted") {
+		t.Fatalf("unexpected error body: %s", body)
+	}
+	if len(fd.gotPaths) != 0 {
+		t.Fatalf("denied request should not reach upstream: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_BindMountInsideBoundaryForwarded(t *testing.T) {
+	fd := startFakeDaemon(t)
+	writeDir := t.TempDir()
+	_, client := newTestProxy(t, fd, writeDir, writeDir, false)
+
+	body := fmt.Sprintf(`{"Image":"alpine","HostConfig":{"Binds":["%s:/work"]}}`, writeDir)
+	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 (forwarded), got %d", status)
+	}
+	if len(fd.gotPaths) != 1 {
+		t.Fatalf("create should be forwarded once: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_BindMountOutsideBoundaryRejected(t *testing.T) {
+	fd := startFakeDaemon(t)
+	writeDir := t.TempDir()
+	_, client := newTestProxy(t, fd, writeDir, writeDir, false)
+
+	body := `{"Image":"alpine","HostConfig":{"Binds":["/etc:/etc"]}}`
+	status, msg := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d (%s)", status, msg)
+	}
+	if !strings.Contains(msg, "outside the sandbox boundary") {
+		t.Fatalf("unexpected message: %s", msg)
+	}
+	if len(fd.gotPaths) != 0 {
+		t.Fatalf("rejected create should not reach upstream: %v", fd.gotPaths)
+	}
+}
+
+func TestProxy_AnonymousVolumeAllowed(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	// Named/anonymous volume (non-absolute source) and a tmpfs/volume Mount.
+	body := `{"Image":"alpine","HostConfig":{"Binds":["mydata:/data"],"Mounts":[{"Type":"volume","Target":"/cache"}]}}`
+	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 (forwarded), got %d", status)
+	}
+}
+
+func TestProxy_PrivilegedRejected(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+
+	body := `{"Image":"alpine","HostConfig":{"Privileged":true}}`
+	status, msg := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", status)
+	}
+	if !strings.Contains(msg, "privileged") {
+		t.Fatalf("unexpected message: %s", msg)
+	}
+}
+
+func TestProxy_PrivilegedAllowedWhenConfigured(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, true)
+
+	body := `{"Image":"alpine","HostConfig":{"Privileged":true}}`
+	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 when allow_privileged is set, got %d", status)
+	}
+}
+
+func TestValidateCreateBody(t *testing.T) {
+	readDir := "/srv/read"
+	writeDir := "/srv/write"
+	read := []string{readDir, writeDir}
+	write := []string{writeDir}
+
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string // substring; "" means allowed
+	}{
+		{"empty", `{}`, ""},
+		{"rw bind in write boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, writeDir), ""},
+		{"rw bind only in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, readDir), "outside the sandbox boundary"},
+		{"ro bind in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x:ro"]}}`, readDir), ""},
+		{"named volume", `{"HostConfig":{"Binds":["vol:/x"]}}`, ""},
+		{"mount bind outside", `{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/etc","Target":"/etc"}]}}`, "outside the sandbox boundary"},
+		{"mount volume", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x"}]}}`, ""},
+		{"privileged", `{"HostConfig":{"Privileged":true}}`, "privileged"},
+		{"cap-add", `{"HostConfig":{"CapAdd":["SYS_ADMIN"]}}`, "capabilities"},
+		{"device", `{"HostConfig":{"Devices":[{"PathOnHost":"/dev/sda"}]}}`, "devices"},
+		{"host pid", `{"HostConfig":{"PidMode":"host"}}`, "PID namespace"},
+		{"host network", `{"HostConfig":{"NetworkMode":"host"}}`, "network namespace"},
+		{"seccomp unconfined", `{"HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}`, "security-opt"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCreateBody([]byte(tc.body), writeDir, read, write, false)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected allowed, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestIsAllowed(t *testing.T) {
+	allowed := [][2]string{
+		{"GET", "/v1.43/version"},
+		{"GET", "/version"},
+		{"POST", "/v1.43/containers/create"},
+		{"POST", "/v1.43/containers/abc123/start"},
+		{"DELETE", "/v1.43/containers/abc123"},
+		{"GET", "/v1.43/containers/json"},
+		{"HEAD", "/_ping"},
+		{"POST", "/v1.43/build"},
+	}
+	for _, a := range allowed {
+		if !isAllowed(a[0], a[1]) {
+			t.Errorf("expected allowed: %s %s", a[0], a[1])
+		}
+	}
+
+	denied := [][2]string{
+		{"GET", "/v1.43/secret"},
+		{"POST", "/v1.43/containers/abc/commit"},
+		{"GET", "/v1.43/containers/abc/json/extra"},
+		{"POST", "/swarm/init"},
+	}
+	for _, d := range denied {
+		if isAllowed(d[0], d[1]) {
+			t.Errorf("expected denied: %s %s", d[0], d[1])
+		}
+	}
+}
+
+func TestEndpointAndSocketDir(t *testing.T) {
+	dir := t.TempDir()
+	srv, err := NewServer(dir, "/var/run/docker.sock", nil, nil, dir, false)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	if want := "unix://" + filepath.Join(dir, "docker.sock"); srv.Endpoint() != want {
+		t.Errorf("Endpoint() = %q, want %q", srv.Endpoint(), want)
+	}
+	if srv.SocketDir() != dir {
+		t.Errorf("SocketDir() = %q, want %q", srv.SocketDir(), dir)
+	}
+}
+
+// jsonMessage is a small helper to assert error bodies are valid Docker error
+// JSON.
+func decodeMessage(t *testing.T, body string) string {
+	t.Helper()
+	var m map[string]string
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("error body is not JSON: %s", body)
+	}
+	return m["message"]
+}
+
+func TestDeniedErrorIsDockerJSON(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, body := do(t, client, "GET", "/v1.43/secret", "")
+	if msg := decodeMessage(t, body); msg == "" {
+		t.Fatalf("expected non-empty docker error message, got: %s", body)
+	}
+}
