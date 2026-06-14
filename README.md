@@ -14,7 +14,7 @@ lite-sandbox install
 
 This automatically:
 1. Adds the MCP server to `~/.claude.json` (user-scoped)
-2. Adds auto-allow permission for `mcp__lite-sandbox__bash` **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
+2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Adds usage directive to `~/.claude/CLAUDE.md`
 
 Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
@@ -62,13 +62,16 @@ Replace `/path/to/lite-sandbox` with the actual path to the built binary.
 
 #### 2. Auto-allow the sandbox tool and deny built-in Bash
 
-Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandboxed tool and can no longer use the built-in `Bash` tool:
+Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandboxed tools and can no longer use the built-in `Bash` tool:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__lite-sandbox__bash"
+      "mcp__lite-sandbox__bash",
+      "mcp__lite-sandbox__bash_output",
+      "mcp__lite-sandbox__kill_shell",
+      "mcp__lite-sandbox__list_shells"
     ],
     "deny": [
       "Bash"
@@ -76,6 +79,10 @@ Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandb
   }
 }
 ```
+
+The `bash_output`, `kill_shell`, and `list_shells` entries cover the
+background-process tools, so polling and stopping background commands also run
+without prompts.
 
 Denying `Bash` is what makes the sandbox enforceable — without it, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 
