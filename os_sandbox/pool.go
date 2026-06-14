@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // HostMsgType identifies messages sent from host to worker.
@@ -256,6 +257,12 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 
 	cmd.Stderr = os.Stderr // Pass through stderr for worker logs
 
+	// Put the worker in its own process group. On macOS this is what makes the
+	// seatbelt "(deny signal (target others))" rule meaningful — sandbox-spawned
+	// processes share this group while the host MCP process does not — and it
+	// lets Close() signal the whole group to reap leaked background processes.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
@@ -374,8 +381,12 @@ func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredential
 	// Allow mach lookups (required for macOS services)
 	sb.WriteString("(allow mach-lookup)\n")
 
-	// Allow signal operations
-	sb.WriteString("(allow signal)\n")
+	// Restrict signaling so kill/pkill cannot reach host processes. The SBPL
+	// signal operation classifies targets as self, pgrp (same process group), or
+	// others (everything else). The worker is started in its own process group
+	// (Setpgid), so denying "others" confines signals to the processes this
+	// sandbox spawned while leaving self/pgrp (allowed by "allow default") intact.
+	sb.WriteString("(deny signal (target others))\n")
 
 	// Allow sysctl reads (required for many tools)
 	sb.WriteString("(allow sysctl-read)\n")
@@ -536,6 +547,11 @@ func (w *Worker) Close() error {
 	w.stdout.Close()
 
 	if w.cmd.Process != nil {
+		// The worker leads its own process group (Setpgid at start). Signal the
+		// whole group first so any background processes it spawned (e.g. servers)
+		// are torn down too, not just the worker leader. Best-effort; on Linux the
+		// PID namespace also reaps them when the worker dies.
+		_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
 		if err := w.cmd.Process.Kill(); err != nil {
 			return fmt.Errorf("failed to kill worker: %w", err)
 		}

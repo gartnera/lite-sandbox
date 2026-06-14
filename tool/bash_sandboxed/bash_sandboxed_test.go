@@ -194,6 +194,43 @@ func TestValidate_AllowedCommands(t *testing.T) {
 	}
 }
 
+func TestValidate_ProcessControlGatedOnOSSandbox(t *testing.T) {
+	commands := []string{
+		"kill 1234",
+		"kill -9 1234",
+		"pkill -f myserver",
+		"sleep 1 & kill $!",
+	}
+
+	// Without the OS sandbox, kill/pkill are blocked.
+	t.Run("blocked without os sandbox", func(t *testing.T) {
+		s := newTestSandbox()
+		for _, cmd := range commands {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error for %q: %v", cmd, err)
+			}
+			if err := s.validate(f); err == nil {
+				t.Errorf("expected %q to be blocked without OS sandbox, but it was allowed", cmd)
+			}
+		}
+	})
+
+	// With the OS sandbox enabled, they are allowed (contained to the sandbox).
+	t.Run("allowed with os sandbox", func(t *testing.T) {
+		s := newTestSandboxWithOSSandbox()
+		for _, cmd := range commands {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error for %q: %v", cmd, err)
+			}
+			if err := s.validate(f); err != nil {
+				t.Errorf("expected %q to be allowed with OS sandbox, got: %v", cmd, err)
+			}
+		}
+	})
+}
+
 func TestValidate_BlockedCommands(t *testing.T) {
 	tests := []struct {
 		name    string

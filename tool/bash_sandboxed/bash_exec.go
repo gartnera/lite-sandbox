@@ -500,7 +500,10 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 				cmdName := args[0]
 				// Runtime command whitelist check — catches blocked commands
 				// introduced via source/. or other dynamic execution paths.
-				if !allowedCommands[cmdName] && !extra[cmdName] {
+				// Process-control commands (kill, pkill) are permitted only when
+				// the OS sandbox is active, where they are contained.
+				osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
+				if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
 						return fmt.Errorf("command %q is not allowed", cmdName)
 					}
