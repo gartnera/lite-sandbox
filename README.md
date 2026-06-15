@@ -5,8 +5,8 @@ An MCP (Model Context Protocol) server that provides a `bash` tool as a replacem
 ## Quick start
 
 ```bash
-go install .             # Build and install the lite-sandbox binary (to $GOPATH/bin)
-lite-sandbox install     # Configure Claude Code, then restart it
+go install github.com/gartnera/lite-sandbox@latest  # Install the lite-sandbox binary (to $GOPATH/bin)
+lite-sandbox install                                 # Configure Claude Code, then restart it
 ```
 
 `install` registers the MCP server, auto-allows the sandbox tools, denies the built-in `Bash` tool, and adds a usage directive so Claude routes shell commands through the sandbox. See [docs/installation.md](docs/installation.md) for manual setup and the optional tool-hook modes.
