@@ -150,9 +150,11 @@ func TestWorkerExecCancelGraceful(t *testing.T) {
 }
 
 // TestWorkerExecCancelReapsForkedChild verifies that cancelling a worker command
-// tears down its whole process group, including a child it forked.
+// tears down its whole subtree, including a child it forked (the `go run`
+// scenario: a leader process that spawns a longer-lived child). On Linux this
+// goes through the process-group kill; on macOS, where commands share the
+// worker's group, it goes through the enumerated-descendant kill (killTargets).
 func TestWorkerExecCancelReapsForkedChild(t *testing.T) {
-	requireLinux(t)
 	w := startBareWorker(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -186,6 +188,32 @@ func TestProcRegistryKillReapsGroup(t *testing.T) {
 	reg := newProcRegistry()
 	reg.add(1, cmd)
 	// Mirror streamCommand: deregister once the process exits.
+	go func() {
+		_ = cmd.Wait()
+		reg.remove(1)
+	}()
+
+	childPid := readPidFile(t, pidFile, 5*time.Second)
+	reg.kill(1)
+	assertReaped(t, childPid, 5*time.Second)
+}
+
+// TestProcRegistryKillReapsTree unit-tests the registry kill on macOS, where
+// commands are NOT placed in their own process group (setProcGroup is a no-op
+// there). The grandchild must still be reaped via the enumerated-descendant
+// path (killTargets), matching the `go run` scenario the group kill cannot.
+func TestProcRegistryKillReapsTree(t *testing.T) {
+	requireDarwin(t)
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	cmd := exec.Command("bash", "-c", "sleep 300 & echo $! > "+pidFile+"; wait")
+	setProcGroup(cmd) // no-op on darwin; cmd shares the test runner's group
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	reg := newProcRegistry()
+	reg.add(1, cmd)
 	go func() {
 		_ = cmd.Wait()
 		reg.remove(1)

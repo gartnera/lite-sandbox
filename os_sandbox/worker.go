@@ -38,12 +38,12 @@ func (r *procRegistry) remove(id uint64) {
 }
 
 // kill terminates the command registered for id, if any. It first asks the
-// process (and, on Linux, its whole process group — see setProcGroup) to exit
-// with SIGTERM, then SIGKILLs it after a grace period if it has not exited. The
-// group signal reaps any children the command forked; the direct-process signal
-// is a fallback (and the only effect on platforms where the command is not a
-// group leader). Any survivors are reaped when the worker is torn down (see
-// Worker.Close).
+// process subtree to exit with SIGTERM, then SIGKILLs whatever is left after a
+// grace period. The set of target pids is snapshotted once, up front: on macOS
+// the subtree is enumerated from the live process table (see killTargets), and
+// once the command leader exits its children reparent to launchd, so
+// re-deriving the tree at force-kill time would miss them. Any survivors are
+// reaped when the worker is torn down (see Worker.Close).
 func (r *procRegistry) kill(id uint64) {
 	r.mu.Lock()
 	cmd, ok := r.m[id]
@@ -51,30 +51,38 @@ func (r *procRegistry) kill(id uint64) {
 	if !ok || cmd.Process == nil {
 		return
 	}
-	pid := cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	targets := killTargets(cmd.Process.Pid)
+	signalPids(targets, syscall.SIGTERM)
 
 	time.AfterFunc(gracefulKillTimeout, func() {
 		// Skip the force-kill if the command already exited (and was
-		// deregistered), so we don't signal a recycled pid/group.
+		// deregistered), so we don't signal recycled pids.
 		r.mu.Lock()
 		_, stillRunning := r.m[id]
 		r.mu.Unlock()
 		if !stillRunning {
 			return
 		}
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_ = cmd.Process.Kill()
+		signalPids(targets, syscall.SIGKILL)
 	})
+}
+
+// signalPids sends sig to each target, ignoring errors (a target may have
+// already exited). A negative target signals the process group led by its
+// absolute value (used on Linux); a positive target signals that one process
+// (used for each member of an enumerated subtree on macOS).
+func signalPids(targets []int, sig syscall.Signal) {
+	for _, pid := range targets {
+		_ = syscall.Kill(pid, sig)
+	}
 }
 
 // setProcGroup makes cmd lead its own process group so its whole subtree can be
 // signaled at once. On macOS the sandbox profile denies signaling processes
 // outside the worker's own process group ("(deny signal (target others))"), so
 // placing a command in a separate group would make even a direct kill fail;
-// there we leave it in the worker's group and rely on per-process and
-// shutdown-time kills instead.
+// there we leave it in the worker's group and reap its subtree by enumerating
+// descendants instead (see killTargets on darwin).
 func setProcGroup(cmd *exec.Cmd) {
 	if runtime.GOOS != "linux" {
 		return
