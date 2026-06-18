@@ -3,11 +3,110 @@ package imds
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/jellydator/ttlcache/v3"
 )
+
+// slowProvider is a credentials provider whose Retrieve blocks for a fixed
+// delay and counts how many times it is invoked. It lets the tests assert that
+// the server delegates caching/singleflight to the SDK CredentialsCache rather
+// than serializing requests under its own lock.
+type slowProvider struct {
+	mu    sync.Mutex
+	calls int
+	delay time.Duration
+}
+
+func (p *slowProvider) Retrieve(_ context.Context) (aws.Credentials, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
+	return aws.Credentials{
+		AccessKeyID:     "AKIAEXAMPLE",
+		SecretAccessKey: "secret",
+		SessionToken:    "token",
+		CanExpire:       true,
+		Expires:         time.Now().Add(time.Hour),
+	}, nil
+}
+
+func (p *slowProvider) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// TestGetCredentials_ConcurrentRefreshDoesNotSerialize verifies the fix for the
+// hang: a burst of concurrent credential requests with a cold cache triggers a
+// single underlying refresh (singleflight) and completes in roughly one refresh
+// delay, rather than serializing N refreshes back-to-back behind a held lock.
+func TestGetCredentials_ConcurrentRefreshDoesNotSerialize(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", "default")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	const delay = 200 * time.Millisecond
+	fp := &slowProvider{delay: delay}
+	// Inject the SDK cache wrapping our slow provider, bypassing config load.
+	server.creds = aws.NewCredentialsCache(fp)
+
+	const n = 25
+	start := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := server.getCredentials(context.Background()); err != nil {
+				t.Errorf("getCredentials: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	// Singleflight: all concurrent cold callers share one underlying retrieve.
+	if got := fp.count(); got != 1 {
+		t.Errorf("expected exactly 1 underlying retrieve, got %d", got)
+	}
+	// If requests serialized under a lock, this would take ~n*delay. Allow
+	// generous slack for scheduling but well under the serialized worst case.
+	if elapsed > delay*4 {
+		t.Errorf("concurrent requests serialized: took %v for %d requests (one refresh = %v)", elapsed, n, delay)
+	}
+}
+
+// TestGetCredentials_CachedAfterFirstRetrieve verifies that once credentials
+// are warm, subsequent requests hit the SDK cache and do not re-invoke the
+// underlying provider.
+func TestGetCredentials_CachedAfterFirstRetrieve(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", "default")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	fp := &slowProvider{}
+	server.creds = aws.NewCredentialsCache(fp)
+
+	for i := 0; i < 5; i++ {
+		if _, err := server.getCredentials(context.Background()); err != nil {
+			t.Fatalf("getCredentials: %v", err)
+		}
+	}
+	if got := fp.count(); got != 1 {
+		t.Errorf("expected creds cached after first retrieve, got %d underlying retrieves", got)
+	}
+}
 
 func TestNewServer_RandomPort(t *testing.T) {
 	// Create server with port 0 (random port)

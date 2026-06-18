@@ -20,23 +20,28 @@ import (
 
 // Server implements an IMDSv2-compatible HTTP server that provides AWS credentials
 // to sandboxed commands without requiring file access to ~/.aws/credentials.
-// Credentials are fetched via AWS STS GetSessionToken and cached until expiry.
+// Credentials come from the configured profile's provider, wrapped in the AWS
+// SDK's own aws.CredentialsCache, which handles concurrency-safe caching,
+// singleflight refresh, expiry-window pre-refresh, and (for sso_session
+// profiles) SSO token auto-refresh.
 type Server struct {
 	addr        string
 	profile     string
 	secretToken string
-	credCache   *credentialCache
 	sessions    *ttlcache.Cache[string, struct{}]
 	server      *http.Server
 	listener    net.Listener
+
+	// credsMu guards lazy initialization of creds only. It is NOT held across
+	// Retrieve(), so a slow/cold credential refresh never serializes concurrent
+	// requests that already have valid cached credentials.
+	credsMu sync.Mutex
+	creds   aws.CredentialsProvider
 }
 
-// credentialCache stores AWS credentials and their expiry time.
-type credentialCache struct {
-	mu        sync.RWMutex
-	awsCreds  *aws.Credentials
-	expiresAt time.Time
-}
+// credExpiryWindow tells the SDK CredentialsCache to refresh this far ahead of
+// actual expiry, so a request never lands on the moment creds go stale.
+const credExpiryWindow = 5 * time.Minute
 
 // NewServer creates a new IMDS server that will listen on the given address
 // and use the specified AWS profile for credential lookups.
@@ -68,7 +73,6 @@ func NewServer(addr string, profile string) (*Server, error) {
 		addr:        listener.Addr().String(), // Use actual bound address
 		profile:     profile,
 		secretToken: secretToken,
-		credCache:   &credentialCache{},
 		sessions:    sessions,
 		listener:    listener,
 	}, nil
@@ -102,6 +106,9 @@ func (s *Server) Start() error {
 	// Run the background eviction loop so expired session tokens are dropped
 	// from memory rather than accumulating until shutdown.
 	go s.sessions.Start()
+
+	// Credentials are fetched lazily on the first request and then cached by the
+	// SDK CredentialsCache, so there's no pre-warm here.
 
 	slog.Info("starting IMDS server", "addr", s.addr, "profile", s.profile)
 	return s.server.Serve(s.listener)
@@ -184,7 +191,9 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	creds, err := s.getCredentials(credCtx)
 	if err != nil {
-		slog.Error("failed to get credentials", "error", err)
+		// Surface the underlying error: an expired SSO session shows up here and
+		// the operator needs to know to run `aws sso login` rather than guess.
+		slog.Error("failed to get credentials", "profile", s.profile, "error", err)
 		http.Error(w, "Failed to get credentials", http.StatusInternalServerError)
 		return
 	}
@@ -223,44 +232,57 @@ func (s *Server) validateSession(r *http.Request) bool {
 	return true
 }
 
-// getCredentials fetches or returns cached AWS credentials.
-// For SSO/temporary credentials, returns them directly.
-// For IAM user credentials, could use STS GetSessionToken but we just pass through for simplicity.
-func (s *Server) getCredentials(ctx context.Context) (*aws.Credentials, error) {
-	s.credCache.mu.Lock()
-	defer s.credCache.mu.Unlock()
+// provider returns the credentials provider for the configured profile,
+// lazily building it on first use. The returned provider is an
+// aws.CredentialsCache (from LoadDefaultConfig), which is safe for concurrent
+// use. credsMu is held only for the (network-free) config load, never across a
+// credential Retrieve, so concurrent callers don't serialize on it.
+//
+// Initialization is retried on failure rather than memoized: a transient error
+// (e.g. a momentarily unreadable config) must not wedge the server until
+// restart.
+func (s *Server) provider(ctx context.Context) (aws.CredentialsProvider, error) {
+	s.credsMu.Lock()
+	defer s.credsMu.Unlock()
 
-	// Check if cached credentials are still valid (refresh 5 min before expiry)
-	if s.credCache.awsCreds != nil &&
-		time.Now().Before(s.credCache.expiresAt.Add(-5*time.Minute)) {
-		slog.Debug("using cached credentials")
-		return s.credCache.awsCreds, nil
+	if s.creds != nil {
+		return s.creds, nil
 	}
 
-	slog.Info("fetching credentials from profile", "profile", s.profile)
+	slog.Info("loading AWS credential provider", "profile", s.profile)
 
-	// Load AWS config with specified profile
+	// Load AWS config with the specified profile. The resulting cfg.Credentials
+	// is an aws.CredentialsCache wrapping the profile's provider (SSO,
+	// assume-role, or IAM user). Setting an expiry window makes it refresh ahead
+	// of actual expiry instead of at the last moment.
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithSharedConfigProfile(s.profile),
+		config.WithCredentialsCacheOptions(func(o *aws.CredentialsCacheOptions) {
+			o.ExpiryWindow = credExpiryWindow
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Retrieve credentials from the profile
-	// This handles SSO, assume-role, and IAM user credentials automatically
-	creds, err := cfg.Credentials.Retrieve(ctx)
+	s.creds = cfg.Credentials
+	return s.creds, nil
+}
+
+// getCredentials returns current AWS credentials for the configured profile.
+// Caching, singleflight refresh, expiry-window pre-refresh, and SSO token
+// auto-refresh are all delegated to the SDK's aws.CredentialsCache, so this
+// call is cheap when credentials are valid and triggers exactly one refresh
+// (shared across concurrent callers) when they are not.
+func (s *Server) getCredentials(ctx context.Context) (aws.Credentials, error) {
+	p, err := s.provider(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve credentials: %w", err)
+		return aws.Credentials{}, err
 	}
 
-	// Cache credentials
-	s.credCache.awsCreds = &creds
-	s.credCache.expiresAt = creds.Expires
-
-	slog.Info("fetched credentials",
-		"expires", creds.Expires.Format(time.RFC3339),
-		"source", creds.Source)
-
-	return &creds, nil
+	creds, err := p.Retrieve(ctx)
+	if err != nil {
+		return aws.Credentials{}, fmt.Errorf("failed to retrieve credentials: %w", err)
+	}
+	return creds, nil
 }
