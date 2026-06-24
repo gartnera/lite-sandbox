@@ -129,8 +129,9 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			sub[cmd] = append(sub[cmd], fields[1:])
 		}
 	}
-	// Determine if AWS credentials should be blocked
-	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
+	// Determine if AWS credentials should be blocked, resolving any
+	// per-directory override for the worker's working directory.
+	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS.ForDirectory(workDir))
 
 	s.mu.Lock()
 	s.cfg = cfg
@@ -184,6 +185,18 @@ func (s *Sandbox) getConfig() *config.Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg
+}
+
+// awsConfigForWorker returns the AWS config resolved for the worker's working
+// directory, so per-directory overrides apply to command validation the same
+// way they apply to the IMDS server and credential blocking.
+func (s *Sandbox) awsConfigForWorker() *config.AWSConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg == nil {
+		return nil
+	}
+	return s.cfg.AWS.ForDirectory(s.workerWorkDir)
 }
 
 // osSandboxEnabled reports whether the OS sandbox (bwrap/sandbox-exec worker)

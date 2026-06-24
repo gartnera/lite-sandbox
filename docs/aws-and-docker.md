@@ -23,13 +23,38 @@ aws:
 
 > SSH private keys in `~/.ssh` are always blocked by the OS sandbox regardless of the AWS mode.
 
+### Per-directory overrides
+
+`overrides` lets either mode be changed for specific working directories, so one
+config can broker a different profile (or switch modes entirely) depending on
+where the sandbox is launched. Each override matches the working directory it is
+started in — at the override's `path` or any directory beneath it — and the most
+specific (longest) matching `path` wins. A matching override fully defines the
+mode for that directory; its fields replace the base settings rather than
+merging, so the two modes never mix.
+
+```yaml
+aws:
+  force_profile: "default"        # base mode for everything else
+  overrides:
+    - path: ~/work/acme           # ~ is expanded
+      force_profile: "acme-dev"   # broker a different profile here
+    - path: ~/work/acme/prod
+      force_profile: "acme-prod"  # more specific path wins under prod/
+    - path: ~/scratch
+      allow_raw_credentials: true # switch modes for this tree
+```
+
 ### CLI
 
 ```bash
-lite-sandbox config aws show                    # Show current AWS mode
-lite-sandbox config aws allow-raw-credentials   # Enable raw-credentials mode
-lite-sandbox config aws force-profile <profile> # Enable brokered IMDS mode for <profile>
-lite-sandbox config aws disable                 # Disable AWS access entirely
+lite-sandbox config aws show                            # Show current AWS mode and overrides
+lite-sandbox config aws allow-raw-credentials           # Enable raw-credentials mode
+lite-sandbox config aws force-profile <profile>         # Enable brokered IMDS mode for <profile>
+lite-sandbox config aws force-profile <profile> --dir <path>   # ...only for commands run under <path>
+lite-sandbox config aws allow-raw-credentials --dir <path>     # ...only for commands run under <path>
+lite-sandbox config aws remove-override <path>          # Remove a per-directory override
+lite-sandbox config aws disable                         # Disable AWS access entirely
 ```
 
 ## Docker access
