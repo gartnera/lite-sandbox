@@ -184,6 +184,73 @@ func TestGitConfig_AllowsWorktreeParent(t *testing.T) {
 	}
 }
 
+func TestAWSConfig_ForDirectory(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+
+	cfg := &AWSConfig{
+		ForceProfile: "default",
+		Overrides: []AWSDirectoryOverride{
+			{Path: "/work/projects", ForceProfile: "team"},
+			{Path: "/work/projects/secure", ForceProfile: "secure"},
+			{Path: "/work/raw", AllowRawCredentials: bp(true)},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		dir          string
+		wantProfile  string
+		wantUsesIMDS bool
+		wantRaw      bool
+	}{
+		{"no match uses base", "/other/place", "default", true, false},
+		{"exact match", "/work/projects", "team", true, false},
+		{"subdir inherits override", "/work/projects/app", "team", true, false},
+		{"most specific override wins", "/work/projects/secure/db", "secure", true, false},
+		{"override switches to raw mode", "/work/raw/svc", "", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cfg.ForDirectory(tt.dir)
+			if got.IMDSProfile() != tt.wantProfile {
+				t.Errorf("IMDSProfile() = %q, want %q", got.IMDSProfile(), tt.wantProfile)
+			}
+			if got.UsesIMDS() != tt.wantUsesIMDS {
+				t.Errorf("UsesIMDS() = %v, want %v", got.UsesIMDS(), tt.wantUsesIMDS)
+			}
+			if got.AllowsRawCredentials() != tt.wantRaw {
+				t.Errorf("AllowsRawCredentials() = %v, want %v", got.AllowsRawCredentials(), tt.wantRaw)
+			}
+			// The resolved config must not carry overrides itself.
+			if len(got.Overrides) != 0 {
+				t.Errorf("resolved config carried %d overrides, want 0", len(got.Overrides))
+			}
+		})
+	}
+}
+
+func TestAWSConfig_ForDirectory_Nil(t *testing.T) {
+	var cfg *AWSConfig
+	if got := cfg.ForDirectory("/anywhere"); got != nil {
+		t.Fatalf("expected nil, got %+v", got)
+	}
+}
+
+func TestAWSConfig_ForDirectory_TildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("failed to get home dir: %v", err)
+	}
+	cfg := &AWSConfig{
+		ForceProfile: "default",
+		Overrides:    []AWSDirectoryOverride{{Path: "~/work", ForceProfile: "home-work"}},
+	}
+	got := cfg.ForDirectory(filepath.Join(home, "work", "sub"))
+	if got.IMDSProfile() != "home-work" {
+		t.Fatalf("IMDSProfile() = %q, want home-work", got.IMDSProfile())
+	}
+}
+
 func TestLocalBinaryExecutionConfig_IsEnabled(t *testing.T) {
 	boolPtr := func(b bool) *bool { return &b }
 

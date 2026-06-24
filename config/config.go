@@ -116,9 +116,74 @@ func (p *PnpmConfig) PnpmPublish() bool {
 // Two modes:
 //  1. allow_raw_credentials: true - AWS CLI reads from ~/.aws/credentials directly (no blocking)
 //  2. force_profile: "name" - AWS CLI uses IMDS server with specified profile (blocks ~/.aws/)
+//
+// Overrides let either mode be changed for specific working directories, so a
+// single config can broker a different profile (or switch modes) depending on
+// where the sandbox is launched. Resolve the effective settings for a directory
+// with ForDirectory before reading the mode accessors.
 type AWSConfig struct {
+	AllowRawCredentials *bool                  `yaml:"allow_raw_credentials,omitempty"`
+	ForceProfile        string                 `yaml:"force_profile,omitempty"`
+	Overrides           []AWSDirectoryOverride `yaml:"overrides,omitempty"`
+}
+
+// AWSDirectoryOverride replaces the AWS credential mode for commands whose
+// working directory is at (or under) Path. Path supports ~ expansion. When a
+// directory matches more than one override the most specific (longest) Path
+// wins. A matching override fully defines the mode for that directory — its
+// fields replace the base force_profile / allow_raw_credentials rather than
+// merging, so the two modes never mix.
+type AWSDirectoryOverride struct {
+	Path                string `yaml:"path"`
 	AllowRawCredentials *bool  `yaml:"allow_raw_credentials,omitempty"`
 	ForceProfile        string `yaml:"force_profile,omitempty"`
+}
+
+// ForDirectory returns the effective AWS configuration for commands running in
+// dir, applying the most specific matching directory override (if any) on top
+// of the base settings. The returned config carries no overrides itself, so all
+// the mode accessors (AWSEnabled, UsesIMDS, IMDSProfile, ...) reflect dir.
+func (a *AWSConfig) ForDirectory(dir string) *AWSConfig {
+	if a == nil {
+		return nil
+	}
+	resolved := &AWSConfig{
+		AllowRawCredentials: a.AllowRawCredentials,
+		ForceProfile:        a.ForceProfile,
+	}
+	if o := a.matchOverride(dir); o != nil {
+		resolved.AllowRawCredentials = o.AllowRawCredentials
+		resolved.ForceProfile = o.ForceProfile
+	}
+	return resolved
+}
+
+// matchOverride returns the most specific override whose Path contains dir, or
+// nil when none match. dir is matched if it equals an override Path or lies
+// beneath it; the longest matching Path wins so nested overrides take priority.
+func (a *AWSConfig) matchOverride(dir string) *AWSDirectoryOverride {
+	if a == nil || dir == "" || len(a.Overrides) == 0 {
+		return nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	var best *AWSDirectoryOverride
+	bestLen := -1
+	for i := range a.Overrides {
+		base := expandPath(a.Overrides[i].Path)
+		if base == "" {
+			continue
+		}
+		if abs == base || strings.HasPrefix(abs, base+string(filepath.Separator)) {
+			if len(base) > bestLen {
+				best = &a.Overrides[i]
+				bestLen = len(base)
+			}
+		}
+	}
+	return best
 }
 
 // AWSEnabled returns whether aws commands are allowed at all (default: false).
@@ -435,6 +500,27 @@ func (c *Config) ExpandedReadablePaths() []string {
 // home directory and all paths resolved to absolute paths.
 func (c *Config) ExpandedWritablePaths() []string {
 	return expandPaths(c.WritablePaths)
+}
+
+// ExpandPath expands ~ and resolves p to an absolute path (so "." and other
+// relative paths become canonical), returning "" when p is empty or cannot be
+// resolved. Callers persisting a user-supplied directory should canonicalize it
+// with this so it doesn't later resolve against an unrelated working directory.
+func ExpandPath(p string) string {
+	return expandPath(p)
+}
+
+// expandPath expands ~ and resolves a single path to absolute, returning ""
+// when the path is empty or cannot be resolved.
+func expandPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	expanded := expandPaths([]string{p})
+	if len(expanded) == 0 {
+		return ""
+	}
+	return expanded[0]
 }
 
 // expandPaths expands ~ to the user's home directory and resolves absolute paths.

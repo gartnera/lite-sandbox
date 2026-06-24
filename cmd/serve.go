@@ -264,11 +264,17 @@ func runServe() error {
 	defer cancel()
 	defer sandbox.Close() // Clean up worker pool on exit
 
-	// Start IMDS server if AWS uses IMDS (force_profile is set)
+	// Start IMDS server if AWS uses IMDS (force_profile is set). The profile is
+	// resolved for the server's working directory so per-directory overrides take
+	// effect.
+	var awsCfg *config.AWSConfig
+	if cfg != nil {
+		awsCfg = cfg.AWS.ForDirectory(cwd)
+	}
 	var imdsServer *imds.Server
-	if cfg != nil && cfg.AWS != nil && cfg.AWS.UsesIMDS() {
+	if awsCfg != nil && awsCfg.UsesIMDS() {
 		// Use port 0 to get a random available port
-		imdsServer, err = imds.NewServer("127.0.0.1:0", cfg.AWS.IMDSProfile())
+		imdsServer, err = imds.NewServer("127.0.0.1:0", awsCfg.IMDSProfile())
 		if err != nil {
 			return fmt.Errorf("failed to create IMDS server: %w", err)
 		}

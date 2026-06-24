@@ -12,6 +12,47 @@ var awsCmd = &cobra.Command{
 	Short: "Manage AWS CLI permission settings",
 }
 
+// awsOverrideDir holds the --dir flag value shared by the mode commands. When
+// set, the command edits the directory override for that path instead of the
+// base AWS settings.
+var awsOverrideDir string
+
+// resolveDirArg canonicalizes a user-supplied directory to an absolute path so
+// inputs like "." or "../sibling" are stored (and matched) as the concrete
+// directory the user meant, not re-resolved later against the server's cwd. It
+// falls back to the raw input if resolution fails.
+func resolveDirArg(dir string) string {
+	if resolved := config.ExpandPath(dir); resolved != "" {
+		return resolved
+	}
+	return dir
+}
+
+// upsertAWSOverride sets the override for dir to the given mode, replacing any
+// existing override for the same path. dir is canonicalized to an absolute path
+// first so "." and other relative inputs are stored as a concrete directory
+// rather than something that re-resolves against the server's working directory.
+func upsertAWSOverride(cfg *config.Config, dir string, allowRaw *bool, forceProfile string) {
+	if cfg.AWS == nil {
+		cfg.AWS = &config.AWSConfig{}
+	}
+	if resolved := config.ExpandPath(dir); resolved != "" {
+		dir = resolved
+	}
+	override := config.AWSDirectoryOverride{
+		Path:                dir,
+		AllowRawCredentials: allowRaw,
+		ForceProfile:        forceProfile,
+	}
+	for i := range cfg.AWS.Overrides {
+		if cfg.AWS.Overrides[i].Path == dir {
+			cfg.AWS.Overrides[i] = override
+			return
+		}
+	}
+	cfg.AWS.Overrides = append(cfg.AWS.Overrides, override)
+}
+
 var awsShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show current AWS configuration",
@@ -27,25 +68,43 @@ var awsShowCmd = &cobra.Command{
 		}
 
 		fmt.Println("AWS Configuration:")
-		if cfg.AWS.AllowsRawCredentials() {
-			fmt.Println("  Mode: allow_raw_credentials")
-			fmt.Println("  Description: AWS CLI reads from ~/.aws/credentials directly")
-			fmt.Println("  Security: Less secure (long-term credentials)")
-			fmt.Println("  ~/.aws: Accessible")
-			fmt.Println("  ~/.ssh: Private keys blocked")
-		} else if cfg.AWS.UsesIMDS() {
-			fmt.Printf("  Mode: force_profile (%s)\n", cfg.AWS.IMDSProfile())
-			fmt.Println("  Description: AWS CLI uses IMDS server with temporary credentials")
-			fmt.Println("  Security: More secure (1-hour STS tokens)")
-			fmt.Println("  ~/.aws: Blocked")
-			fmt.Println("  ~/.ssh: Private keys blocked")
-		} else {
-			fmt.Println("  Mode: disabled")
-			fmt.Println("  AWS CLI commands are not allowed")
+		printAWSMode(cfg.AWS, "  ")
+
+		if len(cfg.AWS.Overrides) > 0 {
+			fmt.Println("\nDirectory overrides (most specific match wins):")
+			for _, o := range cfg.AWS.Overrides {
+				fmt.Printf("  %s:\n", o.Path)
+				printAWSMode(&config.AWSConfig{
+					AllowRawCredentials: o.AllowRawCredentials,
+					ForceProfile:        o.ForceProfile,
+				}, "    ")
+			}
 		}
 
 		return nil
 	},
+}
+
+// printAWSMode prints the resolved credential mode for an AWS config (base or
+// override) with the given indent.
+func printAWSMode(a *config.AWSConfig, indent string) {
+	switch {
+	case a.AllowsRawCredentials():
+		fmt.Printf("%sMode: allow_raw_credentials\n", indent)
+		fmt.Printf("%sDescription: AWS CLI reads from ~/.aws/credentials directly\n", indent)
+		fmt.Printf("%sSecurity: Less secure (long-term credentials)\n", indent)
+		fmt.Printf("%s~/.aws: Accessible\n", indent)
+		fmt.Printf("%s~/.ssh: Private keys blocked\n", indent)
+	case a.UsesIMDS():
+		fmt.Printf("%sMode: force_profile (%s)\n", indent, a.IMDSProfile())
+		fmt.Printf("%sDescription: AWS CLI uses IMDS server with temporary credentials\n", indent)
+		fmt.Printf("%sSecurity: More secure (1-hour STS tokens)\n", indent)
+		fmt.Printf("%s~/.aws: Blocked\n", indent)
+		fmt.Printf("%s~/.ssh: Private keys blocked\n", indent)
+	default:
+		fmt.Printf("%sMode: disabled\n", indent)
+		fmt.Printf("%sAWS CLI commands are not allowed\n", indent)
+	}
 }
 
 var awsAllowRawCredentialsCmd = &cobra.Command{
@@ -67,12 +126,24 @@ This mode is simpler but less secure. Use for development/testing only.`,
 			return err
 		}
 
+		t := true
+		if awsOverrideDir != "" {
+			dir := resolveDirArg(awsOverrideDir)
+			upsertAWSOverride(cfg, dir, &t, "")
+			if err := saveConfig(cfg); err != nil {
+				return err
+			}
+			fmt.Printf("AWS configured for raw credential access in %s\n", dir)
+			fmt.Println("  ~/.aws/credentials will be readable by AWS CLI in that directory")
+			fmt.Println("  ~/.ssh private keys will remain blocked")
+			return nil
+		}
+
 		if cfg.AWS == nil {
 			cfg.AWS = &config.AWSConfig{}
 		}
 
 		// Enable raw credentials, clear force_profile
-		t := true
 		cfg.AWS.AllowRawCredentials = &t
 		cfg.AWS.ForceProfile = ""
 
@@ -110,6 +181,19 @@ This mode is more secure and recommended for production use.`,
 			return err
 		}
 
+		if awsOverrideDir != "" {
+			dir := resolveDirArg(awsOverrideDir)
+			upsertAWSOverride(cfg, dir, nil, profile)
+			if err := saveConfig(cfg); err != nil {
+				return err
+			}
+			fmt.Printf("AWS configured to force profile %q in %s\n", profile, dir)
+			fmt.Println("  IMDS server will provide temporary credentials in that directory")
+			fmt.Println("  ~/.aws will be blocked")
+			fmt.Println("  ~/.ssh private keys will remain blocked")
+			return nil
+		}
+
 		if cfg.AWS == nil {
 			cfg.AWS = &config.AWSConfig{}
 		}
@@ -126,6 +210,50 @@ This mode is more secure and recommended for production use.`,
 		fmt.Println("  IMDS server will provide temporary credentials")
 		fmt.Println("  ~/.aws will be blocked")
 		fmt.Println("  ~/.ssh private keys will remain blocked")
+		return nil
+	},
+}
+
+var awsRemoveOverrideCmd = &cobra.Command{
+	Use:   "remove-override <dir>",
+	Short: "Remove the AWS directory override for the given path",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dir := resolveDirArg(args[0])
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		if cfg.AWS == nil || len(cfg.AWS.Overrides) == 0 {
+			fmt.Printf("No override configured for %s\n", dir)
+			return nil
+		}
+
+		kept := cfg.AWS.Overrides[:0]
+		removed := false
+		for _, o := range cfg.AWS.Overrides {
+			if o.Path == dir {
+				removed = true
+				continue
+			}
+			kept = append(kept, o)
+		}
+		cfg.AWS.Overrides = kept
+		if len(cfg.AWS.Overrides) == 0 {
+			cfg.AWS.Overrides = nil
+		}
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		if removed {
+			fmt.Printf("Removed AWS override for %s\n", dir)
+		} else {
+			fmt.Printf("No override configured for %s\n", dir)
+		}
 		return nil
 	},
 }
@@ -153,9 +281,15 @@ var awsDisableCmd = &cobra.Command{
 }
 
 func init() {
+	awsAllowRawCredentialsCmd.Flags().StringVar(&awsOverrideDir, "dir", "",
+		"Apply this mode only to commands run in this directory (adds a per-directory override)")
+	awsForceProfileCmd.Flags().StringVar(&awsOverrideDir, "dir", "",
+		"Apply this profile only to commands run in this directory (adds a per-directory override)")
+
 	awsCmd.AddCommand(awsShowCmd)
 	awsCmd.AddCommand(awsAllowRawCredentialsCmd)
 	awsCmd.AddCommand(awsForceProfileCmd)
+	awsCmd.AddCommand(awsRemoveOverrideCmd)
 	awsCmd.AddCommand(awsDisableCmd)
 	configCmd.AddCommand(awsCmd)
 }

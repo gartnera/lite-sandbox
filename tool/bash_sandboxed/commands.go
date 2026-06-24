@@ -335,8 +335,8 @@ func validateDenoCommand(s *Sandbox, args []*syntax.Word) error {
 }
 
 func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.AWS == nil || !cfg.AWS.AWSEnabled() {
+	awsCfg := s.awsConfigForWorker()
+	if awsCfg == nil || !awsCfg.AWSEnabled() {
 		return fmt.Errorf("command \"aws\" is not allowed (aws.enabled is disabled)")
 	}
 	// AWS CLI credentials will come from IMDS endpoint, not files
