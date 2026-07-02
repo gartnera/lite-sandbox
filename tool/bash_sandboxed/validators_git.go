@@ -10,24 +10,24 @@ import (
 
 // gitLocalReadSubcommands are read-only subcommands that inspect the local repo.
 var gitLocalReadSubcommands = map[string]bool{
-	"status":     true,
-	"log":        true,
-	"diff":       true,
-	"show":       true,
-	"blame":      true,
-	"branch":     true,
-	"tag":        true,
-	"shortlog":   true,
-	"describe":   true,
-	"rev-parse":  true,
-	"rev-list":   true,
-	"ls-files":   true,
-	"ls-tree":    true,
-	"cat-file":   true,
-	"name-rev":   true,
-	"merge-base": true,
-	"config":     true,
-	"reflog":     true,
+	"status":    true,
+	"log":       true,
+	"diff":      true,
+	"show":      true,
+	"blame":     true,
+	"branch":    true,
+	"tag":       true,
+	"shortlog":  true,
+	"describe":  true,
+	"rev-parse": true,
+	"rev-list":  true,
+	"ls-files":  true,
+	"ls-tree":   true,
+	"cat-file":  true,
+	"name-rev":    true,
+	"merge-base":  true,
+	"config":      true,
+	"reflog":      true,
 }
 
 // gitLocalWriteSubcommands are subcommands that modify local repo state.
@@ -112,14 +112,14 @@ var blockedGitTagFlags = map[string]string{
 
 // blockedRemoteReadFlags are flags for "remote" that are write operations.
 var blockedRemoteWriteSubcommands = map[string]bool{
-	"add":          true,
-	"remove":       true,
-	"rm":           true,
-	"rename":       true,
-	"set-head":     true,
+	"add":    true,
+	"remove": true,
+	"rm":     true,
+	"rename": true,
+	"set-head":  true,
 	"set-branches": true,
-	"set-url":      true,
-	"prune":        true,
+	"set-url":  true,
+	"prune":    true,
 }
 
 // validateGitArgs validates git commands according to the granular permission model.

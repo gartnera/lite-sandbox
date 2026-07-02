@@ -108,3 +108,4 @@ func validatePnpmExecArgs(args []*syntax.Word) error {
 	// No additional validation needed beyond what's already in place
 	return nil
 }
+

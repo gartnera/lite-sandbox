@@ -56,7 +56,7 @@ func executeAwk(ctx context.Context, args []string) error {
 
 	var progSrc []byte
 	var awkArgs []string // input files / var=value items for ARGV[1..]
-	var vars []string    // -v name=value global assignments
+	var vars []string   // -v name=value global assignments
 
 	i := 1
 	for i < len(args) {

@@ -757,7 +757,7 @@ func TestSplitNestedOnly(t *testing.T) {
 	}{
 		{"/a/b/*", "/a/b", true},
 		{"/a/b", "/a/b", false},
-		{"/a/b/", "/a/b/", false},     // trailing slash is not the marker
+		{"/a/b/", "/a/b/", false}, // trailing slash is not the marker
 		{sep + "*", sep + "*", false}, // degenerate: "/*" must not grant all of "/"
 		{"*", "*", false},             // no separator, treated literally
 	}
