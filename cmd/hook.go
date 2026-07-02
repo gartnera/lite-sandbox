@@ -13,11 +13,13 @@ import (
 )
 
 // hookToolMatcher is the tool matcher used when the PreToolUse hook is
-// registered in settings.json. It covers the built-in Bash tool (which the hook
-// redirects to the MCP tool) and the filesystem tools whose paths we govern. The
-// hook itself re-checks the tool name, so the matcher is just an optimization
-// that avoids invoking the binary for unrelated tools.
-const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep"
+// registered in settings.json (Claude Code) or config.toml (Codex). It covers
+// the built-in Bash tool (which the hook redirects to the MCP tool) and the
+// filesystem tools whose paths we govern. apply_patch is Codex's file-editing
+// tool (Claude never emits it, so it is a harmless no-op there). The hook itself
+// re-checks the tool name, so the matcher is just an optimization that avoids
+// invoking the binary for unrelated tools.
+const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
 
 // bashValidateMatcher is the matcher used in --bash-ast-hook-mode, where the
 // hook only governs the built-in Bash tool (validating its command rather than
@@ -167,6 +169,12 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 // paths; write-family tools (Edit/Write/NotebookEdit) against the writable
 // paths.
 func evaluatePathPolicy(event *hook.Event) *hook.Decision {
+	// Codex's apply_patch can touch several files in one call; check every write
+	// target against the writable boundary.
+	if ap, ok := event.ToolInput.(*hook.ApplyPatchInput); ok {
+		return evaluateApplyPatch(event, ap)
+	}
+
 	path, write, governed := fsTarget(event)
 	if !governed || path == "" {
 		// Not a filesystem tool we govern, or no explicit path was supplied
@@ -232,6 +240,52 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		cwd, configNoun,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
+}
+
+// evaluateApplyPatch enforces the writable-path boundary on Codex's apply_patch
+// tool, which edits, creates, deletes, or renames files. Every target the patch
+// touches must resolve inside the writable paths; the first one outside is
+// denied. When no patch targets are visible (unexpected input shape) it defers,
+// keeping the hook fail-open.
+func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decision {
+	paths := ap.Paths()
+	if len(paths) == 0 {
+		// Could not see the patch targets; defer rather than guess.
+		return nil
+	}
+
+	cwd := event.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if cwd == "" {
+		// Without a working directory we cannot resolve the boundary; fail-open.
+		return nil
+	}
+
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+	_, writePaths := computeSandboxPaths(sb, cwd)
+
+	for _, p := range paths {
+		resolved := bash_sandboxed.ResolvePath(p, cwd)
+		if bash_sandboxed.IsUnderAllowedPaths(resolved, writePaths) {
+			continue
+		}
+		reason := fmt.Sprintf(
+			"Blocked by lite-sandbox: %s\n"+
+				"%q resolves to %q, which is outside the sandbox's writable paths.\n"+
+				"Allowed writable paths: %s\n"+
+				"What to do instead: work within the project directory (%s). "+
+				"If this path is genuinely needed, ask the user to add it via "+
+				"`lite-sandbox config writable-paths add <path>`.",
+			ap.Describe(), p, resolved,
+			strings.Join(writePaths, ", "),
+			cwd,
+		)
+		return hook.NewDecision(hook.DecisionDeny, reason)
+	}
+	return nil
 }
 
 // fsTarget reports the filesystem path a tool call targets, whether the access

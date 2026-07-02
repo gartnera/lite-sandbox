@@ -47,11 +47,14 @@ routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
 governs only Bash.
 
-With --codex, configures OpenAI Codex CLI instead of Claude Code: it registers the
-MCP server in ~/.codex/config.toml and adds a usage directive to ~/.codex/AGENTS.md
-(honoring CODEX_HOME). Codex has no per-tool deny or PreToolUse hook, so the
-built-in shell cannot be blocked; the directive steers Codex to the sandboxed tool.
-The Claude-specific hook flags cannot be combined with --codex.`,
+With --codex, configures OpenAI Codex CLI instead of Claude Code. Codex's hook
+protocol matches Claude Code's, so the same hook binary and the same config file
+(readable/writable paths) govern both agents. It registers the MCP server and a
+usage directive in ~/.codex (config.toml + AGENTS.md, honoring CODEX_HOME), plus a
+PreToolUse hook — Codex has no permission deny, so the hook is what blocks the
+built-in shell. --with-tool-hook and --bash-ast-hook-mode compose with --codex and
+mean the same thing there (confine reads/writes — including Codex's apply_patch —
+or AST-validate the shell in place).`,
 	RunE: runInstall,
 }
 
@@ -61,7 +64,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
-		"configure OpenAI Codex CLI (~/.codex/config.toml + ~/.codex/AGENTS.md) instead of Claude Code")
+		"configure OpenAI Codex CLI (~/.codex config.toml + AGENTS.md + PreToolUse hook) instead of Claude Code; composes with --with-tool-hook and --bash-ast-hook-mode")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -76,13 +79,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve symlinks: %w", err)
 	}
 
-	// Codex CLI has a different config model (no per-tool deny, no PreToolUse
-	// hook), so it has its own install path and none of the Claude-specific hook
-	// flags apply.
+	// Codex CLI configures differently (config.toml + AGENTS.md, no permission
+	// deny), so it has its own install path. The hook-mode flags mean the same
+	// thing there — --with-tool-hook confines reads/writes, --bash-ast-hook-mode
+	// AST-validates the shell in place — so they compose with --codex.
 	if installCodex {
-		if installWithToolHook || installBashASTHookMode {
-			return fmt.Errorf("--with-tool-hook and --bash-ast-hook-mode are Claude Code-specific and cannot be combined with --codex")
-		}
 		return runInstallCodex(binPath)
 	}
 

@@ -16,20 +16,25 @@ const (
 	ToolWebFetch  = "WebFetch"
 	ToolWebSearch = "WebSearch"
 	ToolNotebook  = "NotebookEdit"
+	// ToolApplyPatch is Codex CLI's native file-editing tool. Codex has no
+	// Edit/Write tool — it applies changes via apply_patch — so governing writes
+	// for Codex means governing this tool.
+	ToolApplyPatch = "apply_patch"
 )
 
 // toolInputFactories maps a tool name to a constructor for its typed input.
 // Adding support for a new tool is a one-line registration here plus the struct.
 var toolInputFactories = map[string]func() ToolInput{
-	ToolBash:      func() ToolInput { return &BashInput{} },
-	ToolEdit:      func() ToolInput { return &EditInput{} },
-	ToolWrite:     func() ToolInput { return &WriteInput{} },
-	ToolRead:      func() ToolInput { return &ReadInput{} },
-	ToolGlob:      func() ToolInput { return &GlobInput{} },
-	ToolGrep:      func() ToolInput { return &GrepInput{} },
-	ToolWebFetch:  func() ToolInput { return &WebFetchInput{} },
-	ToolWebSearch: func() ToolInput { return &WebSearchInput{} },
-	ToolNotebook:  func() ToolInput { return &NotebookEditInput{} },
+	ToolBash:       func() ToolInput { return &BashInput{} },
+	ToolEdit:       func() ToolInput { return &EditInput{} },
+	ToolWrite:      func() ToolInput { return &WriteInput{} },
+	ToolRead:       func() ToolInput { return &ReadInput{} },
+	ToolGlob:       func() ToolInput { return &GlobInput{} },
+	ToolGrep:       func() ToolInput { return &GrepInput{} },
+	ToolWebFetch:   func() ToolInput { return &WebFetchInput{} },
+	ToolWebSearch:  func() ToolInput { return &WebSearchInput{} },
+	ToolNotebook:   func() ToolInput { return &NotebookEditInput{} },
+	ToolApplyPatch: func() ToolInput { return &ApplyPatchInput{} },
 }
 
 // BashInput is the argument shape for the Bash tool.
@@ -145,6 +150,72 @@ type NotebookEditInput struct {
 func (n *NotebookEditInput) Tool() string { return ToolNotebook }
 func (n *NotebookEditInput) Describe() string {
 	return fmt.Sprintf("edit notebook: %s", n.NotebookPath)
+}
+
+// ApplyPatchInput is the argument shape for Codex CLI's apply_patch tool. Codex
+// delivers the patch body in the command field (per Codex's hook docs,
+// "apply_patch uses tool_input.command"); Input/Patch are accepted as tolerant
+// fallbacks in case a build uses a different key. The patch body is the standard
+// apply_patch envelope, from which Paths extracts the affected files.
+type ApplyPatchInput struct {
+	Command string `json:"command,omitempty"`
+	Input   string `json:"input,omitempty"`
+	Patch   string `json:"patch,omitempty"`
+}
+
+func (a *ApplyPatchInput) Tool() string { return ToolApplyPatch }
+
+// patchText returns whichever field carries the patch body.
+func (a *ApplyPatchInput) patchText() string {
+	for _, s := range []string{a.Command, a.Input, a.Patch} {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// Paths returns the files the patch adds, updates, deletes, or renames to,
+// resolved later against the sandbox's writable boundary. Empty when no patch
+// body was visible or no file markers were found.
+func (a *ApplyPatchInput) Paths() []string {
+	return parseApplyPatchPaths(a.patchText())
+}
+
+func (a *ApplyPatchInput) Describe() string {
+	paths := a.Paths()
+	if len(paths) == 0 {
+		return "apply patch"
+	}
+	return fmt.Sprintf("apply patch to: %s", strings.Join(paths, ", "))
+}
+
+// parseApplyPatchPaths extracts the target file paths from an apply_patch
+// envelope. The format uses "*** Add File: <path>", "*** Update File: <path>",
+// "*** Delete File: <path>", and "*** Move to: <path>" markers. Paths are
+// returned de-duplicated in first-seen order.
+func parseApplyPatchPaths(patch string) []string {
+	markers := []string{
+		"*** Add File:",
+		"*** Update File:",
+		"*** Delete File:",
+		"*** Move to:",
+	}
+	var paths []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(patch, "\n") {
+		t := strings.TrimSpace(line)
+		for _, m := range markers {
+			if strings.HasPrefix(t, m) {
+				p := strings.TrimSpace(strings.TrimPrefix(t, m))
+				if p != "" && !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
+			}
+		}
+	}
+	return paths
 }
 
 func truncate(s string, n int) string {

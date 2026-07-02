@@ -17,12 +17,20 @@ var installCodex bool
 const codexServerName = "lite-sandbox"
 
 // codexDirective is appended to ~/.codex/AGENTS.md so Codex prefers the
-// sandboxed bash tool. Codex has no per-tool deny or PreToolUse hook, so unlike
-// the Claude Code install this cannot block the built-in shell — the directive
-// is advisory.
+// sandboxed bash tool for shell commands (Codex has no Read tool — it reads by
+// shelling out — so routing the shell through the sandbox is what governs reads).
 const codexDirective = "Prefer the `bash` tool from the `lite-sandbox` MCP server for running shell " +
 	"commands. It runs commands through lite-sandbox's AST validation and filesystem path " +
 	"boundaries, which the built-in shell bypasses. Use it instead of the built-in shell whenever possible."
+
+// Codex hooks are configured in config.toml as a TOML array of tables
+// ([[hooks.PreToolUse]]), which is awkward to update in place. Instead we own a
+// single marker-delimited block appended to the file: reconciling means removing
+// the old block and appending a fresh one, leaving all other content untouched.
+const (
+	codexHookBlockStart = "# >>> lite-sandbox hook (managed by `lite-sandbox install --codex`) — do not edit inside >>>"
+	codexHookBlockEnd   = "# <<< lite-sandbox hook (managed by `lite-sandbox install --codex`) <<<"
+)
 
 // codexHome returns Codex's configuration directory: $CODEX_HOME when set,
 // otherwise ~/.codex. This mirrors how Codex itself resolves its home.
@@ -37,13 +45,20 @@ func codexHome() (string, error) {
 	return filepath.Join(home, ".codex"), nil
 }
 
-// runInstallCodex configures OpenAI Codex CLI to use lite-sandbox by:
-//  1. Registering the MCP server in ~/.codex/config.toml
-//  2. Adding a usage directive to ~/.codex/AGENTS.md
+// runInstallCodex configures OpenAI Codex CLI to use lite-sandbox. Codex's hook
+// protocol matches Claude Code's (same PreToolUse event, stdin payload, and
+// permissionDecision output), so the same `lite-sandbox hook` binary and the
+// same config file (readable/writable paths) govern both agents. The install
+// modes mirror the Claude ones:
 //
-// Unlike the Claude Code install there is no permission deny or PreToolUse hook
-// to install — Codex exposes no equivalent — so the sandbox cannot block Codex's
-// built-in shell; the AGENTS.md directive steers Codex to the sandboxed tool.
+//   - default: register the MCP server + AGENTS.md directive, and a PreToolUse
+//     hook that redirects the built-in shell to the sandboxed MCP tool. (Codex
+//     has no permission-deny, so the hook — not a deny rule — is what blocks the
+//     built-in shell.)
+//   - --with-tool-hook: additionally confine reads/writes to the sandbox paths
+//     (Read/Edit/Write/Glob/Grep plus Codex's apply_patch).
+//   - --bash-ast-hook-mode: no MCP server; AST-validate the built-in shell in
+//     place, allowing it when it passes.
 func runInstallCodex(binPath string) error {
 	codexDir, err := codexHome()
 	if err != nil {
@@ -56,22 +71,64 @@ func runInstallCodex(binPath string) error {
 	}
 
 	configTomlPath := filepath.Join(codexDir, "config.toml")
-	if err := configureCodexMCPServer(configTomlPath, binPath); err != nil {
-		return fmt.Errorf("failed to configure Codex MCP server: %w", err)
-	}
-	fmt.Printf("✓ Added MCP server to %s\n", configTomlPath)
 
-	agentsMDPath := filepath.Join(codexDir, "AGENTS.md")
-	if err := configureCodexAGENTSMD(codexDir); err != nil {
-		return fmt.Errorf("failed to configure AGENTS.md: %w", err)
+	// Resolve the install mode from the (composable) flags, mirroring the Claude
+	// install: validateBash AST-checks the shell in place, governFS confines the
+	// filesystem tools, configMCP registers the MCP server + directive.
+	validateBash := installBashASTHookMode
+	governFS := installWithToolHook
+	configMCP := !installBashASTHookMode
+
+	// 1. MCP server (skipped in --bash-ast-hook-mode, which routes nothing to it).
+	if configMCP {
+		if err := configureCodexMCPServer(configTomlPath, binPath); err != nil {
+			return fmt.Errorf("failed to configure Codex MCP server: %w", err)
+		}
+		fmt.Printf("✓ Added MCP server to %s\n", configTomlPath)
 	}
-	fmt.Printf("✓ Added usage directive to %s\n", agentsMDPath)
+
+	// 2. AGENTS.md directive (only meaningful when the MCP tool exists to point at).
+	if configMCP {
+		if err := configureCodexAGENTSMD(codexDir); err != nil {
+			return fmt.Errorf("failed to configure AGENTS.md: %w", err)
+		}
+		fmt.Printf("✓ Added usage directive to %s\n", filepath.Join(codexDir, "AGENTS.md"))
+	}
+
+	// 3. PreToolUse hook. Unlike Claude, Codex always needs a hook (there is no
+	// permission-deny fallback), so one is registered in every mode.
+	hookCommand := binPath + " hook"
+	if validateBash {
+		hookCommand = binPath + " hook --validate-bash"
+	}
+	matcher := bashValidateMatcher
+	if governFS {
+		matcher = hookToolMatcher
+	}
+	if err := reconcileCodexHook(configTomlPath, binPath, hookCommand, matcher); err != nil {
+		return fmt.Errorf("failed to configure Codex hook: %w", err)
+	}
+	switch {
+	case governFS && validateBash:
+		fmt.Printf("✓ Registered PreToolUse hook to AST-check the built-in shell (runs unsandboxed) and confine reads/writes to sandbox paths in %s\n", configTomlPath)
+	case governFS:
+		fmt.Printf("✓ Registered PreToolUse hook to redirect the built-in shell and confine reads/writes to sandbox paths in %s\n", configTomlPath)
+	case validateBash:
+		fmt.Printf("✓ Registered PreToolUse hook to AST-check the built-in shell (runs unsandboxed) in %s\n", configTomlPath)
+	default:
+		fmt.Printf("✓ Registered PreToolUse hook to redirect the built-in shell to the sandboxed MCP tool in %s\n", configTomlPath)
+	}
 
 	fmt.Println("\n✓ Codex installation complete!")
-	fmt.Println("\nNote: Codex has no per-tool deny or PreToolUse hook, so lite-sandbox cannot")
-	fmt.Println("block Codex's built-in shell the way it can with Claude Code. The AGENTS.md")
-	fmt.Println("directive asks Codex to prefer the sandboxed bash tool; enforcement is advisory.")
-	fmt.Println("\nRestart Codex for the changes to take effect.")
+	if installBashASTHookMode {
+		fmt.Println("(--bash-ast-hook-mode: MCP server not configured)")
+	}
+	fmt.Println("\nCodex hooks are enabled by default; if you have set [features] hooks = false in")
+	fmt.Println("config.toml, re-enable it or the hook will not run. Restart Codex to apply changes.")
+	if !governFS {
+		fmt.Println("\nTip: add --with-tool-hook to also confine reads/writes (including apply_patch)")
+		fmt.Println("to the sandbox's paths — the same config that governs Claude Code.")
+	}
 	return nil
 }
 
@@ -109,31 +166,21 @@ func configureCodexMCPServer(configTomlPath, binPath string) error {
 	}
 
 	if start == -1 {
-		// Not present: append our table, separated from existing content by a
-		// blank line.
-		sep := ""
-		switch {
-		case len(content) == 0:
-			sep = ""
-		case !strings.HasSuffix(content, "\n"):
-			sep = "\n\n"
-		case !strings.HasSuffix(content, "\n\n"):
-			sep = "\n"
-		}
-		return os.WriteFile(configTomlPath, []byte(content+sep+block), 0644)
+		return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
 	}
 
 	// Present: replace the table (and any [mcp_servers.lite-sandbox.*] sub-tables)
-	// in place. The table ends at the next table header that isn't one of ours.
+	// in place. The table ends at the next table header that isn't one of ours,
+	// or at our managed hook block, whichever comes first.
 	end := len(lines)
 	for i := start + 1; i < len(lines); i++ {
 		t := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(t, "[") && !isCodexSubTable(t) {
+		if t == codexHookBlockStart || (strings.HasPrefix(t, "[") && !isCodexSubTable(t)) {
 			end = i
 			break
 		}
 	}
-	// Keep any blank separator lines that precede the next table with that table.
+	// Keep any blank separator lines that precede the next section with it.
 	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
 		end--
 	}
@@ -146,6 +193,76 @@ func configureCodexMCPServer(configTomlPath, binPath string) error {
 	b.WriteString(block) // block already ends with "\n"
 	b.WriteString(strings.Join(lines[end:], "\n"))
 	return os.WriteFile(configTomlPath, []byte(b.String()), 0644)
+}
+
+// reconcileCodexHook makes the managed PreToolUse hook block in config.toml
+// match the requested mode: it removes any prior lite-sandbox hook block, then
+// appends a fresh one registering `command` under `matcher`. Editing a single
+// marker-delimited block keeps the operation idempotent and leaves the rest of
+// the file (including the MCP table and user content) untouched.
+func reconcileCodexHook(configTomlPath, binPath, command, matcher string) error {
+	data, err := os.ReadFile(configTomlPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		data = nil
+	}
+	content := stripCodexHookBlock(string(data))
+
+	block := codexHookBlockStart + "\n" +
+		"[[hooks.PreToolUse]]\n" +
+		"matcher = " + tomlString(matcher) + "\n\n" +
+		"[[hooks.PreToolUse.hooks]]\n" +
+		`type = "command"` + "\n" +
+		"command = " + tomlString(command) + "\n" +
+		codexHookBlockEnd + "\n"
+
+	return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
+}
+
+// stripCodexHookBlock removes the managed hook block (markers inclusive) from
+// content, if present, collapsing the surrounding blank lines so re-running
+// converges to a stable file. Content without the block is returned unchanged.
+func stripCodexHookBlock(content string) string {
+	start := strings.Index(content, codexHookBlockStart)
+	if start == -1 {
+		return content
+	}
+	// Find the end marker and extend past the rest of its line.
+	rel := strings.Index(content[start:], codexHookBlockEnd)
+	var after string
+	if rel == -1 {
+		// Malformed (no end marker): drop everything from the start marker on.
+		after = ""
+	} else {
+		endLine := start + rel + len(codexHookBlockEnd)
+		after = content[endLine:]
+		after = strings.TrimPrefix(after, "\n")
+	}
+	before := strings.TrimRight(content[:start], "\n")
+	if before != "" && after != "" {
+		return before + "\n\n" + after
+	}
+	if before != "" {
+		return before + "\n"
+	}
+	return after
+}
+
+// appendTOMLBlock appends block (which ends in a newline) to content, ensuring
+// exactly one blank line separates it from any existing content.
+func appendTOMLBlock(content, block string) string {
+	switch {
+	case len(content) == 0:
+		return block
+	case !strings.HasSuffix(content, "\n"):
+		return content + "\n\n" + block
+	case !strings.HasSuffix(content, "\n\n"):
+		return content + "\n" + block
+	default:
+		return content + block
+	}
 }
 
 // isCodexSubTable reports whether a trimmed line is a sub-table header of our

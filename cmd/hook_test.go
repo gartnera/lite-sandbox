@@ -125,6 +125,48 @@ func TestEvaluatePathPolicy(t *testing.T) {
 			wantInMsg: "readable",
 		},
 		{
+			name: "apply_patch inside cwd defers",
+			event: &hook.Event{
+				ToolName: hook.ToolApplyPatch,
+				CWD:      cwd,
+				ToolInput: &hook.ApplyPatchInput{
+					Command: "*** Begin Patch\n*** Update File: nested/a.txt\n@@\n-old\n+new\n*** End Patch",
+				},
+			},
+		},
+		{
+			name: "apply_patch adding file outside is denied",
+			event: &hook.Event{
+				ToolName: hook.ToolApplyPatch,
+				CWD:      cwd,
+				ToolInput: &hook.ApplyPatchInput{
+					Command: "*** Begin Patch\n*** Add File: " + filepath.Join(outside, "evil.txt") + "\n+pwned\n*** End Patch",
+				},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
+			name: "apply_patch mixed in/out is denied",
+			event: &hook.Event{
+				ToolName: hook.ToolApplyPatch,
+				CWD:      cwd,
+				ToolInput: &hook.ApplyPatchInput{
+					Command: "*** Begin Patch\n*** Update File: ok.txt\n*** Delete File: " + filepath.Join(outside, "gone.txt") + "\n*** End Patch",
+				},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
+			name: "apply_patch with no visible targets defers",
+			event: &hook.Event{
+				ToolName:  hook.ToolApplyPatch,
+				CWD:       cwd,
+				ToolInput: &hook.ApplyPatchInput{Command: "not a real patch"},
+			},
+		},
+		{
 			name: "unmodeled tool defers",
 			event: &hook.Event{
 				ToolName: "WebFetch",
