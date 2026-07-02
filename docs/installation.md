@@ -34,6 +34,40 @@ lite-sandbox install --with-tool-hook --bash-ast-hook-mode # AST-check Bash + co
 
 Restart Claude Code after running the install command.
 
+## OpenAI Codex CLI
+
+To configure [OpenAI Codex CLI](https://developers.openai.com/codex) instead of Claude Code, add `--codex`:
+
+```bash
+lite-sandbox install --codex
+```
+
+This automatically:
+1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`
+2. Adds a usage directive to `~/.codex/AGENTS.md` steering Codex to the sandboxed `bash` tool
+
+Both paths honor `CODEX_HOME` (they use `$CODEX_HOME` when set, otherwise `~/.codex`). The `config.toml` is edited as text — your existing tables, ordering, and comments are preserved, and only the `[mcp_servers.lite-sandbox]` table (plus any of its sub-tables) is rewritten — so re-running is idempotent.
+
+> **Weaker enforcement than Claude Code.** Codex exposes no per-tool permission `deny` and no `PreToolUse`-hook equivalent, so lite-sandbox **cannot block Codex's built-in shell**. The AGENTS.md directive asks Codex to *prefer* the sandboxed tool, but enforcement is advisory — there is no hard boundary like the Claude `Bash` deny or the tool hook. The Claude-specific flags (`--with-tool-hook`, `--bash-ast-hook-mode`) do not apply to Codex and are rejected when combined with `--codex`.
+
+### Manual Codex setup
+
+Add the following to `~/.codex/config.toml` (replace the path with your built binary):
+
+```toml
+[mcp_servers.lite-sandbox]
+command = "/path/to/lite-sandbox"
+args = ["serve-mcp"]
+```
+
+Then add a directive to `~/.codex/AGENTS.md` (global) or a project-level `AGENTS.md`:
+
+```markdown
+Prefer the `bash` tool from the `lite-sandbox` MCP server for running shell commands. It runs commands through lite-sandbox's AST validation and filesystem path boundaries, which the built-in shell bypasses. Use it instead of the built-in shell whenever possible.
+```
+
+Restart Codex after making these changes.
+
 ## Manual Installation
 
 If you prefer to configure manually or need a custom setup:

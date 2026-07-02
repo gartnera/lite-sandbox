@@ -11,6 +11,14 @@ lite-sandbox install                                 # Configure Claude Code, th
 
 `install` registers the MCP server, auto-allows the sandbox tools, denies the built-in `Bash` tool, and adds a usage directive so Claude routes shell commands through the sandbox. See [docs/installation.md](docs/installation.md) for manual setup and the optional tool-hook modes.
 
+To configure **OpenAI Codex CLI** instead, add `--codex`:
+
+```bash
+lite-sandbox install --codex   # registers the MCP server in ~/.codex/config.toml + adds a directive to ~/.codex/AGENTS.md
+```
+
+Codex has no per-tool deny or hook, so it can't block the built-in shell the way the Claude Code install can — the AGENTS.md directive steers Codex to the sandboxed tool. See [docs/installation.md](docs/installation.md#openai-codex-cli) for details.
+
 ## Documentation
 
 - **[Installation](docs/installation.md)** — automatic and manual setup, built-in tool boundaries, and hook modes.
