@@ -124,12 +124,14 @@ func TestConfigureCodexMCPServerReplacesInPlacePreservingSurrounding(t *testing.
 	}
 }
 
-func TestConfigureCodexMCPServerReplacesSubTable(t *testing.T) {
+// TestConfigureCodexMCPServerPreservesFollowingContent verifies that rewriting
+// the table in place preserves everything after it — a user-authored env
+// sub-table, comments, and unrelated tables — rather than absorbing/deleting it.
+func TestConfigureCodexMCPServerPreservesFollowingContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 
-	// A prior config with an env sub-table under our server.
-	existing := "[mcp_servers.lite-sandbox]\ncommand = \"/old\"\nargs = [\"serve-mcp\"]\n\n[mcp_servers.lite-sandbox.env]\nFOO = \"bar\"\n\n[keep]\nz = 3\n"
+	existing := "[mcp_servers.lite-sandbox]\ncommand = \"/old\"\nargs = [\"serve-mcp\"]\n\n[mcp_servers.lite-sandbox.env]\nFOO = \"bar\"\n\n# notes about the next server\n[keep]\nz = 3\n"
 	if err := os.WriteFile(configPath, []byte(existing), 0644); err != nil {
 		t.Fatalf("failed to write existing config: %v", err)
 	}
@@ -139,19 +141,67 @@ func TestConfigureCodexMCPServerReplacesSubTable(t *testing.T) {
 	}
 
 	content := readFile(t, configPath)
-	// The env sub-table is part of our block and should be rewritten away.
-	if strings.Contains(content, "[mcp_servers.lite-sandbox.env]") {
-		t.Errorf("stale sub-table not removed:\n%s", content)
+	// Our table body is updated...
+	if !strings.Contains(content, `command = "/new"`) || strings.Contains(content, "/old") {
+		t.Errorf("table body not updated:\n%s", content)
 	}
-	if strings.Contains(content, "FOO = \"bar\"") {
-		t.Errorf("stale sub-table body not removed:\n%s", content)
+	// ...but the user's env sub-table, comment, and unrelated table survive.
+	if !strings.Contains(content, "[mcp_servers.lite-sandbox.env]") || !strings.Contains(content, `FOO = "bar"`) {
+		t.Errorf("user env sub-table lost:\n%s", content)
 	}
-	// The unrelated table after it must survive.
+	if !strings.Contains(content, "# notes about the next server") {
+		t.Errorf("comment before next section lost:\n%s", content)
+	}
 	if !strings.Contains(content, "[keep]") || !strings.Contains(content, "z = 3") {
 		t.Errorf("unrelated table lost:\n%s", content)
 	}
-	if strings.Count(content, "[mcp_servers.lite-sandbox]") != 1 {
+	if strings.Count(content, "[mcp_servers.lite-sandbox]\n") != 1 {
 		t.Errorf("expected exactly one server table:\n%s", content)
+	}
+}
+
+func TestStripCodexHookBlockRemovesAllAndHandlesMalformed(t *testing.T) {
+	// Two managed blocks: both must be removed so a re-append converges to one.
+	block := codexHookBlockStart + "\nmatcher = \"Bash\"\n" + codexHookBlockEnd + "\n"
+	two := "a = 1\n\n" + block + "\n" + block
+	got := stripCodexHookBlock(two)
+	if strings.Contains(got, codexHookBlockStart) {
+		t.Errorf("not all blocks removed:\n%s", got)
+	}
+	if !strings.Contains(got, "a = 1") {
+		t.Errorf("surrounding content lost:\n%s", got)
+	}
+
+	// Malformed: start marker but no end marker. Only the marker line is removed;
+	// user content below it survives (no delete-to-EOF).
+	malformed := "keep_above = 1\n" + codexHookBlockStart + "\n[user.table]\nkeep_below = 2\n"
+	got = stripCodexHookBlock(malformed)
+	if strings.Contains(got, codexHookBlockStart) {
+		t.Errorf("orphaned start marker not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "keep_above = 1") || !strings.Contains(got, "keep_below = 2") || !strings.Contains(got, "[user.table]") {
+		t.Errorf("user content around orphaned marker was destroyed:\n%s", got)
+	}
+}
+
+func TestConfigureCodexMCPServerDetectsBlockAcrossReinstalls(t *testing.T) {
+	// After a full install, re-running the MCP step must not disturb a comment
+	// that documents the managed hook block.
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox"); err != nil {
+		t.Fatalf("configureCodexMCPServer: %v", err)
+	}
+	if err := reconcileCodexHook(configPath, "/bin/lite-sandbox", "/bin/lite-sandbox hook", bashValidateMatcher); err != nil {
+		t.Fatalf("reconcileCodexHook: %v", err)
+	}
+	before := readFile(t, configPath)
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox-v2"); err != nil {
+		t.Fatalf("configureCodexMCPServer (2nd): %v", err)
+	}
+	after := readFile(t, configPath)
+	if !strings.Contains(after, codexHookBlockStart) {
+		t.Errorf("hook block lost on MCP re-run:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 

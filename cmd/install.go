@@ -482,32 +482,34 @@ func asString(v any) string {
 }
 
 func configureCLAUDEMD(claudeDir string) error {
-	claudeMDPath := filepath.Join(claudeDir, "CLAUDE.md")
-
 	directive := `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.`
+	return appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), directive)
+}
 
-	// Check if the file exists and already contains the directive
-	data, err := os.ReadFile(claudeMDPath)
+// appendDirectiveOnce appends directive to the agent instructions file at path
+// (Claude's CLAUDE.md or Codex's AGENTS.md), creating it if needed. It is
+// idempotent — the directive is added only when not already present — and
+// existing content is preserved.
+func appendDirectiveOnce(path, directive string) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		// File doesn't exist, create it with the directive
-		return os.WriteFile(claudeMDPath, []byte(directive+"\n"), 0644)
+		// File doesn't exist, create it with the directive.
+		return os.WriteFile(path, []byte(directive+"\n"), 0644)
 	}
 
 	content := string(data)
 	if strings.Contains(content, directive) {
-		// Directive already exists, no need to add it again
+		// Directive already present, nothing to do.
 		return nil
 	}
 
-	// Append the directive
-	newContent := content
-	if len(newContent) > 0 && newContent[len(newContent)-1] != '\n' {
-		newContent += "\n"
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content += "\n"
 	}
-	newContent += "\n" + directive + "\n"
+	content += "\n" + directive + "\n"
 
-	return os.WriteFile(claudeMDPath, []byte(newContent), 0644)
+	return os.WriteFile(path, []byte(content), 0644)
 }

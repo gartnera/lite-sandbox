@@ -45,6 +45,23 @@ func TestParseApplyPatchPathsNoMarkers(t *testing.T) {
 	}
 }
 
+// TestParseApplyPatchPathsIgnoresHunkBodyLines ensures marker-like text inside a
+// hunk (context lines are space-prefixed, added lines "+"-prefixed) is not
+// mistaken for a real file target — only markers at column 0 count.
+func TestParseApplyPatchPathsIgnoresHunkBodyLines(t *testing.T) {
+	patch := "*** Begin Patch\n" +
+		"*** Update File: real.go\n" +
+		"@@\n" +
+		" *** Add File: /etc/passwd\n" + // context line (leading space)
+		"+*** Delete File: /etc/shadow\n" + // added line (leading +)
+		"*** End Patch"
+	got := parseApplyPatchPaths(patch)
+	want := []string{"real.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseApplyPatchPaths() = %v, want %v", got, want)
+	}
+}
+
 func TestApplyPatchInputViaFactory(t *testing.T) {
 	// Codex delivers apply_patch input as an object with a command field.
 	raw := `{"command":"*** Begin Patch\n*** Update File: main.go\n*** End Patch"}`

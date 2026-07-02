@@ -79,16 +79,15 @@ func runInstallCodex(binPath string) error {
 	governFS := installWithToolHook
 	configMCP := !installBashASTHookMode
 
-	// 1. MCP server (skipped in --bash-ast-hook-mode, which routes nothing to it).
+	// 1. MCP server + AGENTS.md directive. Both are skipped in
+	// --bash-ast-hook-mode, which routes nothing to the MCP tool, so the
+	// directive would have nothing to point at.
 	if configMCP {
 		if err := configureCodexMCPServer(configTomlPath, binPath); err != nil {
 			return fmt.Errorf("failed to configure Codex MCP server: %w", err)
 		}
 		fmt.Printf("✓ Added MCP server to %s\n", configTomlPath)
-	}
 
-	// 2. AGENTS.md directive (only meaningful when the MCP tool exists to point at).
-	if configMCP {
 		if err := configureCodexAGENTSMD(codexDir); err != nil {
 			return fmt.Errorf("failed to configure AGENTS.md: %w", err)
 		}
@@ -169,20 +168,19 @@ func configureCodexMCPServer(configTomlPath, binPath string) error {
 		return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
 	}
 
-	// Present: replace the table (and any [mcp_servers.lite-sandbox.*] sub-tables)
-	// in place. The table ends at the next table header that isn't one of ours,
-	// or at our managed hook block, whichever comes first.
+	// Present: replace only our contiguous table body in place. Our table is a
+	// run of key=value lines, so it ends at the first line that isn't part of it:
+	// a blank line, a comment (which includes our managed hook block's marker),
+	// or any table header. Stopping there — rather than scanning to the next
+	// top-level header — preserves blank lines, comments, and any user-authored
+	// [mcp_servers.lite-sandbox.*] sub-table that follows.
 	end := len(lines)
 	for i := start + 1; i < len(lines); i++ {
 		t := strings.TrimSpace(lines[i])
-		if t == codexHookBlockStart || (strings.HasPrefix(t, "[") && !isCodexSubTable(t)) {
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "[") {
 			end = i
 			break
 		}
-	}
-	// Keep any blank separator lines that precede the next section with it.
-	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
-		end--
 	}
 
 	var b strings.Builder
@@ -221,55 +219,51 @@ func reconcileCodexHook(configTomlPath, binPath, command, matcher string) error 
 	return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
 }
 
-// stripCodexHookBlock removes the managed hook block (markers inclusive) from
-// content, if present, collapsing the surrounding blank lines so re-running
-// converges to a stable file. Content without the block is returned unchanged.
+// stripCodexHookBlock removes every managed hook block (markers inclusive) from
+// content, so re-running (or switching modes) converges to a single block after
+// the fresh one is appended. Content without a block is returned unchanged.
+//
+// If a start marker has no matching end marker (a user hand-deleted the end
+// marker), only the start-marker line is removed rather than everything to EOF,
+// so user content below an orphaned marker is never destroyed.
 func stripCodexHookBlock(content string) string {
-	start := strings.Index(content, codexHookBlockStart)
-	if start == -1 {
-		return content
+	for {
+		start := strings.Index(content, codexHookBlockStart)
+		if start == -1 {
+			return content
+		}
+		// Expand the removal to the start of the marker's own line.
+		lineStart := strings.LastIndex(content[:start], "\n") + 1
+
+		var cut int
+		if rel := strings.Index(content[start:], codexHookBlockEnd); rel != -1 {
+			// Remove through the end of the end-marker's line.
+			endMarker := start + rel + len(codexHookBlockEnd)
+			cut = lineEnd(content, endMarker)
+		} else {
+			// Malformed (no end marker): remove only the start-marker line.
+			cut = lineEnd(content, start)
+		}
+		content = content[:lineStart] + content[cut:]
 	}
-	// Find the end marker and extend past the rest of its line.
-	rel := strings.Index(content[start:], codexHookBlockEnd)
-	var after string
-	if rel == -1 {
-		// Malformed (no end marker): drop everything from the start marker on.
-		after = ""
-	} else {
-		endLine := start + rel + len(codexHookBlockEnd)
-		after = content[endLine:]
-		after = strings.TrimPrefix(after, "\n")
+}
+
+// lineEnd returns the index just past the newline terminating the line that
+// contains idx, or len(s) if that line is the last (unterminated) one.
+func lineEnd(s string, idx int) int {
+	if nl := strings.IndexByte(s[idx:], '\n'); nl != -1 {
+		return idx + nl + 1
 	}
-	before := strings.TrimRight(content[:start], "\n")
-	if before != "" && after != "" {
-		return before + "\n\n" + after
-	}
-	if before != "" {
-		return before + "\n"
-	}
-	return after
+	return len(s)
 }
 
 // appendTOMLBlock appends block (which ends in a newline) to content, ensuring
 // exactly one blank line separates it from any existing content.
 func appendTOMLBlock(content, block string) string {
-	switch {
-	case len(content) == 0:
+	if content == "" {
 		return block
-	case !strings.HasSuffix(content, "\n"):
-		return content + "\n\n" + block
-	case !strings.HasSuffix(content, "\n\n"):
-		return content + "\n" + block
-	default:
-		return content + block
 	}
-}
-
-// isCodexSubTable reports whether a trimmed line is a sub-table header of our
-// server table (e.g. "[mcp_servers.lite-sandbox.env]"), which is considered part
-// of the block we own and rewrite.
-func isCodexSubTable(trimmed string) bool {
-	return strings.HasPrefix(trimmed, "[mcp_servers."+codexServerName+".")
+	return strings.TrimRight(content, "\n") + "\n\n" + block
 }
 
 // tomlString renders s as a TOML basic string, escaping backslashes and quotes.
@@ -279,31 +273,7 @@ func tomlString(s string) string {
 }
 
 // configureCodexAGENTSMD appends the usage directive to ~/.codex/AGENTS.md,
-// creating the file if needed. It is idempotent: the directive is added only
-// when not already present, and existing content is preserved.
+// creating the file if needed. Idempotent; existing content is preserved.
 func configureCodexAGENTSMD(codexDir string) error {
-	agentsMDPath := filepath.Join(codexDir, "AGENTS.md")
-
-	data, err := os.ReadFile(agentsMDPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		// File doesn't exist, create it with the directive.
-		return os.WriteFile(agentsMDPath, []byte(codexDirective+"\n"), 0644)
-	}
-
-	content := string(data)
-	if strings.Contains(content, codexDirective) {
-		// Directive already present, nothing to do.
-		return nil
-	}
-
-	newContent := content
-	if len(newContent) > 0 && newContent[len(newContent)-1] != '\n' {
-		newContent += "\n"
-	}
-	newContent += "\n" + codexDirective + "\n"
-
-	return os.WriteFile(agentsMDPath, []byte(newContent), 0644)
+	return appendDirectiveOnce(filepath.Join(codexDir, "AGENTS.md"), codexDirective)
 }

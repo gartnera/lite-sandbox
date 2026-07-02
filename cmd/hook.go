@@ -194,59 +194,18 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	sb := configuredSandbox(cwd)
 	defer sb.Close()
 
-	resolved := bash_sandboxed.ResolvePath(path, cwd)
-
-	// Cheap boundary first: cwd plus the user-configured paths cover the vast
-	// majority of accesses and need no runtime detection or git invocation.
-	cheap := append([]string{cwd}, sb.ConfigWritePaths()...)
-	if !write {
-		cheap = append(cheap, sb.ConfigReadPaths()...)
-	}
-	if bash_sandboxed.IsUnderAllowedPaths(resolved, cheap) {
-		// Inside the boundary: defer to Claude Code's normal permission flow.
-		return nil
-	}
-
-	// Outside the cheap set: compute the full boundary, which adds detected
-	// runtime paths (read side) and the worktree parent before deciding.
-	readPaths, writePaths := computeSandboxPaths(sb, cwd)
-	allowed := readPaths
-	boundary := "readable"
-	configNoun := "readable"
-	if write {
-		allowed = writePaths
-		boundary = "writable"
-		configNoun = "writable"
-	}
-
-	if bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
-		// Inside the boundary: defer to Claude Code's normal permission flow.
-		return nil
-	}
-
 	what := event.ToolName
 	if event.ToolInput != nil {
 		what = event.ToolInput.Describe()
 	}
-	reason := fmt.Sprintf(
-		"Blocked by lite-sandbox: %s\n"+
-			"%q resolves to %q, which is outside the sandbox's %s paths.\n"+
-			"Allowed %s paths: %s\n"+
-			"What to do instead: work within the project directory (%s). "+
-			"If this path is genuinely needed, ask the user to add it via "+
-			"`lite-sandbox config %s-paths add <path>`.",
-		what, path, resolved, boundary,
-		boundary, strings.Join(allowed, ", "),
-		cwd, configNoun,
-	)
-	return hook.NewDecision(hook.DecisionDeny, reason)
+	return boundaryDenial(sb, cwd, what, path, write)
 }
 
 // evaluateApplyPatch enforces the writable-path boundary on Codex's apply_patch
 // tool, which edits, creates, deletes, or renames files. Every target the patch
-// touches must resolve inside the writable paths; the first one outside is
-// denied. When no patch targets are visible (unexpected input shape) it defers,
-// keeping the hook fail-open.
+// touches must resolve inside the writable paths; the first one outside (or
+// inside .git) is denied. When no patch targets are visible (unexpected input
+// shape) it defers, keeping the hook fail-open.
 func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decision {
 	paths := ap.Paths()
 	if len(paths) == 0 {
@@ -265,27 +224,70 @@ func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decis
 
 	sb := configuredSandbox(cwd)
 	defer sb.Close()
-	_, writePaths := computeSandboxPaths(sb, cwd)
 
 	for _, p := range paths {
-		resolved := bash_sandboxed.ResolvePath(p, cwd)
-		if bash_sandboxed.IsUnderAllowedPaths(resolved, writePaths) {
-			continue
+		if d := boundaryDenial(sb, cwd, ap.Describe(), p, true); d != nil {
+			return d
 		}
-		reason := fmt.Sprintf(
-			"Blocked by lite-sandbox: %s\n"+
-				"%q resolves to %q, which is outside the sandbox's writable paths.\n"+
-				"Allowed writable paths: %s\n"+
-				"What to do instead: work within the project directory (%s). "+
-				"If this path is genuinely needed, ask the user to add it via "+
-				"`lite-sandbox config writable-paths add <path>`.",
-			ap.Describe(), p, resolved,
-			strings.Join(writePaths, ", "),
-			cwd,
-		)
-		return hook.NewDecision(hook.DecisionDeny, reason)
 	}
 	return nil
+}
+
+// boundaryDenial checks a single path against the sandbox boundary for the given
+// access and returns a deny Decision if it is outside — or, for writes, inside a
+// .git directory — otherwise nil (in bounds; defer). `what` describes the action
+// for the deny message. It does the cheap boundary check (cwd + configured
+// paths) before the full computation that may run runtime detection or shell out
+// to git, so common in-project accesses stay cheap. sb must be configured for cwd.
+func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bool) *hook.Decision {
+	resolved := bash_sandboxed.ResolvePath(path, cwd)
+
+	// Writes into .git are blocked outright (matching the bash sandbox), so an
+	// agent cannot plant a hook or rewrite git internals to escape the sandbox.
+	if write && bash_sandboxed.IsGitInternalPath(resolved) {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: %s\n"+
+				"%q resolves to %q, which is inside a .git directory.\n"+
+				"Writing git internals directly is not allowed; use git commands instead.",
+			what, path, resolved,
+		))
+	}
+
+	// Cheap boundary first: cwd plus the user-configured paths cover the vast
+	// majority of accesses and need no runtime detection or git invocation.
+	cheap := append([]string{cwd}, sb.ConfigWritePaths()...)
+	if !write {
+		cheap = append(cheap, sb.ConfigReadPaths()...)
+	}
+	if bash_sandboxed.IsUnderAllowedPaths(resolved, cheap) {
+		return nil
+	}
+
+	// Outside the cheap set: compute the full boundary, which adds detected
+	// runtime paths (read side) and the worktree parent before deciding.
+	readPaths, writePaths := computeSandboxPaths(sb, cwd)
+	allowed := readPaths
+	boundary := "readable"
+	if write {
+		allowed = writePaths
+		boundary = "writable"
+	}
+	if bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
+		return nil
+	}
+
+	reason := fmt.Sprintf(
+		"Blocked by lite-sandbox: %s\n"+
+			"%q resolves to %q, which is outside the sandbox's %s paths.\n"+
+			"Allowed %s paths: %s\n"+
+			"What to do instead: work within the project directory (%s). "+
+			"If this path is genuinely needed, ask the user to add it via "+
+			"`lite-sandbox config %s-paths add <path>`.",
+		what, path, resolved, boundary,
+		boundary, strings.Join(allowed, ", "),
+		cwd, boundary,
+	)
+	return hook.NewDecision(hook.DecisionDeny, reason)
 }
 
 // fsTarget reports the filesystem path a tool call targets, whether the access

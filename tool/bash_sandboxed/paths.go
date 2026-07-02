@@ -185,6 +185,13 @@ func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, wri
 	return validationErr
 }
 
+// IsGitInternalPath reports whether the resolved path is inside a .git directory.
+// It is the exported form of isGitInternalPath for callers outside this package
+// (e.g. the PreToolUse hook's write-boundary check).
+func IsGitInternalPath(resolved string) bool {
+	return isGitInternalPath(resolved)
+}
+
 // isGitInternalPath returns true if the resolved path is inside a .git directory.
 // Direct access to .git contents is blocked to prevent reading sensitive data
 // (hooks, config) and to force usage through the git command with its validator.

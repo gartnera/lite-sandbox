@@ -167,6 +167,28 @@ func TestEvaluatePathPolicy(t *testing.T) {
 			},
 		},
 		{
+			name: "apply_patch writing into .git is denied",
+			event: &hook.Event{
+				ToolName: hook.ToolApplyPatch,
+				CWD:      cwd,
+				ToolInput: &hook.ApplyPatchInput{
+					Command: "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+#!/bin/sh\n*** End Patch",
+				},
+			},
+			wantDeny:  true,
+			wantInMsg: ".git",
+		},
+		{
+			name: "edit into .git is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolEdit,
+				CWD:       cwd,
+				ToolInput: &hook.EditInput{FilePath: filepath.Join(cwd, ".git", "config")},
+			},
+			wantDeny:  true,
+			wantInMsg: ".git",
+		},
+		{
 			name: "unmodeled tool defers",
 			event: &hook.Event{
 				ToolName: "WebFetch",

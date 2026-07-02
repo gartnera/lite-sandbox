@@ -192,8 +192,13 @@ func (a *ApplyPatchInput) Describe() string {
 
 // parseApplyPatchPaths extracts the target file paths from an apply_patch
 // envelope. The format uses "*** Add File: <path>", "*** Update File: <path>",
-// "*** Delete File: <path>", and "*** Move to: <path>" markers. Paths are
-// returned de-duplicated in first-seen order.
+// "*** Delete File: <path>", and "*** Move to: <path>" markers.
+//
+// Markers are matched only at the start of a line (column 0), NOT after trimming
+// leading whitespace: inside a hunk, unchanged context lines are prefixed with a
+// space and added lines with "+", so a file's own content that happens to read
+// like a marker (e.g. " *** Add File: /etc/passwd") must not be mistaken for a
+// real target. Paths are returned de-duplicated in first-seen order.
 func parseApplyPatchPaths(patch string) []string {
 	markers := []string{
 		"*** Add File:",
@@ -204,10 +209,11 @@ func parseApplyPatchPaths(patch string) []string {
 	var paths []string
 	seen := map[string]bool{}
 	for _, line := range strings.Split(patch, "\n") {
-		t := strings.TrimSpace(line)
 		for _, m := range markers {
-			if strings.HasPrefix(t, m) {
-				p := strings.TrimSpace(strings.TrimPrefix(t, m))
+			if strings.HasPrefix(line, m) {
+				// TrimSpace on the value handles surrounding spaces and a trailing
+				// carriage return (CRLF input).
+				p := strings.TrimSpace(strings.TrimPrefix(line, m))
 				if p != "" && !seen[p] {
 					seen[p] = true
 					paths = append(paths, p)

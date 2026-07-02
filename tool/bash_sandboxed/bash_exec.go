@@ -109,14 +109,14 @@ var blockedBashFlags = map[string]string{
 
 // allowedBashFlags lists bash/sh flags that are safe to use.
 var allowedBashFlags = map[string]bool{
-	"-e":           true,
-	"-x":           true,
-	"-u":           true,
-	"-n":           true,
-	"-v":           true,
-	"-c":           true,
-	"--norc":       true,
-	"--noprofile":  true,
+	"-e":          true,
+	"-x":          true,
+	"-u":          true,
+	"-n":          true,
+	"-v":          true,
+	"-c":          true,
+	"--norc":      true,
+	"--noprofile": true,
 }
 
 // validateBashArgs validates bash/sh command arguments at the AST level.
