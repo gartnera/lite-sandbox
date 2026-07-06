@@ -34,6 +34,65 @@ lite-sandbox install --with-tool-hook --bash-ast-hook-mode # AST-check Bash + co
 
 Restart Claude Code after running the install command.
 
+## OpenAI Codex CLI
+
+To configure [OpenAI Codex CLI](https://developers.openai.com/codex) instead of Claude Code, add `--codex`:
+
+```bash
+lite-sandbox install --codex
+```
+
+This automatically:
+1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`
+2. Adds a usage directive to `~/.codex/AGENTS.md` steering Codex to the sandboxed `bash` tool
+3. Registers a `PreToolUse` hook (`[[hooks.PreToolUse]]`) that blocks Codex's built-in shell and redirects it to the sandboxed MCP tool
+
+Both paths honor `CODEX_HOME` (they use `$CODEX_HOME` when set, otherwise `~/.codex`). Everything is edited as text — your existing tables, ordering, and comments are preserved. The `[mcp_servers.lite-sandbox]` table is rewritten in place, and the hook lives in a clearly-marked managed block, so re-running (and switching modes) is idempotent.
+
+### One config for both Claude Code and Codex
+
+Codex's hook protocol is the same as Claude Code's — same `PreToolUse` event, the same JSON payload on stdin (`tool_name`, `tool_input`, `cwd`, …), and the same `permissionDecision: "deny"` response. lite-sandbox reuses **the same `hook` binary and the same config file** (`readable_paths`/`writable_paths`, extra commands, git settings — see [Configuration](configuration.md)) for both agents. So one security/sandbox config governs Claude Code and Codex together; a `lite-sandbox config writable-paths add …` change applies to both.
+
+To also confine **reads and writes** to the sandbox's paths (not just the shell), add `--with-tool-hook`, exactly as with Claude Code:
+
+```bash
+lite-sandbox install --codex --with-tool-hook
+```
+
+This widens the hook matcher so it also governs Codex's file tools. Note the two agents reach the filesystem differently:
+
+- **Reads** — Codex has no `Read` tool; it reads by shelling out (`cat`, `sed`, `rg`). Those reads are governed because the shell is routed through the sandbox (which enforces the readable paths at runtime). Claude Code's `Read`/`Glob`/`Grep` are governed directly.
+- **Writes** — Codex edits via its native `apply_patch` tool. The hook parses the patch envelope (`*** Add/Update/Delete File:`, `*** Move to:`) and denies the call if any target resolves outside the writable paths. Claude Code's `Write`/`Edit`/`NotebookEdit` are governed directly.
+
+`--bash-ast-hook-mode` also composes with `--codex` (AST-validate the built-in shell in place instead of redirecting it; no MCP server), just like the Claude install.
+
+> **Coverage caveat.** Codex hooks are enabled by default; if you have set `[features] hooks = false` in `config.toml`, re-enable it or the hook will not run. OpenAI's docs state `PreToolUse` fires for the shell, `apply_patch`, and MCP tools, but hook coverage has known gaps (e.g. some newer exec paths), so treat the hook as a strong guardrail rather than an absolute boundary. The **MCP-tool boundary is the hardest layer** — commands routed through `mcp__lite-sandbox__bash` are validated and path-checked at execution time regardless of hook coverage. For defense-in-depth on writes, you can additionally set Codex's native `sandbox_mode` / `writable_roots`.
+
+### Manual Codex setup
+
+Add the MCP server and hook to `~/.codex/config.toml` (replace the path with your built binary):
+
+```toml
+[mcp_servers.lite-sandbox]
+command = "/path/to/lite-sandbox"
+args = ["serve-mcp"]
+
+[[hooks.PreToolUse]]
+matcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/path/to/lite-sandbox hook"
+```
+
+Use `matcher = "Bash"` if you only want to govern the shell, or `command = "/path/to/lite-sandbox hook --validate-bash"` to AST-validate the shell in place instead of redirecting it. Then add a directive to `~/.codex/AGENTS.md` (global) or a project-level `AGENTS.md`:
+
+```markdown
+Prefer the `bash` tool from the `lite-sandbox` MCP server for running shell commands. It runs commands through lite-sandbox's AST validation and filesystem path boundaries, which the built-in shell bypasses. Use it instead of the built-in shell whenever possible.
+```
+
+Restart Codex after making these changes.
+
 ## Manual Installation
 
 If you prefer to configure manually or need a custom setup:

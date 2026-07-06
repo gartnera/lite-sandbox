@@ -13,11 +13,13 @@ import (
 )
 
 // hookToolMatcher is the tool matcher used when the PreToolUse hook is
-// registered in settings.json. It covers the built-in Bash tool (which the hook
-// redirects to the MCP tool) and the filesystem tools whose paths we govern. The
-// hook itself re-checks the tool name, so the matcher is just an optimization
-// that avoids invoking the binary for unrelated tools.
-const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep"
+// registered in settings.json (Claude Code) or config.toml (Codex). It covers
+// the built-in Bash tool (which the hook redirects to the MCP tool) and the
+// filesystem tools whose paths we govern. apply_patch is Codex's file-editing
+// tool (Claude never emits it, so it is a harmless no-op there). The hook itself
+// re-checks the tool name, so the matcher is just an optimization that avoids
+// invoking the binary for unrelated tools.
+const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
 
 // bashValidateMatcher is the matcher used in --bash-ast-hook-mode, where the
 // hook only governs the built-in Bash tool (validating its command rather than
@@ -167,6 +169,12 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 // paths; write-family tools (Edit/Write/NotebookEdit) against the writable
 // paths.
 func evaluatePathPolicy(event *hook.Event) *hook.Decision {
+	// Codex's apply_patch can touch several files in one call; check every write
+	// target against the writable boundary.
+	if ap, ok := event.ToolInput.(*hook.ApplyPatchInput); ok {
+		return evaluateApplyPatch(event, ap)
+	}
+
 	path, write, governed := fsTarget(event)
 	if !governed || path == "" {
 		// Not a filesystem tool we govern, or no explicit path was supplied
@@ -186,7 +194,64 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	sb := configuredSandbox(cwd)
 	defer sb.Close()
 
+	what := event.ToolName
+	if event.ToolInput != nil {
+		what = event.ToolInput.Describe()
+	}
+	return boundaryDenial(sb, cwd, what, path, write)
+}
+
+// evaluateApplyPatch enforces the writable-path boundary on Codex's apply_patch
+// tool, which edits, creates, deletes, or renames files. Every target the patch
+// touches must resolve inside the writable paths; the first one outside (or
+// inside .git) is denied. When no patch targets are visible (unexpected input
+// shape) it defers, keeping the hook fail-open.
+func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decision {
+	paths := ap.Paths()
+	if len(paths) == 0 {
+		// Could not see the patch targets; defer rather than guess.
+		return nil
+	}
+
+	cwd := event.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if cwd == "" {
+		// Without a working directory we cannot resolve the boundary; fail-open.
+		return nil
+	}
+
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+
+	for _, p := range paths {
+		if d := boundaryDenial(sb, cwd, ap.Describe(), p, true); d != nil {
+			return d
+		}
+	}
+	return nil
+}
+
+// boundaryDenial checks a single path against the sandbox boundary for the given
+// access and returns a deny Decision if it is outside — or, for writes, inside a
+// .git directory — otherwise nil (in bounds; defer). `what` describes the action
+// for the deny message. It does the cheap boundary check (cwd + configured
+// paths) before the full computation that may run runtime detection or shell out
+// to git, so common in-project accesses stay cheap. sb must be configured for cwd.
+func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bool) *hook.Decision {
 	resolved := bash_sandboxed.ResolvePath(path, cwd)
+
+	// Writes into .git are blocked outright (matching the bash sandbox), so an
+	// agent cannot plant a hook or rewrite git internals to escape the sandbox.
+	if write && bash_sandboxed.IsGitInternalPath(resolved) {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: %s\n"+
+				"%q resolves to %q, which is inside a .git directory.\n"+
+				"Writing git internals directly is not allowed; use git commands instead.",
+			what, path, resolved,
+		))
+	}
 
 	// Cheap boundary first: cwd plus the user-configured paths cover the vast
 	// majority of accesses and need no runtime detection or git invocation.
@@ -195,7 +260,6 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		cheap = append(cheap, sb.ConfigReadPaths()...)
 	}
 	if bash_sandboxed.IsUnderAllowedPaths(resolved, cheap) {
-		// Inside the boundary: defer to Claude Code's normal permission flow.
 		return nil
 	}
 
@@ -204,22 +268,14 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	readPaths, writePaths := computeSandboxPaths(sb, cwd)
 	allowed := readPaths
 	boundary := "readable"
-	configNoun := "readable"
 	if write {
 		allowed = writePaths
 		boundary = "writable"
-		configNoun = "writable"
 	}
-
 	if bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
-		// Inside the boundary: defer to Claude Code's normal permission flow.
 		return nil
 	}
 
-	what := event.ToolName
-	if event.ToolInput != nil {
-		what = event.ToolInput.Describe()
-	}
 	reason := fmt.Sprintf(
 		"Blocked by lite-sandbox: %s\n"+
 			"%q resolves to %q, which is outside the sandbox's %s paths.\n"+
@@ -229,7 +285,7 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 			"`lite-sandbox config %s-paths add <path>`.",
 		what, path, resolved, boundary,
 		boundary, strings.Join(allowed, ", "),
-		cwd, configNoun,
+		cwd, boundary,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
 }

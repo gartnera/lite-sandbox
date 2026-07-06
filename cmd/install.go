@@ -45,7 +45,16 @@ otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
 enforcement, only this up-front static check — so it is a weaker guarantee than
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
-governs only Bash.`,
+governs only Bash.
+
+With --codex, configures OpenAI Codex CLI instead of Claude Code. Codex's hook
+protocol matches Claude Code's, so the same hook binary and the same config file
+(readable/writable paths) govern both agents. It registers the MCP server and a
+usage directive in ~/.codex (config.toml + AGENTS.md, honoring CODEX_HOME), plus a
+PreToolUse hook — Codex has no permission deny, so the hook is what blocks the
+built-in shell. --with-tool-hook and --bash-ast-hook-mode compose with --codex and
+mean the same thing there (confine reads/writes — including Codex's apply_patch —
+or AST-validate the shell in place).`,
 	RunE: runInstall,
 }
 
@@ -54,6 +63,8 @@ func init() {
 		"register a PreToolUse hook that redirects built-in Bash to the MCP tool and confines built-in Read/Write/Edit to the sandbox's readable/writable paths")
 	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
+	installCmd.Flags().BoolVar(&installCodex, "codex", false,
+		"configure OpenAI Codex CLI (~/.codex config.toml + AGENTS.md + PreToolUse hook) instead of Claude Code; composes with --with-tool-hook and --bash-ast-hook-mode")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -66,6 +77,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	binPath, err = filepath.EvalSymlinks(binPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve symlinks: %w", err)
+	}
+
+	// Codex CLI configures differently (config.toml + AGENTS.md, no permission
+	// deny), so it has its own install path. The hook-mode flags mean the same
+	// thing there — --with-tool-hook confines reads/writes, --bash-ast-hook-mode
+	// AST-validates the shell in place — so they compose with --codex.
+	if installCodex {
+		return runInstallCodex(binPath)
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -463,32 +482,34 @@ func asString(v any) string {
 }
 
 func configureCLAUDEMD(claudeDir string) error {
-	claudeMDPath := filepath.Join(claudeDir, "CLAUDE.md")
-
 	directive := `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.`
+	return appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), directive)
+}
 
-	// Check if the file exists and already contains the directive
-	data, err := os.ReadFile(claudeMDPath)
+// appendDirectiveOnce appends directive to the agent instructions file at path
+// (Claude's CLAUDE.md or Codex's AGENTS.md), creating it if needed. It is
+// idempotent — the directive is added only when not already present — and
+// existing content is preserved.
+func appendDirectiveOnce(path, directive string) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		// File doesn't exist, create it with the directive
-		return os.WriteFile(claudeMDPath, []byte(directive+"\n"), 0644)
+		// File doesn't exist, create it with the directive.
+		return os.WriteFile(path, []byte(directive+"\n"), 0644)
 	}
 
 	content := string(data)
 	if strings.Contains(content, directive) {
-		// Directive already exists, no need to add it again
+		// Directive already present, nothing to do.
 		return nil
 	}
 
-	// Append the directive
-	newContent := content
-	if len(newContent) > 0 && newContent[len(newContent)-1] != '\n' {
-		newContent += "\n"
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		content += "\n"
 	}
-	newContent += "\n" + directive + "\n"
+	content += "\n" + directive + "\n"
 
-	return os.WriteFile(claudeMDPath, []byte(newContent), 0644)
+	return os.WriteFile(path, []byte(content), 0644)
 }
