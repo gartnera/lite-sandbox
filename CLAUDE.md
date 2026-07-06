@@ -30,7 +30,7 @@ This is an MCP (Model Context Protocol) server that gives AI coding agents shell
 2. **Runtime validation** — the interpreter's `CallHandler`/`OpenHandler` re-validate every command's expanded arguments and every file open, catching bypasses like `cat $HOME/secret`.
 3. **Optional OS sandbox** — bubblewrap (Linux) or sandbox-exec (macOS) confines writes to the working directory and masks sensitive paths (`~/.ssh` private keys, `~/.aws` in IMDS mode).
 
-The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `sed`, `touch`, `mkdir`, ...) are allowed inside the boundary, and opt-in config enables runtimes (Go, pnpm, Deno, Rust), `git`, `aws` (via a local IMDS credential broker), and `docker` (via a filtering proxy). Bare `extra_commands` config entries bypass validation entirely and run via real `bash -c` — a trust-based escape hatch.
+The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `sed`, `touch`, `mkdir`, ...) are allowed inside the boundary, and opt-in config enables runtimes (Go, pnpm, Deno, Rust), `git`, `aws` (via a local IMDS credential broker), and `docker` (via a filtering proxy). Bare `extra_commands` config entries bypass validation entirely and run via real `bash -c` (inside the OS sandbox worker when it is enabled) — a trust-based escape hatch.
 
 **Key packages:**
 - `cmd/` — Cobra CLI: MCP server (`serve.go`), installers (`install*.go`), PreToolUse hook (`hook.go`), interactive shell (`shell.go`), config subcommands (`config_*.go`)

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gartnera/lite-sandbox/config"
 )
@@ -126,6 +127,84 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 		if r.output != "test\n" {
 			t.Errorf("concurrent execute %d unexpected output: got %q, want %q", i, r.output, "test\n")
 		}
+	}
+}
+
+// TestOSSandboxBareExtraCommandConfined verifies that a bare extra_commands
+// entry — which bypasses AST parsing and validation entirely — still executes
+// inside the OS sandbox worker when the OS sandbox is enabled: the real bash
+// runs (accepting syntax the AST validator would reject), writes inside the
+// working directory succeed, and writes outside it are blocked.
+func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
+	requireOSSandbox(t)
+	tmpDir := t.TempDir()
+
+	s := NewSandbox()
+	enabled := true
+	cfg := &config.Config{
+		OSSandbox:     &enabled,
+		ExtraCommands: []string{"bash"},
+	}
+	s.UpdateConfig(cfg, tmpDir)
+	defer s.Close()
+
+	// Process substitution would be rejected by the AST validator; it only
+	// works because the bare entry routes the whole string to the real bash.
+	output, err := s.Execute(context.Background(), `bash -c 'cat <(echo raw-ok)'`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("bare extra command failed: %v, output: %s", err, output)
+	}
+	if !strings.Contains(output, "raw-ok") {
+		t.Errorf("unexpected output: got %q, want it to contain %q", output, "raw-ok")
+	}
+
+	// Writes inside the working directory succeed and are visible on the host.
+	insideFile := filepath.Join(tmpDir, "inside.txt")
+	if _, err := s.Execute(context.Background(), "bash -c 'touch "+insideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
+		t.Errorf("expected write inside workdir to succeed, got error: %v", err)
+	}
+	if _, err := os.Stat(insideFile); os.IsNotExist(err) {
+		t.Error("expected file to exist in workdir")
+	}
+
+	// Writes outside the working directory are blocked by the OS sandbox even
+	// though no validation ran.
+	restrictedPath := "/root/testfile"
+	if runtime.GOOS == "darwin" {
+		restrictedPath = "/usr/testfile"
+	}
+	output, err = s.Execute(context.Background(), "bash -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err == nil {
+		t.Errorf("expected error when writing to %s, got success. output: %s", restrictedPath, output)
+	}
+}
+
+// TestOSSandboxBackgroundBareExtraCommandConfined verifies the background raw
+// path for bare extra_commands is likewise confined by the OS sandbox.
+func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
+	requireOSSandbox(t)
+	tmpDir := t.TempDir()
+
+	s := NewSandbox()
+	enabled := true
+	cfg := &config.Config{
+		OSSandbox:     &enabled,
+		ExtraCommands: []string{"bash"},
+	}
+	s.UpdateConfig(cfg, tmpDir)
+	defer s.Close()
+
+	restrictedPath := "/root/testfile"
+	if runtime.GOOS == "darwin" {
+		restrictedPath = "/usr/testfile"
+	}
+
+	proc, err := s.ExecuteBackground("bash -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("ExecuteBackground failed: %v", err)
+	}
+	if st := waitForStatus(t, proc, 15*time.Second, "completed", "failed"); st != "failed" {
+		t.Fatalf("expected background write outside workdir to fail, got status %q", st)
 	}
 }
 
