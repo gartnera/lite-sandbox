@@ -43,7 +43,7 @@ lite-sandbox install --codex
 ```
 
 This automatically:
-1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`
+1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`, with `default_tools_approval_mode = "approve"` so Codex auto-approves the sandboxed tools (the mirror of the Claude installer's `mcp__lite-sandbox__*` allow entries — lite-sandbox is itself the boundary, so a per-call Codex prompt is redundant). Only this server's tools are affected. Requires a Codex build new enough to honor the key; older versions ignore it harmlessly and will still prompt.
 2. Adds a usage directive to `~/.codex/AGENTS.md` steering Codex to the sandboxed `bash` tool
 3. Registers a `PreToolUse` hook (`[[hooks.PreToolUse]]`) that blocks Codex's built-in shell and redirects it to the sandboxed MCP tool
 
@@ -76,6 +76,7 @@ Add the MCP server and hook to `~/.codex/config.toml` (replace the path with you
 [mcp_servers.lite-sandbox]
 command = "/path/to/lite-sandbox"
 args = ["serve-mcp"]
+default_tools_approval_mode = "approve"
 
 [[hooks.PreToolUse]]
 matcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
