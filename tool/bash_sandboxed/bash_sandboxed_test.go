@@ -86,6 +86,8 @@ func TestValidate_AllowedCommands(t *testing.T) {
 		command string
 	}{
 		{"echo", "echo hello"},
+		{"colon noop", ":"},
+		{"colon in if", "if :; then echo yes; fi"},
 		{"ls", "ls -la"},
 		{"grep pipe", "echo foo | grep foo"},
 		{"cat", "cat /etc/hostname"},
@@ -309,7 +311,6 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"xargs with blocked command", "echo hello | xargs python", `command "python" is not allowed`},
 
 		// Text processing with write capability
-		{"tee", "echo hello | tee file", `command "tee" is not allowed`},
 		{"csplit", "csplit file /pattern/", `command "csplit" is not allowed`},
 
 		// Interactive / potentially disruptive

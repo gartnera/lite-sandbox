@@ -33,6 +33,9 @@ func TestValidate_AllowedWriteCommands(t *testing.T) {
 		{"sed with rewrite", "sed 's/old/rewrite/' file.txt"},
 		{"sed with World", "sed 's/old/World/' file.txt"},
 		{"sed with sandbox flag", "sed --sandbox 's/old/new/' file.txt"},
+		{"tee file", "echo hi | tee out.txt"},
+		{"tee append", "echo hi | tee -a out.txt"},
+		{"tee multiple files", "echo hi | tee a.txt b.txt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

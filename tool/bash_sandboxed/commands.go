@@ -109,6 +109,7 @@ var allowedCommands = map[string]bool{
 	// Shell builtins (non-destructive, no escape capability)
 	"test":     true,
 	"[":        true,
+	":":        true,
 	"true":     true,
 	"false":    true,
 	"read":     true,
@@ -187,6 +188,7 @@ var allowedCommands = map[string]bool{
 	"chmod": true,
 	"ln":    true,
 	"sed":   true,
+	"tee":   true,
 
 	// Control flow / job control
 	"sleep":    true,
@@ -238,6 +240,7 @@ var writeCommands = map[string]bool{
 	"chmod": true,
 	"ln":    true,
 	"sed":   true,
+	"tee":   true,
 	"mkdir": true,
 }
 
