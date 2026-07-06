@@ -148,23 +148,25 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.worktreeParentCache = nil
 
 	// Store worker config for lazy start / restart.
+	blockAWSChanged := s.workerBlockAWS != blockAWSCredentials
 	s.workerWorkDir = workDir
 	s.workerBlockAWS = blockAWSCredentials
 
-	// Handle OS sandbox enable/disable
+	// Handle OS sandbox enable/disable. A live worker is also closed when the
+	// AWS credential mask changes: the mask is baked into the worker's mount
+	// setup at start time, so a stale worker would keep the old ~/.aws access.
+	// The next command lazily starts a replacement with the new settings.
 	newOSSandbox := cfg.OSSandboxEnabled()
-	if newOSSandbox != s.osSandbox {
-		// OS sandbox setting changed
-		if s.worker != nil {
-			slog.Info("closing existing worker")
-			s.worker.Close()
-			s.worker = nil
-		}
-		if newOSSandbox {
-			slog.Info("enabling OS sandbox", "block_aws_credentials", blockAWSCredentials)
-		}
-		s.osSandbox = newOSSandbox
+	osSandboxChanged := newOSSandbox != s.osSandbox
+	if (osSandboxChanged || blockAWSChanged) && s.worker != nil {
+		slog.Info("closing existing worker")
+		s.worker.Close()
+		s.worker = nil
 	}
+	if osSandboxChanged && newOSSandbox {
+		slog.Info("enabling OS sandbox", "block_aws_credentials", blockAWSCredentials)
+	}
+	s.osSandbox = newOSSandbox
 	s.mu.Unlock()
 }
 

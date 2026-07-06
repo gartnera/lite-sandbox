@@ -17,7 +17,6 @@ import (
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
-	"github.com/gartnera/lite-sandbox/internal/imds"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
@@ -266,37 +265,17 @@ func runServe() error {
 
 	// Start IMDS server if AWS uses IMDS (force_profile is set). The profile is
 	// resolved for the server's working directory so per-directory overrides take
-	// effect.
+	// effect. The lifecycle also reacts to config reloads below, starting or
+	// stopping the server as AWS settings change.
 	var awsCfg *config.AWSConfig
 	if cfg != nil {
 		awsCfg = cfg.AWS.ForDirectory(cwd)
 	}
-	var imdsServer *imds.Server
-	if awsCfg != nil && awsCfg.UsesIMDS() {
-		// Use port 0 to get a random available port
-		imdsServer, err = imds.NewServer("127.0.0.1:0", awsCfg.IMDSProfile())
-		if err != nil {
-			return fmt.Errorf("failed to create IMDS server: %w", err)
-		}
-
-		// Start IMDS server in background
-		go func() {
-			slog.Info("IMDS server endpoint", "url", imdsServer.Endpoint())
-			if err := imdsServer.Start(); err != nil && err != http.ErrServerClosed {
-				slog.Error("IMDS server failed", "error", err)
-			}
-		}()
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			if err := imdsServer.Shutdown(shutdownCtx); err != nil {
-				slog.Error("failed to shutdown IMDS server", "error", err)
-			}
-		}()
-
-		// Set IMDS endpoint in sandbox
-		sandbox.SetIMDSEndpoint(imdsServer.Endpoint())
+	imdsLC := &imdsLifecycle{sandbox: sandbox}
+	if err := imdsLC.apply(awsCfg); err != nil {
+		return err
 	}
+	defer imdsLC.stop()
 
 	// Start docker proxy if docker is enabled and usable (the docker command is
 	// only permitted under the OS sandbox, unless allow_unsandboxed is set).
@@ -339,21 +318,10 @@ func runServe() error {
 			sandbox.UpdateConfig(newCfg, cwd)
 			slog.Info("reloaded config", "extra_commands", newCfg.ExtraCommands)
 
-			// Handle IMDS server lifecycle on config changes
-			wasEnabled := cfg != nil && cfg.AWS != nil && cfg.AWS.AWSEnabled()
-			nowEnabled := newCfg != nil && newCfg.AWS != nil && newCfg.AWS.AWSEnabled()
-
-			if !wasEnabled && nowEnabled {
-				// AWS was just enabled
-				slog.Info("AWS enabled, starting IMDS server")
-				// TODO: Start IMDS server dynamically
-			} else if wasEnabled && !nowEnabled {
-				// AWS was just disabled
-				slog.Info("AWS disabled, stopping IMDS server")
-				// TODO: Stop IMDS server dynamically
+			// Start, stop, or restart the IMDS server to match the new AWS settings.
+			if err := imdsLC.apply(newCfg.AWS.ForDirectory(cwd)); err != nil {
+				slog.Error("failed to apply AWS config change", "error", err)
 			}
-
-			cfg = newCfg
 		})
 		if err != nil && ctx.Err() == nil {
 			slog.Error("config watcher failed", "error", err)

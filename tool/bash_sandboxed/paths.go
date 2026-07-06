@@ -24,15 +24,27 @@ var gitGlobalPathFlags = map[string]bool{
 // gitGlobalPathArgIndices returns a set of argument indices (within args)
 // that are path values for git's global flags (e.g., -C /path). These
 // should be excluded from file-path security checks.
-func gitGlobalPathArgIndices(args []*syntax.Word) map[int]bool {
+func gitGlobalPathArgIndices(args []string) map[int]bool {
 	skip := make(map[int]bool)
 	for i, arg := range args {
-		lit := arg.Lit()
-		if gitGlobalPathFlags[lit] && i+1 < len(args) {
+		if gitGlobalPathFlags[arg] && i+1 < len(args) {
 			skip[i+1] = true
 		}
 	}
 	return skip
+}
+
+// wordLits reduces AST words to their literal text, with "" for words that
+// are not plain literals (variables, quoted strings, substitutions). The
+// static preflight can only reason about literals; empty entries are skipped
+// by validateCommandArgPaths and re-checked after expansion by the
+// interpreter's CallHandler.
+func wordLits(words []*syntax.Word) []string {
+	lits := make([]string, len(words))
+	for i, w := range words {
+		lits[i] = w.Lit()
+	}
+	return lits
 }
 
 // validatePaths checks that all path-like arguments in the AST resolve to
@@ -51,82 +63,102 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 			return false
 		}
 		callExpr, ok := node.(*syntax.CallExpr)
-		if !ok {
+		if !ok || len(callExpr.Args) == 0 {
 			return true
 		}
-		// Determine which allowed paths to use based on command name
+		cmdName := extractCommandName(callExpr.Args[0])
 		allowedPaths := resolvedRead
-		var cmdName string
-		isWriteCmd := false
-		if len(callExpr.Args) > 0 {
-			cmdName = extractCommandName(callExpr.Args[0])
-			if writeCommands[cmdName] {
-				allowedPaths = resolvedWrite
-				isWriteCmd = true
-			}
+		if writeCommands[cmdName] {
+			allowedPaths = resolvedWrite
 		}
-		// For git, identify argument positions that are path values for global
-		// flags (e.g., -C /repo). These control where git runs, not what files
-		// are accessed, so they are exempt from sandbox path validation.
-		// For sed, identify which arguments are script expressions (not paths).
-		var skipIndices map[int]bool
-		switch cmdName {
-		case "git":
-			skipIndices = gitGlobalPathArgIndices(callExpr.Args)
-		case "sed":
-			skipIndices = sedNonPathArgIndicesAST(callExpr.Args)
-		}
-		for i, arg := range callExpr.Args {
-			if i == 0 {
-				continue // skip command name
-			}
-			if skipIndices[i] {
-				continue // skip git global flag path values or sed expressions
-			}
-			lit := arg.Lit()
-			if lit == "" {
-				continue // dynamic/non-literal argument
-			}
-			var pathToCheck string
-			if strings.HasPrefix(lit, "-") {
-				// Extract any path embedded in a flag (e.g., -f/etc/passwd, --file=/etc/passwd).
-				// Skip for commands whose flag values are never paths (e.g., cut -d/).
-				if noFlagPathExtractionCommands[cmdName] {
-					continue
-				}
-				pathToCheck = extractPathFromFlag(lit)
-			} else {
-				pathToCheck = lit
-			}
-			// Check for .git access even if it doesn't look like a typical path
-			if pathToCheck == ".git" || strings.HasPrefix(pathToCheck, ".git/") || strings.HasPrefix(pathToCheck, ".git\\") {
-				validationErr = fmt.Errorf("path %q accesses .git directory which is not allowed", lit)
-				return false
-			}
-			if pathToCheck == "" || !looksLikePath(pathToCheck) {
-				continue
-			}
-			resolved := ResolvePath(pathToCheck, workDir)
-			// For read commands with absolute paths, skip validation if the path
-			// doesn't exist locally. Non-existent absolute paths are likely URL
-			// path arguments (e.g., /v3/api/endpoint?query=value passed to curl)
-			// rather than real filesystem paths; they can't be read from disk.
-			// Relative paths are always validated to prevent traversal attempts.
-			if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
-				continue
-			}
-			if !isUnderResolvedAllowedPaths(resolved, allowedPaths) {
-				validationErr = fmt.Errorf("path %q resolves to %q which is outside allowed directories", lit, resolved)
-				return false
-			}
-			if isGitInternalPath(resolved) {
-				validationErr = fmt.Errorf("path %q accesses .git directory which is not allowed", lit)
-				return false
-			}
+		if err := validateCommandArgPaths(cmdName, wordLits(callExpr.Args), workDir, allowedPaths); err != nil {
+			validationErr = err
+			return false
 		}
 		return true
 	})
 	return validationErr
+}
+
+// validateCommandArgPaths checks the path-like arguments of a single command
+// against the allowed directories. It is the shared core of the static AST
+// preflight (validatePaths, which passes each argument's literal text with ""
+// for non-literal words) and the interpreter's CallHandler
+// (validateExpandedPaths, which passes post-expansion values). args includes
+// the command name at index 0; allowed must already be selected for read vs
+// write commands (see writeCommands) and pre-resolved.
+func validateCommandArgPaths(cmdName string, args []string, workDir string, allowed []resolvedAllowedPath) error {
+	isWriteCmd := writeCommands[cmdName]
+	skipIndices := nonPathArgIndices(cmdName, args)
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "" {
+			continue // dynamic/non-literal argument (static pass only)
+		}
+		if skipIndices[i] {
+			continue // git global flag path values, sed scripts, grep patterns
+		}
+		var pathToCheck string
+		if strings.HasPrefix(arg, "-") {
+			// Extract any path embedded in a flag (e.g., -f/etc/passwd, --file=/etc/passwd).
+			// Skip for commands whose flag values are never paths (e.g., cut -d/).
+			if noFlagPathExtractionCommands[cmdName] {
+				continue
+			}
+			pathToCheck = extractPathFromFlag(arg)
+		} else {
+			pathToCheck = arg
+		}
+		// Check for .git access even if it doesn't look like a typical path
+		if pathToCheck == ".git" || strings.HasPrefix(pathToCheck, ".git/") || strings.HasPrefix(pathToCheck, ".git\\") {
+			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
+		}
+		if pathToCheck == "" || !looksLikePath(pathToCheck) {
+			continue
+		}
+		if err := checkPathBoundary(arg, pathToCheck, workDir, isWriteCmd, allowed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// nonPathArgIndices returns the argument indices (within args, which includes
+// the command name at index 0) that are known not to be file paths for
+// cmdName — git global-flag values (e.g., -C /repo, which controls where git
+// runs, not what files are accessed), sed script expressions, and grep
+// patterns — so they are excluded from file-path security checks.
+func nonPathArgIndices(cmdName string, args []string) map[int]bool {
+	switch cmdName {
+	case "git":
+		return gitGlobalPathArgIndices(args)
+	case "sed":
+		return sedNonPathArgIndices(args)
+	case "grep", "egrep", "fgrep":
+		return grepNonPathArgIndices(args)
+	}
+	return nil
+}
+
+// checkPathBoundary validates one candidate path against the allowed set:
+// it resolves the path relative to workDir, verifies containment, and blocks
+// .git internals. orig is the argument as written, used in error messages.
+// For reads, an absolute path that doesn't exist locally is allowed through:
+// it is likely a URL path argument (e.g., /v3/api/endpoint?query=value passed
+// to curl) rather than a real filesystem path, and can't be read from disk
+// anyway. Relative paths are always validated to prevent traversal attempts.
+func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
+	resolved := ResolvePath(path, workDir)
+	if !isWrite && filepath.IsAbs(path) && !pathExistsLocally(resolved) {
+		return nil
+	}
+	if !isUnderResolvedAllowedPaths(resolved, allowed) {
+		return fmt.Errorf("path %q resolves to %q which is outside allowed directories", orig, resolved)
+	}
+	if isGitInternalPath(resolved) {
+		return fmt.Errorf("path %q accesses .git directory which is not allowed", orig)
+	}
+	return nil
 }
 
 // validateRedirectPaths checks that file targets in redirections resolve to
@@ -401,43 +433,6 @@ func isUnderResolvedAllowedPaths(path string, allowed []resolvedAllowedPath) boo
 	return false
 }
 
-// sedNonPathArgIndicesAST returns the set of argument indices (within
-// []*syntax.Word args) that are sed script expressions (not file paths).
-// Used by the static AST-based validatePaths.
-func sedNonPathArgIndicesAST(args []*syntax.Word) map[int]bool {
-	skip := make(map[int]bool)
-	scriptSeen := false
-	i := 1
-	for i < len(args) {
-		lit := args[i].Lit()
-		if lit == "--" {
-			break
-		}
-		if strings.HasPrefix(lit, "-") {
-			switch lit {
-			case "-e", "--expression":
-				i++
-				if i < len(args) {
-					skip[i] = true // expression value, not a path
-					scriptSeen = true
-				}
-			case "-f", "--file":
-				i++ // file path value — NOT skipped (already blocked by validateSedArgs)
-			}
-			i++
-			continue
-		}
-		// First non-flag positional arg is the sed script expression.
-		if !scriptSeen {
-			scriptSeen = true
-			skip[i] = true
-		}
-		// Subsequent positional args are file paths — path-checked normally.
-		i++
-	}
-	return skip
-}
-
 // sedNonPathArgIndices returns the set of argument indices (within args) that
 // are sed script expressions (not file paths) and should be excluded from
 // file-path security checks. For sed:
@@ -529,19 +524,6 @@ func grepNonPathArgIndices(args []string) map[int]bool {
 	return skip
 }
 
-// gitGlobalPathArgIndicesExpanded returns a set of argument indices (within
-// string args) that are path values for git's global flags (e.g., -C /path).
-// These should be excluded from file-path security checks.
-func gitGlobalPathArgIndicesExpanded(args []string) map[int]bool {
-	skip := make(map[int]bool)
-	for i, arg := range args {
-		if gitGlobalPathFlags[arg] && i+1 < len(args) {
-			skip[i+1] = true
-		}
-	}
-	return skip
-}
-
 // validateExpandedPaths checks command arguments after variable expansion.
 // This is called by the interpreter's CallHandler, where all variables and
 // command substitutions have been resolved to their actual values.
@@ -553,74 +535,13 @@ func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writ
 	}
 	cmdName := args[0]
 	allowedPaths := readAllowedPaths
-	isWriteCmd := writeCommands[cmdName]
-	if isWriteCmd {
+	if writeCommands[cmdName] {
 		allowedPaths = writeAllowedPaths
 	}
-
-	// For grep-family and sed commands, identify which arg positions are
-	// patterns/expressions (not file paths) so we don't incorrectly flag
-	// expressions like ".git/" or "/pattern/" as path access attempts.
-	var nonPathIndices map[int]bool
-	switch cmdName {
-	case "grep", "egrep", "fgrep":
-		nonPathIndices = grepNonPathArgIndices(args)
-	case "sed":
-		nonPathIndices = sedNonPathArgIndices(args)
-	}
-
-	// For git, identify argument positions that are path values for global
-	// flags (e.g., -C /repo). These are exempt from sandbox path validation.
-	var gitSkipIndices map[int]bool
-	if cmdName == "git" {
-		gitSkipIndices = gitGlobalPathArgIndicesExpanded(args)
-	}
-
 	// Resolve the allowed-path set once; a single command (e.g. a glob) can
 	// expand to thousands of args, and re-resolving inside the loop would do
 	// O(args × allowedPaths) EvalSymlinks syscalls.
-	resolvedAllowed := resolveAllowedPaths(allowedPaths)
-
-	for i, arg := range args[1:] {
-		argIdx := i + 1
-		if nonPathIndices[argIdx] {
-			continue
-		}
-		if gitSkipIndices[argIdx] {
-			continue // skip git global flag path values (e.g., -C /path)
-		}
-		if arg == ".git" || strings.HasPrefix(arg, ".git/") || strings.HasPrefix(arg, ".git\\") {
-			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
-		}
-		var pathToCheck string
-		if strings.HasPrefix(arg, "-") {
-			// Skip flag-path extraction for commands whose flag values are never paths.
-			if noFlagPathExtractionCommands[cmdName] {
-				continue
-			}
-			pathToCheck = extractPathFromFlag(arg)
-		} else {
-			pathToCheck = arg
-		}
-		if pathToCheck == "" || !looksLikePath(pathToCheck) {
-			continue
-		}
-		resolved := ResolvePath(pathToCheck, workDir)
-		// For read commands with absolute paths, skip validation if the path
-		// doesn't exist locally. Non-existent absolute paths are likely URL
-		// path arguments passed to curl rather than real filesystem paths.
-		// Relative paths are always validated to prevent traversal attempts.
-		if !isWriteCmd && filepath.IsAbs(pathToCheck) && !pathExistsLocally(resolved) {
-			continue
-		}
-		if !isUnderResolvedAllowedPaths(resolved, resolvedAllowed) {
-			return fmt.Errorf("path %q resolves to %q which is outside allowed directories", arg, resolved)
-		}
-		if isGitInternalPath(resolved) {
-			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
-		}
-	}
-	return nil
+	return validateCommandArgPaths(cmdName, args, workDir, resolveAllowedPaths(allowedPaths))
 }
 
 // validateOpenPath checks a file path before the interpreter opens it (for
@@ -637,20 +558,7 @@ func validateOpenPath(path string, flag int, workDir string, readAllowedPaths, w
 	if isWrite {
 		allowedPaths = writeAllowedPaths
 	}
-	resolved := ResolvePath(path, workDir)
-	// For read redirects with absolute paths, skip validation if the path
-	// doesn't exist locally — it cannot be read and poses no security risk.
-	// Relative paths are always validated to prevent traversal attempts.
-	if !isWrite && filepath.IsAbs(path) && !pathExistsLocally(resolved) {
-		return nil
-	}
-	if !IsUnderAllowedPaths(resolved, allowedPaths) {
-		return fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
-	}
-	if isGitInternalPath(resolved) {
-		return fmt.Errorf("path %q accesses .git directory which is not allowed", path)
-	}
-	return nil
+	return checkPathBoundary(path, path, workDir, isWrite, resolveAllowedPaths(allowedPaths))
 }
 
 // isWriteFlag returns true if the open flags include any write-related bits.
