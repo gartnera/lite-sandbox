@@ -976,9 +976,19 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 // CommandContext kills only the direct process.
 func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup bool) error {
 	s.mu.RLock()
+	useOSSandbox := s.osSandbox
 	imdsEndpoint := s.imdsEndpoint
 	dockerHost := s.dockerHost
 	s.mu.RUnlock()
+
+	// The AST bypass skips validation, not confinement: when the OS sandbox is
+	// enabled the raw bash still runs inside the worker, so filesystem
+	// restrictions apply to extra_commands like any other command. The worker
+	// runs each command in its own process group and kills the whole subtree on
+	// cancellation, so newProcessGroup is only needed for the host path below.
+	if useOSSandbox {
+		return s.runRawInWorker(ctx, command, workDir, imdsEndpoint, dockerHost, out)
+	}
 
 	env := os.Environ()
 	if imdsEndpoint != "" {
@@ -1029,6 +1039,39 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	return err
 }
 
+// runRawInWorker executes a bare extra_commands string with `bash -c` inside
+// the OS sandbox worker, streaming combined stdout/stderr to out. No AST
+// parsing or validation is performed — trust comes from the user's explicit
+// opt-in plus the worker's bwrap/sandbox-exec confinement.
+func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndpoint, dockerHost string, out io.Writer) error {
+	w, err := s.getOrCreateWorker()
+	if err != nil {
+		return fmt.Errorf("failed to get worker: %w", err)
+	}
+
+	env := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	if imdsEndpoint != "" {
+		env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = imdsEndpoint
+	}
+	if dockerHost != "" {
+		env["DOCKER_HOST"] = dockerHost
+	}
+
+	exitCode, err := w.Exec(ctx, []string{"bash", "-c", command}, workDir, env, nil, out, out)
+	if err != nil {
+		return fmt.Errorf("worker communication failed: %w", err)
+	}
+	if exitCode != 0 {
+		return interp.ExitStatus(exitCode)
+	}
+	return nil
+}
+
 // Execute parses, validates, and executes a bash command.
 // workDir is the working directory for the command and for resolving relative paths.
 // readAllowedPaths are absolute directories that read-only commands may access.
@@ -1038,7 +1081,9 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 	slog.InfoContext(ctx, "executing sandboxed bash", "command", command)
 
 	// Bare extra_commands entries bypass bash AST parsing entirely and are
-	// executed directly with the real bash for maximum compatibility.
+	// executed directly with the real bash for maximum compatibility. When the
+	// OS sandbox is enabled the raw bash runs inside the worker, so filesystem
+	// confinement still applies.
 	if s.isExtraCommandInvocation(command) {
 		return s.executeRaw(ctx, command, workDir)
 	}

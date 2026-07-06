@@ -11,6 +11,15 @@ extra_commands:
   - python3
 ```
 
+A bare entry (a single token) allows the command with any arguments and, when it
+is the leading command of an invocation, bypasses bash AST parsing entirely —
+the whole command string runs via the real bash. An entry with a subcommand
+(e.g. `uv run pyright`) restricts the command to invocations whose leading
+non-flag arguments match, and still goes through normal parsing and validation.
+When the [OS sandbox](security.md#os-level-sandboxing-optional) is enabled,
+bare entries run inside it like every other command, so filesystem confinement
+applies even though validation is skipped.
+
 The config file is automatically reloaded when changed — no server restart needed.
 
 ## CLI config management
