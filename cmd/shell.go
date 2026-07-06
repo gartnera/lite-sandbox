@@ -16,7 +16,6 @@ import (
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
-	"github.com/gartnera/lite-sandbox/internal/imds"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
@@ -55,33 +54,14 @@ func runShell() error {
 	if cfg != nil {
 		awsCfg = cfg.AWS.ForDirectory(workDir)
 	}
-	var imdsServer *imds.Server
-	if awsCfg != nil && awsCfg.UsesIMDS() {
-		imdsServer, err = imds.NewServer("127.0.0.1:0", awsCfg.IMDSProfile())
-		if err != nil {
-			return fmt.Errorf("failed to create IMDS server: %w", err)
-		}
-
-		// Start IMDS server in background
-		go func() {
-			slog.Debug("starting IMDS server", "endpoint", imdsServer.Endpoint())
-			if err := imdsServer.Start(); err != nil && err != http.ErrServerClosed {
-				slog.Error("IMDS server failed", "error", err)
-			}
-		}()
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			if err := imdsServer.Shutdown(shutdownCtx); err != nil {
-				slog.Error("failed to shutdown IMDS server", "error", err)
-			}
-		}()
-
-		// Set IMDS endpoint in sandbox
-		sandbox.SetIMDSEndpoint(imdsServer.Endpoint())
-
+	imdsLC := &imdsLifecycle{sandbox: sandbox}
+	if err := imdsLC.apply(awsCfg); err != nil {
+		return err
+	}
+	defer imdsLC.stop()
+	if endpoint := imdsLC.endpoint(); endpoint != "" {
 		// Also set in process environment for subprocesses
-		os.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", imdsServer.Endpoint())
+		os.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
 	}
 
 	ctx := context.Background()
