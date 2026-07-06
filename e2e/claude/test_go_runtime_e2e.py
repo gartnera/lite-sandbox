@@ -35,6 +35,7 @@ def go_runtime_agent_options(tmp_path) -> ClaudeAgentOptions:
             "Write",
             "Edit",
         ],
+        disallowed_tools=["Bash"],
         can_use_tool=deny_builtin_bash,
         model="haiku",
         max_turns=15,
@@ -80,17 +81,10 @@ Show me the results of the go test and git commit commands.
     # Assert the sandbox tool was used
     assert_used_sandbox_tool(response)
 
-    # Verify only allowed tools were used
+    # Verify no built-in Bash was used (enforced by disallowed_tools and the
+    # can_use_tool callback). Harness-internal tools such as ToolSearch may
+    # appear depending on the CLI version, so don't assert a strict whitelist.
     tool_names = [tc.name for tc in response["tool_calls"]]
-    for name in tool_names:
-        assert name in [
-            "mcp__lite-sandbox__bash",
-            "Read",
-            "Write",
-            "Edit",
-        ], f"Unexpected tool used: {name}"
-
-    # Verify no built-in Bash was used (enforced by can_use_tool callback)
     assert "Bash" not in tool_names, "Built-in Bash should not be used"
 
     # Check for evidence of successful test run

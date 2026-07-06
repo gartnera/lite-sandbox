@@ -16,7 +16,7 @@ async def deny_builtin_bash(
     """Allow the MCP sandbox tool freely; deny the built-in Bash tool."""
     if tool_name == "Bash":
         return PermissionResultDeny(
-            message="Use bash instead", interrupt=True,
+            message="Use the mcp__lite-sandbox__bash tool instead",
         )
     return PermissionResultAllow(updated_input=input_data)
 
@@ -64,6 +64,7 @@ def agent_options() -> ClaudeAgentOptions:
             "The sandboxed tool is pre-approved and requires no permission prompts."
         ),
         allowed_tools=["mcp__lite-sandbox__bash"],
+        disallowed_tools=["Bash"],
         can_use_tool=deny_builtin_bash,
         model="haiku",
         max_turns=5,
