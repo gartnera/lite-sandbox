@@ -86,7 +86,7 @@ func runInstallCodex(binPath string) error {
 		if err := configureCodexMCPServer(configTomlPath, binPath); err != nil {
 			return fmt.Errorf("failed to configure Codex MCP server: %w", err)
 		}
-		fmt.Printf("✓ Added MCP server to %s\n", configTomlPath)
+		fmt.Printf("✓ Added MCP server (tools auto-approved) to %s\n", configTomlPath)
 
 		if err := configureCodexAGENTSMD(codexDir); err != nil {
 			return fmt.Errorf("failed to configure AGENTS.md: %w", err)
@@ -139,9 +139,18 @@ func runInstallCodex(binPath string) error {
 // appending a duplicate.
 func configureCodexMCPServer(configTomlPath, binPath string) error {
 	header := "[mcp_servers." + codexServerName + "]"
+	// Auto-approve this server's tools so Codex doesn't prompt on every call —
+	// the mirror of the mcp__lite-sandbox__* allow entries the Claude installer
+	// adds. lite-sandbox is itself the security boundary (AST validation, path
+	// confinement, OS sandbox), so a redundant per-call Codex prompt adds no
+	// safety. Scoped to [mcp_servers.lite-sandbox], so only our tools are
+	// affected; other servers keep Codex's default approval behavior. (Requires a
+	// Codex build new enough to honor default_tools_approval_mode; older versions
+	// ignore the key harmlessly.)
 	block := header + "\n" +
 		"command = " + tomlString(binPath) + "\n" +
-		`args = ["serve-mcp"]` + "\n"
+		`args = ["serve-mcp"]` + "\n" +
+		`default_tools_approval_mode = "approve"` + "\n"
 
 	data, err := os.ReadFile(configTomlPath)
 	if err != nil {

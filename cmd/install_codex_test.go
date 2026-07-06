@@ -16,9 +16,37 @@ func TestConfigureCodexMCPServerNewFile(t *testing.T) {
 	}
 
 	content := readFile(t, configPath)
-	want := "[mcp_servers.lite-sandbox]\ncommand = \"/usr/local/bin/lite-sandbox\"\nargs = [\"serve-mcp\"]\n"
+	want := "[mcp_servers.lite-sandbox]\ncommand = \"/usr/local/bin/lite-sandbox\"\nargs = [\"serve-mcp\"]\ndefault_tools_approval_mode = \"approve\"\n"
 	if content != want {
 		t.Errorf("unexpected content:\n%q\nwant:\n%q", content, want)
+	}
+}
+
+// TestConfigureCodexMCPServerUpgradesApprovalMode verifies that re-running over
+// an older block (command + args only, no approval key) rewrites it in place to
+// include default_tools_approval_mode, without duplicating the table.
+func TestConfigureCodexMCPServerUpgradesApprovalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	old := "[mcp_servers.lite-sandbox]\ncommand = \"/old\"\nargs = [\"serve-mcp\"]\n"
+	if err := os.WriteFile(configPath, []byte(old), 0644); err != nil {
+		t.Fatalf("failed to write existing config: %v", err)
+	}
+
+	if err := configureCodexMCPServer(configPath, "/new"); err != nil {
+		t.Fatalf("configureCodexMCPServer failed: %v", err)
+	}
+
+	content := readFile(t, configPath)
+	if !strings.Contains(content, `default_tools_approval_mode = "approve"`) {
+		t.Errorf("approval mode not added on upgrade:\n%s", content)
+	}
+	if got := strings.Count(content, "[mcp_servers.lite-sandbox]"); got != 1 {
+		t.Errorf("expected one server table, got %d:\n%s", got, content)
+	}
+	if strings.Contains(content, "/old") {
+		t.Errorf("stale command not replaced:\n%s", content)
 	}
 }
 
