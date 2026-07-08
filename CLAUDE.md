@@ -20,7 +20,7 @@ go build -o lite-sandbox && OS_SANDBOX_TESTS=1 go test ./...  # Linux needs bubb
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code (or Codex with `--codex`) to route shell commands through it; `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary.
+This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code, Codex, and opencode (autodetecting which are installed on the host; pass names like `install codex` to select explicitly) to route shell commands through it; `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary.
 
 **Command flow:** MCP request → `cmd/serve.go` → `Sandbox.Execute()` in `tool/bash_sandboxed/`, which parses the command into a bash AST (`mvdan.cc/sh/v3`), statically validates it, then executes it via the `mvdan.cc/sh` interpreter (NOT `bash -c`) with runtime hooks that re-validate after variable expansion. When the OS sandbox is enabled, commands are additionally dispatched to a long-lived sandboxed worker process (`os_sandbox/`).
 

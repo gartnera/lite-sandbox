@@ -7,8 +7,9 @@ import (
 	"strings"
 )
 
-// installCodex selects the OpenAI Codex CLI install target instead of Claude
-// Code. Set by the --codex flag on the install command.
+// installCodex selects the OpenAI Codex CLI install target. Set by the
+// deprecated --codex flag on the install command, which is an alias for
+// `lite-sandbox install codex`.
 var installCodex bool
 
 // codexServerName is the name lite-sandbox is registered under in Codex's
@@ -27,6 +28,9 @@ const codexDirective = "Prefer the `bash` tool from the `lite-sandbox` MCP serve
 // ([[hooks.PreToolUse]]), which is awkward to update in place. Instead we own a
 // single marker-delimited block appended to the file: reconciling means removing
 // the old block and appending a fresh one, leaving all other content untouched.
+// The marker text still says `--codex` (the old spelling of `install codex`);
+// it must stay byte-for-byte stable so reinstalls recognize blocks written by
+// earlier versions.
 const (
 	codexHookBlockStart = "# >>> lite-sandbox hook (managed by `lite-sandbox install --codex`) — do not edit inside >>>"
 	codexHookBlockEnd   = "# <<< lite-sandbox hook (managed by `lite-sandbox install --codex`) <<<"
@@ -64,10 +68,8 @@ func runInstallCodex(binPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(codexDir); os.IsNotExist(err) {
-		return fmt.Errorf("%s not found — install Codex CLI first (or set CODEX_HOME)", codexDir)
-	} else if err != nil {
-		return fmt.Errorf("failed to access %s: %w", codexDir, err)
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", codexDir, err)
 	}
 
 	configTomlPath := filepath.Join(codexDir, "config.toml")
