@@ -6,19 +6,19 @@ An MCP (Model Context Protocol) server that provides a `bash` tool as a replacem
 
 ```bash
 go install github.com/gartnera/lite-sandbox@latest  # Install the lite-sandbox binary (to $GOPATH/bin)
-lite-sandbox install                                 # Configure Claude Code, then restart it
+lite-sandbox install                                 # Configure every detected agent CLI, then restart them
 ```
 
-`install` registers the MCP server, auto-allows the sandbox tools, denies the built-in `Bash` tool, and adds a usage directive so Claude routes shell commands through the sandbox. See [docs/installation.md](docs/installation.md) for manual setup and the optional tool-hook modes.
-
-To configure **OpenAI Codex CLI** instead, add `--codex`:
+`install` autodetects which supported agent CLIs — **Claude Code**, **OpenAI Codex CLI**, and **opencode** — are installed on the host (binary on `PATH` or config directory present) and configures each one: it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a usage directive so the agent routes shell commands through the sandbox. Name agents explicitly to configure just those:
 
 ```bash
-lite-sandbox install --codex                   # MCP server + AGENTS.md directive + PreToolUse hook in ~/.codex
-lite-sandbox install --codex --with-tool-hook  # also confine reads/writes (incl. apply_patch) to the sandbox paths
+lite-sandbox install                       # autodetect claude / codex / opencode
+lite-sandbox install codex                 # configure only Codex
+lite-sandbox install claude opencode       # configure exactly these
+lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths
 ```
 
-Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hook binary and the **same config file** to govern both agents — one security/sandbox config for Claude Code and Codex. The `--with-tool-hook` and `--bash-ast-hook-mode` flags compose with `--codex`. See [docs/installation.md](docs/installation.md#openai-codex-cli) for details and coverage caveats.
+Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hook binary and the **same config file** to govern both agents — one security/sandbox config for all of them. The `--with-tool-hook` and `--bash-ast-hook-mode` flags apply to `claude` and `codex` (opencode has no compatible hook protocol). See [docs/installation.md](docs/installation.md) for manual setup, per-agent details, and coverage caveats.
 
 ## Documentation
 

@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,18 +27,38 @@ var mcpToolPermissions = []string{
 }
 
 var installCmd = &cobra.Command{
-	Use:   "install",
-	Short: "Automatically configure Claude Code to use lite-sandbox",
-	Long: `Automatically configures Claude Code by:
-1. Adding the MCP server to ~/.claude.json (user-scoped)
-2. Adding auto-allow permission for mcp__lite-sandbox__bash and denying the built-in Bash tool in ~/.claude/settings.json
-3. Adding usage directive to ~/.claude/CLAUDE.md
+	Use:   "install [claude|codex|opencode ...]",
+	Short: "Configure installed agent CLIs (Claude Code, Codex, opencode) to use lite-sandbox",
+	Long: `Configures AI coding agents to route shell commands through lite-sandbox.
+
+With no arguments, autodetects which supported agent CLIs are installed on this
+host — their binary is on PATH or their config directory exists — and configures
+every detected one. Pass agent names to configure an explicit set instead:
+
+  lite-sandbox install                 # autodetect claude / codex / opencode
+  lite-sandbox install claude codex    # configure exactly these
+
+Per agent:
+
+  claude   — adds the MCP server to ~/.claude.json, auto-allows the
+             mcp__lite-sandbox__* tools and denies the built-in Bash tool in
+             ~/.claude/settings.json, and adds a usage directive to
+             ~/.claude/CLAUDE.md
+  codex    — registers the MCP server and a PreToolUse hook in
+             ~/.codex/config.toml (honoring CODEX_HOME) and adds a usage
+             directive to ~/.codex/AGENTS.md; Codex has no permission deny, so
+             the hook is what blocks the built-in shell
+  opencode — registers the MCP server, denies the built-in bash tool, and
+             auto-allows the sandbox tools in ~/.config/opencode/opencode.json
+             (honoring XDG_CONFIG_HOME), and adds a usage directive to
+             ~/.config/opencode/AGENTS.md
 
 With --with-tool-hook, registers a PreToolUse hook that governs the built-in
 tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
 message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
 sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
-matching the boundaries the bash tool enforces.
+matching the boundaries the bash tool enforces. Applies to claude and codex;
+opencode has no compatible hook protocol, so the flag is a no-op there.
 
 With --bash-ast-hook-mode, the MCP server is NOT configured. Instead, the PreToolUse
 hook statically parses each built-in Bash command's AST and checks it against the
@@ -45,17 +67,11 @@ otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
 enforcement, only this up-front static check — so it is a weaker guarantee than
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
-governs only Bash.
-
-With --codex, configures OpenAI Codex CLI instead of Claude Code. Codex's hook
-protocol matches Claude Code's, so the same hook binary and the same config file
-(readable/writable paths) govern both agents. It registers the MCP server and a
-usage directive in ~/.codex (config.toml + AGENTS.md, honoring CODEX_HOME), plus a
-PreToolUse hook — Codex has no permission deny, so the hook is what blocks the
-built-in shell. --with-tool-hook and --bash-ast-hook-mode compose with --codex and
-mean the same thing there (confine reads/writes — including Codex's apply_patch —
-or AST-validate the shell in place).`,
-	RunE: runInstall,
+governs only Bash. Applies to claude and codex; opencode is skipped in this mode
+since the check requires a hook.`,
+	ValidArgs: []string{"claude", "codex", "opencode"},
+	Args:      cobra.OnlyValidArgs,
+	RunE:      runInstall,
 }
 
 func init() {
@@ -64,8 +80,103 @@ func init() {
 	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
-		"configure OpenAI Codex CLI (~/.codex config.toml + AGENTS.md + PreToolUse hook) instead of Claude Code; composes with --with-tool-hook and --bash-ast-hook-mode")
+		"configure OpenAI Codex CLI")
+	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")
 	rootCmd.AddCommand(installCmd)
+}
+
+// installTarget is one supported agent CLI the install command can configure.
+type installTarget struct {
+	name        string // positional-arg / binary name
+	displayName string
+	detected    func() bool                // is this CLI installed on the host?
+	run         func(binPath string) error // configure it
+}
+
+// installTargets lists the supported agents in install order.
+func installTargets() []installTarget {
+	return []installTarget{
+		{"claude", "Claude Code", detectClaude, runInstallClaude},
+		{"codex", "OpenAI Codex CLI", detectCodex, runInstallCodex},
+		{"opencode", "opencode", detectOpencode, runInstallOpencode},
+	}
+}
+
+// cliOnPath reports whether an executable named bin is on PATH.
+func cliOnPath(bin string) bool {
+	_, err := exec.LookPath(bin)
+	return err == nil
+}
+
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// A CLI counts as installed when its binary is on PATH or its config directory
+// exists (covering hosts where the binary lives outside PATH, e.g. an alias).
+
+func detectClaude() bool {
+	if cliOnPath("claude") {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	return err == nil && dirExists(filepath.Join(home, ".claude"))
+}
+
+func detectCodex() bool {
+	if cliOnPath("codex") {
+		return true
+	}
+	dir, err := codexHome()
+	return err == nil && dirExists(dir)
+}
+
+func detectOpencode() bool {
+	if cliOnPath("opencode") {
+		return true
+	}
+	dir, err := opencodeConfigDir()
+	return err == nil && dirExists(dir)
+}
+
+// resolveInstallTargets picks which agents to configure: the ones named in
+// args (order preserved, duplicates dropped), or — when none are named — every
+// agent detected on the host. The returned bool reports whether autodetection
+// was used.
+func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
+	all := installTargets()
+
+	// The deprecated --codex flag is an alias for naming codex explicitly.
+	if installCodex {
+		args = append(slices.Clone(args), "codex")
+	}
+
+	if len(args) > 0 {
+		var targets []installTarget
+		for _, arg := range args {
+			i := slices.IndexFunc(all, func(t installTarget) bool { return t.name == arg })
+			if i == -1 {
+				return nil, false, fmt.Errorf("unknown agent %q (supported: claude, codex, opencode)", arg)
+			}
+			if slices.ContainsFunc(targets, func(t installTarget) bool { return t.name == arg }) {
+				continue
+			}
+			targets = append(targets, all[i])
+		}
+		return targets, false, nil
+	}
+
+	var detected []installTarget
+	for _, t := range all {
+		if t.detected() {
+			detected = append(detected, t)
+		}
+	}
+	if len(detected) == 0 {
+		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, or opencode binary on PATH and no ~/.claude, ~/.codex, or ~/.config/opencode directory) — name one explicitly, e.g. `lite-sandbox install claude`")
+	}
+	return detected, true, nil
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
@@ -79,24 +190,47 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve symlinks: %w", err)
 	}
 
-	// Codex CLI configures differently (config.toml + AGENTS.md, no permission
-	// deny), so it has its own install path. The hook-mode flags mean the same
-	// thing there — --with-tool-hook confines reads/writes, --bash-ast-hook-mode
-	// AST-validates the shell in place — so they compose with --codex.
-	if installCodex {
-		return runInstallCodex(binPath)
+	targets, autodetected, err := resolveInstallTargets(args)
+	if err != nil {
+		return err
+	}
+	if autodetected {
+		names := make([]string, len(targets))
+		for i, t := range targets {
+			names[i] = t.displayName
+		}
+		fmt.Printf("Detected agent CLIs: %s\n", strings.Join(names, ", "))
 	}
 
+	// Configure every target, continuing past per-agent failures so one broken
+	// config doesn't block the rest; errors are aggregated at the end.
+	var errs []error
+	for i, t := range targets {
+		if i > 0 || autodetected {
+			fmt.Println()
+		}
+		if len(targets) > 1 {
+			fmt.Printf("── %s ──\n", t.displayName)
+		}
+		if err := t.run(binPath); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", t.name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// runInstallClaude configures Claude Code: MCP server in ~/.claude.json,
+// permissions + optional PreToolUse hook in ~/.claude/settings.json, and a
+// usage directive in ~/.claude/CLAUDE.md.
+func runInstallClaude(binPath string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
 	claudeDir := filepath.Join(homeDir, ".claude")
-	if _, err := os.Stat(claudeDir); os.IsNotExist(err) {
-		return fmt.Errorf("~/.claude directory not found — install Claude Code first")
-	} else if err != nil {
-		return fmt.Errorf("failed to access ~/.claude directory: %w", err)
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create ~/.claude directory: %w", err)
 	}
 
 	claudeJsonPath := filepath.Join(homeDir, ".claude.json")
@@ -176,11 +310,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in ~/.claude/settings.json")
 	}
 
-	fmt.Println("\n✓ Installation complete!")
+	fmt.Println("\n✓ Claude Code installation complete!")
 	if installBashASTHookMode {
 		fmt.Println("(--bash-ast-hook-mode: MCP server not configured)")
 	}
-	fmt.Println("\nRestart Claude Code for the changes to take effect.")
+	fmt.Println("Restart Claude Code for the changes to take effect.")
 	return nil
 }
 

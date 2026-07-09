@@ -1,14 +1,26 @@
-# Installing & Configuring with Claude Code
+# Installing & Configuring
 
 ## Automatic Installation
 
-The easiest way to configure Claude Code is to use the built-in install command:
+The easiest way to configure your coding agents is the built-in install command:
 
 ```bash
 lite-sandbox install
 ```
 
-This automatically:
+With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), and [opencode](#opencode) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`). To configure an explicit set instead, name the agents:
+
+```bash
+lite-sandbox install                  # autodetect claude / codex / opencode
+lite-sandbox install codex            # configure only Codex
+lite-sandbox install claude opencode  # configure exactly these
+```
+
+The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol, so `--with-tool-hook` is a no-op for it and `--bash-ast-hook-mode` skips it.
+
+## Claude Code
+
+For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`) automatically:
 1. Adds the MCP server to `~/.claude.json` (user-scoped)
 2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Adds usage directive to `~/.claude/CLAUDE.md`
@@ -36,11 +48,13 @@ Restart Claude Code after running the install command.
 
 ## OpenAI Codex CLI
 
-To configure [OpenAI Codex CLI](https://developers.openai.com/codex) instead of Claude Code, add `--codex`:
+To configure [OpenAI Codex CLI](https://developers.openai.com/codex), run the install (autodetected, or named explicitly):
 
 ```bash
-lite-sandbox install --codex
+lite-sandbox install codex
 ```
+
+(The old `--codex` flag still works but is deprecated in favor of the positional name.)
 
 This automatically:
 1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`, with `default_tools_approval_mode = "approve"` so Codex auto-approves the sandboxed tools (the mirror of the Claude installer's `mcp__lite-sandbox__*` allow entries — lite-sandbox is itself the boundary, so a per-call Codex prompt is redundant). Only this server's tools are affected. Requires a Codex build new enough to honor the key; older versions ignore it harmlessly and will still prompt.
@@ -56,7 +70,7 @@ Codex's hook protocol is the same as Claude Code's — same `PreToolUse` event, 
 To also confine **reads and writes** to the sandbox's paths (not just the shell), add `--with-tool-hook`, exactly as with Claude Code:
 
 ```bash
-lite-sandbox install --codex --with-tool-hook
+lite-sandbox install codex --with-tool-hook
 ```
 
 This widens the hook matcher so it also governs Codex's file tools. Note the two agents reach the filesystem differently:
@@ -64,7 +78,7 @@ This widens the hook matcher so it also governs Codex's file tools. Note the two
 - **Reads** — Codex has no `Read` tool; it reads by shelling out (`cat`, `sed`, `rg`). Those reads are governed because the shell is routed through the sandbox (which enforces the readable paths at runtime). Claude Code's `Read`/`Glob`/`Grep` are governed directly.
 - **Writes** — Codex edits via its native `apply_patch` tool. The hook parses the patch envelope (`*** Add/Update/Delete File:`, `*** Move to:`) and denies the call if any target resolves outside the writable paths. Claude Code's `Write`/`Edit`/`NotebookEdit` are governed directly.
 
-`--bash-ast-hook-mode` also composes with `--codex` (AST-validate the built-in shell in place instead of redirecting it; no MCP server), just like the Claude install.
+`--bash-ast-hook-mode` also composes with `install codex` (AST-validate the built-in shell in place instead of redirecting it; no MCP server), just like the Claude install.
 
 > **Coverage caveat.** Codex hooks are enabled by default; if you have set `[features] hooks = false` in `config.toml`, re-enable it or the hook will not run. OpenAI's docs state `PreToolUse` fires for the shell, `apply_patch`, and MCP tools, but hook coverage has known gaps (e.g. some newer exec paths), so treat the hook as a strong guardrail rather than an absolute boundary. The **MCP-tool boundary is the hardest layer** — commands routed through `mcp__lite-sandbox__bash` are validated and path-checked at execution time regardless of hook coverage. For defense-in-depth on writes, you can additionally set Codex's native `sandbox_mode` / `writable_roots`.
 
@@ -94,9 +108,56 @@ Prefer the `bash` tool from the `lite-sandbox` MCP server for running shell comm
 
 Restart Codex after making these changes.
 
-## Manual Installation
+## opencode
 
-If you prefer to configure manually or need a custom setup:
+To configure [opencode](https://opencode.ai), run the install (autodetected, or named explicitly):
+
+```bash
+lite-sandbox install opencode
+```
+
+This automatically edits opencode's **global** config and rules (in `~/.config/opencode`, honoring `$XDG_CONFIG_HOME`):
+
+1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json`
+2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked and opencode must use the sandbox (the analogue of the Claude installer's `Bash` permission deny; any existing granular `bash` rule is replaced), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_bash_output`, ...) never prompt
+3. Adds a usage directive to `AGENTS.md`
+
+All other keys in `opencode.json` are preserved, and re-running is idempotent. Note lite-sandbox can only edit plain JSON — if your global config is `opencode.jsonc` or uses comments, add the entries below manually instead.
+
+Unlike Claude Code and Codex, opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` is a no-op for opencode (use opencode's own `permission.edit` / `permission.external_directory` rules to confine its file tools), and `--bash-ast-hook-mode` skips opencode entirely. Reads and writes made *through the sandboxed shell* are still confined at runtime like on every other agent.
+
+### Manual opencode setup
+
+Add this to `~/.config/opencode/opencode.json` (replace the path with your built binary):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "lite-sandbox": {
+      "type": "local",
+      "command": ["/path/to/lite-sandbox", "serve-mcp"],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "bash": "deny",
+    "lite-sandbox*": "allow"
+  }
+}
+```
+
+Then add a directive to `~/.config/opencode/AGENTS.md` (global) or a project-level `AGENTS.md`:
+
+```markdown
+ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands. The built-in bash tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+```
+
+Restart opencode after making these changes.
+
+## Manual Claude Code setup
+
+If you prefer to configure Claude Code manually or need a custom setup:
 
 ### 1. Add the MCP server
 
@@ -174,7 +235,7 @@ The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go
 
 `PreToolUse` hooks run *after* `permissions.deny`, and a matching deny rule blocks a call regardless of what the hook returns — so a `deny` rule and the hook can't both apply to `Bash`. The two install modes therefore handle `Bash` differently:
 
-- **`lite-sandbox install`** (default) — hard-denies `Bash` via a `permissions.deny` rule. Strongest, but the model only sees a terse rejection; the [`CLAUDE.md` directive](#automatic-installation) is what points it to the MCP tool.
+- **`lite-sandbox install`** (default) — hard-denies `Bash` via a `permissions.deny` rule. Strongest, but the model only sees a terse rejection; the [`CLAUDE.md` directive](#claude-code) is what points it to the MCP tool.
 - **`lite-sandbox install --with-tool-hook`** — leaves `Bash` out of `deny` (removing it if a prior install added it) and lets the hook block it with the actionable redirect message. If the hook ever fails to run, `Bash` falls back to a normal user permission prompt rather than executing silently.
 
 The hook is **fail-open**: any internal error (unparseable event, missing working directory) defers rather than blocking work. It reads config fresh on each call, so boundary changes take effect without reinstalling. To remove it, delete the `PreToolUse` entry for `lite-sandbox hook` from `settings.json`.

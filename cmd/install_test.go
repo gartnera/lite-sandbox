@@ -297,6 +297,102 @@ func TestConfigureCLAUDEMD(t *testing.T) {
 	}
 }
 
+// setupDetectionEnv points every detection input (PATH, HOME, CODEX_HOME,
+// XDG_CONFIG_HOME) at empty temp directories so no real CLI on the test host
+// leaks into the result. It returns the fake home and PATH directories.
+func setupDetectionEnv(t *testing.T) (homeDir, pathDir string) {
+	t.Helper()
+	homeDir = t.TempDir()
+	pathDir = t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", pathDir)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	return homeDir, pathDir
+}
+
+func targetNames(targets []installTarget) []string {
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.name
+	}
+	return names
+}
+
+func TestResolveInstallTargetsAutodetect(t *testing.T) {
+	homeDir, pathDir := setupDetectionEnv(t)
+
+	// Nothing installed: autodetection must fail rather than silently do nothing.
+	if _, _, err := resolveInstallTargets(nil); err == nil {
+		t.Fatal("expected error when no CLI is detected")
+	}
+
+	// Config-directory detection.
+	if err := os.MkdirAll(filepath.Join(homeDir, ".claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	targets, auto, err := resolveInstallTargets(nil)
+	if err != nil {
+		t.Fatalf("resolveInstallTargets failed: %v", err)
+	}
+	if !auto || !slices.Equal(targetNames(targets), []string{"claude"}) {
+		t.Errorf("expected autodetected [claude], got %v (auto=%v)", targetNames(targets), auto)
+	}
+
+	// PATH detection.
+	if err := os.WriteFile(filepath.Join(pathDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// CODEX_HOME detection.
+	codexDir := t.TempDir()
+	t.Setenv("CODEX_HOME", codexDir)
+
+	targets, _, err = resolveInstallTargets(nil)
+	if err != nil {
+		t.Fatalf("resolveInstallTargets failed: %v", err)
+	}
+	if !slices.Equal(targetNames(targets), []string{"claude", "codex", "opencode"}) {
+		t.Errorf("expected [claude codex opencode], got %v", targetNames(targets))
+	}
+}
+
+func TestResolveInstallTargetsExplicit(t *testing.T) {
+	setupDetectionEnv(t) // nothing detected — explicit args must still work
+
+	targets, auto, err := resolveInstallTargets([]string{"opencode", "codex", "opencode"})
+	if err != nil {
+		t.Fatalf("resolveInstallTargets failed: %v", err)
+	}
+	if auto {
+		t.Error("explicit args must not report autodetection")
+	}
+	// Order preserved, duplicates dropped.
+	if !slices.Equal(targetNames(targets), []string{"opencode", "codex"}) {
+		t.Errorf("expected [opencode codex], got %v", targetNames(targets))
+	}
+
+	if _, _, err := resolveInstallTargets([]string{"cursor"}); err == nil {
+		t.Error("expected error for unknown agent name")
+	}
+}
+
+// TestResolveInstallTargetsDeprecatedCodexFlag verifies the old --codex flag
+// still selects the codex target.
+func TestResolveInstallTargetsDeprecatedCodexFlag(t *testing.T) {
+	setupDetectionEnv(t)
+
+	installCodex = true
+	defer func() { installCodex = false }()
+
+	targets, auto, err := resolveInstallTargets(nil)
+	if err != nil {
+		t.Fatalf("resolveInstallTargets failed: %v", err)
+	}
+	if auto || !slices.Equal(targetNames(targets), []string{"codex"}) {
+		t.Errorf("expected explicit [codex], got %v (auto=%v)", targetNames(targets), auto)
+	}
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
