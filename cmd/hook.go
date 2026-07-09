@@ -31,33 +31,61 @@ const bashValidateMatcher = "Bash"
 // allow it when it passes. Set by the --validate-bash flag.
 var hookValidateBash bool
 
+// Hook event/decision formats. Claude Code and Codex share one protocol
+// (hookSpecificOutput.permissionDecision on stdout, exit 0); Grok CLI parses
+// {"decision": "approve"|"block"} on stdout and — for denials — surfaces only
+// the stderr of a hook exiting with code 2 to the model.
+const (
+	hookFormatClaude = "claude"
+	hookFormatGrok   = "grok"
+)
+
+// hookFormat selects the agent hook protocol to speak. Set by --format.
+var hookFormat string
+
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Evaluate a Claude Code PreToolUse event from stdin",
-	Long: "Reads a Claude Code PreToolUse hook event as JSON on stdin and enforces " +
+	Short: "Evaluate a PreToolUse event from stdin",
+	Long: "Reads a PreToolUse hook event as JSON on stdin and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
 		"writes outside the writable paths are denied. All other calls defer to " +
-		"Claude Code's normal permission flow. Invoked by Claude Code; register it " +
+		"the agent's normal permission flow. Invoked by the agent CLI; register it " +
 		"with `lite-sandbox install --with-tool-hook`.\n\n" +
 		"With --validate-bash, the built-in Bash tool is validated through the " +
 		"sandbox (AST whitelist + path boundaries) and allowed when it passes " +
-		"instead of being redirected to the MCP tool.",
+		"instead of being redirected to the MCP tool.\n\n" +
+		"--format selects the agent protocol: claude (Claude Code and Codex, the " +
+		"default) or grok (Grok CLI, whose tool names and decision document differ).",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runHook(cmd, hookValidateBash)
+		if hookFormat != hookFormatClaude && hookFormat != hookFormatGrok {
+			return fmt.Errorf("unknown --format %q (supported: %s, %s)", hookFormat, hookFormatClaude, hookFormatGrok)
+		}
+		code, err := runHook(cmd, hookValidateBash, hookFormat)
+		if err != nil {
+			return err
+		}
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	},
 }
 
 func init() {
 	hookCmd.Flags().BoolVar(&hookValidateBash, "validate-bash", false,
 		"validate the built-in Bash command through the sandbox and allow it when it passes, instead of denying it")
+	hookCmd.Flags().StringVar(&hookFormat, "format", hookFormatClaude,
+		"hook protocol to speak: claude (Claude Code & Codex) or grok (Grok CLI)")
 	rootCmd.AddCommand(hookCmd)
 }
 
-// runHook is the hot path Claude Code invokes per tool call. It is deliberately
+// runHook is the hot path the agent invokes per tool call. It is deliberately
 // fail-open: any internal error (unparseable event, missing cwd) defers to
-// Claude Code's normal permission flow rather than blocking the user's work.
-func runHook(cmd *cobra.Command, validateBash bool) error {
+// the agent's normal permission flow rather than blocking the user's work.
+// The returned int is the process exit code the hook must terminate with
+// (Grok CLI signals a blocked call via exit code 2).
+func runHook(cmd *cobra.Command, validateBash bool, format string) (int, error) {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -65,7 +93,7 @@ func runHook(cmd *cobra.Command, validateBash bool) error {
 	if event == nil {
 		// Could not even decode the envelope; defer (exit 0, no output).
 		fmt.Fprintf(errOut, "lite-sandbox hook: %v\n", perr)
-		return nil
+		return 0, nil
 	}
 	if perr != nil {
 		// tool_input failed to decode but we can still act on tool name.
@@ -73,24 +101,55 @@ func runHook(cmd *cobra.Command, validateBash bool) error {
 	}
 	if event.HookEventName != hook.EventPreToolUse {
 		// Not our event; defer.
-		return nil
+		return 0, nil
 	}
 
 	decision := evaluate(event, validateBash)
 	if decision == nil {
 		// Nothing to enforce: defer to normal permission flow (no JSON).
-		return nil
+		return 0, nil
 	}
-	return decision.Write(out)
+
+	if format == hookFormatGrok {
+		if err := decision.WriteGrok(out); err != nil {
+			return 0, err
+		}
+		if decision.Verdict() == hook.DecisionDeny {
+			// Grok ignores the JSON reason: only the stderr of a hook exiting
+			// with code 2 reaches the model. Emit both so the deny blocks the
+			// call AND the model reads why (and what to do instead).
+			fmt.Fprintln(errOut, decision.Reason())
+			return 2, nil
+		}
+		return 0, nil
+	}
+	return 0, decision.Write(out)
+}
+
+// isBuiltinShell reports whether the tool is an agent's built-in shell tool:
+// Claude Code's (and Codex's) Bash, or Grok CLI's bash.
+func isBuiltinShell(toolName string) bool {
+	return toolName == hook.ToolBash || toolName == hook.ToolGrokBash
+}
+
+// sandboxBashToolName is the name the agent exposes lite-sandbox's bash tool
+// under, used in deny messages so the model knows where to go instead. Claude
+// Code namespaces MCP tools as mcp__<server>__<tool>; Grok CLI as
+// mcp_<server-id>__<tool>.
+func sandboxBashToolName(builtinShell string) string {
+	if builtinShell == hook.ToolGrokBash {
+		return grokMCPBashTool
+	}
+	return "mcp__lite-sandbox__bash"
 }
 
 // evaluate returns a decision for a governed tool call, or nil to defer to
-// Claude Code's normal permission flow. For the built-in Bash tool: when
+// the agent's normal permission flow. For the built-in shell tool: when
 // validateBash is set (--bash-ast-hook-mode) the command is validated through
 // the sandbox and allowed when it passes; otherwise it is redirected to the
 // sandboxed MCP tool. Filesystem tools are checked against path boundaries.
 func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
-	if event.ToolName == hook.ToolBash {
+	if isBuiltinShell(event.ToolName) {
 		if validateBash {
 			return validateBuiltinBash(event)
 		}
@@ -99,11 +158,11 @@ func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
 	return evaluatePathPolicy(event)
 }
 
-// denyBuiltinBash blocks the built-in Bash tool and points the model at the
+// denyBuiltinBash blocks the built-in shell tool and points the model at the
 // sandboxed MCP tool, which runs the same command through lite-sandbox's
-// validation and path boundaries. The built-in Bash tool has no sandbox.
+// validation and path boundaries. The built-in shell tool has no sandbox.
 func denyBuiltinBash(event *hook.Event) *hook.Decision {
-	if event.ToolName != hook.ToolBash {
+	if !isBuiltinShell(event.ToolName) {
 		return nil
 	}
 	what := event.ToolName
@@ -111,14 +170,26 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 		what = event.ToolInput.Describe()
 	}
 	reason := fmt.Sprintf(
-		"Blocked by lite-sandbox: the built-in Bash tool is disabled.\n"+
+		"Blocked by lite-sandbox: the built-in %s tool is disabled.\n"+
 			"Attempted action: %s\n"+
-			"What to do instead: run this command with the mcp__lite-sandbox__bash tool, "+
+			"What to do instead: run this command with the %s tool, "+
 			"which executes it through lite-sandbox's validation and path boundaries. "+
-			"The built-in Bash tool bypasses the sandbox and is not permitted.",
-		what,
+			"The built-in %s tool bypasses the sandbox and is not permitted.",
+		event.ToolName, what, sandboxBashToolName(event.ToolName), event.ToolName,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
+}
+
+// shellCommand extracts the command string from a built-in shell tool input,
+// covering both Claude Code's Bash and Grok CLI's bash argument shapes.
+func shellCommand(in hook.ToolInput) (string, bool) {
+	switch b := in.(type) {
+	case *hook.BashInput:
+		return b.Command, true
+	case *hook.GrokBashInput:
+		return b.Command, true
+	}
+	return "", false
 }
 
 // validateBuiltinBash parses and validates the built-in Bash tool's command
@@ -128,8 +199,8 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 // error so the model can correct it. Any inability to inspect the command
 // (missing input, no cwd) fails open to Claude Code's normal flow.
 func validateBuiltinBash(event *hook.Event) *hook.Decision {
-	in, ok := event.ToolInput.(*hook.BashInput)
-	if !ok || in.Command == "" {
+	command, ok := shellCommand(event.ToolInput)
+	if !ok || command == "" {
 		// Could not see the command; defer rather than guess.
 		return nil
 	}
@@ -147,7 +218,7 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	defer sb.Close()
 	readPaths, writePaths := computeSandboxPaths(sb, cwd)
 
-	if err := sb.ValidateCommand(in.Command, cwd, readPaths, writePaths); err != nil {
+	if err := sb.ValidateCommand(command, cwd, readPaths, writePaths); err != nil {
 		reason := fmt.Sprintf(
 			"Blocked by lite-sandbox: this command did not pass sandbox validation.\n"+
 				"Attempted action: %s\n"+
@@ -156,7 +227,7 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 				"non-destructive operations within the project's paths. If this command "+
 				"is genuinely needed, ask the user to permit it via `lite-sandbox config` "+
 				"(e.g. extra-commands or readable/writable paths).",
-			in.Describe(), err,
+			event.ToolInput.Describe(), err,
 		)
 		return hook.NewDecision(hook.DecisionDeny, reason)
 	}
@@ -306,6 +377,14 @@ func fsTarget(e *hook.Event) (path string, write bool, governed bool) {
 		return in.FilePath, true, true
 	case *hook.NotebookEditInput:
 		return in.NotebookPath, true, true
+	case *hook.GrokReadFileInput:
+		return in.Path, false, true
+	case *hook.GrokGrepInput:
+		return in.Path, false, true
+	case *hook.GrokWriteFileInput:
+		return in.Path, true, true
+	case *hook.GrokEditFileInput:
+		return in.Path, true, true
 	}
 	return "", false, false
 }

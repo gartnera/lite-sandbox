@@ -8,15 +8,15 @@ The easiest way to configure your coding agents is the built-in install command:
 lite-sandbox install
 ```
 
-With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), and [opencode](#opencode) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`). To configure an explicit set instead, name the agents:
+With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [Grok CLI](#grok-cli), and [opencode](#opencode) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `grok`, `opencode`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.grok`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`). To configure an explicit set instead, name the agents:
 
 ```bash
-lite-sandbox install                  # autodetect claude / codex / opencode
+lite-sandbox install                  # autodetect claude / codex / grok / opencode
 lite-sandbox install codex            # configure only Codex
 lite-sandbox install claude opencode  # configure exactly these
 ```
 
-The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol, so `--with-tool-hook` is a no-op for it and `--bash-ast-hook-mode` skips it.
+The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude`, `codex`, and `grok`, which support a PreToolUse hook (Grok speaks a slightly different dialect of it — see its section); opencode has no compatible hook protocol, so `--with-tool-hook` is a no-op for it and `--bash-ast-hook-mode` skips it.
 
 ## Claude Code
 
@@ -107,6 +107,78 @@ Prefer the `bash` tool from the `lite-sandbox` MCP server for running shell comm
 ```
 
 Restart Codex after making these changes.
+
+## Grok CLI
+
+To configure [Grok CLI](https://github.com/superagent-ai/grok-cli), run the install (autodetected, or named explicitly):
+
+```bash
+lite-sandbox install grok
+```
+
+This edits Grok's **user-level** settings (`~/.grok/user-settings.json` — Grok keeps both its MCP servers and its hooks there, intentionally ignoring project-level hook definitions) and automatically:
+
+1. Registers the MCP server under `mcp.servers` (id `lite-sandbox`, stdio transport). Grok namespaces MCP tools as `mcp_<server-id>__<tool>`, so the sandboxed shell surfaces as **`mcp_lite-sandbox__bash`** (single underscore after `mcp`, unlike Claude Code's `mcp__lite-sandbox__bash`).
+2. Adds a usage directive to `~/.grok/AGENTS.md` (Grok's global instructions file) steering Grok to the sandboxed tool.
+3. Registers a `PreToolUse` hook that blocks Grok's built-in `bash` tool and redirects it to the sandboxed MCP tool. Like Codex, Grok has no permission-deny config, so the hook is what blocks the built-in shell.
+
+All other keys in `user-settings.json` (API key, sub-agents, other MCP servers, other hooks) are preserved, and re-running is idempotent.
+
+### Grok's hook dialect
+
+Grok's `PreToolUse` event carries the same JSON payload on stdin as Claude Code's (`tool_name`, `tool_input`, `cwd`, …), but the rest of the protocol differs, so the hook is registered as `lite-sandbox hook --format grok`:
+
+- **Tool names** — Grok's built-ins are `bash`, `read_file`, `write_file`, `edit_file`, `grep` (with a `path` argument) rather than `Bash`, `Read`, `Write`, `Edit`, `Grep` (with `file_path`).
+- **Decisions** — Grok parses `{"decision": "approve"|"block"}` from stdout instead of `permissionDecision`, and it ignores the JSON `reason` when blocking: only the **stderr of a hook exiting with code 2** reaches the model. On a deny, the hook therefore writes the block document to stdout, the reason to stderr, and exits 2, so the call is blocked *and* the model reads what to do instead.
+- **Matchers** — Grok matches hook matchers by exact string comparison (no regex alternation), so lite-sandbox registers one matcher group per governed tool.
+
+Because the hook shares the same lite-sandbox config as every other agent, one `readable_paths`/`writable_paths`/extra-commands config governs Claude Code, Codex, and Grok together.
+
+The flags compose exactly as with Claude Code and Codex:
+
+```bash
+lite-sandbox install grok --with-tool-hook     # also confine read_file/write_file/edit_file/grep to sandbox paths
+lite-sandbox install grok --bash-ast-hook-mode # AST-validate the built-in bash in place; no MCP server
+```
+
+### Manual Grok setup
+
+Add this to `~/.grok/user-settings.json` (replace the path with your built binary; keep your existing keys):
+
+```json
+{
+  "mcp": {
+    "servers": [
+      {
+        "id": "lite-sandbox",
+        "label": "lite-sandbox",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "/path/to/lite-sandbox",
+        "args": ["serve-mcp"]
+      }
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          {"type": "command", "command": "/path/to/lite-sandbox hook --format grok"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+Add matcher groups for `read_file`, `write_file`, `edit_file`, and `grep` with the same command to also confine the file tools, or use `--validate-bash` on the hook command to AST-validate the built-in shell in place. Then add a directive to `~/.grok/AGENTS.md` (global) or a project-level `AGENTS.md`:
+
+```markdown
+ALWAYS use the `mcp_lite-sandbox__bash` tool for running shell commands. The built-in bash tool is blocked by a PreToolUse hook and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+```
+
+Restart Grok after making these changes.
 
 ## opencode
 

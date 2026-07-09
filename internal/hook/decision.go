@@ -55,3 +55,43 @@ func (d *Decision) Write(w io.Writer) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(d)
 }
+
+// grokOutput is the hook output document Grok CLI parses from stdout:
+// {"decision": "approve"|"block", "reason": "..."}. Grok has no
+// hookSpecificOutput/permissionDecision envelope.
+type grokOutput struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// WriteGrok emits the decision in Grok CLI's hook output format. Allow maps to
+// "approve" and deny to "block". Ask has no Grok equivalent, so nothing is
+// written (Grok treats no output as deferring to its normal flow).
+//
+// Note Grok ignores the JSON reason field when blocking: only stderr from a
+// hook exiting with code 2 is surfaced to the model. Callers that deny must
+// therefore also write the reason to stderr and exit 2 (see Reason).
+func (d *Decision) WriteGrok(w io.Writer) error {
+	out := grokOutput{Reason: d.HookSpecificOutput.PermissionDecisionReason}
+	switch d.HookSpecificOutput.PermissionDecision {
+	case DecisionAllow:
+		out.Decision = "approve"
+	case DecisionDeny:
+		out.Decision = "block"
+	default:
+		return nil
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// Verdict reports the decision's verdict.
+func (d *Decision) Verdict() PermissionDecision {
+	return d.HookSpecificOutput.PermissionDecision
+}
+
+// Reason reports the human/model-readable explanation for the verdict.
+func (d *Decision) Reason() string {
+	return d.HookSpecificOutput.PermissionDecisionReason
+}

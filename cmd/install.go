@@ -27,15 +27,15 @@ var mcpToolPermissions = []string{
 }
 
 var installCmd = &cobra.Command{
-	Use:   "install [claude|codex|opencode ...]",
-	Short: "Configure installed agent CLIs (Claude Code, Codex, opencode) to use lite-sandbox",
+	Use:   "install [claude|codex|grok|opencode ...]",
+	Short: "Configure installed agent CLIs (Claude Code, Codex, Grok CLI, opencode) to use lite-sandbox",
 	Long: `Configures AI coding agents to route shell commands through lite-sandbox.
 
 With no arguments, autodetects which supported agent CLIs are installed on this
 host — their binary is on PATH or their config directory exists — and configures
 every detected one. Pass agent names to configure an explicit set instead:
 
-  lite-sandbox install                 # autodetect claude / codex / opencode
+  lite-sandbox install                 # autodetect claude / codex / grok / opencode
   lite-sandbox install claude codex    # configure exactly these
 
 Per agent:
@@ -48,6 +48,10 @@ Per agent:
              ~/.codex/config.toml (honoring CODEX_HOME) and adds a usage
              directive to ~/.codex/AGENTS.md; Codex has no permission deny, so
              the hook is what blocks the built-in shell
+  grok     — registers the MCP server and a PreToolUse hook in
+             ~/.grok/user-settings.json and adds a usage directive to
+             ~/.grok/AGENTS.md; like Codex, Grok has no permission deny, so
+             the hook is what blocks the built-in bash tool
   opencode — registers the MCP server, denies the built-in bash tool, and
              auto-allows the sandbox tools in ~/.config/opencode/opencode.json
              (honoring XDG_CONFIG_HOME), and adds a usage directive to
@@ -57,8 +61,9 @@ With --with-tool-hook, registers a PreToolUse hook that governs the built-in
 tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
 message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
 sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
-matching the boundaries the bash tool enforces. Applies to claude and codex;
-opencode has no compatible hook protocol, so the flag is a no-op there.
+matching the boundaries the bash tool enforces. Applies to claude, codex, and
+grok (for grok it governs read_file/write_file/edit_file/grep); opencode has no
+compatible hook protocol, so the flag is a no-op there.
 
 With --bash-ast-hook-mode, the MCP server is NOT configured. Instead, the PreToolUse
 hook statically parses each built-in Bash command's AST and checks it against the
@@ -67,9 +72,9 @@ otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
 enforcement, only this up-front static check — so it is a weaker guarantee than
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
-governs only Bash. Applies to claude and codex; opencode is skipped in this mode
-since the check requires a hook.`,
-	ValidArgs: []string{"claude", "codex", "opencode"},
+governs only Bash. Applies to claude, codex, and grok; opencode is skipped in
+this mode since the check requires a hook.`,
+	ValidArgs: []string{"claude", "codex", "grok", "opencode"},
 	Args:      cobra.OnlyValidArgs,
 	RunE:      runInstall,
 }
@@ -98,6 +103,7 @@ func installTargets() []installTarget {
 	return []installTarget{
 		{"claude", "Claude Code", detectClaude, runInstallClaude},
 		{"codex", "OpenAI Codex CLI", detectCodex, runInstallCodex},
+		{"grok", "Grok CLI", detectGrok, runInstallGrok},
 		{"opencode", "opencode", detectOpencode, runInstallOpencode},
 	}
 }
@@ -157,7 +163,7 @@ func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
 		for _, arg := range args {
 			i := slices.IndexFunc(all, func(t installTarget) bool { return t.name == arg })
 			if i == -1 {
-				return nil, false, fmt.Errorf("unknown agent %q (supported: claude, codex, opencode)", arg)
+				return nil, false, fmt.Errorf("unknown agent %q (supported: claude, codex, grok, opencode)", arg)
 			}
 			if slices.ContainsFunc(targets, func(t installTarget) bool { return t.name == arg }) {
 				continue
@@ -174,7 +180,7 @@ func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
 		}
 	}
 	if len(detected) == 0 {
-		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, or opencode binary on PATH and no ~/.claude, ~/.codex, or ~/.config/opencode directory) — name one explicitly, e.g. `lite-sandbox install claude`")
+		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, grok, or opencode binary on PATH and no ~/.claude, ~/.codex, ~/.grok, or ~/.config/opencode directory) — name one explicitly, e.g. `lite-sandbox install claude`")
 	}
 	return detected, true, nil
 }
@@ -298,7 +304,7 @@ func runInstallClaude(binPath string) error {
 			matcher = bashValidateMatcher
 		}
 	}
-	if err := reconcilePreToolUseHook(claudeDir, binPath, hookCommand, matcher); err != nil {
+	if err := reconcilePreToolUseHook(filepath.Join(claudeDir, "settings.json"), binPath, hookCommand, matcher); err != nil {
 		return fmt.Errorf("failed to configure tool hook: %w", err)
 	}
 	switch {
@@ -453,28 +459,33 @@ func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 	return writeSettingsFile(settingsPath, cfg)
 }
 
-// reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook
-// match the requested install mode. It first removes any stale lite-sandbox hook
-// entry (so switching between modes — or back to no hook — doesn't leave a
-// conflicting one behind), then registers `command` under `matcher` when command
-// is non-empty. binPath identifies our hook entries to remove.
-func reconcilePreToolUseHook(claudeDir, binPath, command, matcher string) error {
-	if err := removeLiteSandboxHooks(claudeDir, binPath); err != nil {
+// reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook in
+// the settings file at settingsPath match the requested install mode. It first
+// removes any stale lite-sandbox hook entry (so switching between modes — or
+// back to no hook — doesn't leave a conflicting one behind), then registers
+// `command` under each of `matchers` when command is non-empty. Claude Code
+// uses a single regex matcher; Grok CLI matches exactly, so it registers one
+// group per governed tool. binPath identifies our hook entries to remove.
+func reconcilePreToolUseHook(settingsPath, binPath, command string, matchers ...string) error {
+	if err := removeLiteSandboxHooks(settingsPath, binPath); err != nil {
 		return err
 	}
 	if command == "" {
 		return nil
 	}
-	return configurePreToolUseHook(claudeDir, command, matcher)
+	for _, matcher := range matchers {
+		if err := configurePreToolUseHook(settingsPath, command, matcher); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// removeLiteSandboxHooks strips any PreToolUse hook entry that invokes the
-// lite-sandbox binary (command `<binPath> hook ...`), dropping matcher groups
-// that become empty. Other hooks and settings are preserved. It is a no-op when
-// no hooks are configured.
-func removeLiteSandboxHooks(claudeDir, binPath string) error {
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-
+// removeLiteSandboxHooks strips any PreToolUse hook entry in the settings file
+// at settingsPath that invokes the lite-sandbox binary (command `<binPath> hook
+// ...`), dropping matcher groups that become empty. Other hooks and settings
+// are preserved. It is a no-op when no hooks are configured.
+func removeLiteSandboxHooks(settingsPath, binPath string) error {
 	cfg, err := readSettingsFile(settingsPath)
 	if err != nil {
 		return err
@@ -527,14 +538,14 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 }
 
 // configurePreToolUseHook registers (or updates) a PreToolUse hook entry in
-// settings.json that invokes `command` for the given tool matcher. Existing
-// settings and other hooks are preserved, and the operation is idempotent:
-// re-running with the same command/matcher does not duplicate the entry. The
-// hooks subtree is manipulated as untyped JSON so unrelated events
-// (PostToolUse, etc.) and fields (timeouts) survive the round-trip.
-func configurePreToolUseHook(claudeDir, command, matcher string) error {
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-
+// the settings file at settingsPath that invokes `command` for the given tool
+// matcher. Existing settings and other hooks are preserved, and the operation
+// is idempotent: re-running with the same command/matcher does not duplicate
+// the entry. The hooks subtree is manipulated as untyped JSON so unrelated
+// events (PostToolUse, etc.) and fields (timeouts) survive the round-trip.
+// Claude Code's settings.json and Grok CLI's user-settings.json share this
+// hooks shape, so both installers use it.
+func configurePreToolUseHook(settingsPath, command, matcher string) error {
 	cfg, err := readSettingsFile(settingsPath)
 	if err != nil {
 		return err

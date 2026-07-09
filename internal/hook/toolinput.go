@@ -22,6 +22,17 @@ const (
 	ToolApplyPatch = "apply_patch"
 )
 
+// Tool names Grok CLI uses for its built-in tools. Grok's names are
+// lowercase/snake_case, so they never collide with Claude Code's (or Codex's)
+// capitalized names above and can share the same factory map.
+const (
+	ToolGrokBash      = "bash"
+	ToolGrokReadFile  = "read_file"
+	ToolGrokWriteFile = "write_file"
+	ToolGrokEditFile  = "edit_file"
+	ToolGrokGrep      = "grep"
+)
+
 // toolInputFactories maps a tool name to a constructor for its typed input.
 // Adding support for a new tool is a one-line registration here plus the struct.
 var toolInputFactories = map[string]func() ToolInput{
@@ -35,6 +46,12 @@ var toolInputFactories = map[string]func() ToolInput{
 	ToolWebSearch:  func() ToolInput { return &WebSearchInput{} },
 	ToolNotebook:   func() ToolInput { return &NotebookEditInput{} },
 	ToolApplyPatch: func() ToolInput { return &ApplyPatchInput{} },
+
+	ToolGrokBash:      func() ToolInput { return &GrokBashInput{} },
+	ToolGrokReadFile:  func() ToolInput { return &GrokReadFileInput{} },
+	ToolGrokWriteFile: func() ToolInput { return &GrokWriteFileInput{} },
+	ToolGrokEditFile:  func() ToolInput { return &GrokEditFileInput{} },
+	ToolGrokGrep:      func() ToolInput { return &GrokGrepInput{} },
 }
 
 // BashInput is the argument shape for the Bash tool.
@@ -222,6 +239,68 @@ func parseApplyPatchPaths(patch string) []string {
 		}
 	}
 	return paths
+}
+
+// GrokBashInput is the argument shape for Grok CLI's bash tool.
+type GrokBashInput struct {
+	Command    string `json:"command"`
+	Timeout    int    `json:"timeout,omitempty"`
+	Background bool   `json:"background,omitempty"`
+}
+
+func (b *GrokBashInput) Tool() string { return ToolGrokBash }
+func (b *GrokBashInput) Describe() string {
+	return fmt.Sprintf("run shell command: %s", truncate(b.Command, 200))
+}
+
+// GrokReadFileInput is the argument shape for Grok CLI's read_file tool.
+type GrokReadFileInput struct {
+	Path      string `json:"path"`
+	StartLine int    `json:"start_line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+}
+
+func (r *GrokReadFileInput) Tool() string { return ToolGrokReadFile }
+func (r *GrokReadFileInput) Describe() string {
+	return fmt.Sprintf("read file: %s", r.Path)
+}
+
+// GrokWriteFileInput is the argument shape for Grok CLI's write_file tool.
+type GrokWriteFileInput struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func (w *GrokWriteFileInput) Tool() string { return ToolGrokWriteFile }
+func (w *GrokWriteFileInput) Describe() string {
+	return fmt.Sprintf("write file: %s (%d bytes)", w.Path, len(w.Content))
+}
+
+// GrokEditFileInput is the argument shape for Grok CLI's edit_file tool.
+type GrokEditFileInput struct {
+	Path      string `json:"path"`
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
+func (e *GrokEditFileInput) Tool() string { return ToolGrokEditFile }
+func (e *GrokEditFileInput) Describe() string {
+	return fmt.Sprintf("edit file: %s", e.Path)
+}
+
+// GrokGrepInput is the argument shape for Grok CLI's grep tool.
+type GrokGrepInput struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path,omitempty"`
+	Include string `json:"include,omitempty"`
+}
+
+func (g *GrokGrepInput) Tool() string { return ToolGrokGrep }
+func (g *GrokGrepInput) Describe() string {
+	if g.Path != "" {
+		return fmt.Sprintf("grep: %s in %s", g.Pattern, g.Path)
+	}
+	return fmt.Sprintf("grep: %s", g.Pattern)
 }
 
 func truncate(s string, n int) string {

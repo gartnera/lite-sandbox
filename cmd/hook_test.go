@@ -239,8 +239,12 @@ func TestRunHookDenyOutput(t *testing.T) {
 		c.SetIn(bytes.NewReader(payload))
 		c.SetOut(&out)
 		c.SetErr(&bytes.Buffer{})
-		if err := runHook(c, false); err != nil {
+		code, err := runHook(c, false, hookFormatClaude)
+		if err != nil {
 			t.Fatalf("runHook returned error: %v", err)
+		}
+		if code != 0 {
+			t.Fatalf("claude format always exits 0, got %d", code)
 		}
 		return out.String()
 	}
@@ -281,8 +285,12 @@ func TestRunHookFailOpen(t *testing.T) {
 	c.SetIn(strings.NewReader("not json"))
 	c.SetOut(&out)
 	c.SetErr(&bytes.Buffer{})
-	if err := runHook(c, false); err != nil {
+	code, err := runHook(c, false, hookFormatClaude)
+	if err != nil {
 		t.Fatalf("runHook should fail-open, got error: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("fail-open should exit 0, got %d", code)
 	}
 	if out.String() != "" {
 		t.Errorf("expected no decision on parse failure, got: %s", out.String())
@@ -395,6 +403,251 @@ func TestValidateBuiltinBash(t *testing.T) {
 	}
 }
 
+// TestDenyBuiltinBashGrok verifies Grok's built-in bash tool is denied with a
+// redirect to Grok's MCP tool name (mcp_lite-sandbox__bash, single underscore
+// after "mcp").
+func TestDenyBuiltinBashGrok(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+
+	event := &hook.Event{
+		ToolName:  hook.ToolGrokBash,
+		CWD:       cwd,
+		ToolInput: &hook.GrokBashInput{Command: "ls -la"},
+	}
+	got := evaluate(event, false)
+	if got == nil {
+		t.Fatal("expected grok bash to be denied, got nil (defer)")
+	}
+	if got.Verdict() != hook.DecisionDeny {
+		t.Fatalf("expected deny, got %q", got.Verdict())
+	}
+	if !strings.Contains(got.Reason(), "mcp_lite-sandbox__bash") {
+		t.Errorf("deny reason should redirect to Grok's MCP tool name, got: %s", got.Reason())
+	}
+	if strings.Contains(got.Reason(), "mcp__lite-sandbox__bash") {
+		t.Errorf("deny reason should not use Claude's MCP tool name for grok, got: %s", got.Reason())
+	}
+}
+
+// TestValidateBuiltinBashGrok verifies --validate-bash works on Grok's bash
+// input shape.
+func TestValidateBuiltinBashGrok(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+
+	allow := evaluate(&hook.Event{
+		ToolName:  hook.ToolGrokBash,
+		CWD:       cwd,
+		ToolInput: &hook.GrokBashInput{Command: "ls -la"},
+	}, true)
+	if allow == nil || allow.Verdict() != hook.DecisionAllow {
+		t.Fatalf("expected allow for whitelisted command, got %+v", allow)
+	}
+
+	deny := evaluate(&hook.Event{
+		ToolName:  hook.ToolGrokBash,
+		CWD:       cwd,
+		ToolInput: &hook.GrokBashInput{Command: "curl https://example.com"},
+	}, true)
+	if deny == nil || deny.Verdict() != hook.DecisionDeny {
+		t.Fatalf("expected deny for non-whitelisted command, got %+v", deny)
+	}
+}
+
+// TestEvaluatePathPolicyGrok verifies Grok's file tools are governed by the
+// same path boundaries as Claude's.
+func TestEvaluatePathPolicyGrok(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	outside := t.TempDir()
+
+	tests := []struct {
+		name      string
+		event     *hook.Event
+		wantDeny  bool
+		wantInMsg string
+	}{
+		{
+			name: "read_file inside cwd defers",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokReadFile,
+				CWD:       cwd,
+				ToolInput: &hook.GrokReadFileInput{Path: filepath.Join(cwd, "a.txt")},
+			},
+		},
+		{
+			name: "read_file outside is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokReadFile,
+				CWD:       cwd,
+				ToolInput: &hook.GrokReadFileInput{Path: filepath.Join(outside, "secret.txt")},
+			},
+			wantDeny:  true,
+			wantInMsg: "readable",
+		},
+		{
+			name: "write_file outside is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokWriteFile,
+				CWD:       cwd,
+				ToolInput: &hook.GrokWriteFileInput{Path: filepath.Join(outside, "out.txt")},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
+			name: "edit_file outside is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokEditFile,
+				CWD:       cwd,
+				ToolInput: &hook.GrokEditFileInput{Path: filepath.Join(outside, "f.go")},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
+			name: "grep with outside path is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokGrep,
+				CWD:       cwd,
+				ToolInput: &hook.GrokGrepInput{Pattern: "secret", Path: outside},
+			},
+			wantDeny:  true,
+			wantInMsg: "readable",
+		},
+		{
+			name: "grep without path defers",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokGrep,
+				CWD:       cwd,
+				ToolInput: &hook.GrokGrepInput{Pattern: "secret"},
+			},
+		},
+		{
+			name: "write_file into .git is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolGrokWriteFile,
+				CWD:       cwd,
+				ToolInput: &hook.GrokWriteFileInput{Path: filepath.Join(cwd, ".git", "hooks", "pre-commit")},
+			},
+			wantDeny:  true,
+			wantInMsg: ".git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluatePathPolicy(tt.event)
+			if tt.wantDeny {
+				if got == nil {
+					t.Fatalf("expected deny decision, got nil (defer)")
+				}
+				if got.Verdict() != hook.DecisionDeny {
+					t.Fatalf("expected deny, got %q", got.Verdict())
+				}
+				if !strings.Contains(got.Reason(), tt.wantInMsg) {
+					t.Errorf("reason %q does not contain %q", got.Reason(), tt.wantInMsg)
+				}
+			} else if got != nil {
+				t.Fatalf("expected defer (nil), got deny: %s", got.Reason())
+			}
+		})
+	}
+}
+
+// TestRunHookGrokFormat verifies the end-to-end contract for --format grok: a
+// denied call emits {"decision":"block"} on stdout, the reason on stderr, and
+// exit code 2 (the only channel Grok surfaces to the model); an in-bounds call
+// defers with no output and exit 0; an allowed call (validate-bash) emits
+// {"decision":"approve"} with exit 0.
+func TestRunHookGrokFormat(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	outside := t.TempDir()
+
+	run := func(event map[string]any, validateBash bool) (stdout, stderr string, code int) {
+		t.Helper()
+		payload, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		var out, errOut bytes.Buffer
+		c := &cobra.Command{}
+		c.SetIn(bytes.NewReader(payload))
+		c.SetOut(&out)
+		c.SetErr(&errOut)
+		code, err = runHook(c, validateBash, hookFormatGrok)
+		if err != nil {
+			t.Fatalf("runHook returned error: %v", err)
+		}
+		return out.String(), errOut.String(), code
+	}
+
+	// Built-in bash is denied: block JSON + reason on stderr + exit 2.
+	stdout, stderr, code := run(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "bash",
+		"cwd":             cwd,
+		"tool_input":      map[string]any{"command": "ls -la"},
+	}, false)
+	if code != 2 {
+		t.Errorf("expected exit code 2 for grok deny, got %d", code)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	if doc["decision"] != "block" {
+		t.Errorf(`expected {"decision":"block"}, got %s`, stdout)
+	}
+	if _, ok := doc["hookSpecificOutput"]; ok {
+		t.Errorf("grok output must not use Claude's envelope, got %s", stdout)
+	}
+	if !strings.Contains(stderr, "mcp_lite-sandbox__bash") {
+		t.Errorf("stderr should carry the redirect reason for the model, got: %s", stderr)
+	}
+
+	// Out-of-bounds read_file is denied the same way.
+	_, stderr, code = run(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "read_file",
+		"cwd":             cwd,
+		"tool_input":      map[string]any{"path": filepath.Join(outside, "secret.txt")},
+	}, false)
+	if code != 2 || !strings.Contains(stderr, "readable") {
+		t.Errorf("expected exit 2 with boundary reason on stderr, got code=%d stderr=%q", code, stderr)
+	}
+
+	// In-bounds read_file defers: no output, exit 0.
+	stdout, stderr, code = run(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "read_file",
+		"cwd":             cwd,
+		"tool_input":      map[string]any{"path": filepath.Join(cwd, "in.txt")},
+	}, false)
+	if code != 0 || stdout != "" {
+		t.Errorf("expected defer (no output, exit 0), got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	// validate-bash mode approves a whitelisted command.
+	stdout, _, code = run(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "bash",
+		"cwd":             cwd,
+		"tool_input":      map[string]any{"command": "ls -la"},
+	}, true)
+	if code != 0 {
+		t.Errorf("expected exit 0 for approve, got %d", code)
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("approve stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	if doc["decision"] != "approve" {
+		t.Errorf(`expected {"decision":"approve"}, got %s`, stdout)
+	}
+}
+
 func TestConfigurePermissionsToolHook(t *testing.T) {
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
@@ -439,7 +692,7 @@ func TestConfigurePreToolUseHook(t *testing.T) {
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 	command := "/usr/local/bin/lite-sandbox hook"
 
-	if err := configurePreToolUseHook(tmpDir, command, hookToolMatcher); err != nil {
+	if err := configurePreToolUseHook(settingsPath, command, hookToolMatcher); err != nil {
 		t.Fatalf("configurePreToolUseHook failed: %v", err)
 	}
 
@@ -470,7 +723,7 @@ func TestConfigurePreToolUseHook(t *testing.T) {
 	}
 
 	// Idempotent: re-running with same command/matcher does not duplicate.
-	if err := configurePreToolUseHook(tmpDir, command, hookToolMatcher); err != nil {
+	if err := configurePreToolUseHook(settingsPath, command, hookToolMatcher); err != nil {
 		t.Fatalf("second configurePreToolUseHook failed: %v", err)
 	}
 	pre = readPre()
@@ -527,7 +780,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Install --with-tool-hook.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook", hookToolMatcher); err != nil {
+	if err := reconcilePreToolUseHook(settingsPath, binPath, binPath+" hook", hookToolMatcher); err != nil {
 		t.Fatalf("reconcile (tool hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook" {
@@ -535,7 +788,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Switch to --bash-ast-hook-mode: the old command must be replaced, not added to.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook --validate-bash", bashValidateMatcher); err != nil {
+	if err := reconcilePreToolUseHook(settingsPath, binPath, binPath+" hook --validate-bash", bashValidateMatcher); err != nil {
 		t.Fatalf("reconcile (bash hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook --validate-bash" {
@@ -543,7 +796,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Switch to default (no hook): the lite-sandbox entry must be removed.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, "", hookToolMatcher); err != nil {
+	if err := reconcilePreToolUseHook(settingsPath, binPath, "", hookToolMatcher); err != nil {
 		t.Fatalf("reconcile (no hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 0 {
@@ -568,7 +821,7 @@ func TestConfigurePreToolUseHookPreservesExisting(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	if err := configurePreToolUseHook(tmpDir, "/bin/ls hook", hookToolMatcher); err != nil {
+	if err := configurePreToolUseHook(settingsPath, "/bin/ls hook", hookToolMatcher); err != nil {
 		t.Fatalf("configurePreToolUseHook failed: %v", err)
 	}
 
