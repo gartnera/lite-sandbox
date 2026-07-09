@@ -37,6 +37,11 @@ var dockerShowCmd = &cobra.Command{
 		} else {
 			fmt.Println("  Privileged: blocked (--privileged, --cap-add, host namespaces rejected)")
 		}
+		if cfg.Docker.AllowsHostNamespaces() {
+			fmt.Println("  Host namespaces: ALLOWED (--pid=host, --net=host, --ipc=host permitted)")
+		} else {
+			fmt.Println("  Host namespaces: blocked (--pid=host, --net=host, --ipc=host rejected)")
+		}
 		if cfg.Docker.AllowsUnsandboxed() {
 			fmt.Println("  OS sandbox: NOT required (allow_unsandboxed; proxy is bypassable)")
 		} else {
@@ -156,6 +161,41 @@ escape to the host. Use only when you understand the risk.`,
 	},
 }
 
+var dockerAllowHostNamespacesCmd = &cobra.Command{
+	Use:   "allow-host-namespaces",
+	Short: "Allow the host PID, network, and IPC namespaces (--pid=host, --net=host, --ipc=host)",
+	Long: `Permit --pid=host, --net=host, and --ipc=host (and docker build
+--network=host) through the docker proxy without allowing full privileged mode.
+
+This is narrower than 'allow-privileged': --privileged, --cap-add, --device, the
+host user namespace, and container-joined namespaces remain blocked. It is still
+a meaningful weakening of isolation — a container sharing the host PID, network,
+or IPC namespace can observe and interfere with host processes, networking, and
+shared memory. Use only when you understand the risk.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		if cfg.Docker == nil {
+			cfg.Docker = &config.DockerConfig{}
+		}
+		t := true
+		cfg.Docker.Enabled = &t
+		cfg.Docker.AllowHostNamespaces = &t
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("Docker host PID/network/IPC namespaces ALLOWED")
+		fmt.Println("  --pid=host, --net=host, and --ipc=host are now permitted")
+		fmt.Println("  Warning: this weakens the sandbox boundary")
+		return nil
+	},
+}
+
 var dockerDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Disable docker entirely",
@@ -183,6 +223,7 @@ func init() {
 	dockerCmd.AddCommand(dockerShowCmd)
 	dockerCmd.AddCommand(dockerEnableCmd)
 	dockerCmd.AddCommand(dockerAllowPrivilegedCmd)
+	dockerCmd.AddCommand(dockerAllowHostNamespacesCmd)
 	dockerCmd.AddCommand(dockerAllowUnsandboxedCmd)
 	dockerCmd.AddCommand(dockerDisableCmd)
 	configCmd.AddCommand(dockerCmd)

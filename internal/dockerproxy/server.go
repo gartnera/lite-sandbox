@@ -24,12 +24,13 @@ import (
 // Server is a filtering reverse proxy that forwards a restricted subset of the
 // Docker API from a local unix socket to the real Docker daemon socket.
 type Server struct {
-	socketPath      string
-	upstream        string
-	workDir         string
-	readPaths       []string
-	writePaths      []string
-	allowPrivileged bool
+	socketPath          string
+	upstream            string
+	workDir             string
+	readPaths           []string
+	writePaths          []string
+	allowPrivileged     bool
+	allowHostNamespaces bool
 
 	listener net.Listener
 	server   *http.Server
@@ -39,9 +40,11 @@ type Server struct {
 // NewServer creates a Docker proxy that listens on a unix socket inside
 // socketDir and forwards permitted requests to the upstream daemon socket.
 // readPaths/writePaths define the sandbox boundary used to validate bind-mount
-// sources; workDir is used to resolve relative sources. The listening socket is
-// created immediately but requests are not served until Start() is called.
-func NewServer(socketDir, upstream string, readPaths, writePaths []string, workDir string, allowPrivileged bool) (*Server, error) {
+// sources; workDir is used to resolve relative sources. allowHostNamespaces
+// permits the host PID and network namespaces without allowing full privileged
+// mode. The listening socket is created immediately but requests are not served
+// until Start() is called.
+func NewServer(socketDir, upstream string, readPaths, writePaths []string, workDir string, allowPrivileged, allowHostNamespaces bool) (*Server, error) {
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 	}
@@ -59,13 +62,14 @@ func NewServer(socketDir, upstream string, readPaths, writePaths []string, workD
 	}
 
 	s := &Server{
-		socketPath:      socketPath,
-		upstream:        upstream,
-		workDir:         workDir,
-		readPaths:       readPaths,
-		writePaths:      writePaths,
-		allowPrivileged: allowPrivileged,
-		listener:        listener,
+		socketPath:          socketPath,
+		upstream:            upstream,
+		workDir:             workDir,
+		readPaths:           readPaths,
+		writePaths:          writePaths,
+		allowPrivileged:     allowPrivileged,
+		allowHostNamespaces: allowHostNamespaces,
+		listener:            listener,
 	}
 
 	// The reverse proxy dials the real daemon socket regardless of the request
@@ -141,7 +145,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// Build requests carry their namespace mode as a query parameter rather than
 	// a JSON body, so check it here (mirrors the container-create namespace rule).
 	if isBuild(r.Method, r.URL.Path) && !s.allowPrivileged {
-		if mode := r.URL.Query().Get("networkmode"); isDisallowedNamespace(mode) {
+		if mode := r.URL.Query().Get("networkmode"); namespaceForbidden(mode, s.allowHostNamespaces) {
 			slog.Warn("docker proxy rejected build", "networkmode", mode)
 			writeDockerError(w, http.StatusForbidden,
 				fmt.Sprintf("build with network namespace mode %q is not allowed in the sandbox", mode))
@@ -158,7 +162,7 @@ func (s *Server) bodyInspector(method, path string) func([]byte) error {
 	switch {
 	case isContainerCreate(method, path):
 		return func(b []byte) error {
-			return validateCreateBody(b, s.workDir, s.readPaths, s.writePaths, s.allowPrivileged)
+			return validateCreateBody(b, s.workDir, s.readPaths, s.writePaths, s.allowPrivileged, s.allowHostNamespaces)
 		}
 	case isExecCreate(method, path):
 		return func(b []byte) error { return validateExecBody(b, s.allowPrivileged) }
