@@ -20,6 +20,30 @@ When the [OS sandbox](security.md#os-level-sandboxing-optional) is enabled,
 bare entries run inside it like every other command, so filesystem confinement
 applies even though validation is skipped.
 
+### Unsandboxed commands
+
+`unsandboxed_commands` is parsed exactly like `extra_commands` (same bare and
+subcommand-restricted entry formats, same validation bypass) with one
+difference: matching invocations always run **directly on the host**, bypassing
+the [OS sandbox](security.md#os-level-sandboxing-optional) worker
+(bwrap/sandbox-exec) even when it is enabled. This is a trust-based escape hatch
+for commands that cannot run confined.
+
+```yaml
+unsandboxed_commands:
+  - docker            # talk to the real docker daemon, not the filtering proxy
+  - ./scripts/deploy.sh
+```
+
+Because these commands leave the OS sandbox, the docker filtering proxy is also
+bypassed: the proxy `DOCKER_HOST` override is not applied, so `docker` reaches
+the real daemon (or whatever `DOCKER_HOST` the host environment already sets).
+Subcommand-restricted entries only unsandbox matching invocations — e.g.
+`git push` leaves other `git` subcommands confined.
+
+Manage the list with
+`lite-sandbox config unsandboxed-commands add|list|remove`.
+
 The config file is automatically reloaded when changed — no server restart needed.
 
 ## CLI config management

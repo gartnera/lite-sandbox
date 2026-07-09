@@ -539,6 +539,195 @@ func TestValidate_ExtraCommands(t *testing.T) {
 	}
 }
 
+func TestValidate_UnsandboxedCommands(t *testing.T) {
+	s := NewSandbox()
+
+	// curl should be blocked by default.
+	f, err := ParseBash("curl https://example.com")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if err := s.validate(f); err == nil {
+		t.Fatal("expected curl to be blocked by default")
+	}
+
+	// unsandboxed_commands entries are treated like extra_commands for
+	// validation: adding curl allows it.
+	s.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"curl"}}, "")
+	if err := s.validate(f); err != nil {
+		t.Fatalf("expected curl to be allowed via unsandboxed commands, got: %v", err)
+	}
+
+	// Clearing the list blocks it again.
+	s.UpdateConfig(&config.Config{}, "")
+	if err := s.validate(f); err == nil {
+		t.Fatal("expected curl to be blocked after clearing unsandboxed commands")
+	}
+}
+
+func TestIsUnsandboxedInvocation(t *testing.T) {
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands:       []string{"wget"},
+		UnsandboxedCommands: []string{"curl", "git push"},
+	}, "")
+
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{"curl https://example.com", true},  // bare unsandboxed entry
+		{"wget https://example.com", false}, // extra_commands, not unsandboxed
+		{"git push origin main", false},     // subcommand entry: not a bare raw invocation
+		{"ls", false},                       // built-in allowed command
+		{"", false},                         // empty command
+	}
+	for _, tt := range tests {
+		if got := s.isUnsandboxedInvocation(tt.command); got != tt.want {
+			t.Errorf("isUnsandboxedInvocation(%q) = %v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestExecIsUnsandboxed(t *testing.T) {
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands:       []string{"wget"},
+		UnsandboxedCommands: []string{"curl", "git push"},
+	}, "")
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"bare entry", []string{"curl", "https://example.com"}, true},
+		{"extra not unsandboxed", []string{"wget", "https://example.com"}, false},
+		{"subcommand match", []string{"git", "push", "origin", "main"}, true},
+		{"subcommand match with flags", []string{"git", "--no-pager", "push"}, true},
+		{"subcommand no args prints help", []string{"git"}, true},
+		{"subcommand mismatch stays confined", []string{"git", "status"}, false},
+		{"unrelated command", []string{"ls"}, false},
+		{"empty", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.execIsUnsandboxed(context.Background(), tt.args); got != tt.want {
+				t.Errorf("execIsUnsandboxed(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// clearDockerHost removes any inherited DOCKER_HOST so the test controls the
+// value entirely, restoring it afterwards.
+func clearDockerHost(t *testing.T) {
+	t.Helper()
+	orig, had := os.LookupEnv("DOCKER_HOST")
+	os.Unsetenv("DOCKER_HOST")
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("DOCKER_HOST", orig)
+		}
+	})
+}
+
+func TestUnsandboxedCommand_SkipsDockerProxy_RawPath(t *testing.T) {
+	clearDockerHost(t)
+	tmpDir := t.TempDir()
+	const proxy = "unix:///tmp/ls-test-proxy.sock"
+
+	// Control: a bare extra_commands entry (no OS sandbox) gets the proxy
+	// DOCKER_HOST injected.
+	extra := NewSandbox()
+	extra.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, tmpDir)
+	extra.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, err := extra.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("extra bash failed: %v", err)
+	}
+	if !strings.Contains(out, "["+proxy+"]") {
+		t.Errorf("expected extra command to see proxy DOCKER_HOST, got %q", out)
+	}
+
+	// Unsandboxed: the same bare entry runs on the host without the proxy.
+	uns := NewSandbox()
+	uns.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	uns.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, err = uns.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("unsandboxed bash failed: %v", err)
+	}
+	if strings.Contains(out, proxy) {
+		t.Errorf("expected unsandboxed command not to see proxy DOCKER_HOST, got %q", out)
+	}
+	if !strings.Contains(out, "[]") {
+		t.Errorf("expected empty DOCKER_HOST for unsandboxed command, got %q", out)
+	}
+}
+
+func TestUnsandboxedCommand_SkipsDockerProxy_InterpPath(t *testing.T) {
+	clearDockerHost(t)
+	tmpDir := t.TempDir()
+	const proxy = "unix:///tmp/ls-test-proxy.sock"
+
+	// Control: printenv allowed via extra_commands sees the proxy DOCKER_HOST.
+	// A leading "true &&" forces the compound through the interpreter rather than
+	// the bare raw fast path.
+	extra := NewSandbox()
+	extra.UpdateConfig(&config.Config{ExtraCommands: []string{"printenv"}}, tmpDir)
+	extra.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, _ := extra.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if !strings.Contains(out, proxy) {
+		t.Errorf("expected extra printenv to see proxy DOCKER_HOST, got %q", out)
+	}
+
+	// Unsandboxed printenv runs on the host without the proxy DOCKER_HOST
+	// injected, so the variable is unset (printenv prints nothing).
+	uns := NewSandbox()
+	uns.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
+	uns.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, _ = uns.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if strings.Contains(out, proxy) {
+		t.Errorf("expected unsandboxed printenv not to see proxy DOCKER_HOST, got %q", out)
+	}
+}
+
+func TestUnsandboxedCommand_PreservesHostDockerHost(t *testing.T) {
+	const (
+		proxy      = "unix:///tmp/ls-test-proxy.sock"
+		hostDocker = "tcp://host.example:2375"
+	)
+	t.Setenv("DOCKER_HOST", hostDocker)
+	tmpDir := t.TempDir()
+
+	// Raw path: a bare unsandboxed entry should see the host's own DOCKER_HOST,
+	// not the proxy socket.
+	raw := NewSandbox()
+	raw.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	raw.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, err := raw.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("raw unsandboxed bash failed: %v", err)
+	}
+	if !strings.Contains(out, "["+hostDocker+"]") {
+		t.Errorf("raw path: expected host DOCKER_HOST %q, got %q", hostDocker, out)
+	}
+
+	// Interp path: printenv run on the host should likewise report the host
+	// DOCKER_HOST rather than the proxy.
+	interpS := NewSandbox()
+	interpS.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
+	interpS.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
+	out, _ = interpS.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if !strings.Contains(out, hostDocker) {
+		t.Errorf("interp path: expected host DOCKER_HOST %q, got %q", hostDocker, out)
+	}
+	if strings.Contains(out, proxy) {
+		t.Errorf("interp path: expected proxy DOCKER_HOST to be replaced, got %q", out)
+	}
+}
+
 func TestValidate_DockerRequiresProxy(t *testing.T) {
 	s := NewSandbox()
 	f, err := ParseBash("docker ps")

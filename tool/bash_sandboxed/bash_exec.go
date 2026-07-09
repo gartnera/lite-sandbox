@@ -543,28 +543,19 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					// `./build.sh` from inside `web/foo`. interp tracks cwd in
 					// HandlerContext, so the resolution sees the post-`cd` dir.
 					if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
-						if useOSSandbox {
-							return s.execInWorker(ctx, args)
-						}
-						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+						return s.dispatchExec(ctx, args, useOSSandbox)
 					}
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
 						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
 					}
 					// Check if file is a compiled binary (ELF/Mach-O)
 					if isBinaryExecutable(path) {
-						if useOSSandbox {
-							return s.execInWorker(ctx, args)
-						}
-						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+						return s.dispatchExec(ctx, args, useOSSandbox)
 					}
 					return s.executeScript(ctx, args)
 				}
 			}
-			if useOSSandbox {
-				return s.execInWorker(ctx, args)
-			}
-			return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+			return s.dispatchExec(ctx, args, useOSSandbox)
 		}),
 	}
 }

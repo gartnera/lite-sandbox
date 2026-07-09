@@ -179,6 +179,54 @@ func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 	}
 }
 
+// TestOSSandboxUnsandboxedCommandEscapes verifies that an unsandboxed_commands
+// entry runs directly on the host even when the OS sandbox is enabled: a write
+// outside the working directory (into the user's home, which the sandbox mounts
+// read-only) succeeds, whereas the same command allowed via extra_commands is
+// confined and fails. This is the defining difference between the two lists.
+func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
+	requireOSSandbox(t)
+	tmpDir := t.TempDir()
+
+	// A host-writable location outside the working directory and outside the
+	// temp roots the sandbox profile permits (/tmp, /var/folders). The user's
+	// home is writable on the host but read-only inside the OS sandbox.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("failed to get home dir: %v", err)
+	}
+	outsideDir, err := os.MkdirTemp(home, "ls-unsandboxed-test-")
+	if err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	defer os.RemoveAll(outsideDir)
+	outsideFile := filepath.Join(outsideDir, "escaped.txt")
+
+	enabled := true
+
+	// Control: as a bare extra_commands entry the write is confined and fails.
+	confined := NewSandbox()
+	confined.UpdateConfig(&config.Config{OSSandbox: &enabled, ExtraCommands: []string{"bash"}}, tmpDir)
+	defer confined.Close()
+	if output, err := confined.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err == nil {
+		t.Errorf("expected confined write outside workdir to fail, got success. output: %s", output)
+	}
+	if _, err := os.Stat(outsideFile); err == nil {
+		t.Fatalf("confined command unexpectedly created %s", outsideFile)
+	}
+
+	// Unsandboxed: the same command runs on the host and the write succeeds.
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{OSSandbox: &enabled, UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	defer s.Close()
+	if output, err := s.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
+		t.Fatalf("expected unsandboxed write outside workdir to succeed, got error: %v, output: %s", err, output)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Errorf("expected unsandboxed command to create %s on the host, stat error: %v", outsideFile, err)
+	}
+}
+
 // TestOSSandboxBackgroundBareExtraCommandConfined verifies the background raw
 // path for bare extra_commands is likewise confined by the OS sandbox.
 func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
