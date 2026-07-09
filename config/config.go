@@ -495,6 +495,7 @@ type RuntimesConfig struct {
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
 	ExtraCommands        []string                    `yaml:"extra_commands,omitempty"`
+	UnsandboxedCommands  []string                    `yaml:"unsandboxed_commands,omitempty"`
 	ReadablePaths        []string                    `yaml:"readable_paths,omitempty"`
 	WritablePaths        []string                    `yaml:"writable_paths,omitempty"`
 	Git                  *GitConfig                  `yaml:"git,omitempty"`

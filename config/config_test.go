@@ -38,6 +38,7 @@ func TestLoadSave(t *testing.T) {
 
 	// Save and reload.
 	cfg.ExtraCommands = []string{"curl", "wget"}
+	cfg.UnsandboxedCommands = []string{"docker"}
 	if err := Save(cfg); err != nil {
 		t.Fatalf("save error: %v", err)
 	}
@@ -48,6 +49,9 @@ func TestLoadSave(t *testing.T) {
 	}
 	if len(cfg2.ExtraCommands) != 2 || cfg2.ExtraCommands[0] != "curl" || cfg2.ExtraCommands[1] != "wget" {
 		t.Fatalf("expected [curl wget], got %v", cfg2.ExtraCommands)
+	}
+	if len(cfg2.UnsandboxedCommands) != 1 || cfg2.UnsandboxedCommands[0] != "docker" {
+		t.Fatalf("expected [docker], got %v", cfg2.UnsandboxedCommands)
 	}
 }
 

@@ -369,6 +369,14 @@ func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredential
 		sb.WriteString(fmt.Sprintf("(deny network-outbound (literal \"%s\"))\n", p))
 	}
 
+	// Confine writes to the allowed subpaths below. Without this catch-all deny
+	// the leading "(allow default)" would permit writes everywhere the OS itself
+	// allows (e.g. the user's home directory), contradicting the documented
+	// policy that only the working directory, extra binds, and temp dirs are
+	// writable. SBPL applies the last matching rule, so this deny is overridden
+	// by the specific "(allow file-write* ...)" rules that follow.
+	sb.WriteString("(deny file-write* (subpath \"/\"))\n")
+
 	// Allow write access to workDir and its resolved path
 	sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", workDir))
 

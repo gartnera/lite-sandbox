@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,7 +61,18 @@ type Sandbox struct {
 	// `cd`) still hits the bare-extra bypass — interp tracks cwd in
 	// HandlerContext, so the lookup is done with the post-`cd` directory.
 	bareExtraScriptPaths map[string]bool
-	imdsEndpoint         string
+	// unsandboxed_commands entries are treated exactly like extra_commands for
+	// validation (merged into the maps above so they are allowed and bare entries
+	// skip AST parsing); the only difference is that matching invocations execute
+	// directly on the host, bypassing the OS sandbox worker even when it is
+	// enabled. The maps below mirror bareExtraCommands / bareExtraScriptPaths /
+	// extraSubCommands but only for the unsandboxed subset, so routing is decided
+	// per invocation (a subcommand-restricted entry like "git push" unsandboxes
+	// only matching calls, not every use of the binary).
+	unsandboxedBare            map[string]bool
+	unsandboxedBareScriptPaths map[string]bool
+	unsandboxedSub             map[string][][]string
+	imdsEndpoint               string
 	// dockerHost is the DOCKER_HOST value (unix://… proxy socket) injected into
 	// sandboxed commands when the docker proxy is running. dockerSocketDir is the
 	// directory holding that socket, bind-mounted into the OS sandbox worker so
@@ -104,19 +116,24 @@ func NewSandbox() *Sandbox {
 
 // UpdateConfig replaces the sandbox configuration with the provided config.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
-	m := make(map[string]bool, len(cfg.ExtraCommands))
+	m := make(map[string]bool, len(cfg.ExtraCommands)+len(cfg.UnsandboxedCommands))
 	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
 	bareScripts := make(map[string]bool)
-	for _, c := range cfg.ExtraCommands {
-		// Entries are whitespace-separated. A single token (e.g. "fvm") is a
-		// bare entry that allows the command with any arguments. Multiple
-		// tokens (e.g. "pnpx prettier", "uv run pyright") restrict the
-		// command so that its leading non-flag arguments must match the
-		// remaining tokens as a prefix.
+	unsandboxedBare := make(map[string]bool)
+	unsandboxedBareScripts := make(map[string]bool)
+	unsandboxedSub := make(map[string][][]string)
+	// processEntry parses one whitespace-separated entry into the command maps.
+	// A single token (e.g. "fvm") is a bare entry that allows the command with
+	// any arguments; multiple tokens (e.g. "pnpx prettier", "uv run pyright")
+	// restrict the command so that its leading non-flag arguments must match the
+	// remaining tokens as a prefix. When fromUnsandboxed is set the same parse is
+	// also recorded in the unsandboxed maps so matching invocations bypass the OS
+	// sandbox worker.
+	processEntry := func(c string, fromUnsandboxed bool) {
 		fields := strings.Fields(c)
 		if len(fields) == 0 {
-			continue
+			return
 		}
 		cmd := fields[0]
 		m[cmd] = true
@@ -125,9 +142,24 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			if isScriptPath(cmd) && workDir != "" {
 				bareScripts[absPath(cmd, workDir)] = true
 			}
+			if fromUnsandboxed {
+				unsandboxedBare[cmd] = true
+				if isScriptPath(cmd) && workDir != "" {
+					unsandboxedBareScripts[absPath(cmd, workDir)] = true
+				}
+			}
 		} else {
 			sub[cmd] = append(sub[cmd], fields[1:])
+			if fromUnsandboxed {
+				unsandboxedSub[cmd] = append(unsandboxedSub[cmd], fields[1:])
+			}
 		}
+	}
+	for _, c := range cfg.ExtraCommands {
+		processEntry(c, false)
+	}
+	for _, c := range cfg.UnsandboxedCommands {
+		processEntry(c, true)
 	}
 	// Determine if AWS credentials should be blocked, resolving any
 	// per-directory override for the worker's working directory.
@@ -139,6 +171,9 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.extraSubCommands = sub
 	s.bareExtraCommands = bare
 	s.bareExtraScriptPaths = bareScripts
+	s.unsandboxedBare = unsandboxedBare
+	s.unsandboxedBareScriptPaths = unsandboxedBareScripts
+	s.unsandboxedSub = unsandboxedSub
 
 	// Invalidate lazily computed state derived from the previous config.
 	// Runtime paths (GOPATH, GOCACHE, pnpm store, ...) are detected on first
@@ -820,6 +855,14 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 // validateScriptFile reads a script file path, parses and validates its contents.
 func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	path := absPath(scriptPath, workDir)
+	// Bare extra_commands script entries are an explicit trust opt-in; skip
+	// body validation regardless of how the script is reached (directly,
+	// `bash <script>`, or `source <script>`). This mirrors the runtime
+	// ExecHandler bypass so static preflight does not reject a script the user
+	// deliberately opted out of validation for.
+	if s.getBareExtraCommands()[scriptPath] || s.getBareExtraScriptPaths()[path] {
+		return nil
+	}
 	if isBinaryExecutable(path) {
 		return nil
 	}
@@ -953,11 +996,174 @@ func (s *Sandbox) isExtraCommandInvocation(command string) bool {
 	return s.getBareExtraCommands()[word]
 }
 
+// isUnsandboxedInvocation reports whether the command string's leading command
+// is a bare unsandboxed_commands entry, meaning it must run directly on the host
+// (bypassing the OS sandbox worker). Used by the top-level raw-execution path,
+// which only ever handles bare entries.
+func (s *Sandbox) isUnsandboxedInvocation(command string) bool {
+	word := firstCommandWord(command)
+	if word == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.unsandboxedBare[word]
+}
+
+// execIsUnsandboxed reports whether an exec invocation (from the interpreter's
+// ExecHandler) should run on the host instead of the OS sandbox worker because
+// it matches an unsandboxed_commands entry. Bare script-path entries are matched
+// by absolute path (resolved against the post-`cd` directory tracked in the
+// interp HandlerContext) so a script survives a working-directory change.
+// Subcommand-restricted entries match only when the invocation's leading
+// arguments match the restriction, so e.g. "git push" unsandboxes only pushes
+// and not every git command.
+func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	cmdName := args[0]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.unsandboxedBare[cmdName] {
+		return true
+	}
+	if len(s.unsandboxedBareScriptPaths) > 0 && isScriptPath(cmdName) {
+		hc := interp.HandlerCtx(ctx)
+		if s.unsandboxedBareScriptPaths[absPath(cmdName, hc.Dir)] {
+			return true
+		}
+	}
+	if restrictions, ok := s.unsandboxedSub[cmdName]; ok {
+		return argsMatchSubCommand(restrictions, args[1:])
+	}
+	return false
+}
+
+// argsMatchSubCommand reports whether the expanded arguments (already stripped
+// of the command name) satisfy any recorded subcommand-prefix restriction. It
+// mirrors extraSubCommandMatches but operates on plain strings from the
+// ExecHandler rather than AST words. An invocation with no non-flag arguments
+// matches (typically prints help).
+func argsMatchSubCommand(restrictions [][]string, args []string) bool {
+	var nonFlag []string
+	for _, a := range args {
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		nonFlag = append(nonFlag, a)
+	}
+	if len(nonFlag) == 0 {
+		return true
+	}
+	for _, seq := range restrictions {
+		if len(seq) > len(nonFlag) {
+			continue
+		}
+		match := true
+		for i, tok := range seq {
+			if nonFlag[i] != tok {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchExec runs an exec invocation inside the OS sandbox worker or directly
+// on the host. Commands go to the worker when the OS sandbox is enabled and the
+// command is not an unsandboxed_commands entry. Host execution injects the
+// docker filtering proxy's DOCKER_HOST only for non-unsandboxed commands, so
+// unsandboxed ones reach the real docker daemon (or the host's own DOCKER_HOST).
+func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
+	unsandboxed := s.execIsUnsandboxed(ctx, args)
+	if useOSSandbox && !unsandboxed {
+		return s.execInWorker(ctx, args)
+	}
+	return s.execOnHost(ctx, args, !unsandboxed)
+}
+
+// execOnHost runs a command directly on the host, mirroring
+// interp.DefaultExecHandler. When injectDockerProxy is true and a docker
+// filtering proxy is configured, DOCKER_HOST is set to the proxy socket so the
+// command is routed through it; when false the command inherits whatever
+// DOCKER_HOST the interpreter environment already carries (the host's, or none).
+func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerProxy bool) error {
+	hc := interp.HandlerCtx(ctx)
+
+	var env []string
+	hc.Env.Each(func(name string, vr expand.Variable) bool {
+		if !vr.IsSet() {
+			return true
+		}
+		env = append(env, name+"="+vr.String())
+		return true
+	})
+	if injectDockerProxy {
+		s.mu.RLock()
+		proxyHost := s.dockerHost
+		s.mu.RUnlock()
+		if proxyHost != "" {
+			env = append(env, "DOCKER_HOST="+proxyHost)
+		}
+	}
+
+	path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
+	if err != nil {
+		fmt.Fprintln(hc.Stderr, err)
+		return interp.ExitStatus(127)
+	}
+
+	cmd := &exec.Cmd{
+		Path:   path,
+		Args:   args,
+		Env:    env,
+		Dir:    hc.Dir,
+		Stdin:  hc.Stdin,
+		Stdout: hc.Stdout,
+		Stderr: hc.Stderr,
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(hc.Stderr, "%v\n", err)
+		return interp.ExitStatus(127)
+	}
+	// Cancellation mirrors interp.DefaultExecHandler(gracefulKillTimeout):
+	// SIGINT, then SIGKILL after the grace period.
+	stopf := context.AfterFunc(ctx, func() {
+		if runtime.GOOS == "windows" {
+			_ = cmd.Process.Signal(os.Kill)
+			return
+		}
+		_ = cmd.Process.Signal(os.Interrupt)
+		time.Sleep(gracefulKillTimeout)
+		_ = cmd.Process.Signal(os.Kill)
+	})
+	defer stopf()
+
+	err = cmd.Wait()
+	if err == nil {
+		return nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return interp.ExitStatus(exitErr.ExitCode())
+	}
+	return err
+}
+
 // executeRaw executes a command string directly using the system bash without
 // going through AST parsing or validation. Used for bare extra_commands entries.
-func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string) (string, error) {
+// When forceHost is true (bare unsandboxed_commands entries) the command runs on
+// the host even if the OS sandbox is enabled.
+func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string, forceHost bool) (string, error) {
 	var out bytes.Buffer
-	if err := s.runRawToWriter(ctx, command, workDir, &out, false); err != nil {
+	if err := s.runRawToWriter(ctx, command, workDir, &out, false, forceHost); err != nil {
 		output := out.String()
 		return output, &CommandFailedError{Err: err, Output: output}
 	}
@@ -974,9 +1180,12 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 // server, a daemon, `something &`) are reaped too — not just bash itself. This
 // is used for background runs; foreground runs keep the default behavior where
 // CommandContext kills only the direct process.
-func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup bool) error {
+//
+// When forceHost is true the command always runs on the host even if the OS
+// sandbox is enabled — used for bare unsandboxed_commands entries.
+func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup, forceHost bool) error {
 	s.mu.RLock()
-	useOSSandbox := s.osSandbox
+	useOSSandbox := s.osSandbox && !forceHost
 	imdsEndpoint := s.imdsEndpoint
 	dockerHost := s.dockerHost
 	s.mu.RUnlock()
@@ -994,7 +1203,9 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
 	}
-	if dockerHost != "" {
+	// Skip the docker filtering proxy for unsandboxed commands (forceHost) so
+	// they reach the real docker daemon rather than the proxy socket.
+	if dockerHost != "" && !forceHost {
 		env = append(env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
 	}
 
@@ -1083,9 +1294,10 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 	// Bare extra_commands entries bypass bash AST parsing entirely and are
 	// executed directly with the real bash for maximum compatibility. When the
 	// OS sandbox is enabled the raw bash runs inside the worker, so filesystem
-	// confinement still applies.
+	// confinement still applies — unless the entry came from unsandboxed_commands,
+	// which runs on the host regardless.
 	if s.isExtraCommandInvocation(command) {
-		return s.executeRaw(ctx, command, workDir)
+		return s.executeRaw(ctx, command, workDir, s.isUnsandboxedInvocation(command))
 	}
 
 	// Parse and validate
@@ -1147,18 +1359,19 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	s.mu.RLock()
 	useOSSandbox := s.osSandbox
 	imdsEndpoint := s.imdsEndpoint
-	dockerHost := s.dockerHost
 	s.mu.RUnlock()
 
 	// Build environment with IMDS endpoint if AWS is enabled. The interpreter
 	// hands this env to every spawned subprocess (e.g. aws cli), so there is
 	// no need — and no safe way — to mutate the host process's environment.
+	// The docker filtering proxy's DOCKER_HOST is intentionally NOT set here:
+	// it is injected per command at dispatch time (execInWorker / execOnHost)
+	// so unsandboxed_commands can reach the real daemon while everything else is
+	// routed through the proxy. The host's own DOCKER_HOST (if any) flows through
+	// untouched via os.Environ().
 	env := os.Environ()
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
-	}
-	if dockerHost != "" {
-		env = append(env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
 	}
 
 	// Store sandbox paths in context so nested bash/sh can access them
@@ -1246,6 +1459,16 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 		envMap[name] = vr.String()
 		return true
 	})
+
+	// Route docker through the filtering proxy. DOCKER_HOST is injected here
+	// rather than into the interpreter's base env so that unsandboxed_commands
+	// (which never reach the worker) can talk to the real daemon instead.
+	s.mu.RLock()
+	proxyHost := s.dockerHost
+	s.mu.RUnlock()
+	if proxyHost != "" {
+		envMap["DOCKER_HOST"] = proxyHost
+	}
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

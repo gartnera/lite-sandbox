@@ -328,6 +328,18 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	} else if scriptFile != "" {
 		hc := interp.HandlerCtx(ctx)
 		path := absPath(scriptFile, hc.Dir)
+		// A bare extra_commands script entry is an explicit trust opt-in, so
+		// invoking it via `bash <script>` must behave the same as running it
+		// directly (`./<script>`): run the whole invocation raw without reading
+		// or validating the script body. Match either by the literal token or by
+		// the resolved absolute path so `bash web/foo/build.sh` matches an entry
+		// registered as `./web/foo/build.sh`.
+		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
+			s.mu.RLock()
+			useOSSandbox := s.osSandbox
+			s.mu.RUnlock()
+			return s.dispatchExec(ctx, args, useOSSandbox)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("%s: cannot read script %s: %w", cmdName, path, err)
@@ -543,28 +555,19 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 					// `./build.sh` from inside `web/foo`. interp tracks cwd in
 					// HandlerContext, so the resolution sees the post-`cd` dir.
 					if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
-						if useOSSandbox {
-							return s.execInWorker(ctx, args)
-						}
-						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+						return s.dispatchExec(ctx, args, useOSSandbox)
 					}
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
 						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
 					}
 					// Check if file is a compiled binary (ELF/Mach-O)
 					if isBinaryExecutable(path) {
-						if useOSSandbox {
-							return s.execInWorker(ctx, args)
-						}
-						return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+						return s.dispatchExec(ctx, args, useOSSandbox)
 					}
 					return s.executeScript(ctx, args)
 				}
 			}
-			if useOSSandbox {
-				return s.execInWorker(ctx, args)
-			}
-			return interp.DefaultExecHandler(gracefulKillTimeout)(ctx, args)
+			return s.dispatchExec(ctx, args, useOSSandbox)
 		}),
 	}
 }

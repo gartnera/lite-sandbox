@@ -249,6 +249,7 @@ func exitCodeFromErr(err error, killed bool) int {
 // run_in_background option.
 func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
 	isExtra := s.isExtraCommandInvocation(command)
+	forceHost := s.isUnsandboxedInvocation(command)
 
 	var f *syntax.File
 	if !isExtra {
@@ -285,7 +286,7 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 			if isExtra {
 				// newProcessGroup=true: background bare commands often start
 				// servers/daemons that fork, so kill the whole group on stop.
-				runDone <- s.runRawToWriter(ctx, command, workDir, proc.output, true)
+				runDone <- s.runRawToWriter(ctx, command, workDir, proc.output, true, forceHost)
 			} else {
 				runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
 			}
