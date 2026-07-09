@@ -913,6 +913,47 @@ func TestExecuteScript_BareExtraCommandBypassesBlockedBody(t *testing.T) {
 	}
 }
 
+// TestExecuteBash_BareExtraCommandScriptBypassesBlockedBody verifies that a bare
+// extra_commands script entry bypasses the script-body validator even when it is
+// invoked via `bash <script>` (as opposed to directly as `./script`). The bare
+// entry is an explicit trust opt-in, so both invocation forms must behave the
+// same. Regression test for `bash web/foo/build.sh` rejecting non-allowlisted
+// commands (e.g. protoc) inside the registered script.
+func TestExecuteBash_BareExtraCommandScriptBypassesBlockedBody(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "wrapper.sh")
+	// Body references a command not in the allowlist.
+	body := "#!/bin/bash\n" +
+		"if false; then protoc --version; fi\n" +
+		"echo opted-in-$1\n"
+	os.WriteFile(scriptPath, []byte(body), 0755)
+
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		ExtraCommands: []string{"./wrapper.sh"},
+	}, dir)
+
+	// Invoked via `bash <script>`, without the leading "./" — must match the
+	// registered bare entry by resolved absolute path and bypass body validation.
+	out, err := executeInDirWithSandbox(t, s, dir, `bash wrapper.sh hello`)
+	if err != nil {
+		t.Fatalf("expected `bash <script>` to bypass body validation for bare extra command: %v", err)
+	}
+	if !strings.Contains(out, "opted-in-hello") {
+		t.Errorf("expected output to include 'opted-in-hello', got %q", out)
+	}
+
+	// Also exercise a non-leading invocation so both the static preflight and the
+	// runtime ExecHandler paths are covered.
+	out, err = executeInDirWithSandbox(t, s, dir, `true && bash ./wrapper.sh world`)
+	if err != nil {
+		t.Fatalf("expected non-leading `bash <script>` to bypass body validation: %v", err)
+	}
+	if !strings.Contains(out, "opted-in-world") {
+		t.Errorf("expected output to include 'opted-in-world', got %q", out)
+	}
+}
+
 // TestExecuteScript_NonBareExtraCommandStillValidatesBody verifies that when a
 // script is registered with a subcommand restriction (not bare), the body is
 // still validated — only bare entries get the full bypass.

@@ -855,6 +855,14 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 // validateScriptFile reads a script file path, parses and validates its contents.
 func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	path := absPath(scriptPath, workDir)
+	// Bare extra_commands script entries are an explicit trust opt-in; skip
+	// body validation regardless of how the script is reached (directly,
+	// `bash <script>`, or `source <script>`). This mirrors the runtime
+	// ExecHandler bypass so static preflight does not reject a script the user
+	// deliberately opted out of validation for.
+	if s.getBareExtraCommands()[scriptPath] || s.getBareExtraScriptPaths()[path] {
+		return nil
+	}
 	if isBinaryExecutable(path) {
 		return nil
 	}
