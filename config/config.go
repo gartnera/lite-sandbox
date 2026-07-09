@@ -228,6 +228,11 @@ type DockerConfig struct {
 	Enabled         *bool  `yaml:"enabled,omitempty"`
 	SocketPath      string `yaml:"socket_path,omitempty"`      // upstream daemon socket, default /var/run/docker.sock
 	AllowPrivileged *bool  `yaml:"allow_privileged,omitempty"` // default false
+	// AllowHostNamespaces permits the host PID, network, and IPC namespaces
+	// (--pid=host, --net=host, --ipc=host) without allowing full privileged mode.
+	// Other escalation vectors (--privileged, --cap-add, --device, the host user
+	// namespace, container-joined namespaces) remain blocked. Default false.
+	AllowHostNamespaces *bool `yaml:"allow_host_namespaces,omitempty"`
 	// AllowUnsandboxed permits the docker command without the OS sandbox. By
 	// default docker requires os_sandbox, because only the OS sandbox can mask
 	// the real daemon socket and make the filtering proxy unbypassable — without
@@ -350,6 +355,16 @@ func (d *DockerConfig) AllowsPrivileged() bool {
 		return false
 	}
 	return *d.AllowPrivileged
+}
+
+// AllowsHostNamespaces returns whether the host PID, network, and IPC
+// namespaces (--pid=host / --net=host / --ipc=host, and docker build
+// --network=host) are permitted through the proxy (default: false).
+func (d *DockerConfig) AllowsHostNamespaces() bool {
+	if d == nil || d.AllowHostNamespaces == nil {
+		return false
+	}
+	return *d.AllowHostNamespaces
 }
 
 // AllowsUnsandboxed returns whether the docker command may run without the OS

@@ -55,7 +55,7 @@ type driverConfig struct {
 // except local-driver volumes that bind a host path (which are treated as
 // binds and validated). A non-nil error means the request must be rejected;
 // its message is surfaced to the docker client.
-func validateCreateBody(body []byte, workDir string, readPaths, writePaths []string, allowPrivileged bool) error {
+func validateCreateBody(body []byte, workDir string, readPaths, writePaths []string, allowPrivileged, allowHostNamespaces bool) error {
 	var cb createBody
 	if err := json.Unmarshal(body, &cb); err != nil {
 		return fmt.Errorf("failed to parse container create request: %v", err)
@@ -63,7 +63,7 @@ func validateCreateBody(body []byte, workDir string, readPaths, writePaths []str
 	hc := cb.HostConfig
 
 	if !allowPrivileged {
-		if err := checkPrivilege(hc); err != nil {
+		if err := checkPrivilege(hc, allowHostNamespaces); err != nil {
 			return err
 		}
 	}
@@ -158,8 +158,11 @@ func checkDriverDevice(opts map[string]string, readOnly bool, workDir string, re
 }
 
 // checkPrivilege rejects privileged containers and the equivalent escalation
-// vectors that would let a container break out of the sandbox boundary.
-func checkPrivilege(hc hostConfig) error {
+// vectors that would let a container break out of the sandbox boundary. When
+// allowHostNamespaces is set, the host PID, network, and IPC namespaces
+// (--pid=host / --net=host / --ipc=host) are permitted; all other vectors
+// remain blocked.
+func checkPrivilege(hc hostConfig, allowHostNamespaces bool) error {
 	if hc.Privileged {
 		return fmt.Errorf("privileged containers are not allowed in the sandbox")
 	}
@@ -180,16 +183,18 @@ func checkPrivilege(hc hostConfig) error {
 			return fmt.Errorf("security-opt %q is not allowed in the sandbox", opt)
 		}
 	}
-	if err := checkNamespace("PID", hc.PidMode); err != nil {
+	// The host PID, network, and IPC namespaces can be opted into independently
+	// of full privileged mode; the user host namespace stays blocked either way.
+	if err := checkNamespace("PID", hc.PidMode, allowHostNamespaces); err != nil {
 		return err
 	}
-	if err := checkNamespace("IPC", hc.IpcMode); err != nil {
+	if err := checkNamespace("IPC", hc.IpcMode, allowHostNamespaces); err != nil {
 		return err
 	}
-	if err := checkNamespace("user", hc.UsernsMode); err != nil {
+	if err := checkNamespace("user", hc.UsernsMode, false); err != nil {
 		return err
 	}
-	if err := checkNamespace("network", hc.NetworkMode); err != nil {
+	if err := checkNamespace("network", hc.NetworkMode, allowHostNamespaces); err != nil {
 		return err
 	}
 	return nil
@@ -198,12 +203,23 @@ func checkPrivilege(hc hostConfig) error {
 // checkNamespace rejects sharing the host's namespace ("host") or joining
 // another container's namespace ("container:<id>"); both break the isolation
 // the sandbox relies on. Other modes (default, none, bridge, a network name)
-// are allowed.
-func checkNamespace(kind, mode string) error {
-	if isDisallowedNamespace(mode) {
+// are allowed. When allowHost is set, the "host" mode is permitted (but joining
+// another container's namespace still is not).
+func checkNamespace(kind, mode string, allowHost bool) error {
+	if namespaceForbidden(mode, allowHost) {
 		return fmt.Errorf("%s namespace mode %q is not allowed in the sandbox", kind, mode)
 	}
 	return nil
+}
+
+// namespaceForbidden reports whether a namespace mode must be rejected. Host
+// mode is forbidden unless allowHost is set; joining another container's
+// namespace ("container:<id>") is always forbidden.
+func namespaceForbidden(mode string, allowHost bool) bool {
+	if allowHost && strings.EqualFold(mode, "host") {
+		return false
+	}
+	return isDisallowedNamespace(mode)
 }
 
 func isDisallowedNamespace(mode string) bool {

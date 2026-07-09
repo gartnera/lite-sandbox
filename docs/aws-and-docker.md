@@ -66,10 +66,11 @@ workflows keep working.
 
 ```yaml
 docker:
-  enabled: false           # Enable the docker proxy (default: false)
-  socket_path: ""          # Upstream daemon socket; auto-detected if empty
-  allow_privileged: false  # Permit privileged containers and escalation flags (default: false)
-  allow_unsandboxed: false # Permit docker without the OS sandbox (default: false)
+  enabled: false               # Enable the docker proxy (default: false)
+  socket_path: ""              # Upstream daemon socket; auto-detected if empty
+  allow_privileged: false      # Permit privileged containers and escalation flags (default: false)
+  allow_host_namespaces: false # Permit --pid=host, --net=host, --ipc=host only (default: false)
+  allow_unsandboxed: false     # Permit docker without the OS sandbox (default: false)
 ```
 
 When enabled, lite-sandbox starts the proxy on a private unix socket, points the
@@ -86,6 +87,7 @@ with `allow_unsandboxed: true` (not recommended).
 
 - **Endpoint allowlist** — Normal read and lifecycle operations on containers, images, networks, and volumes (plus `build`, `exec`, and BuildKit) are forwarded; anything outside the allowlist is rejected with `403`.
 - **No privilege escalation** (unless `allow_privileged: true`) — rejects `--privileged`, `--cap-add`, `--device`/`--gpus`, device cgroup rules, `--security-opt` `unconfined`, host PID/IPC/user/network namespaces, and `docker build --network=host`.
+- **Host namespaces** (opt-in via `allow_host_namespaces: true`) — permits just `--pid=host`, `--net=host`, and `--ipc=host` (and `docker build --network=host`) without allowing full privileged mode. The host user namespace, container-joined namespaces, and all other escalation vectors stay blocked. Implied by `allow_privileged: true`.
 - **Bind-mount confinement** — host bind mounts (`-v`, `--mount type=bind`, and `local`-driver volumes with a `device` path) must resolve inside the sandbox boundary: read-only mounts within the readable paths, read-write mounts within the writable paths. Named/anonymous volumes are allowed. Ambiguous binds are rejected fail-closed.
 
 ### Upstream socket auto-detection
@@ -100,6 +102,7 @@ paths (Docker Desktop, OrbStack, Colima) → `/var/run/docker.sock`.
 lite-sandbox config docker show                  # Show current docker config
 lite-sandbox config docker enable [--socket <path>]  # Enable the proxy (optionally pin the upstream socket)
 lite-sandbox config docker allow-privileged      # Permit privileged containers / escalation flags
+lite-sandbox config docker allow-host-namespaces # Permit --pid=host, --net=host, --ipc=host only
 lite-sandbox config docker allow-unsandboxed     # Permit docker without the OS sandbox (weakens the boundary)
 lite-sandbox config docker disable               # Disable docker access
 ```

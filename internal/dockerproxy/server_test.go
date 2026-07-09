@@ -60,9 +60,9 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 // newTestProxy starts a proxy in front of fd whose writable boundary is
 // writeDir (read boundary is readDir), and returns the proxy plus an http
 // client that dials its socket.
-func newTestProxy(t *testing.T, fd *fakeDaemon, readDir, writeDir string, allowPriv bool) (*Server, *http.Client) {
+func newTestProxy(t *testing.T, fd *fakeDaemon, readDir, writeDir string, allowPriv, allowHostNS bool) (*Server, *http.Client) {
 	t.Helper()
-	srv, err := NewServer(shortSocketDir(t), fd.socket, []string{readDir}, []string{writeDir}, writeDir, allowPriv)
+	srv, err := NewServer(shortSocketDir(t), fd.socket, []string{readDir}, []string{writeDir}, writeDir, allowPriv, allowHostNS)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -119,7 +119,7 @@ func do(t *testing.T, client *http.Client, method, path string, body string) (in
 func TestProxy_AllowedRequestForwarded(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	status, _ := do(t, client, "GET", "/v1.43/version", "")
 	if status != http.StatusOK {
@@ -133,7 +133,7 @@ func TestProxy_AllowedRequestForwarded(t *testing.T) {
 func TestProxy_DeniedEndpoint(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	// /secret is not in the allowlist.
 	status, body := do(t, client, "GET", "/v1.43/secret", "")
@@ -151,7 +151,7 @@ func TestProxy_DeniedEndpoint(t *testing.T) {
 func TestProxy_BindMountInsideBoundaryForwarded(t *testing.T) {
 	fd := startFakeDaemon(t)
 	writeDir := t.TempDir()
-	_, client := newTestProxy(t, fd, writeDir, writeDir, false)
+	_, client := newTestProxy(t, fd, writeDir, writeDir, false, false)
 
 	body := fmt.Sprintf(`{"Image":"alpine","HostConfig":{"Binds":["%s:/work"]}}`, writeDir)
 	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
@@ -166,7 +166,7 @@ func TestProxy_BindMountInsideBoundaryForwarded(t *testing.T) {
 func TestProxy_BindMountOutsideBoundaryRejected(t *testing.T) {
 	fd := startFakeDaemon(t)
 	writeDir := t.TempDir()
-	_, client := newTestProxy(t, fd, writeDir, writeDir, false)
+	_, client := newTestProxy(t, fd, writeDir, writeDir, false, false)
 
 	body := `{"Image":"alpine","HostConfig":{"Binds":["/etc:/etc"]}}`
 	status, msg := do(t, client, "POST", "/v1.43/containers/create", body)
@@ -184,7 +184,7 @@ func TestProxy_BindMountOutsideBoundaryRejected(t *testing.T) {
 func TestProxy_AnonymousVolumeAllowed(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	// Named/anonymous volume (non-absolute source) and a tmpfs/volume Mount.
 	body := `{"Image":"alpine","HostConfig":{"Binds":["mydata:/data"],"Mounts":[{"Type":"volume","Target":"/cache"}]}}`
@@ -197,7 +197,7 @@ func TestProxy_AnonymousVolumeAllowed(t *testing.T) {
 func TestProxy_PrivilegedRejected(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	body := `{"Image":"alpine","HostConfig":{"Privileged":true}}`
 	status, msg := do(t, client, "POST", "/v1.43/containers/create", body)
@@ -212,7 +212,7 @@ func TestProxy_PrivilegedRejected(t *testing.T) {
 func TestProxy_PrivilegedAllowedWhenConfigured(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, true)
+	_, client := newTestProxy(t, fd, dir, dir, true, false)
 
 	body := `{"Image":"alpine","HostConfig":{"Privileged":true}}`
 	status, _ := do(t, client, "POST", "/v1.43/containers/create", body)
@@ -228,37 +228,45 @@ func TestValidateCreateBody(t *testing.T) {
 	write := []string{writeDir}
 
 	tests := []struct {
-		name    string
-		body    string
-		wantErr string // substring; "" means allowed
+		name        string
+		body        string
+		allowHostNS bool
+		wantErr     string // substring; "" means allowed
 	}{
-		{"empty", `{}`, ""},
-		{"rw bind in write boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, writeDir), ""},
-		{"rw bind only in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, readDir), "outside the sandbox boundary"},
-		{"ro bind in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x:ro"]}}`, readDir), ""},
-		{"named volume", `{"HostConfig":{"Binds":["vol:/x"]}}`, ""},
-		{"mount bind outside", `{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/etc","Target":"/etc"}]}}`, "outside the sandbox boundary"},
-		{"mount volume", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x"}]}}`, ""},
-		{"privileged", `{"HostConfig":{"Privileged":true}}`, "privileged"},
-		{"cap-add", `{"HostConfig":{"CapAdd":["SYS_ADMIN"]}}`, "capabilities"},
-		{"device", `{"HostConfig":{"Devices":[{"PathOnHost":"/dev/sda"}]}}`, "devices"},
-		{"host pid", `{"HostConfig":{"PidMode":"host"}}`, "PID namespace"},
-		{"host network", `{"HostConfig":{"NetworkMode":"host"}}`, "network namespace"},
-		{"container pid namespace", `{"HostConfig":{"PidMode":"container:abc123"}}`, "PID namespace"},
-		{"container network namespace", `{"HostConfig":{"NetworkMode":"container:abc123"}}`, "network namespace"},
-		{"seccomp unconfined", `{"HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}`, "security-opt"},
-		{"device requests", `{"HostConfig":{"DeviceRequests":[{"Count":-1}]}}`, "host devices"},
-		{"device cgroup rules", `{"HostConfig":{"DeviceCgroupRules":["a *:* rwm"]}}`, "device cgroup"},
-		{"ambiguous bind colon in source", `{"HostConfig":{"Binds":["/host:dir:/container"]}}`, "ambiguous"},
-		{"ambiguous bind four fields", `{"HostConfig":{"Binds":["/a:/b:/c:ro"]}}`, "ambiguous"},
-		{"volume driver bind inside boundary", fmt.Sprintf(`{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"%s/d"}}}}]}}`, writeDir), ""},
-		{"volume driver bind outside boundary", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`, "outside the sandbox boundary"},
-		{"volume driver nfs device allowed", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"nfs","device":":/exports/data","o":"addr=10.0.0.1"}}}}]}}`, ""},
+		{"empty", `{}`, false, ""},
+		{"rw bind in write boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, writeDir), false, ""},
+		{"rw bind only in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x"]}}`, readDir), false, "outside the sandbox boundary"},
+		{"ro bind in read boundary", fmt.Sprintf(`{"HostConfig":{"Binds":["%s/x:/x:ro"]}}`, readDir), false, ""},
+		{"named volume", `{"HostConfig":{"Binds":["vol:/x"]}}`, false, ""},
+		{"mount bind outside", `{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/etc","Target":"/etc"}]}}`, false, "outside the sandbox boundary"},
+		{"mount volume", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x"}]}}`, false, ""},
+		{"privileged", `{"HostConfig":{"Privileged":true}}`, false, "privileged"},
+		{"cap-add", `{"HostConfig":{"CapAdd":["SYS_ADMIN"]}}`, false, "capabilities"},
+		{"device", `{"HostConfig":{"Devices":[{"PathOnHost":"/dev/sda"}]}}`, false, "devices"},
+		{"host pid", `{"HostConfig":{"PidMode":"host"}}`, false, "PID namespace"},
+		{"host network", `{"HostConfig":{"NetworkMode":"host"}}`, false, "network namespace"},
+		{"container pid namespace", `{"HostConfig":{"PidMode":"container:abc123"}}`, false, "PID namespace"},
+		{"container network namespace", `{"HostConfig":{"NetworkMode":"container:abc123"}}`, false, "network namespace"},
+		// With allow_host_namespaces, host PID/network/IPC are permitted, but the
+		// host user namespace and container-joined namespaces stay blocked.
+		{"host pid allowed", `{"HostConfig":{"PidMode":"host"}}`, true, ""},
+		{"host network allowed", `{"HostConfig":{"NetworkMode":"host"}}`, true, ""},
+		{"host ipc allowed", `{"HostConfig":{"IpcMode":"host"}}`, true, ""},
+		{"host userns still blocked", `{"HostConfig":{"UsernsMode":"host"}}`, true, "user namespace"},
+		{"container pid still blocked", `{"HostConfig":{"PidMode":"container:abc123"}}`, true, "PID namespace"},
+		{"seccomp unconfined", `{"HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}`, false, "security-opt"},
+		{"device requests", `{"HostConfig":{"DeviceRequests":[{"Count":-1}]}}`, false, "host devices"},
+		{"device cgroup rules", `{"HostConfig":{"DeviceCgroupRules":["a *:* rwm"]}}`, false, "device cgroup"},
+		{"ambiguous bind colon in source", `{"HostConfig":{"Binds":["/host:dir:/container"]}}`, false, "ambiguous"},
+		{"ambiguous bind four fields", `{"HostConfig":{"Binds":["/a:/b:/c:ro"]}}`, false, "ambiguous"},
+		{"volume driver bind inside boundary", fmt.Sprintf(`{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"%s/d"}}}}]}}`, writeDir), false, ""},
+		{"volume driver bind outside boundary", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"none","o":"bind","device":"/etc"}}}}]}}`, false, "outside the sandbox boundary"},
+		{"volume driver nfs device allowed", `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/x","VolumeOptions":{"DriverConfig":{"Name":"local","Options":{"type":"nfs","device":":/exports/data","o":"addr=10.0.0.1"}}}}]}}`, false, ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateCreateBody([]byte(tc.body), writeDir, read, write, false)
+			err := validateCreateBody([]byte(tc.body), writeDir, read, write, false, tc.allowHostNS)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("expected allowed, got: %v", err)
@@ -313,7 +321,7 @@ func TestValidateVolumeCreateBody(t *testing.T) {
 func TestProxy_UnknownFieldsPassThrough(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	// Known-good HostConfig (in-boundary bind) plus fields the proxy structs omit.
 	body := `{"Image":"alpine","Labels":{"k":"v"},"HostConfig":{"Binds":["` + dir + `:/w"]},"FutureField":{"nested":[1,2,3]}}`
@@ -332,7 +340,7 @@ func TestProxy_UnknownFieldsPassThrough(t *testing.T) {
 func TestProxy_ExecPrivilegedRejected(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	status, msg := do(t, client, "POST", "/v1.43/containers/abc123/exec", `{"Privileged":true,"Cmd":["sh"]}`)
 	if status != http.StatusForbidden {
@@ -346,7 +354,7 @@ func TestProxy_ExecPrivilegedRejected(t *testing.T) {
 func TestProxy_VolumeDriverBindOutsideRejected(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	body := `{"Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/etc"}}`
 	status, msg := do(t, client, "POST", "/v1.43/volumes/create", body)
@@ -361,7 +369,7 @@ func TestProxy_VolumeDriverBindOutsideRejected(t *testing.T) {
 func TestProxy_BuildHostNetworkRejected(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	status, msg := do(t, client, "POST", "/v1.43/build?networkmode=host", "")
 	if status != http.StatusForbidden {
@@ -375,10 +383,24 @@ func TestProxy_BuildHostNetworkRejected(t *testing.T) {
 	}
 }
 
+func TestProxy_BuildHostNetworkAllowedWhenConfigured(t *testing.T) {
+	fd := startFakeDaemon(t)
+	dir := t.TempDir()
+	_, client := newTestProxy(t, fd, dir, dir, false, true)
+
+	status, msg := do(t, client, "POST", "/v1.43/build?networkmode=host", "")
+	if status != http.StatusOK {
+		t.Fatalf("expected build with host network forwarded, got %d (%s)", status, msg)
+	}
+	if len(fd.gotPaths) != 1 {
+		t.Fatalf("build should reach upstream once: %v", fd.gotPaths)
+	}
+}
+
 func TestProxy_BuildDefaultNetworkForwarded(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 
 	status, _ := do(t, client, "POST", "/v1.43/build", "")
 	if status != http.StatusOK {
@@ -423,7 +445,7 @@ func TestIsAllowed(t *testing.T) {
 
 func TestEndpointAndSocketDir(t *testing.T) {
 	dir := shortSocketDir(t)
-	srv, err := NewServer(dir, "/var/run/docker.sock", nil, nil, dir, false)
+	srv, err := NewServer(dir, "/var/run/docker.sock", nil, nil, dir, false, false)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -451,7 +473,7 @@ func decodeMessage(t *testing.T, body string) string {
 func TestDeniedErrorIsDockerJSON(t *testing.T) {
 	fd := startFakeDaemon(t)
 	dir := t.TempDir()
-	_, client := newTestProxy(t, fd, dir, dir, false)
+	_, client := newTestProxy(t, fd, dir, dir, false, false)
 	_, body := do(t, client, "GET", "/v1.43/secret", "")
 	if msg := decodeMessage(t, body); msg == "" {
 		t.Fatalf("expected non-empty docker error message, got: %s", body)

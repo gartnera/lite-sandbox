@@ -43,7 +43,7 @@ func requireDockerIntegration(t *testing.T) {
 func startProxyForCLI(t *testing.T, workDir string, allowPriv bool) string {
 	t.Helper()
 	srv, err := NewServer(shortSocketDir(t), "/var/run/docker.sock",
-		[]string{workDir}, []string{workDir}, workDir, allowPriv)
+		[]string{workDir}, []string{workDir}, workDir, allowPriv, false)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

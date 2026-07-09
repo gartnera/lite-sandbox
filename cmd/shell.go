@@ -87,7 +87,7 @@ func runShell() error {
 		defer os.RemoveAll(socketDir)
 
 		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
-			readPaths, writePaths, startDir, cfg.Docker.AllowsPrivileged())
+			readPaths, writePaths, startDir, cfg.Docker.AllowsPrivileged(), cfg.Docker.AllowsHostNamespaces())
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy: %w", err)
 		}

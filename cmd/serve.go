@@ -291,7 +291,7 @@ func runServe() error {
 		defer os.RemoveAll(socketDir)
 
 		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
-			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged())
+			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged(), cfg.Docker.AllowsHostNamespaces())
 		if err != nil {
 			return fmt.Errorf("failed to create docker proxy: %w", err)
 		}
