@@ -1,6 +1,8 @@
 package os_sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,5 +53,34 @@ func TestGenerateSBPLProfile_ConfinesWrites(t *testing.T) {
 	}
 	if denyIdx > allowIdx {
 		t.Errorf("write-confinement deny must come before workDir allow (deny at %d, allow at %d)\nprofile:\n%s", denyIdx, allowIdx, profile)
+	}
+}
+
+// TestGenerateSBPLProfile_ExtraBinds verifies that extra bind paths (runtime
+// dirs, configured writable_paths, worktree parents) get write-allow rules, and
+// that a symlinked bind also emits the resolved path — Seatbelt enforces on the
+// real path, so without the resolved rule writes through the symlink EPERM.
+func TestGenerateSBPLProfile_ExtraBinds(t *testing.T) {
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "real")
+	if err := os.Mkdir(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := generateSBPLProfile("/tmp/work", []string{link}, false, nil)
+
+	if want := `(allow file-write* (subpath "` + link + `"))`; !strings.Contains(profile, want) {
+		t.Errorf("SBPL profile missing extra bind allow %q\nprofile:\n%s", want, profile)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `(allow file-write* (subpath "` + resolved + `"))`; !strings.Contains(profile, want) {
+		t.Errorf("SBPL profile missing symlink-resolved extra bind allow %q\nprofile:\n%s", want, profile)
 	}
 }

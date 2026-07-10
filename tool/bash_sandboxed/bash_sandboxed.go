@@ -183,22 +183,23 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.worktreeParentCache = nil
 
 	// Store worker config for lazy start / restart.
-	blockAWSChanged := s.workerBlockAWS != blockAWSCredentials
 	s.workerWorkDir = workDir
 	s.workerBlockAWS = blockAWSCredentials
 
-	// Handle OS sandbox enable/disable. A live worker is also closed when the
-	// AWS credential mask changes: the mask is baked into the worker's mount
-	// setup at start time, so a stale worker would keep the old ~/.aws access.
-	// The next command lazily starts a replacement with the new settings.
+	// Close any live worker on every config update: the AWS credential mask,
+	// writable_paths, worktree-parent grant, runtime binds, and more are all
+	// baked into the worker's mount setup / SBPL profile at start time, so a
+	// stale worker would keep enforcing the old policy. Rather than tracking
+	// which of those inputs changed, recycle unconditionally — UpdateConfig only
+	// fires when the config actually changed, and the next command lazily starts
+	// a replacement with the new settings.
 	newOSSandbox := cfg.OSSandboxEnabled()
-	osSandboxChanged := newOSSandbox != s.osSandbox
-	if (osSandboxChanged || blockAWSChanged) && s.worker != nil {
-		slog.Info("closing existing worker")
+	if s.worker != nil {
+		slog.Info("closing existing worker after config update")
 		s.worker.Close()
 		s.worker = nil
 	}
-	if osSandboxChanged && newOSSandbox {
+	if newOSSandbox && !s.osSandbox {
 		slog.Info("enabling OS sandbox", "block_aws_credentials", blockAWSCredentials)
 	}
 	s.osSandbox = newOSSandbox
@@ -1493,8 +1494,28 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 	s.mu.Unlock()
 
-	// Resolve runtime binds outside the lock; this may run lazy detection.
-	runtimeBinds := s.RuntimeReadPaths()
+	// Resolve the worker's writable extra binds outside the lock; runtime
+	// detection may run lazily here. The worker is writable in the working
+	// directory by default; every other directory a command may legitimately
+	// write to must be added here or the OS sandbox denies the write (EPERM)
+	// even though the Go validator permitted it.
+	extraBinds := s.RuntimeReadPaths()
+
+	// User-configured writable_paths are enforced by the Go validator via
+	// Execute(..., writeAllowedPaths), but that only gates the interpreter — the
+	// OS sandbox worker has its own profile. Without adding them here, a write
+	// the validator allows is still denied by bwrap/seatbelt with EPERM.
+	extraBinds = append(extraBinds, s.ConfigWritePaths()...)
+
+	// Same for the main worktree when the session runs in a linked git worktree
+	// with git.allow_worktree_parent: git writes index/lock files under the main
+	// repo's .git/worktrees/<name>/, which is outside the worker's workDir.
+	s.mu.RLock()
+	workerWorkDir := s.workerWorkDir
+	s.mu.RUnlock()
+	if parent := s.WorktreeParentPath(workerWorkDir); parent != "" {
+		extraBinds = append(extraBinds, parent)
+	}
 
 	// Bind the docker proxy socket dir into the worker so sandboxed commands
 	// can reach the proxy via DOCKER_HOST, and mask the real daemon socket(s)
@@ -1507,7 +1528,7 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 	s.mu.RUnlock()
 	if dockerSocketDir != "" {
-		runtimeBinds = append(runtimeBinds, dockerSocketDir)
+		extraBinds = append(extraBinds, dockerSocketDir)
 	}
 
 	s.mu.Lock()
@@ -1517,7 +1538,7 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", s.workerBlockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, runtimeBinds, s.workerBlockAWS, dockerMaskPaths)
+	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, s.workerBlockAWS, dockerMaskPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}

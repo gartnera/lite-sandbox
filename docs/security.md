@@ -52,7 +52,7 @@ lite-sandbox config os-sandbox show
 The two backends use different mechanisms (bubblewrap mounts vs. SBPL rules) but
 enforce the same policy:
 
-- **Writes confined to the working directory** — Only the working directory (and its resolved symlink), configured `writable_paths`, and temp dirs are writable; everything else on the host is read-only.
+- **Writes confined to the working directory** — Only the working directory (and its resolved symlink), configured `writable_paths`, the main worktree when `git.allow_worktree_parent` is enabled and the working directory is a linked worktree, and temp dirs are writable; everything else on the host is read-only. Since these grants are baked into the sandbox profile at worker start, any config change recycles the worker so the new policy takes effect on the next command.
 - **Writable temp directories** — `/tmp` and the platform's other temporary directories are writable, as required for build caches and `TMPDIR`.
 - **Runtime bind mounts** — Additional writable paths are granted for enabled runtimes (e.g., `$GOPATH/bin` for Go).
 - **Network preserved** — Network access is left intact.
