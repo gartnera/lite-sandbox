@@ -385,9 +385,15 @@ func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredential
 		sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", resolvedWorkDir))
 	}
 
-	// Allow write access to extra bind paths (e.g., GOPATH)
+	// Allow write access to extra bind paths (e.g., GOPATH, configured
+	// writable_paths). As with workDir, Seatbelt enforces on the real path, so
+	// emit the symlink-resolved path too — otherwise a write to a symlinked bind
+	// (e.g. an fvm-managed SDK dir) is denied even though the rule "looks" right.
 	for _, path := range extraBinds {
 		sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", path))
+		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+			sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", resolved))
+		}
 	}
 
 	// Allow write access to system temp directories
