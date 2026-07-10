@@ -479,7 +479,11 @@ func sedNonPathArgIndices(args []string) map[int]bool {
 //   - Arguments following -e/--regexp are regex patterns (not file paths).
 //   - Arguments following -f/--file ARE file paths and must be path-checked.
 //   - Arguments following numeric-value flags (-m, -A, -B, -C, etc.) are numbers.
-//   - The first positional (non-flag) argument is the regex pattern (not a path).
+//   - -e/-f (and their --regexp=/--file= and embedded forms) supply the pattern,
+//     so when one is present the first positional is a file to search, not the
+//     pattern, and must be path-checked.
+//   - Otherwise the first positional (non-flag) argument is the regex pattern
+//     (not a path).
 //   - Subsequent positional arguments are file paths and must be path-checked.
 func grepNonPathArgIndices(args []string) map[int]bool {
 	skip := make(map[int]bool)
@@ -491,20 +495,29 @@ func grepNonPathArgIndices(args []string) map[int]bool {
 			// Everything after -- is a file path; stop skipping.
 			break
 		}
-		if strings.HasPrefix(arg, "-") {
-			switch arg {
-			case "-e", "--regexp":
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			switch {
+			case arg == "-e" || arg == "--regexp":
 				i++
 				if i < len(args) {
 					skip[i] = true // regex pattern value
 				}
 				patternSeen = true // -e supplies the pattern; next positional is a file
-			case "-f", "--file":
-				i++ // file path value — NOT skipped
-			case "-m", "--max-count",
-				"-A", "--after-context",
-				"-B", "--before-context",
-				"-C", "--context":
+			case arg == "-f" || arg == "--file":
+				i++                // file path value — NOT skipped
+				patternSeen = true // -f supplies the pattern; next positional is a file
+			case strings.HasPrefix(arg, "--regexp=") || strings.HasPrefix(arg, "-e") ||
+				strings.HasPrefix(arg, "--file=") || strings.HasPrefix(arg, "-f"):
+				// Embedded forms (-epat, --regexp=pat, -fFILE, --file=FILE) carry
+				// the pattern (or pattern file) in this same arg — no separate value
+				// follows. The flag still supplies the pattern, so the next
+				// positional is a file to search, not the pattern. The arg itself is
+				// left out of the skip set so any embedded path is still checked.
+				patternSeen = true
+			case arg == "-m" || arg == "--max-count" ||
+				arg == "-A" || arg == "--after-context" ||
+				arg == "-B" || arg == "--before-context" ||
+				arg == "-C" || arg == "--context":
 				i++ // numeric value — not a path, skip silently
 				if i < len(args) {
 					skip[i] = true
