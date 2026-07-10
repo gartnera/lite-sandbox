@@ -125,6 +125,140 @@ func TestValidate_Xargs(t *testing.T) {
 	}
 }
 
+// TestValidate_Env verifies that env recursively validates the command it
+// wraps, so it cannot be used as a five-character prefix to smuggle a
+// non-whitelisted command (env execs its child natively, bypassing the
+// interpreter's runtime hooks). NAME=VALUE assignments and env's own options
+// must be skipped without swallowing the wrapped command.
+func TestValidate_Env(t *testing.T) {
+	blocked := []struct {
+		name    string
+		command string
+		errMsg  string
+	}{
+		{"env curl", `env curl --version`, `command "curl" is not allowed`},
+		{"env assignment curl", `env FOO=bar curl x`, `command "curl" is not allowed`},
+		{"env -i curl", `env -i curl x`, `command "curl" is not allowed`},
+		{"env -u curl", `env -u PATH curl x`, `command "curl" is not allowed`},
+		{"env -uNAME curl", `env -uPATH curl x`, `command "curl" is not allowed`},
+		{"env --unset= curl", `env --unset=PATH curl x`, `command "curl" is not allowed`},
+		{"env --unset NAME curl", `env --unset PATH curl x`, `command "curl" is not allowed`},
+		{"env -C dir curl", `env -C /tmp curl x`, `command "curl" is not allowed`},
+		{"env -- curl", `env -- curl x`, `command "curl" is not allowed`},
+		{"env expansion value curl", `env FOO=$BAR curl x`, `command "curl" is not allowed`},
+		{"env env curl", `env env curl x`, `command "curl" is not allowed`},
+		{"env timeout curl", `env timeout 5 curl x`, `command "curl" is not allowed`},
+		{"env sh -c", `env sh -c 'id'`, `not allowed as a wrapped subcommand`},
+		{"env bash -c", `env bash -c 'id'`, `not allowed as a wrapped subcommand`},
+		{"env awk", `env awk 'BEGIN{system("id")}'`, `not allowed as a wrapped subcommand`},
+		{"env time", `env time curl x`, `not allowed as a wrapped subcommand`},
+		{"env -S separate", `env -S 'curl x'`, `--split-string is not allowed`},
+		{"env -iS", `env -iS 'curl x'`, `--split-string is not allowed`},
+	}
+	for _, tt := range blocked {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = newTestSandbox().validate(f)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.errMsg) {
+				t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
+			}
+		})
+	}
+
+	allowed := []struct {
+		name    string
+		command string
+	}{
+		{"env no command", `env`},
+		{"env -i only", `env -i`},
+		{"env assignment only", `env FOO=bar`},
+		{"env assignment grep", `env FOO=bar grep x file`},
+		{"env grep", `env grep pattern file`},
+		{"env -u ls", `env -u PATH ls`},
+		{"env -- cat", `env -- cat file`},
+		{"env cat", `env cat file`},
+		{"env expansion value grep", `env FOO=$BAR grep x file`},
+		{"env timeout grep", `env timeout 5 grep x file`},
+	}
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := newTestSandbox().validate(f); err != nil {
+				t.Fatalf("expected command to be allowed, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidate_Timeout verifies that timeout recursively validates the command
+// it wraps after skipping its options and the mandatory DURATION operand.
+func TestValidate_Timeout(t *testing.T) {
+	blocked := []struct {
+		name    string
+		command string
+		errMsg  string
+	}{
+		{"timeout curl", `timeout 5 curl x`, `command "curl" is not allowed`},
+		{"timeout suffix curl", `timeout 5s curl x`, `command "curl" is not allowed`},
+		{"timeout -k curl", `timeout -k 3 5 curl x`, `command "curl" is not allowed`},
+		{"timeout -kN curl", `timeout -k3 5 curl x`, `command "curl" is not allowed`},
+		{"timeout --kill-after curl", `timeout --kill-after=3 5 curl x`, `command "curl" is not allowed`},
+		{"timeout -s curl", `timeout -s KILL 5 curl x`, `command "curl" is not allowed`},
+		{"timeout --signal curl", `timeout --signal=KILL 5 curl x`, `command "curl" is not allowed`},
+		{"timeout --preserve-status curl", `timeout --preserve-status 5 curl x`, `command "curl" is not allowed`},
+		{"timeout -- curl", `timeout -- 5 curl x`, `command "curl" is not allowed`},
+		{"timeout env curl", `timeout 5 env curl x`, `command "curl" is not allowed`},
+		{"timeout sh -c", `timeout 5 sh -c 'id'`, `not allowed as a wrapped subcommand`},
+		{"timeout time", `timeout 5 time curl x`, `not allowed as a wrapped subcommand`},
+	}
+	for _, tt := range blocked {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = newTestSandbox().validate(f)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.errMsg) {
+				t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
+			}
+		})
+	}
+
+	allowed := []struct {
+		name    string
+		command string
+	}{
+		{"timeout grep", `timeout 5 grep x file`},
+		{"timeout no args", `timeout`},
+		{"timeout duration only", `timeout 5`},
+		{"timeout -k cat", `timeout -k 3 5 cat file`},
+		{"timeout env grep", `timeout 5 env grep x file`},
+	}
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := newTestSandbox().validate(f); err != nil {
+				t.Fatalf("expected command to be allowed, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidate_RecursiveFindAndXargs(t *testing.T) {
 	allowed := []struct {
 		name    string
@@ -214,7 +348,7 @@ func TestValidate_BlockedSubCommandShells(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected validation error for shell subcommand via find/xargs")
 			}
-			if !strings.Contains(err.Error(), "not allowed as a find -exec or xargs subcommand") {
+			if !strings.Contains(err.Error(), "not allowed as a wrapped subcommand") {
 				t.Fatalf("expected subcommand denylist error, got %q", err.Error())
 			}
 		})

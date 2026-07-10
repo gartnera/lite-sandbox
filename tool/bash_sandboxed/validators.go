@@ -107,26 +107,32 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
-// subCommandDenylist names commands that are unsafe to invoke via find -exec
-// or xargs because their sandbox safety relies on runtime hooks that only
-// fire when the sandbox interpreter is the direct caller:
+// subCommandDenylist names commands that are unsafe to invoke via a command
+// wrapper (find -exec, xargs, env, timeout) because their sandbox safety relies
+// on the sandbox interpreter being the direct caller:
 //   - bash, sh: validateBashArgs explicitly defers -c content validation to
 //     executeBash, which only runs when the sandbox interp invokes them.
 //   - awk: executeAwk swaps the binary for goawk with NoExec/NoFileWrites,
-//     but find/xargs spawn the system awk that has system() etc.
+//     but the wrapper spawns the system awk that has system() etc.
+//   - time: at the top level `time` is a shell keyword (a TimeClause whose
+//     inner command is walked and validated); as a real /usr/bin/time exec it
+//     is instead a command wrapper of its own (and -o can write files), so a
+//     wrapper reaching it would run its child command unvalidated.
 //
-// When find or xargs spawns these as native processes, the runtime hooks are
-// bypassed entirely, so the -c / awk program would execute unvalidated.
+// When a wrapper spawns these as native processes, the interpreter's hooks are
+// bypassed entirely, so the -c / awk program / wrapped command would execute
+// unvalidated.
 var subCommandDenylist = map[string]bool{
 	"bash": true,
 	"sh":   true,
 	"awk":  true,
+	"time": true,
 }
 
 // validateSubCommand validates a command name and its arguments against the
 // whitelist, including any per-command argument validators. args[0] must be
 // the command name. Used for recursive validation of commands embedded in
-// find -exec and xargs.
+// find -exec, xargs, env, and timeout.
 func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if len(args) == 0 {
 		return fmt.Errorf("empty command")
@@ -136,7 +142,7 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 		return fmt.Errorf("dynamic command names are not allowed")
 	}
 	if subCommandDenylist[cmdName] {
-		return fmt.Errorf("command %q is not allowed as a find -exec or xargs subcommand", cmdName)
+		return fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName)
 	}
 	extra := s.getExtraCommands()
 	if !allowedCommands[cmdName] && !extra[cmdName] {
@@ -199,6 +205,202 @@ func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
 	}
 	// No explicit command — xargs defaults to echo, which is safe
 	return nil
+}
+
+// wordLeadingLit returns the maximal literal prefix of a word: the text of its
+// leading *syntax.Lit parts up to the first non-literal part. For "FOO=$BAR"
+// this is "FOO="; for "$CMD" it is "". Used to recognize env NAME=VALUE
+// operands even when the VALUE is a non-literal expansion.
+func wordLeadingLit(w *syntax.Word) string {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		lit, ok := part.(*syntax.Lit)
+		if !ok {
+			break
+		}
+		b.WriteString(lit.Value)
+	}
+	return b.String()
+}
+
+// isEnvAssignment reports whether lit is an env NAME=VALUE operand, i.e. a
+// valid shell identifier followed by '='. env treats such operands as variable
+// assignments; the first operand that is not one is the COMMAND.
+func isEnvAssignment(lit string) bool {
+	eq := strings.IndexByte(lit, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i := 0; i < eq; i++ {
+		c := lit[i]
+		switch {
+		case c == '_':
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case i > 0 && c >= '0' && c <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// envConsumingShortFlags are env short options that consume the following
+// argument as their value when written separately (e.g. -u NAME, -C DIR).
+var envConsumingShortFlags = map[byte]bool{
+	'u': true, // --unset=NAME
+	'C': true, // --chdir=DIR
+}
+
+// errEnvSplitString is returned when env is invoked with -S/--split-string.
+// That option builds a whole argv from a single string (intended for shebang
+// lines), which would smuggle an otherwise-blocked command past validation, so
+// it is rejected outright.
+func errEnvSplitString() error {
+	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
+}
+
+// validateEnvArgs validates env by skipping its options and NAME=VALUE
+// assignments, then recursively validating the wrapped COMMAND against the
+// whitelist. env execs COMMAND as a child that never re-enters the sandbox
+// interpreter, so without this an otherwise-blocked command (curl, sh -c, ...)
+// would run unvalidated. With no COMMAND, env merely prints the environment,
+// which is safe.
+func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
+	i := 1 // skip "env"
+	for i < len(args) {
+		lit := args[i].Lit()
+		// A lone "-" means "-i" (start with an empty environment), not a command.
+		if lit == "-" {
+			i++
+			continue
+		}
+		// End-of-options marker: everything after is the command and its args.
+		if lit == "--" {
+			i++
+			if i < len(args) {
+				return validateSubCommand(s, args[i:])
+			}
+			return nil
+		}
+		if strings.HasPrefix(lit, "--") {
+			name := lit[2:]
+			hasInlineValue := false
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+				hasInlineValue = true
+			}
+			if name == "split-string" {
+				return errEnvSplitString()
+			}
+			if !hasInlineValue && (name == "unset" || name == "chdir") {
+				i += 2 // consumes the following value argument
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(lit, "-") {
+			// Short option cluster, e.g. "-i", "-iu", "-uNAME", "-S...".
+			body := lit[1:]
+			consumesNext := false
+			for j := 0; j < len(body); j++ {
+				c := body[j]
+				if c == 'S' {
+					return errEnvSplitString()
+				}
+				if envConsumingShortFlags[c] {
+					// The value is the remainder of this token, or the next arg.
+					if j == len(body)-1 {
+						consumesNext = true
+					}
+					break
+				}
+			}
+			if consumesNext {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		// Not an option. A NAME=VALUE operand sets a variable; keep scanning.
+		// wordLeadingLit handles values that are non-literal expansions
+		// (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
+		if isEnvAssignment(wordLeadingLit(args[i])) {
+			i++
+			continue
+		}
+		// First non-option, non-assignment operand: the COMMAND.
+		return validateSubCommand(s, args[i:])
+	}
+	// No COMMAND: env merely prints the environment, which is safe.
+	return nil
+}
+
+// timeoutConsumingShortFlags are timeout short options that consume the
+// following argument as their value when written separately.
+var timeoutConsumingShortFlags = map[byte]bool{
+	'k': true, // --kill-after=DURATION
+	's': true, // --signal=SIGNAL
+}
+
+// validateTimeoutArgs validates timeout by skipping its options and the
+// mandatory DURATION operand, then recursively validating the wrapped COMMAND
+// against the whitelist. Like env, timeout execs COMMAND as a native child
+// that never re-enters the sandbox interpreter, so the command must be
+// validated here. With no COMMAND, there is nothing to run.
+func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
+	i := 1 // skip "timeout"
+	for i < len(args) {
+		lit := args[i].Lit()
+		// End-of-options marker: the next operand is DURATION.
+		if lit == "--" {
+			i++
+			break
+		}
+		if strings.HasPrefix(lit, "--") {
+			name := lit[2:]
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				i++
+				continue
+			}
+			if name == "kill-after" || name == "signal" {
+				i += 2 // consumes the following value argument
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(lit, "-") && lit != "-" {
+			body := lit[1:]
+			consumesNext := false
+			for j := 0; j < len(body); j++ {
+				if timeoutConsumingShortFlags[body[j]] {
+					if j == len(body)-1 {
+						consumesNext = true
+					}
+					break
+				}
+			}
+			if consumesNext {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		// First non-option token is the DURATION operand.
+		break
+	}
+	if i >= len(args) {
+		return nil // no DURATION/COMMAND — timeout will error at runtime
+	}
+	i++ // skip DURATION
+	if i >= len(args) {
+		return nil // DURATION but no COMMAND
+	}
+	return validateSubCommand(s, args[i:])
 }
 
 // blockedTarOps lists tar operation flags that are not read-only.
