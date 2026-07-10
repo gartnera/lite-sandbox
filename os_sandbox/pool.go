@@ -189,74 +189,36 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "linux":
-		// Build bwrap command
-		// Strategy: bind root read-only, add writable tmpfs for /tmp, add runtime binds, then rebind workDir as writable
-		// The order matters: later mounts can override earlier ones, so workDir bind comes last
-		// and will override the tmpfs if workDir is under /tmp (e.g., in tests)
-		// --ro-bind / / : read-only root filesystem
-		// --tmpfs /tmp : writable /tmp (needed by Go and other tools for build cache)
-		// --tmpfs <credential-dir> : empty overlay to block credential access
-		// --bind <runtime-path> <runtime-path> : writable runtime directories (GOPATH, etc.)
-		// --bind <cwd> <cwd> : writable current working directory (overrides tmpfs if under /tmp)
-		// --dev /dev : fresh devtmpfs
-		// --proc /proc : fresh procfs
-		// --unshare-all --share-net : unshare everything except network
-		// --die-with-parent : kill worker if parent dies
-		// --chdir <cwd> : start in working directory
-		args := []string{
-			"--ro-bind", "/", "/",
-			"--tmpfs", "/tmp",
-		}
-
-		// Block credential files/directories with overlays
-		homeDir, err := os.UserHomeDir()
-		if err == nil {
-			// Block SSH private keys but allow known_hosts and config
-			sshDir := filepath.Join(homeDir, ".ssh")
-			for _, keyPath := range getSSHPrivateKeyPaths(sshDir) {
-				args = append(args, "--ro-bind", "/dev/null", keyPath)
-			}
-
-			// Conditionally block ~/.aws
-			if blockAWSCredentials {
-				awsDir := filepath.Join(homeDir, ".aws")
-				if _, err := os.Stat(awsDir); err == nil {
-					args = append(args, "--tmpfs", awsDir)
-				}
-			}
-		}
-
-		// Mask broker sockets (e.g. the real /var/run/docker.sock) so the only
-		// reachable daemon is the proxy whose socket dir is bind-mounted via
-		// extraBinds. Overlaying /dev/null turns the path into a char device, so
-		// connect() fails — defeating `unset DOCKER_HOST`/`-H` style bypasses.
-		for _, p := range maskPaths {
-			args = append(args, "--ro-bind", "/dev/null", p)
-		}
-
-		// Add runtime bind mounts (e.g., GOPATH for Go runtime)
+		// Create runtime bind dirs up front and keep the ones that exist; a
+		// path we can't create can't be bind-mounted, so drop it.
+		var binds []string
 		for _, path := range extraBinds {
-			// Create the directory if it doesn't exist
 			if err := os.MkdirAll(path, 0755); err != nil {
 				slog.WarnContext(ctx, "failed to create runtime bind path", "path", path, "error", err)
 				continue
 			}
-			args = append(args, "--bind", path, path)
+			binds = append(binds, path)
 		}
 
-		// Add workDir bind and remaining args
-		args = append(args,
-			"--bind", realWorkDir, realWorkDir,
-			"--dev", "/dev",
-			"--proc", "/proc",
-			"--unshare-all",
-			"--share-net",
-			"--die-with-parent",
-			"--chdir", realWorkDir,
-			"--",
-			self, "sandbox-worker",
-		)
+		// Gather the credential/socket masks. These are applied last (see
+		// buildBwrapArgs) so an overlapping writable bind cannot re-expose them.
+		var sshKeyPaths []string
+		var awsTmpfsDir string
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			// Block SSH private keys but allow known_hosts and config.
+			sshKeyPaths = getSSHPrivateKeyPaths(filepath.Join(homeDir, ".ssh"))
 
+			// Conditionally block ~/.aws (only if it exists).
+			if blockAWSCredentials {
+				awsDir := filepath.Join(homeDir, ".aws")
+				if _, err := os.Stat(awsDir); err == nil {
+					awsTmpfsDir = awsDir
+				}
+			}
+		}
+
+		args := buildBwrapArgs(self, realWorkDir, binds, sshKeyPaths, maskPaths, awsTmpfsDir)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
 
 	case "darwin":
@@ -327,6 +289,69 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 	go w.runDispatcher()
 
 	return w, nil
+}
+
+// buildBwrapArgs assembles the ordered bwrap argument list for the Linux
+// sandbox worker.
+//
+// The invariant that makes this secure is ORDERING: bwrap applies mounts in the
+// order given and a later overlapping mount wins. All writable binds (the extra
+// runtime/writable_paths binds and the workDir bind) are emitted first; the
+// credential and broker-socket masks are emitted AFTER them. If a mask were
+// emitted before an overlapping bind — e.g. workDir under $HOME, or
+// writable_paths containing "~" which binds $HOME writable — the bind would
+// override the mask and re-expose ~/.ssh private keys, ~/.aws, or a broker
+// socket, silently breaking the "always denied" guarantee. Masking last closes
+// that hole regardless of what the binds cover.
+//
+//   - --ro-bind / / : read-only root filesystem
+//   - --tmpfs /tmp : writable /tmp (Go and other tools need it for build cache)
+//   - --bind <path> <path> : writable runtime/config directories
+//   - --bind <workDir> <workDir> : writable working directory (overrides the
+//     /tmp tmpfs when workDir is under /tmp, e.g. in tests)
+//   - --ro-bind /dev/null <ssh-key> : mask each SSH private key
+//   - --tmpfs <~/.aws> : empty overlay hiding AWS credentials
+//   - --ro-bind /dev/null <socket> : mask broker sockets (e.g. the real
+//     /var/run/docker.sock); overlaying /dev/null turns the path into a char
+//     device so connect() fails, defeating `unset DOCKER_HOST`/`-H` bypasses
+//   - --dev /dev / --proc /proc : fresh devtmpfs and procfs
+//   - --unshare-all --share-net : unshare everything except the network
+//   - --die-with-parent : kill the worker if the parent dies
+//   - --chdir <workDir> : start in the working directory
+func buildBwrapArgs(self, realWorkDir string, binds, sshKeyPaths, maskPaths []string, awsTmpfsDir string) []string {
+	args := []string{
+		"--ro-bind", "/", "/",
+		"--tmpfs", "/tmp",
+	}
+
+	// Writable binds first, so the masks below can override any overlap.
+	for _, path := range binds {
+		args = append(args, "--bind", path, path)
+	}
+	args = append(args, "--bind", realWorkDir, realWorkDir)
+
+	// Credential/socket masks last: no later mount may override them.
+	for _, keyPath := range sshKeyPaths {
+		args = append(args, "--ro-bind", "/dev/null", keyPath)
+	}
+	if awsTmpfsDir != "" {
+		args = append(args, "--tmpfs", awsTmpfsDir)
+	}
+	for _, p := range maskPaths {
+		args = append(args, "--ro-bind", "/dev/null", p)
+	}
+
+	args = append(args,
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--unshare-all",
+		"--share-net",
+		"--die-with-parent",
+		"--chdir", realWorkDir,
+		"--",
+		self, "sandbox-worker",
+	)
+	return args
 }
 
 // generateSBPLProfile generates a Scheme-based sandbox profile for macOS sandbox-exec.
