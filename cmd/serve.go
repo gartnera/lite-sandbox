@@ -214,10 +214,14 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 // sandboxPaths computes the read- and write-allowed path lists for a command
 // executed from cwd, combining the working directory, detected runtime paths,
-// user-configured paths, and any git worktree parent.
+// user-configured paths, and any git worktree parent. Writable paths are also
+// readable, so they are folded into the read set. This is the single source of
+// truth shared with the PreToolUse hook (cmd/hook.go) so the bash tool and the
+// built-in file tools enforce the same boundary.
 func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
 	readPaths = append([]string{cwd}, sandbox.RuntimeReadPaths()...)
 	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
+	readPaths = append(readPaths, sandbox.ConfigWritePaths()...)
 	writePaths = append([]string{cwd}, sandbox.ConfigWritePaths()...)
 	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
 		readPaths = append(readPaths, parent)

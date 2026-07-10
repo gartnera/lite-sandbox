@@ -2,10 +2,13 @@ package cmd
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -451,5 +454,31 @@ func TestBashSandboxedTool_NegativeTimeout(t *testing.T) {
 				t.Fatalf("expected positive timeout error message, got: %q", text.Text)
 			}
 		}
+	}
+}
+
+// TestSandboxPaths_WritableIsReadable guards against the bash tool and the
+// PreToolUse hook disagreeing about whether a configured writable path is also
+// readable. Both now share sandboxPaths, so a writable path must appear in the
+// read set (otherwise `cat /granted/writable/f` would be denied in bash but
+// allowed for the built-in file tools).
+func TestSandboxPaths_WritableIsReadable(t *testing.T) {
+	sb := bash_sandboxed.NewSandbox()
+	defer sb.Close()
+	sb.UpdateConfig(&config.Config{
+		WritablePaths: []string{"/granted/writable"},
+		ReadablePaths: []string{"/granted/readable"},
+	}, "/work")
+
+	readPaths, writePaths := sandboxPaths(sb, "/work")
+
+	if !slices.Contains(writePaths, "/granted/writable") {
+		t.Fatalf("expected writable path in writePaths, got %v", writePaths)
+	}
+	if !slices.Contains(readPaths, "/granted/writable") {
+		t.Fatalf("writable path must also be readable; readPaths=%v", readPaths)
+	}
+	if !slices.Contains(readPaths, "/granted/readable") {
+		t.Fatalf("expected readable path in readPaths, got %v", readPaths)
 	}
 }
