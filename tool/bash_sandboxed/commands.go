@@ -14,7 +14,7 @@ import (
 //   - Archive write: gzip, etc. (arbitrary file writes to sensitive locations)
 //   - tar, unzip, ar are allowed with arg validators restricting to read-only operations
 //   - Shell escape: eval, exec, source (bypass command whitelist)
-//   - xargs is allowed with an arg validator that recursively validates the embedded command
+//   - xargs, env, timeout are allowed with arg validators that recursively validate the wrapped command
 //   - Version control: gh (can execute hooks, fetch remote code)
 //   - git is allowed with arg validator restricting to read-only subcommands
 //   - Package managers: npm, pip, cargo, etc. (arbitrary code execution via install scripts)
@@ -133,7 +133,7 @@ var allowedCommands = map[string]bool{
 	"whoami":   true,
 	"id":       true,
 	"groups":   true,
-	"env":      true,
+	"env":      true, // arg validator recursively validates the wrapped command
 	"printenv": true,
 	"date":     true,
 	"cal":      true,
@@ -198,7 +198,7 @@ var allowedCommands = map[string]bool{
 	"exit":     true,
 	"break":    true,
 	"continue": true,
-	"timeout":  true,
+	"timeout":  true, // arg validator recursively validates the wrapped command
 	"time":     true,
 	"yes":      true,
 
@@ -249,28 +249,30 @@ var writeCommands = map[string]bool{
 // validator here to block those flags while still allowing the command itself.
 // Validators receive the *Sandbox so they can access config (e.g., runtimes, git).
 var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	"awk":    validateAwkArgs,
-	"bash":   validateBashCommand,
-	"sh":     validateBashCommand,
-	"source": validateSourceCommand,
-	".":      validateSourceCommand,
-	"rg":     validateRgArgs,
-	"find":   validateFindArgs,
-	"tar":    validateTarArgs,
-	"unzip":  validateUnzipArgs,
-	"ar":     validateArArgs,
-	"rm":     validateRmArgs,
-	"sed":    validateSedArgs,
-	"git":    validateGitCommand,
-	"go":     validateGoCommand,
-	"gofmt":  validateGofmtCommand,
-	"pnpm":   validatePnpmCommand,
-	"cargo":  validateCargoCommand,
-	"rustc":  validateRustcCommand,
-	"deno":   validateDenoCommand,
-	"aws":    validateAWSCommand,
-	"docker": validateDockerCommand,
-	"xargs":  validateXargsArgs,
+	"awk":     validateAwkArgs,
+	"bash":    validateBashCommand,
+	"sh":      validateBashCommand,
+	"source":  validateSourceCommand,
+	".":       validateSourceCommand,
+	"rg":      validateRgArgs,
+	"find":    validateFindArgs,
+	"tar":     validateTarArgs,
+	"unzip":   validateUnzipArgs,
+	"ar":      validateArArgs,
+	"rm":      validateRmArgs,
+	"sed":     validateSedArgs,
+	"git":     validateGitCommand,
+	"go":      validateGoCommand,
+	"gofmt":   validateGofmtCommand,
+	"pnpm":    validatePnpmCommand,
+	"cargo":   validateCargoCommand,
+	"rustc":   validateRustcCommand,
+	"deno":    validateDenoCommand,
+	"aws":     validateAWSCommand,
+	"docker":  validateDockerCommand,
+	"xargs":   validateXargsArgs,
+	"env":     validateEnvArgs,
+	"timeout": validateTimeoutArgs,
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
