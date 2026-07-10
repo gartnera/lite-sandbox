@@ -824,6 +824,12 @@ func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
 		// File args for grep SHOULD be path-checked
 		{"grep pattern .git/config blocked", []string{"grep", "pattern", ".git/config"}, true, "accesses .git directory"},
 		{"grep -e pat .git/config blocked", []string{"grep", "-e", "pat", ".git/config"}, true, "accesses .git directory"},
+		// -f supplies the pattern from a file; the following positional is a file arg
+		// and MUST be path-checked (regression: it was misclassified as the pattern).
+		{"grep -f patfile .git/config blocked", []string{"grep", "-f", "patfile", ".git/config"}, true, "accesses .git directory"},
+		{"grep --file=patfile .git/config blocked", []string{"grep", "--file=patfile", ".git/config"}, true, "accesses .git directory"},
+		{"grep -fpatfile .git/config blocked", []string{"grep", "-fpatfile", ".git/config"}, true, "accesses .git directory"},
+		{"grep --regexp=pat .git/config blocked", []string{"grep", "--regexp=pat", ".git/config"}, true, "accesses .git directory"},
 		// Non-grep commands still block .git/ args
 		{"cat .git/ blocked", []string{"cat", ".git/"}, true, "accesses .git directory"},
 		{"ls .git blocked", []string{"ls", ".git"}, true, "accesses .git directory"},
