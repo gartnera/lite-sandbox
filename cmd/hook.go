@@ -145,7 +145,7 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 
 	sb := configuredSandbox(cwd)
 	defer sb.Close()
-	readPaths, writePaths := computeSandboxPaths(sb, cwd)
+	readPaths, writePaths := sandboxPaths(sb, cwd)
 
 	if err := sb.ValidateCommand(in.Command, cwd, readPaths, writePaths); err != nil {
 		reason := fmt.Sprintf(
@@ -265,7 +265,7 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bo
 
 	// Outside the cheap set: compute the full boundary, which adds detected
 	// runtime paths (read side) and the worktree parent before deciding.
-	readPaths, writePaths := computeSandboxPaths(sb, cwd)
+	readPaths, writePaths := sandboxPaths(sb, cwd)
 	allowed := readPaths
 	boundary := "readable"
 	if write {
@@ -318,21 +318,4 @@ func configuredSandbox(cwd string) *bash_sandboxed.Sandbox {
 		sb.UpdateConfig(cfg, cwd)
 	}
 	return sb
-}
-
-// computeSandboxPaths derives the readable and writable path sets from an
-// already-configured sandbox. Writable paths are also readable, so they are
-// folded into the read set.
-func computeSandboxPaths(sb *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
-	readPaths = append([]string{cwd}, sb.RuntimeReadPaths()...)
-	readPaths = append(readPaths, sb.ConfigReadPaths()...)
-	readPaths = append(readPaths, sb.ConfigWritePaths()...)
-
-	writePaths = append([]string{cwd}, sb.ConfigWritePaths()...)
-
-	if parent := sb.WorktreeParentPath(cwd); parent != "" {
-		readPaths = append(readPaths, parent)
-		writePaths = append(writePaths, parent)
-	}
-	return readPaths, writePaths
 }
