@@ -417,6 +417,16 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 		binds = append(binds, flutterBinds...)
 	}
 
+	// Detect uv paths if uv runtime is enabled. `uv cache dir` (and friends)
+	// shell out, so results are persisted across processes (see runtime_cache.go).
+	if runtimes.Uv != nil && runtimes.Uv.UvEnabled() {
+		uvBinds := cachedDetect("uv", []string{
+			"UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR",
+			"XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_BIN_HOME", "HOME",
+		}, detectUvBinds)
+		binds = append(binds, uvBinds...)
+	}
+
 	return binds
 }
 
@@ -543,6 +553,53 @@ func detectDenoBinds() []string {
 
 	if len(paths) > 0 {
 		slog.Info("detected Deno runtime paths", "paths", paths)
+	}
+
+	return paths
+}
+
+// detectUvBinds detects the uv (Python package manager) paths that need to be
+// writable. uv downloads and builds wheels into its cache, installs Python
+// interpreters, and stores tool environments; all live outside the working
+// directory, so they must be bound in for uv to function under the OS sandbox:
+//   - `uv cache dir`  — the package/wheel cache (default ~/.cache/uv)
+//   - `uv python dir` — uv-managed Python interpreters (default ~/.local/share/uv/python)
+//   - `uv tool dir`   — tool environments from `uv tool install` (default ~/.local/share/uv/tools)
+//
+// The tool *bin* directory (`uv tool dir --bin`, default ~/.local/bin) is
+// deliberately NOT bound: it lives on the user's PATH, so binding it writable
+// would let a sandboxed command install executables that persist and run
+// outside the sandbox boundary. `uv tool install` therefore cannot place its
+// launcher and fails, which is the intended restriction; `uvx` (ephemeral tool
+// runs cached under `uv cache dir`) still works.
+//
+// Like Deno, uv creates these lazily on first use, so they frequently do not
+// exist yet. We create them up front because a bind-mount source must exist for
+// the OS sandbox to mount it, and the sandbox cannot create the directory
+// itself (its parent is not bound).
+func detectUvBinds() []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, sub := range [][]string{
+		{"cache", "dir"},
+		{"python", "dir"},
+		{"tool", "dir"},
+	} {
+		cmd := exec.Command("uv", sub...)
+		output, err := cmd.Output()
+		if err != nil {
+			slog.Warn("failed to detect uv path", "subcommand", strings.Join(sub, " "), "error", err)
+			continue
+		}
+		dir := strings.TrimSpace(string(output))
+		if p := ensureDir(dir); p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+
+	if len(paths) > 0 {
+		slog.Info("detected uv runtime paths", "paths", paths)
 	}
 
 	return paths

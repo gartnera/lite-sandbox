@@ -1,7 +1,7 @@
 # Runtime Support
 
 Code execution runtimes are disabled by default and can be enabled individually
-via config. This page covers Go, pnpm, Rust, Deno, and Flutter.
+via config. This page covers Go, pnpm, Rust, Deno, Flutter, and uv.
 
 ## Go Runtime Support
 
@@ -194,3 +194,59 @@ Flutter is a code-execution runtime: like Go, Rust, and Deno, its containment
 relies on the OS sandbox confining writes to the working directory and the
 detected runtime paths, rather than on per-argument validation. Once enabled,
 all `flutter`/`dart`/`fvm` subcommands are permitted.
+
+## uv Runtime Support
+
+[uv](https://docs.astral.sh/uv/) commands (`uv`, `uvx`) are disabled by default.
+Enable them via config:
+
+```yaml
+runtimes:
+  uv:
+    enabled: true   # Allow uv sync, add, run, pip, venv, build, tool, etc. (default: false)
+    publish: false  # Allow uv publish (default: false)
+```
+
+Enable uv via CLI:
+
+```bash
+# Enable uv commands
+lite-sandbox config runtimes uv enable
+
+# Enable with publish permission
+lite-sandbox config runtimes uv enable --with-publish
+
+# Show current uv configuration
+lite-sandbox config runtimes uv show
+```
+
+Enabling the uv runtime automatically detects and grants access to the paths uv
+needs outside the working directory (the same mechanism used for Go's `$GOPATH`).
+These are discovered by shelling out to uv and confined so uv can populate them:
+
+- `uv cache dir` — the package/wheel cache (default `~/.cache/uv`)
+- `uv python dir` — uv-managed Python interpreters (default `~/.local/share/uv/python`)
+- `uv tool dir` — tool environments from `uv tool install` (default `~/.local/share/uv/tools`)
+
+The tool *bin* directory (`uv tool dir --bin`, default `~/.local/bin`) is
+deliberately left unbound: it sits on the user's `PATH`, so granting write
+access would let a sandboxed command install executables that persist and run
+outside the sandbox. As a result `uv tool install` cannot place its launcher and
+fails; use `uvx` (ephemeral tool runs, cached under `uv cache dir`) instead.
+
+uv runtime commands enable safe Python development workflows:
+
+```bash
+uv init
+uv add requests
+uv sync
+uv run main.py
+uv pip install flask
+uvx ruff check
+```
+
+Security features:
+- `uv publish` requires explicit opt-in since it uploads distributions to a
+  package index (shared state)
+- `uv self update` is blocked — it downloads and overwrites the uv executable in
+  place (an unsandboxable modification of the tool itself, like `deno upgrade`)
