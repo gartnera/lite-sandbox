@@ -67,6 +67,13 @@ var runtimesShowCmd = &cobra.Command{
 			fmt.Printf("    allow_network: %v\n", false)
 			fmt.Printf("    allow_import:  %v\n", true)
 		}
+		if cfg.Runtimes.Flutter != nil {
+			fmt.Println("  flutter:")
+			fmt.Printf("    enabled: %v\n", cfg.Runtimes.Flutter.FlutterEnabled())
+		} else {
+			fmt.Println("  flutter: (defaults)")
+			fmt.Printf("    enabled: %v\n", false)
+		}
 		return nil
 	},
 }
@@ -508,6 +515,83 @@ var denoRuntimeDisableCmd = &cobra.Command{
 	},
 }
 
+// Flutter runtime commands
+var flutterRuntimeCmd = &cobra.Command{
+	Use:   "flutter",
+	Short: "Manage Flutter runtime permission settings (flutter, dart, fvm)",
+}
+
+var flutterRuntimeShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show current Flutter runtime permission settings",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		f := &config.FlutterConfig{}
+		if cfg.Runtimes != nil && cfg.Runtimes.Flutter != nil {
+			f = cfg.Runtimes.Flutter
+		}
+		fmt.Printf("enabled: %v\n", f.FlutterEnabled())
+		return nil
+	},
+}
+
+var flutterRuntimeEnableCmd = &cobra.Command{
+	Use:   "enable",
+	Short: "Enable Flutter runtime commands (flutter, dart, fvm)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Runtimes == nil {
+			cfg.Runtimes = &config.RuntimesConfig{}
+		}
+		if cfg.Runtimes.Flutter == nil {
+			cfg.Runtimes.Flutter = &config.FlutterConfig{}
+		}
+
+		trueVal := true
+		cfg.Runtimes.Flutter.Enabled = &trueVal
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("runtimes.flutter.enabled set to true")
+		return nil
+	},
+}
+
+var flutterRuntimeDisableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Disable Flutter runtime commands",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Runtimes == nil {
+			cfg.Runtimes = &config.RuntimesConfig{}
+		}
+		if cfg.Runtimes.Flutter == nil {
+			cfg.Runtimes.Flutter = &config.FlutterConfig{}
+		}
+
+		falseVal := false
+		cfg.Runtimes.Flutter.Enabled = &falseVal
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("runtimes.flutter.enabled set to false")
+		return nil
+	},
+}
+
 func init() {
 	// Add --with-generate flag to enable/disable commands
 	goRuntimeEnableCmd.Flags().Bool("with-generate", false, "Also enable go generate")
@@ -551,12 +635,18 @@ func init() {
 	denoRuntimeCmd.AddCommand(denoRuntimeEnableCmd)
 	denoRuntimeCmd.AddCommand(denoRuntimeDisableCmd)
 
+	// Add flutter subcommands
+	flutterRuntimeCmd.AddCommand(flutterRuntimeShowCmd)
+	flutterRuntimeCmd.AddCommand(flutterRuntimeEnableCmd)
+	flutterRuntimeCmd.AddCommand(flutterRuntimeDisableCmd)
+
 	// Add runtimes subcommands
 	runtimesCmd.AddCommand(runtimesShowCmd)
 	runtimesCmd.AddCommand(goRuntimeCmd)
 	runtimesCmd.AddCommand(pnpmRuntimeCmd)
 	runtimesCmd.AddCommand(rustRuntimeCmd)
 	runtimesCmd.AddCommand(denoRuntimeCmd)
+	runtimesCmd.AddCommand(flutterRuntimeCmd)
 
 	// Add runtimes to config
 	configCmd.AddCommand(runtimesCmd)

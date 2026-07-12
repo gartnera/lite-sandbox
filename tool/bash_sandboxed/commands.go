@@ -167,12 +167,15 @@ var allowedCommands = map[string]bool{
 	"sh":   true,
 
 	// Runtimes (config-gated, validated by commandArgValidators)
-	"go":    true,
-	"gofmt": true,
-	"pnpm":  true,
-	"cargo": true,
-	"rustc": true,
-	"deno":  true,
+	"go":      true,
+	"gofmt":   true,
+	"pnpm":    true,
+	"cargo":   true,
+	"rustc":   true,
+	"deno":    true,
+	"flutter": true,
+	"dart":    true,
+	"fvm":     true,
 
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
@@ -268,6 +271,9 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"cargo":   validateCargoCommand,
 	"rustc":   validateRustcCommand,
 	"deno":    validateDenoCommand,
+	"flutter": validateFlutterCommand,
+	"dart":    validateDartCommand,
+	"fvm":     validateFvmCommand,
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
 	"xargs":   validateXargsArgs,
