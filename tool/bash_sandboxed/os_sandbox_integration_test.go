@@ -452,4 +452,52 @@ func TestOSSandboxUvRuntime(t *testing.T) {
 			t.Errorf("expected greeting in output, got: %s", output)
 		}
 	})
+
+	// uv tool install places a launcher on the user's PATH (`uv tool dir --bin`,
+	// default ~/.local/bin), which is deliberately NOT bound writable: installing
+	// executables that persist and run outside the sandbox is exactly what the
+	// boundary must prevent. The install must therefore fail and leave no
+	// launcher behind. Build a trivial local package so the failure is the bin
+	// write, not a missing build backend.
+	t.Run("uv tool install cannot escape to PATH", func(t *testing.T) {
+		binOut, err := exec.Command("uv", "tool", "dir", "--bin").Output()
+		if err != nil {
+			t.Skipf("failed to resolve uv tool bin dir: %v", err)
+		}
+		launcher := filepath.Join(strings.TrimSpace(string(binOut)), "greeter")
+		os.Remove(launcher)
+
+		pkgDir := filepath.Join(tmpDir, "greeter")
+		if err := os.MkdirAll(filepath.Join(pkgDir, "src", "greeter"), 0755); err != nil {
+			t.Fatalf("failed to create package dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pkgDir, "pyproject.toml"), []byte(`[project]
+name = "greeter"
+version = "0.1.0"
+
+[project.scripts]
+greeter = "greeter:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+`), 0644); err != nil {
+			t.Fatalf("failed to write pyproject.toml: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pkgDir, "src", "greeter", "__init__.py"), []byte(`def main():
+    print("greeter installed")
+`), 0644); err != nil {
+			t.Fatalf("failed to write __init__.py: %v", err)
+		}
+
+		cmd := "uv tool install --python python3 " + pkgDir
+		output, execErr := s.Execute(context.Background(), cmd, tmpDir, []string{tmpDir}, []string{tmpDir})
+		if execErr == nil {
+			t.Fatalf("expected uv tool install to fail (bin dir not writable), got success. output: %s", output)
+		}
+		if _, statErr := os.Stat(launcher); statErr == nil {
+			os.Remove(launcher)
+			t.Errorf("launcher escaped the sandbox to %s", launcher)
+		}
+	})
 }

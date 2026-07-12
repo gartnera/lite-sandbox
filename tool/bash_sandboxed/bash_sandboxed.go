@@ -560,11 +560,18 @@ func detectDenoBinds() []string {
 
 // detectUvBinds detects the uv (Python package manager) paths that need to be
 // writable. uv downloads and builds wheels into its cache, installs Python
-// interpreters, and installs tools; all three live outside the working
+// interpreters, and stores tool environments; all live outside the working
 // directory, so they must be bound in for uv to function under the OS sandbox:
 //   - `uv cache dir`  — the package/wheel cache (default ~/.cache/uv)
 //   - `uv python dir` — uv-managed Python interpreters (default ~/.local/share/uv/python)
-//   - `uv tool dir`   — tools installed via `uv tool install` (default ~/.local/share/uv/tools)
+//   - `uv tool dir`   — tool environments from `uv tool install` (default ~/.local/share/uv/tools)
+//
+// The tool *bin* directory (`uv tool dir --bin`, default ~/.local/bin) is
+// deliberately NOT bound: it lives on the user's PATH, so binding it writable
+// would let a sandboxed command install executables that persist and run
+// outside the sandbox boundary. `uv tool install` therefore cannot place its
+// launcher and fails, which is the intended restriction; `uvx` (ephemeral tool
+// runs cached under `uv cache dir`) still works.
 //
 // Like Deno, uv creates these lazily on first use, so they frequently do not
 // exist yet. We create them up front because a bind-mount source must exist for

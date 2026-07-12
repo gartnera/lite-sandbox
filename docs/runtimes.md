@@ -226,7 +226,13 @@ These are discovered by shelling out to uv and confined so uv can populate them:
 
 - `uv cache dir` — the package/wheel cache (default `~/.cache/uv`)
 - `uv python dir` — uv-managed Python interpreters (default `~/.local/share/uv/python`)
-- `uv tool dir` — tools installed via `uv tool install` (default `~/.local/share/uv/tools`)
+- `uv tool dir` — tool environments from `uv tool install` (default `~/.local/share/uv/tools`)
+
+The tool *bin* directory (`uv tool dir --bin`, default `~/.local/bin`) is
+deliberately left unbound: it sits on the user's `PATH`, so granting write
+access would let a sandboxed command install executables that persist and run
+outside the sandbox. As a result `uv tool install` cannot place its launcher and
+fails; use `uvx` (ephemeral tool runs, cached under `uv cache dir`) instead.
 
 uv runtime commands enable safe Python development workflows:
 
