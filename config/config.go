@@ -501,6 +501,28 @@ func (f *FlutterConfig) FlutterEnabled() bool {
 	return *f.Enabled
 }
 
+// UvConfig controls granular uv (Python package manager) runtime permissions.
+type UvConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+}
+
+// UvEnabled returns whether uv/uvx commands are allowed (default: false).
+func (u *UvConfig) UvEnabled() bool {
+	if u == nil || u.Enabled == nil {
+		return false
+	}
+	return *u.Enabled
+}
+
+// UvPublish returns whether uv publish is allowed (default: false).
+func (u *UvConfig) UvPublish() bool {
+	if u == nil || u.Publish == nil {
+		return false
+	}
+	return *u.Publish
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
 	Go      *GoConfig      `yaml:"go,omitempty"`
@@ -508,6 +530,7 @@ type RuntimesConfig struct {
 	Rust    *RustConfig    `yaml:"rust,omitempty"`
 	Deno    *DenoConfig    `yaml:"deno,omitempty"`
 	Flutter *FlutterConfig `yaml:"flutter,omitempty"`
+	Uv      *UvConfig      `yaml:"uv,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;

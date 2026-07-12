@@ -399,3 +399,57 @@ go 1.21
 		os.Remove(defaultBinPath)
 	})
 }
+
+// TestOSSandboxUvRuntime verifies the uv runtime works end-to-end under the OS
+// sandbox: uv's detected paths (cache, python, tool dirs) are bound writable, so
+// creating a venv and running code that populates the cache both succeed even
+// though those paths live outside the working directory.
+func TestOSSandboxUvRuntime(t *testing.T) {
+	requireOSSandbox(t)
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv not installed")
+	}
+	tmpDir := t.TempDir()
+
+	s := NewSandbox()
+
+	enabled := true
+	uvEnabled := true
+	cfg := &config.Config{
+		OSSandbox: &enabled,
+		Runtimes: &config.RuntimesConfig{
+			Uv: &config.UvConfig{
+				Enabled: &uvEnabled,
+			},
+		},
+	}
+	s.UpdateConfig(cfg, tmpDir)
+	defer s.Close()
+
+	// uv venv writes the virtual environment into the working directory and
+	// exercises uv executing under the sandbox. Pin to the host python so no
+	// interpreter download is attempted.
+	t.Run("uv venv", func(t *testing.T) {
+		output, err := s.Execute(context.Background(), "uv venv --python python3", tmpDir, []string{tmpDir}, []string{tmpDir})
+		if err != nil {
+			t.Fatalf("uv venv failed: %v, output: %s", err, output)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".venv")); os.IsNotExist(err) {
+			t.Error("expected .venv to exist after uv venv")
+		}
+	})
+
+	// uv run populates uv's cache (outside the working directory). If the cache
+	// dir were not bound writable, uv would fail with a permission error, so a
+	// successful run proves the runtime path binding works.
+	t.Run("uv run populates cache", func(t *testing.T) {
+		cmd := `uv run --no-project --python python3 python -c "print('hello from uv')"`
+		output, err := s.Execute(context.Background(), cmd, tmpDir, []string{tmpDir}, []string{tmpDir})
+		if err != nil {
+			t.Fatalf("uv run failed: %v, output: %s", err, output)
+		}
+		if !contains(output, "hello from uv") {
+			t.Errorf("expected greeting in output, got: %s", output)
+		}
+	})
+}

@@ -74,6 +74,15 @@ var runtimesShowCmd = &cobra.Command{
 			fmt.Println("  flutter: (defaults)")
 			fmt.Printf("    enabled: %v\n", false)
 		}
+		if cfg.Runtimes.Uv != nil {
+			fmt.Println("  uv:")
+			fmt.Printf("    enabled: %v\n", cfg.Runtimes.Uv.UvEnabled())
+			fmt.Printf("    publish: %v\n", cfg.Runtimes.Uv.UvPublish())
+		} else {
+			fmt.Println("  uv: (defaults)")
+			fmt.Printf("    enabled: %v\n", false)
+			fmt.Printf("    publish: %v\n", false)
+		}
 		return nil
 	},
 }
@@ -592,6 +601,102 @@ var flutterRuntimeDisableCmd = &cobra.Command{
 	},
 }
 
+// Uv runtime commands
+var uvRuntimeCmd = &cobra.Command{
+	Use:   "uv",
+	Short: "Manage uv (Python) runtime permission settings",
+}
+
+var uvRuntimeShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show current uv runtime permission settings",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		u := &config.UvConfig{}
+		if cfg.Runtimes != nil && cfg.Runtimes.Uv != nil {
+			u = cfg.Runtimes.Uv
+		}
+		fmt.Printf("enabled: %v\n", u.UvEnabled())
+		fmt.Printf("publish: %v\n", u.UvPublish())
+		return nil
+	},
+}
+
+var uvRuntimeEnableCmd = &cobra.Command{
+	Use:   "enable",
+	Short: "Enable uv runtime commands (uv, uvx)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		withPublish, _ := cmd.Flags().GetBool("with-publish")
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Runtimes == nil {
+			cfg.Runtimes = &config.RuntimesConfig{}
+		}
+		if cfg.Runtimes.Uv == nil {
+			cfg.Runtimes.Uv = &config.UvConfig{}
+		}
+
+		trueVal := true
+		cfg.Runtimes.Uv.Enabled = &trueVal
+
+		if withPublish {
+			cfg.Runtimes.Uv.Publish = &trueVal
+		}
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("runtimes.uv.enabled set to true")
+		if withPublish {
+			fmt.Println("runtimes.uv.publish set to true")
+		}
+		return nil
+	},
+}
+
+var uvRuntimeDisableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Disable uv runtime commands",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		withPublish, _ := cmd.Flags().GetBool("with-publish")
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Runtimes == nil {
+			cfg.Runtimes = &config.RuntimesConfig{}
+		}
+		if cfg.Runtimes.Uv == nil {
+			cfg.Runtimes.Uv = &config.UvConfig{}
+		}
+
+		falseVal := false
+		cfg.Runtimes.Uv.Enabled = &falseVal
+
+		if withPublish {
+			cfg.Runtimes.Uv.Publish = &falseVal
+		}
+
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+
+		fmt.Println("runtimes.uv.enabled set to false")
+		if withPublish {
+			fmt.Println("runtimes.uv.publish set to false")
+		}
+		return nil
+	},
+}
+
 func init() {
 	// Add --with-generate flag to enable/disable commands
 	goRuntimeEnableCmd.Flags().Bool("with-generate", false, "Also enable go generate")
@@ -640,6 +745,15 @@ func init() {
 	flutterRuntimeCmd.AddCommand(flutterRuntimeEnableCmd)
 	flutterRuntimeCmd.AddCommand(flutterRuntimeDisableCmd)
 
+	// Add --with-publish flag to uv enable/disable commands
+	uvRuntimeEnableCmd.Flags().Bool("with-publish", false, "Also enable uv publish")
+	uvRuntimeDisableCmd.Flags().Bool("with-publish", false, "Also disable uv publish")
+
+	// Add uv subcommands
+	uvRuntimeCmd.AddCommand(uvRuntimeShowCmd)
+	uvRuntimeCmd.AddCommand(uvRuntimeEnableCmd)
+	uvRuntimeCmd.AddCommand(uvRuntimeDisableCmd)
+
 	// Add runtimes subcommands
 	runtimesCmd.AddCommand(runtimesShowCmd)
 	runtimesCmd.AddCommand(goRuntimeCmd)
@@ -647,6 +761,7 @@ func init() {
 	runtimesCmd.AddCommand(rustRuntimeCmd)
 	runtimesCmd.AddCommand(denoRuntimeCmd)
 	runtimesCmd.AddCommand(flutterRuntimeCmd)
+	runtimesCmd.AddCommand(uvRuntimeCmd)
 
 	// Add runtimes to config
 	configCmd.AddCommand(runtimesCmd)

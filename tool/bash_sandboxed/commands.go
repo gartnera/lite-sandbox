@@ -176,6 +176,8 @@ var allowedCommands = map[string]bool{
 	"flutter": true,
 	"dart":    true,
 	"fvm":     true,
+	"uv":      true,
+	"uvx":     true,
 
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
@@ -274,6 +276,8 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"flutter": validateFlutterCommand,
 	"dart":    validateDartCommand,
 	"fvm":     validateFvmCommand,
+	"uv":      validateUvCommand,
+	"uvx":     validateUvxCommand,
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
 	"xargs":   validateXargsArgs,
@@ -343,6 +347,26 @@ func validateDenoCommand(s *Sandbox, args []*syntax.Word) error {
 		return fmt.Errorf("command \"deno\" is not allowed (runtimes.deno.enabled is disabled)")
 	}
 	return validateDenoArgs(args, cfg.Runtimes.Deno)
+}
+
+func validateUvCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Runtimes == nil || cfg.Runtimes.Uv == nil || !cfg.Runtimes.Uv.UvEnabled() {
+		return fmt.Errorf("command \"uv\" is not allowed (runtimes.uv.enabled is disabled)")
+	}
+	return validateUvArgs(args, cfg.Runtimes.Uv)
+}
+
+// validateUvxCommand gates uvx (an alias of `uv tool run`) behind the uv
+// runtime. uvx takes a tool name rather than a uv subcommand, so beyond the
+// runtime check there is nothing to gate — running the tool is confined by the
+// OS sandbox like `uv run`.
+func validateUvxCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	if cfg.Runtimes == nil || cfg.Runtimes.Uv == nil || !cfg.Runtimes.Uv.UvEnabled() {
+		return fmt.Errorf("command \"uvx\" is not allowed (runtimes.uv.enabled is disabled)")
+	}
+	return nil
 }
 
 func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
