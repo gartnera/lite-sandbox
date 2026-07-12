@@ -106,7 +106,6 @@ func TestDetectFlutterBinds(t *testing.T) {
 		filepath.Join(home, ".config", "dart"),
 		filepath.Join(home, ".flutter"),
 		filepath.Join(home, ".dart"),
-		filepath.Join(home, ".dart-tool"),
 	}
 	for _, w := range want {
 		if !slices.Contains(paths, w) {

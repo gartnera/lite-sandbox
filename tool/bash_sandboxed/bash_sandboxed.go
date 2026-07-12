@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -555,7 +556,7 @@ func ensureDir(dir string) string {
 		return ""
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		slog.Warn("failed to create deno runtime directory", "path", dir, "error", err)
+		slog.Warn("failed to create runtime directory", "path", dir, "error", err)
 		return ""
 	}
 	return dir
@@ -582,7 +583,7 @@ func detectFlutterBinds() []string {
 	home, _ := os.UserHomeDir()
 
 	// fvm cache: FVM_CACHE_PATH is the current override, FVM_HOME the legacy one.
-	fvmCache := firstNonEmpty(os.Getenv("FVM_CACHE_PATH"), os.Getenv("FVM_HOME"))
+	fvmCache := cmp.Or(os.Getenv("FVM_CACHE_PATH"), os.Getenv("FVM_HOME"))
 	if fvmCache == "" && home != "" {
 		fvmCache = filepath.Join(home, "fvm")
 	}
@@ -615,7 +616,6 @@ func detectFlutterBinds() []string {
 			filepath.Join(".config", "dart"),
 			".flutter",
 			".dart",
-			".dart-tool",
 		} {
 			if p := ensureDir(filepath.Join(home, rel)); p != "" {
 				paths = append(paths, p)
@@ -664,16 +664,6 @@ func isFlutterSDKRoot(dir string) bool {
 	}
 	info, err := os.Stat(filepath.Join(dir, "packages"))
 	return err == nil && info.IsDir()
-}
-
-// firstNonEmpty returns the first non-empty string in vals, or "".
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // ParseBash parses a command string as bash and returns the AST.

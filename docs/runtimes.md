@@ -184,8 +184,8 @@ so builds and tests work without hand-configuring `readable_paths`:
   checkout (it contains a `packages/` directory), so a stray binary in a system
   directory never widens access to `/usr`.
 - **Flutter/Dart config directories** — `~/.config/flutter`, `~/.config/dart`,
-  `~/.flutter`, `~/.dart`, and `~/.dart-tool`, where the tools persist settings
-  and analytics state.
+  `~/.flutter`, and `~/.dart`, where the tools persist settings and analytics
+  state.
 
 Directories that don't exist yet (fresh machine, cold caches) are created up
 front so the OS sandbox has a bind-mount source for them.
