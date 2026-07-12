@@ -1,7 +1,7 @@
 # Runtime Support
 
 Code execution runtimes are disabled by default and can be enabled individually
-via config. This page covers Go, pnpm, and Deno.
+via config. This page covers Go, pnpm, Rust, Deno, and Flutter.
 
 ## Go Runtime Support
 
@@ -135,3 +135,62 @@ Security features:
   (`deno cache`, `deno add`, `deno install`), which fetch at the CLI level where
   an injected flag cannot stop them. (Already-cached modules can still load;
   with `allow_import: false` from the start, nothing new is fetched or cached.)
+
+## Flutter Runtime Support
+
+Flutter, Dart, and fvm (Flutter Version Management) commands are disabled by
+default. Enable them via config:
+
+```yaml
+runtimes:
+  flutter:
+    enabled: true   # Allow flutter, dart, and fvm commands (default: false)
+```
+
+Enable Flutter via CLI:
+
+```bash
+# Enable flutter/dart/fvm commands
+lite-sandbox config runtimes flutter enable
+
+# Disable them again
+lite-sandbox config runtimes flutter disable
+
+# Show current flutter configuration
+lite-sandbox config runtimes flutter show
+```
+
+Flutter runtime commands enable normal mobile/web development workflows:
+
+```bash
+fvm install
+fvm flutter pub get
+fvm flutter test
+flutter build apk
+dart run build_runner build
+```
+
+Like Go (which auto-detects `GOPATH`/`GOCACHE`), the Flutter runtime
+automatically detects and grants access to the paths these tools read and write,
+so builds and tests work without hand-configuring `readable_paths`:
+
+- **fvm cache** — `FVM_CACHE_PATH` (or the legacy `FVM_HOME`), defaulting to
+  `~/fvm`. This is where fvm stores each managed Flutter SDK version.
+- **pub cache** — `PUB_CACHE`, defaulting to `~/.pub-cache`. This is where
+  Dart/Flutter packages are downloaded.
+- **Flutter SDK root** — `FLUTTER_ROOT`, or resolved from a `flutter` binary on
+  `PATH` (for a non-fvm global install). Flutter writes to `bin/cache` under
+  this directory. A candidate is only accepted when it looks like a real SDK
+  checkout (it contains a `packages/` directory), so a stray binary in a system
+  directory never widens access to `/usr`.
+- **Flutter/Dart config directories** — `~/.config/flutter`, `~/.config/dart`,
+  `~/.flutter`, `~/.dart`, and `~/.dart-tool`, where the tools persist settings
+  and analytics state.
+
+Directories that don't exist yet (fresh machine, cold caches) are created up
+front so the OS sandbox has a bind-mount source for them.
+
+Flutter is a code-execution runtime: like Go, Rust, and Deno, its containment
+relies on the OS sandbox confining writes to the working directory and the
+detected runtime paths, rather than on per-argument validation. Once enabled,
+all `flutter`/`dart`/`fvm` subcommands are permitted.

@@ -483,12 +483,31 @@ func (d *DenoConfig) DenoAllowImport() bool {
 	return *d.AllowImport
 }
 
+// FlutterConfig controls the Flutter/Dart/fvm runtime. When enabled, the
+// flutter, dart, and fvm commands are permitted and the paths those tools read
+// and write (the fvm SDK cache, the pub cache, the Flutter SDK, and the
+// Flutter/Dart config directories) are automatically detected and made
+// accessible, mirroring the Go runtime's GOPATH/GOCACHE handling.
+type FlutterConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// FlutterEnabled returns whether flutter/dart/fvm commands are allowed
+// (default: false).
+func (f *FlutterConfig) FlutterEnabled() bool {
+	if f == nil || f.Enabled == nil {
+		return false
+	}
+	return *f.Enabled
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
-	Go   *GoConfig   `yaml:"go,omitempty"`
-	Pnpm *PnpmConfig `yaml:"pnpm,omitempty"`
-	Rust *RustConfig `yaml:"rust,omitempty"`
-	Deno *DenoConfig `yaml:"deno,omitempty"`
+	Go      *GoConfig      `yaml:"go,omitempty"`
+	Pnpm    *PnpmConfig    `yaml:"pnpm,omitempty"`
+	Rust    *RustConfig    `yaml:"rust,omitempty"`
+	Deno    *DenoConfig    `yaml:"deno,omitempty"`
+	Flutter *FlutterConfig `yaml:"flutter,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;

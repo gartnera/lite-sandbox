@@ -54,7 +54,7 @@ enforce the same policy:
 
 - **Writes confined to the working directory** — Only the working directory (and its resolved symlink), configured `writable_paths`, the main worktree when `git.allow_worktree_parent` is enabled and the working directory is a linked worktree, and temp dirs are writable; everything else on the host is read-only. Since these grants are baked into the sandbox profile at worker start, any config change recycles the worker so the new policy takes effect on the next command.
 - **Writable temp directories** — `/tmp` and the platform's other temporary directories are writable, as required for build caches and `TMPDIR`.
-- **Runtime bind mounts** — Additional writable paths are granted for enabled runtimes (e.g., `$GOPATH/bin` for Go).
+- **Runtime bind mounts** — Additional writable paths are granted for enabled runtimes (e.g., `$GOPATH`/`$GOCACHE` for Go, or the fvm SDK cache and pub cache for Flutter).
 - **Network preserved** — Network access is left intact.
 - **Process execution allowed** — Spawning subprocesses is permitted; enforcement is at the filesystem level.
 - **SSH key protection** — SSH **private** keys in `~/.ssh` are **always** denied read access; `known_hosts`, `config`, `authorized_keys`, and `*.pub` files remain accessible.

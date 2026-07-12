@@ -410,6 +410,12 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 		binds = append(binds, denoBinds...)
 	}
 
+	// Detect Flutter/Dart/fvm paths if the Flutter runtime is enabled
+	if runtimes.Flutter != nil && runtimes.Flutter.FlutterEnabled() {
+		flutterBinds := detectFlutterBinds()
+		binds = append(binds, flutterBinds...)
+	}
+
 	return binds
 }
 
@@ -553,6 +559,121 @@ func ensureDir(dir string) string {
 		return ""
 	}
 	return dir
+}
+
+// detectFlutterBinds detects the paths that Flutter, Dart, and fvm read and
+// write, so the sandbox can grant access to them automatically (mirroring the
+// Go runtime's GOPATH/GOCACHE handling). The paths are:
+//
+//   - the fvm cache (FVM_CACHE_PATH / legacy FVM_HOME, default ~/fvm), where fvm
+//     stores each managed Flutter SDK version;
+//   - the pub cache (PUB_CACHE, default ~/.pub-cache), where Dart/Flutter
+//     packages are downloaded;
+//   - the active Flutter SDK root (FLUTTER_ROOT, or resolved from a flutter
+//     binary on PATH), which Flutter writes to under bin/cache;
+//   - the Flutter/Dart config directories, where the tools persist settings.
+//
+// Like the caches for other runtimes these directories are frequently created
+// lazily on first run, so cache directories are materialized up front (a bind
+// mount source must exist for the OS sandbox to mount it). Only directories that
+// exist (or can be created) are returned, so a partial toolchain still works.
+func detectFlutterBinds() []string {
+	var paths []string
+	home, _ := os.UserHomeDir()
+
+	// fvm cache: FVM_CACHE_PATH is the current override, FVM_HOME the legacy one.
+	fvmCache := firstNonEmpty(os.Getenv("FVM_CACHE_PATH"), os.Getenv("FVM_HOME"))
+	if fvmCache == "" && home != "" {
+		fvmCache = filepath.Join(home, "fvm")
+	}
+	if p := ensureDir(fvmCache); p != "" {
+		paths = append(paths, p)
+	}
+
+	// pub cache: PUB_CACHE overrides the default ~/.pub-cache.
+	pubCache := os.Getenv("PUB_CACHE")
+	if pubCache == "" && home != "" {
+		pubCache = filepath.Join(home, ".pub-cache")
+	}
+	if p := ensureDir(pubCache); p != "" {
+		paths = append(paths, p)
+	}
+
+	// Active Flutter SDK root (for a non-fvm global install). fvm-managed SDKs
+	// live under the fvm cache above, or the project's .fvm/flutter_sdk symlink,
+	// which is already under the working directory.
+	if sdk := detectFlutterSDKRoot(); sdk != "" {
+		paths = append(paths, sdk)
+	}
+
+	// Config directories where Flutter and Dart persist settings and analytics
+	// state. These already exist on a configured machine; create them so the
+	// tools can write on a fresh one.
+	if home != "" {
+		for _, rel := range []string{
+			filepath.Join(".config", "flutter"),
+			filepath.Join(".config", "dart"),
+			".flutter",
+			".dart",
+			".dart-tool",
+		} {
+			if p := ensureDir(filepath.Join(home, rel)); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+
+	if len(paths) > 0 {
+		slog.Info("detected Flutter runtime paths", "paths", paths)
+	}
+	return paths
+}
+
+// detectFlutterSDKRoot returns the root directory of the active Flutter SDK, or
+// "" if it cannot be located. FLUTTER_ROOT wins when set; otherwise a flutter
+// binary on PATH is resolved (following symlinks) to <root>/bin/flutter and the
+// grandparent is returned. The candidate is only accepted when it looks like a
+// Flutter SDK checkout (it contains a packages directory), so a stray binary in
+// a system directory like /usr/bin never widens access to /usr.
+func detectFlutterSDKRoot() string {
+	if root := os.Getenv("FLUTTER_ROOT"); root != "" {
+		if isFlutterSDKRoot(root) {
+			return root
+		}
+	}
+	bin, err := exec.LookPath("flutter")
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(bin); err == nil {
+		bin = resolved
+	}
+	root := filepath.Dir(filepath.Dir(bin))
+	if isFlutterSDKRoot(root) {
+		return root
+	}
+	return ""
+}
+
+// isFlutterSDKRoot reports whether dir looks like a Flutter SDK checkout. Every
+// SDK ships a top-level packages directory alongside bin/, which distinguishes a
+// real SDK from an ordinary bin directory such as /usr/bin.
+func isFlutterSDKRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "packages"))
+	return err == nil && info.IsDir()
+}
+
+// firstNonEmpty returns the first non-empty string in vals, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ParseBash parses a command string as bash and returns the AST.
