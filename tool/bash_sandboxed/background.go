@@ -151,6 +151,11 @@ type backgroundManager struct {
 
 	parentCtx    context.Context
 	parentCancel context.CancelFunc
+
+	// wg tracks the live runner goroutines launched by ExecuteBackground so
+	// shutdown (killAll) can wait for each to finish tearing down its OS process
+	// before the MCP server exits, rather than orphaning it.
+	wg sync.WaitGroup
 }
 
 func newBackgroundManager() *backgroundManager {
@@ -211,9 +216,20 @@ func (m *backgroundManager) finish(p *BackgroundProcess, err error) {
 	p.exitCode = exitCodeFromErr(err, p.killed)
 }
 
-// killAll terminates every background process. It marks each running process as
-// killed (for status reporting) and cancels the shared parent context, which
-// tears down all derived process contexts and their worker execs at once.
+// shutdownGracePeriod bounds how long killAll waits for the runner goroutines to
+// finish tearing down their OS processes after cancellation, so a wedged runner
+// cannot block MCP shutdown indefinitely. It exceeds the per-runner grace period
+// (runnerKillGracePeriod, after which a goroutine records its terminal state and
+// returns) plus the host process-group SIGKILL delay (gracefulKillTimeout), so a
+// cleanly terminating process is always fully reaped before shutdown proceeds.
+const shutdownGracePeriod = runnerKillGracePeriod + gracefulKillTimeout
+
+// killAll terminates every background process and waits for their runner
+// goroutines to finish. It marks each running process as killed (for status
+// reporting) and cancels the shared parent context, which tears down all derived
+// process contexts and their worker execs at once. It then blocks until every
+// runner goroutine has returned (bounded by shutdownGracePeriod) so that no
+// background OS process is left orphaned when the MCP server exits.
 func (m *backgroundManager) killAll() {
 	for _, p := range m.list() {
 		p.mu.Lock()
@@ -223,6 +239,16 @@ func (m *backgroundManager) killAll() {
 		p.mu.Unlock()
 	}
 	m.parentCancel()
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownGracePeriod):
+	}
 }
 
 // exitCodeFromErr maps a runner error to a conventional exit code. A killed
@@ -274,7 +300,12 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	// reachable. Cancellation is driven by KillBackground / Close.
 	proc, ctx := s.bg.create(command)
 
+	// Track the runner goroutine so shutdown (killAll) can wait for it to finish
+	// tearing down its OS process. Add before launching so a concurrent shutdown
+	// cannot miss it.
+	s.bg.wg.Add(1)
 	go func() {
+		defer s.bg.wg.Done()
 		defer proc.cancel()
 
 		// Run in an inner goroutine so a runner that hangs after cancellation
