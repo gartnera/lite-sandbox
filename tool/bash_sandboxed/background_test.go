@@ -269,6 +269,79 @@ func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 	}
 }
 
+// TestCloseShutsDownBackgroundProcesses verifies that closing the sandbox (as
+// happens when the top-level MCP server shuts down) tears down a running
+// background process and its forked grandchild, and blocks until the teardown
+// has actually completed rather than returning while the process is still alive.
+func TestCloseShutsDownBackgroundProcesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups not supported on windows")
+	}
+	s := NewSandbox()
+	cwd := t.TempDir()
+	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+
+	pidFile := filepath.Join(cwd, "child.pid")
+	command := "bash -c 'sleep 300 & echo $! > " + pidFile + "; wait'"
+	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
+	if err != nil {
+		t.Fatalf("ExecuteBackground failed: %v", err)
+	}
+
+	// Wait for the grandchild pid to be recorded.
+	var childPid int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if p, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && p > 0 {
+				childPid = p
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPid == 0 {
+		t.Fatal("forked child pid was never recorded")
+	}
+	if err := syscall.Kill(childPid, 0); err != nil {
+		t.Fatalf("expected forked child %d alive before close, got %v", childPid, err)
+	}
+
+	// Close must block until the runner goroutine has finished its teardown, so
+	// bound it well under how long the child would otherwise sleep (300s).
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(shutdownGracePeriod + 3*time.Second):
+		t.Fatal("Close did not return within the shutdown grace period")
+	}
+
+	// Once Close has returned, the background process is recorded as killed.
+	if st := proc.Status(); st != "killed" {
+		t.Fatalf("expected killed status after Close, got %q", st)
+	}
+
+	// The forked grandchild must be torn down along with the group (rather than
+	// left orphaned running its 300s sleep). Poll for reaping, since the process
+	// dying and being reaped by init lags slightly behind Close returning.
+	reaped := false
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(childPid, 0); err != nil {
+			reaped = true // ESRCH: no such process
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reaped {
+		t.Fatalf("forked child %d survived Close (process group not reaped)", childPid)
+	}
+}
+
 // TestBackgroundKillIsGraceful verifies kill sends SIGTERM first, giving the
 // process a chance to clean up, before escalating to SIGKILL. A command that
 // traps SIGTERM and writes a marker proves the signal was delivered (an
