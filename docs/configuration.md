@@ -86,6 +86,30 @@ read an individual peer worktree while blocking a single `grep`/`ls` from
 sweeping every worktree at once. Manage these with
 `lite-sandbox config readable-paths add <path>` / `writable-paths add <path>`.
 
+## Internal readable / writable paths (OS sandbox only)
+
+`internal_readable_paths` / `internal_writable_paths` grant access **only at the
+OS sandbox layer** (see [Security](security.md)), so programs a command spawns
+can reach their own data — while the agent itself still cannot read or write
+those paths directly (the AST/runtime path validation, the file-tool hook, and
+Deno's injected `--allow-read`/`--allow-write` all keep denying them):
+
+```yaml
+internal_writable_paths:
+  - ~/.cache/some-tool   # the tool can update its cache; `cat`/`sed` there still fail
+internal_readable_paths:
+  - /opt/reference-data
+```
+
+Use these when a tool needs its own state directory to function under the OS
+sandbox, but you don't want to widen the boundary the agent can touch. They only
+have an effect when `os_sandbox` is enabled — without it there is no OS layer to
+loosen. Note that inside the OS sandbox the filesystem is already broadly
+readable, so `internal_readable_paths` mainly matters for host paths hidden by
+the sandbox's `/tmp` overlay on Linux. Manage these with
+`lite-sandbox config internal-readable-paths add <path>` /
+`internal-writable-paths add <path>`.
+
 ## Git Support
 
 Git commands are enabled by default with granular permission levels that can be configured:
