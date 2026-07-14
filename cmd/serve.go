@@ -218,6 +218,14 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 // readable, so they are folded into the read set. This is the single source of
 // truth shared with the PreToolUse hook (cmd/hook.go) so the bash tool and the
 // built-in file tools enforce the same boundary.
+//
+// internal_readable_paths / internal_writable_paths are deliberately excluded:
+// they only loosen the OS sandbox worker's profile (see getOrCreateWorker) so
+// spawned programs can reach their own data. Keeping them out of these lists is
+// what makes the AST validators, the file-tool hook, the docker proxy's bind
+// checks, and Deno's injected --allow-read/--allow-write all continue to deny
+// them — Deno especially, since scoping --allow-write to an internal path would
+// hand executed code a trivial sandbox workaround.
 func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
 	readPaths = append([]string{cwd}, sandbox.RuntimeReadPaths()...)
 	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)

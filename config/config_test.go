@@ -116,12 +116,38 @@ func TestExpandedWritablePaths(t *testing.T) {
 	}
 }
 
+func TestExpandedInternalPaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("failed to get home dir: %v", err)
+	}
+
+	cfg := &Config{
+		InternalReadablePaths: []string{"~/.config/some-tool", "/opt/data"},
+		InternalWritablePaths: []string{"~/.cache"},
+	}
+	gotRead := cfg.ExpandedInternalReadablePaths()
+	if len(gotRead) != 2 || gotRead[0] != filepath.Join(home, ".config/some-tool") || gotRead[1] != "/opt/data" {
+		t.Fatalf("unexpected internal readable paths: %v", gotRead)
+	}
+	gotWrite := cfg.ExpandedInternalWritablePaths()
+	if len(gotWrite) != 1 || gotWrite[0] != filepath.Join(home, ".cache") {
+		t.Fatalf("unexpected internal writable paths: %v", gotWrite)
+	}
+}
+
 func TestExpandedPaths_Empty(t *testing.T) {
 	cfg := &Config{}
 	if got := cfg.ExpandedReadablePaths(); got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}
 	if got := cfg.ExpandedWritablePaths(); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+	if got := cfg.ExpandedInternalReadablePaths(); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+	if got := cfg.ExpandedInternalWritablePaths(); got != nil {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }

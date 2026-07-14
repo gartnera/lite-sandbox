@@ -227,6 +227,65 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 	}
 }
 
+// TestOSSandboxInternalWritablePaths verifies the two halves of
+// internal_writable_paths: the OS sandbox worker permits writes there (so a
+// spawned program can reach its own data, simulated by a bare extra_commands
+// bash whose write skips AST validation), while the AST/interpreter layer —
+// whose write set deliberately excludes internal paths — still denies the agent
+// writing there directly.
+func TestOSSandboxInternalWritablePaths(t *testing.T) {
+	requireOSSandbox(t)
+	tmpDir := t.TempDir()
+
+	// A location outside the working directory and the temp roots, which the OS
+	// sandbox would mount read-only without the internal_writable_paths grant.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("failed to get home dir: %v", err)
+	}
+	internalDir, err := os.MkdirTemp(home, "ls-internal-test-")
+	if err != nil {
+		t.Fatalf("failed to create internal dir: %v", err)
+	}
+	defer os.RemoveAll(internalDir)
+
+	enabled := true
+	s := NewSandbox()
+	s.UpdateConfig(&config.Config{
+		OSSandbox:             &enabled,
+		ExtraCommands:         []string{"bash"},
+		InternalWritablePaths: []string{internalDir},
+	}, tmpDir)
+	defer s.Close()
+
+	// The read/write path sets mirror sandboxPaths: internal paths are excluded.
+	readPaths := []string{tmpDir}
+	writePaths := []string{tmpDir}
+
+	// A spawned program (raw bash in the worker, no AST validation) can write
+	// its data directory.
+	programFile := filepath.Join(internalDir, "program-data.txt")
+	if output, err := s.Execute(context.Background(), "bash -c 'touch "+programFile+"'", tmpDir, readPaths, writePaths); err != nil {
+		t.Fatalf("expected program write to internal path to succeed, got error: %v, output: %s", err, output)
+	}
+	if _, err := os.Stat(programFile); err != nil {
+		t.Errorf("expected program to create %s, stat error: %v", programFile, err)
+	}
+
+	// The agent writing the same location directly is still denied at the
+	// validation layer, before the worker is ever consulted.
+	directFile := filepath.Join(internalDir, "direct.txt")
+	output, err := s.Execute(context.Background(), "touch "+directFile, tmpDir, readPaths, writePaths)
+	if err == nil {
+		t.Errorf("expected direct write to internal path to fail validation, got success. output: %s", output)
+	} else if !strings.Contains(err.Error(), "validation failed") {
+		t.Errorf("expected a validation error for direct write, got: %v", err)
+	}
+	if _, err := os.Stat(directFile); err == nil {
+		t.Errorf("direct write unexpectedly created %s", directFile)
+	}
+}
+
 // TestOSSandboxBackgroundBareExtraCommandConfined verifies the background raw
 // path for bare extra_commands is likewise confined by the OS sandbox.
 func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {

@@ -132,12 +132,15 @@ func getSSHPrivateKeyPaths(sshDir string) []string {
 // The worker runs the "lite-sandbox sandbox-worker" subcommand inside a platform-specific sandbox.
 // On Linux, this uses bwrap. On macOS, this uses sandbox-exec with SBPL profiles.
 // extraBinds specifies additional writable paths to bind mount (e.g., for runtimes).
+// roBinds specifies additional read-only paths (internal_readable_paths). Reads
+// inside the sandbox are broadly allowed already, so on Linux these only matter
+// for host paths hidden by the worker's /tmp overlay; on macOS they are a no-op.
 // blockAWSCredentials specifies whether to block ~/.aws directory.
 // Note: ~/.ssh private keys are ALWAYS blocked regardless of this parameter.
 // maskPaths are filesystem paths made unreachable inside the worker (e.g. the
 // real Docker daemon socket), so a sandboxed command cannot bypass a broker by
 // connecting to the underlying resource directly.
-func StartWorker(ctx context.Context, workDir string, extraBinds []string, blockAWSCredentials bool, maskPaths []string) (*Worker, error) {
+func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []string, blockAWSCredentials bool, maskPaths []string) (*Worker, error) {
 	// Find our own binary path to pass to the sandbox
 	self, err := os.Executable()
 	if err != nil {
@@ -200,6 +203,18 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 			binds = append(binds, path)
 		}
 
+		// Read-only binds must exist to be mountable, but are not created: a
+		// missing internal_readable_paths entry is the user's to fix, not ours
+		// to materialize.
+		var roMounts []string
+		for _, path := range roBinds {
+			if _, err := os.Stat(path); err != nil {
+				slog.WarnContext(ctx, "skipping missing read-only bind path", "path", path, "error", err)
+				continue
+			}
+			roMounts = append(roMounts, path)
+		}
+
 		// Gather the credential/socket masks. These are applied last (see
 		// buildBwrapArgs) so an overlapping writable bind cannot re-expose them.
 		var sshKeyPaths []string
@@ -218,12 +233,14 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 			}
 		}
 
-		args := buildBwrapArgs(self, realWorkDir, binds, sshKeyPaths, maskPaths, awsTmpfsDir)
+		args := buildBwrapArgs(self, realWorkDir, binds, roMounts, sshKeyPaths, maskPaths, awsTmpfsDir)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
 
 	case "darwin":
 		// Build sandbox-exec command
-		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds
+		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds.
+		// roBinds are not needed here: the profile's "(allow default)" already
+		// permits reads everywhere except the credential/socket masks.
 		profile := generateSBPLProfile(realWorkDir, extraBinds, blockAWSCredentials, maskPaths)
 
 		// sandbox-exec -p <profile> <binary> <args>
@@ -307,6 +324,8 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 //   - --ro-bind / / : read-only root filesystem
 //   - --tmpfs /tmp : writable /tmp (Go and other tools need it for build cache)
 //   - --bind <path> <path> : writable runtime/config directories
+//   - --ro-bind <path> <path> : read-only internal_readable_paths (mostly
+//     relevant for host paths the /tmp tmpfs would otherwise hide)
 //   - --bind <workDir> <workDir> : writable working directory (overrides the
 //     /tmp tmpfs when workDir is under /tmp, e.g. in tests)
 //   - --ro-bind /dev/null <ssh-key> : mask each SSH private key
@@ -318,13 +337,18 @@ func StartWorker(ctx context.Context, workDir string, extraBinds []string, block
 //   - --unshare-all --share-net : unshare everything except the network
 //   - --die-with-parent : kill the worker if the parent dies
 //   - --chdir <workDir> : start in the working directory
-func buildBwrapArgs(self, realWorkDir string, binds, sshKeyPaths, maskPaths []string, awsTmpfsDir string) []string {
+func buildBwrapArgs(self, realWorkDir string, binds, roBinds, sshKeyPaths, maskPaths []string, awsTmpfsDir string) []string {
 	args := []string{
 		"--ro-bind", "/", "/",
 		"--tmpfs", "/tmp",
 	}
 
-	// Writable binds first, so the masks below can override any overlap.
+	// Writable and read-only binds first, so the masks below can override any
+	// overlap — an internal_readable_paths entry covering ~/.ssh or ~/.aws must
+	// not re-expose the masked secrets.
+	for _, path := range roBinds {
+		args = append(args, "--ro-bind", path, path)
+	}
 	for _, path := range binds {
 		args = append(args, "--bind", path, path)
 	}

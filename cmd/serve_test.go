@@ -482,3 +482,30 @@ func TestSandboxPaths_WritableIsReadable(t *testing.T) {
 		t.Fatalf("expected readable path in readPaths, got %v", readPaths)
 	}
 }
+
+// TestSandboxPaths_InternalPathsExcluded guards the security property of
+// internal_readable_paths / internal_writable_paths: they only loosen the OS
+// sandbox worker's profile and must never appear in the AST-level path sets.
+// If one leaked into sandboxPaths, the agent could read/write it directly and
+// Deno's injected --allow-read/--allow-write would grant executed code the
+// same access — exactly the sandbox workaround the fields are designed to
+// prevent.
+func TestSandboxPaths_InternalPathsExcluded(t *testing.T) {
+	sb := bash_sandboxed.NewSandbox()
+	defer sb.Close()
+	sb.UpdateConfig(&config.Config{
+		InternalReadablePaths: []string{"/internal/readable"},
+		InternalWritablePaths: []string{"/internal/writable"},
+	}, "/work")
+
+	readPaths, writePaths := sandboxPaths(sb, "/work")
+
+	for _, p := range []string{"/internal/readable", "/internal/writable"} {
+		if slices.Contains(readPaths, p) {
+			t.Fatalf("internal path %q must not be in readPaths, got %v", p, readPaths)
+		}
+		if slices.Contains(writePaths, p) {
+			t.Fatalf("internal path %q must not be in writePaths, got %v", p, writePaths)
+		}
+	}
+}

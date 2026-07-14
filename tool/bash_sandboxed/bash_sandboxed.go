@@ -360,6 +360,26 @@ func (s *Sandbox) ConfigWritePaths() []string {
 	return s.cfg.ExpandedWritablePaths()
 }
 
+// ConfigInternalReadPaths returns the user-configured internal readable paths
+// (with ~ expanded). These apply only to the OS sandbox worker: they are never
+// folded into the AST/interpreter read paths, so the agent cannot read them
+// directly and Deno's injected --allow-read never includes them.
+func (s *Sandbox) ConfigInternalReadPaths() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.ExpandedInternalReadablePaths()
+}
+
+// ConfigInternalWritePaths returns the user-configured internal writable paths
+// (with ~ expanded). These apply only to the OS sandbox worker: they are never
+// folded into the AST/interpreter write paths, so the agent cannot write them
+// directly and Deno's injected --allow-write never includes them.
+func (s *Sandbox) ConfigInternalWritePaths() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.ExpandedInternalWritablePaths()
+}
+
 // Close shuts down the sandbox, killing any background processes and closing
 // the worker if running.
 func (s *Sandbox) Close() error {
@@ -1675,6 +1695,17 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	// the validator allows is still denied by bwrap/seatbelt with EPERM.
 	extraBinds = append(extraBinds, s.ConfigWritePaths()...)
 
+	// internal_writable_paths are the inverse: the OS sandbox worker allows the
+	// writes (so spawned programs can reach their own data, e.g. ~/.cache), but
+	// the paths are deliberately NOT part of the interpreter's write set, so the
+	// agent's direct writes there are still rejected at the AST/runtime layer.
+	extraBinds = append(extraBinds, s.ConfigInternalWritePaths()...)
+
+	// internal_readable_paths likewise only reach the worker (as read-only
+	// binds); reads inside the OS sandbox are broadly allowed already, so this
+	// mainly re-exposes host paths hidden by the worker's /tmp overlay.
+	roBinds := s.ConfigInternalReadPaths()
+
 	// Same for the main worktree when the session runs in a linked git worktree
 	// with git.allow_worktree_parent: git writes index/lock files under the main
 	// repo's .git/worktrees/<name>/, which is outside the worker's workDir.
@@ -1706,7 +1737,7 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", s.workerBlockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, s.workerBlockAWS, dockerMaskPaths)
+	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, roBinds, s.workerBlockAWS, dockerMaskPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}

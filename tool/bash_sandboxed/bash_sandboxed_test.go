@@ -1135,14 +1135,22 @@ func TestConfigPaths(t *testing.T) {
 
 	// After UpdateConfig with paths
 	s.UpdateConfig(&config.Config{
-		ReadablePaths: []string{"/tmp/readable"},
-		WritablePaths: []string{"/tmp/writable"},
+		ReadablePaths:         []string{"/tmp/readable"},
+		WritablePaths:         []string{"/tmp/writable"},
+		InternalReadablePaths: []string{"/tmp/internal-readable"},
+		InternalWritablePaths: []string{"/tmp/internal-writable"},
 	}, "")
 	if got := s.ConfigReadPaths(); len(got) != 1 || got[0] != "/tmp/readable" {
 		t.Fatalf("expected [/tmp/readable], got %v", got)
 	}
 	if got := s.ConfigWritePaths(); len(got) != 1 || got[0] != "/tmp/writable" {
 		t.Fatalf("expected [/tmp/writable], got %v", got)
+	}
+	if got := s.ConfigInternalReadPaths(); len(got) != 1 || got[0] != "/tmp/internal-readable" {
+		t.Fatalf("expected [/tmp/internal-readable], got %v", got)
+	}
+	if got := s.ConfigInternalWritePaths(); len(got) != 1 || got[0] != "/tmp/internal-writable" {
+		t.Fatalf("expected [/tmp/internal-writable], got %v", got)
 	}
 
 	// After clearing config

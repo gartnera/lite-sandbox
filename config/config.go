@@ -536,16 +536,26 @@ type RuntimesConfig struct {
 // Config holds all user configuration. New fields can be added over time;
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
-	ExtraCommands        []string                    `yaml:"extra_commands,omitempty"`
-	UnsandboxedCommands  []string                    `yaml:"unsandboxed_commands,omitempty"`
-	ReadablePaths        []string                    `yaml:"readable_paths,omitempty"`
-	WritablePaths        []string                    `yaml:"writable_paths,omitempty"`
-	Git                  *GitConfig                  `yaml:"git,omitempty"`
-	Runtimes             *RuntimesConfig             `yaml:"runtimes,omitempty"`
-	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
-	Docker               *DockerConfig               `yaml:"docker,omitempty"`
-	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
-	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
+	ExtraCommands       []string `yaml:"extra_commands,omitempty"`
+	UnsandboxedCommands []string `yaml:"unsandboxed_commands,omitempty"`
+	ReadablePaths       []string `yaml:"readable_paths,omitempty"`
+	WritablePaths       []string `yaml:"writable_paths,omitempty"`
+	// InternalReadablePaths / InternalWritablePaths grant access only at the OS
+	// sandbox layer (the bwrap/sandbox-exec worker), so programs a command spawns
+	// can reach their own data (e.g. a tool's ~/.cache directory) — while the
+	// AST/interpreter validation layer still denies the agent reading or writing
+	// those paths directly (cat, sed, redirections, the PreToolUse file-tool
+	// hook, docker bind mounts, and Deno's injected --allow-read/--allow-write
+	// all exclude them). Unlike readable_paths/writable_paths, these never widen
+	// the agent-visible boundary.
+	InternalReadablePaths []string                    `yaml:"internal_readable_paths,omitempty"`
+	InternalWritablePaths []string                    `yaml:"internal_writable_paths,omitempty"`
+	Git                   *GitConfig                  `yaml:"git,omitempty"`
+	Runtimes              *RuntimesConfig             `yaml:"runtimes,omitempty"`
+	AWS                   *AWSConfig                  `yaml:"aws,omitempty"`
+	Docker                *DockerConfig               `yaml:"docker,omitempty"`
+	LocalBinaryExecution  *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
+	OSSandbox             *bool                       `yaml:"os_sandbox,omitempty"`
 }
 
 // ExpandedReadablePaths returns ReadablePaths with ~ expanded to the user's
@@ -558,6 +568,18 @@ func (c *Config) ExpandedReadablePaths() []string {
 // home directory and all paths resolved to absolute paths.
 func (c *Config) ExpandedWritablePaths() []string {
 	return expandPaths(c.WritablePaths)
+}
+
+// ExpandedInternalReadablePaths returns InternalReadablePaths with ~ expanded
+// to the user's home directory and all paths resolved to absolute paths.
+func (c *Config) ExpandedInternalReadablePaths() []string {
+	return expandPaths(c.InternalReadablePaths)
+}
+
+// ExpandedInternalWritablePaths returns InternalWritablePaths with ~ expanded
+// to the user's home directory and all paths resolved to absolute paths.
+func (c *Config) ExpandedInternalWritablePaths() []string {
+	return expandPaths(c.InternalWritablePaths)
 }
 
 // ExpandPath expands ~ and resolves p to an absolute path (so "." and other
