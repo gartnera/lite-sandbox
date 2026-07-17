@@ -297,6 +297,58 @@ func TestConfigureCLAUDEMD(t *testing.T) {
 	}
 }
 
+// TestClaudeHookPlan covers the hook command/matcher for each install mode. In
+// every mode that configures the MCP server, the matcher must include the
+// sandbox's own MCP tools so the hook pre-approves them in subagents/skills,
+// which don't inherit permissions.allow (anthropics/claude-code#18950).
+func TestClaudeHookPlan(t *testing.T) {
+	const bin = "/usr/local/bin/lite-sandbox"
+
+	tests := []struct {
+		name                             string
+		wantHook, validateBash, governFS bool
+		configMCP                        bool
+		wantCommand, wantMatcher         string
+	}{
+		{
+			name:        "default install allows MCP tools via hook",
+			configMCP:   true,
+			wantCommand: bin + " hook",
+			wantMatcher: mcpToolMatcher,
+		},
+		{
+			name:     "with-tool-hook governs built-ins and allows MCP tools",
+			wantHook: true, governFS: true, configMCP: true,
+			wantCommand: bin + " hook",
+			wantMatcher: hookToolMatcher + "|" + mcpToolMatcher,
+		},
+		{
+			name:     "bash-ast mode matches only Bash (no MCP server)",
+			wantHook: true, validateBash: true,
+			wantCommand: bin + " hook --validate-bash",
+			wantMatcher: bashValidateMatcher,
+		},
+		{
+			name:     "bash-ast with tool hook matches built-ins only",
+			wantHook: true, validateBash: true, governFS: true,
+			wantCommand: bin + " hook --validate-bash",
+			wantMatcher: hookToolMatcher,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, matcher := claudeHookPlan(bin, tt.wantHook, tt.validateBash, tt.governFS, tt.configMCP)
+			if command != tt.wantCommand {
+				t.Errorf("command = %q, want %q", command, tt.wantCommand)
+			}
+			if matcher != tt.wantMatcher {
+				t.Errorf("matcher = %q, want %q", matcher, tt.wantMatcher)
+			}
+		})
+	}
+}
+
 // setupDetectionEnv points every detection input (PATH, HOME, CODEX_HOME,
 // XDG_CONFIG_HOME) at empty temp directories so no real CLI on the test host
 // leaks into the result. It returns the fake home and PATH directories.

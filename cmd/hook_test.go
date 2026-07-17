@@ -316,6 +316,41 @@ func TestDenyBuiltinBash(t *testing.T) {
 	}
 }
 
+// TestEvaluateMCPToolAllow verifies the sandbox's own MCP tools are allowed
+// outright (bypassing the permission prompt, which subagents/skills would
+// otherwise raise — anthropics/claude-code#18950), in both hook modes, while
+// other servers' MCP tools defer to the normal permission flow.
+func TestEvaluateMCPToolAllow(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+
+	for _, tool := range []string{
+		"mcp__lite-sandbox__bash",
+		"mcp__lite-sandbox__bash_output",
+		"mcp__lite-sandbox__kill_shell",
+		"mcp__lite-sandbox__list_shells",
+	} {
+		// MCP tool inputs are unmodeled, so ToolInput is nil — the allow must
+		// not depend on it.
+		event := &hook.Event{ToolName: tool, CWD: cwd}
+		for _, validateBash := range []bool{false, true} {
+			got := evaluate(event, validateBash)
+			if got == nil {
+				t.Fatalf("%s (validateBash=%v): expected allow decision, got nil (defer)", tool, validateBash)
+			}
+			if got.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+				t.Errorf("%s (validateBash=%v): expected allow, got %q", tool, validateBash, got.HookSpecificOutput.PermissionDecision)
+			}
+		}
+	}
+
+	// A different server's MCP tool is not ours to approve.
+	other := &hook.Event{ToolName: "mcp__other-server__bash", CWD: cwd}
+	if got := evaluate(other, false); got != nil {
+		t.Errorf("expected defer (nil) for another server's MCP tool, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
+	}
+}
+
 func TestValidateBuiltinBash(t *testing.T) {
 	isolateConfig(t)
 	cwd := t.TempDir()
