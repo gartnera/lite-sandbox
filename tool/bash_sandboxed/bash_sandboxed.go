@@ -415,7 +415,7 @@ func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
 	// Detect pnpm paths if pnpm runtime is enabled. `pnpm store path` boots
 	// node and costs hundreds of milliseconds, so it is cached persistently.
 	if runtimes.Pnpm != nil && runtimes.Pnpm.PnpmEnabled() {
-		pnpmBinds := cachedDetect("pnpm", []string{"PNPM_HOME", "XDG_DATA_HOME", "HOME"}, detectPnpmBinds)
+		pnpmBinds := cachedDetect("pnpm", []string{"PNPM_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "HOME"}, detectPnpmBinds)
 		binds = append(binds, pnpmBinds...)
 	}
 
@@ -477,22 +477,46 @@ func detectGoBinds() []string {
 }
 
 // detectPnpmBinds detects pnpm paths that need to be writable.
-// Returns the pnpm store directory where packages are cached.
+// Returns the pnpm store directory (downloaded packages) and the pnpm cache
+// directory (registry metadata and the `pnpm dlx` cache), which live in
+// separate trees (e.g. ~/Library/pnpm/store vs ~/Library/Caches/pnpm on
+// macOS). Without the cache dir bound, pnpm invoked inside the sandbox — e.g.
+// by a lefthook job or package script — fails with EPERM creating its cache.
 func detectPnpmBinds() []string {
+	var paths []string
+
 	cmd := exec.Command("pnpm", "store", "path")
 	output, err := cmd.Output()
 	if err != nil {
-		slog.Warn("failed to detect pnpm paths", "error", err)
-		return nil
+		slog.Warn("failed to detect pnpm store path", "error", err)
+	} else if storePath := strings.TrimSpace(string(output)); storePath != "" {
+		paths = append(paths, storePath)
 	}
 
-	storePath := strings.TrimSpace(string(output))
-	if storePath == "" {
-		return nil
+	// `pnpm config get cache-dir` prints "undefined" when the setting is
+	// unset; pnpm then defaults to the OS cache dir joined with "pnpm".
+	// pnpm creates cache subdirs lazily, so materialize the directory up
+	// front — a bind-mount source must exist for the OS sandbox to mount it.
+	cacheDir := ""
+	if output, err := exec.Command("pnpm", "config", "get", "cache-dir").Output(); err != nil {
+		slog.Warn("failed to detect pnpm cache dir", "error", err)
+	} else {
+		cacheDir = strings.TrimSpace(string(output))
+	}
+	if cacheDir == "" || cacheDir == "undefined" {
+		if userCache, err := os.UserCacheDir(); err == nil {
+			cacheDir = filepath.Join(userCache, "pnpm")
+		} else {
+			cacheDir = ""
+		}
+	}
+	if p := ensureDir(cacheDir); p != "" {
+		paths = append(paths, p)
 	}
 
-	paths := []string{storePath}
-	slog.Info("detected pnpm runtime paths", "paths", paths)
+	if len(paths) > 0 {
+		slog.Info("detected pnpm runtime paths", "paths", paths)
+	}
 	return paths
 }
 

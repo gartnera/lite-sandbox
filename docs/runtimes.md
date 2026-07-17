@@ -59,8 +59,18 @@ pnpm test
 pnpm run build
 ```
 
+When the OS sandbox is enabled, the pnpm runtime automatically detects and
+grants write access to:
+
+- **pnpm store** — `pnpm store path`, where downloaded packages live.
+- **pnpm cache** — the `cache-dir` setting, defaulting to the OS cache
+  directory joined with `pnpm` (e.g. `~/Library/Caches/pnpm` on macOS,
+  `~/.cache/pnpm` on Linux). This holds registry metadata and the `pnpm dlx`
+  cache, so pnpm invoked indirectly inside the sandbox (e.g. by a lefthook job
+  or package script) can populate its cache.
+
 Security features:
-- `pnpm dlx` is blocked (downloads and executes remote packages)
+- `pnpm dlx` is blocked when invoked directly (downloads and executes remote packages)
 - `pnpm publish` requires explicit opt-in since it affects the npm registry (shared state)
 
 ## Deno Runtime Support

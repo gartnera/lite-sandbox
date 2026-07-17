@@ -20,6 +20,12 @@ import (
 // runtimeDetectCacheTTL bounds how long a persisted detection result is reused.
 const runtimeDetectCacheTTL = time.Hour
 
+// runtimeCacheVersion identifies the detection logic that produced the cached
+// entries. Bump it whenever a detect function changes which paths it returns,
+// so an upgraded binary re-detects immediately instead of serving stale paths
+// for up to the TTL.
+const runtimeCacheVersion = 2
+
 type runtimeCacheEntry struct {
 	Paths     []string          `json:"paths"`
 	ExpiresAt time.Time         `json:"expires_at"`
@@ -27,6 +33,7 @@ type runtimeCacheEntry struct {
 }
 
 type runtimeCacheFile struct {
+	Version int                          `json:"version"`
 	Entries map[string]runtimeCacheEntry `json:"entries"`
 }
 
@@ -87,15 +94,19 @@ func cachedDetect(name string, envKeys []string, detect func() []string) []strin
 }
 
 // loadRuntimeCache reads the cache file, returning an empty cache on any error
-// (missing file, corrupt JSON) so callers always get a usable value.
+// (missing file, corrupt JSON, version mismatch) so callers always get a
+// usable value. The unmarshal target must be a zero value: Unmarshal leaves
+// absent fields untouched, so decoding a legacy version-less file into a
+// struct pre-filled with the current version would wrongly pass the check.
 func loadRuntimeCache(path string) runtimeCacheFile {
-	cache := runtimeCacheFile{Entries: map[string]runtimeCacheEntry{}}
+	empty := runtimeCacheFile{Version: runtimeCacheVersion, Entries: map[string]runtimeCacheEntry{}}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cache
+		return empty
 	}
-	if err := json.Unmarshal(data, &cache); err != nil || cache.Entries == nil {
-		cache.Entries = map[string]runtimeCacheEntry{}
+	var cache runtimeCacheFile
+	if err := json.Unmarshal(data, &cache); err != nil || cache.Version != runtimeCacheVersion || cache.Entries == nil {
+		return empty
 	}
 	return cache
 }

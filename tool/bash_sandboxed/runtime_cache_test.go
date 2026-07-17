@@ -100,6 +100,50 @@ func TestCachedDetect_EmptyResultNotCached(t *testing.T) {
 	}
 }
 
+func TestCachedDetect_VersionMismatchInvalidates(t *testing.T) {
+	setCacheDir(t)
+
+	calls := 0
+	detect := func() []string {
+		calls++
+		return []string{"/some/path"}
+	}
+
+	cachedDetect("testrt", nil, detect)
+
+	// Rewrite the file as if produced by an older binary.
+	path := runtimeCachePath()
+	cache := loadRuntimeCache(path)
+	cache.Version = runtimeCacheVersion - 1
+	saveRuntimeCache(path, cache)
+
+	cachedDetect("testrt", nil, detect)
+	if calls != 2 {
+		t.Fatalf("detect ran %d times, want 2 (version mismatch should invalidate)", calls)
+	}
+}
+
+func TestCachedDetect_LegacyVersionlessFileInvalidates(t *testing.T) {
+	setCacheDir(t)
+
+	// A cache written by a pre-versioning binary: fresh entry, no "version"
+	// key at all. Unmarshal leaves absent fields untouched, so this only
+	// invalidates if the load path decodes into a zero value.
+	path := runtimeCachePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"entries":{"testrt":{"paths":["/stale/path"],"expires_at":"`+
+		time.Now().Add(time.Hour).Format(time.RFC3339)+`"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cachedDetect("testrt", nil, func() []string { return []string{"/fresh/path"} })
+	if !reflect.DeepEqual(got, []string{"/fresh/path"}) {
+		t.Fatalf("got %v, want re-detected paths (legacy version-less cache must be invalidated)", got)
+	}
+}
+
 func TestCachedDetect_CorruptCacheFile(t *testing.T) {
 	setCacheDir(t)
 
