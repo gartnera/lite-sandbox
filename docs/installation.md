@@ -23,7 +23,8 @@ The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to
 For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`) automatically:
 1. Adds the MCP server to `~/.claude.json` (user-scoped)
 2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
-3. Adds usage directive to `~/.claude/CLAUDE.md`
+3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools outright — subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow.
+4. Adds usage directive to `~/.claude/CLAUDE.md`
 
 Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
 
@@ -33,7 +34,7 @@ To extend the sandbox to Claude Code's **built-in tools**, add `--with-tool-hook
 lite-sandbox install --with-tool-hook
 ```
 
-This registers a `PreToolUse` hook that (1) blocks the built-in `Bash` tool with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is optional and off by default. When used, the hook governs `Bash` instead of the blunt permission `deny` (so the redirect message actually reaches the model).
+This widens the `PreToolUse` hook matcher so that, in addition to allowing the `mcp__lite-sandbox__*` tools, it (1) blocks the built-in `Bash` tool with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is optional and off by default. When used, the hook governs `Bash` instead of the blunt permission `deny` (so the redirect message actually reaches the model).
 
 If you'd rather keep using Claude Code's own `Bash` tool but still put a static gate in front of it, add `--bash-ast-hook-mode`:
 
@@ -202,6 +203,23 @@ without prompts.
 
 Denying `Bash` is what makes the sandbox enforceable — without it, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 
+Because subagents and skills don't inherit these `allow` entries ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), also register a `PreToolUse` hook that allows the sandbox tools there:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__lite-sandbox__.*",
+        "hooks": [
+          {"type": "command", "command": "/path/to/lite-sandbox hook"}
+        ]
+      }
+    ]
+  }
+}
+```
+
 ### 3. Direct Claude to use the sandboxed tool
 
 Add the following to your `~/.claude/CLAUDE.md` (global) or project-level `CLAUDE.md`:
@@ -227,6 +245,7 @@ This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.
 - **redirects `Bash`** — the built-in Bash tool is denied with a message telling the model to use `mcp__lite-sandbox__bash` instead;
 - **denies reads** (`Read`, and `Grep`/`Glob` with an explicit `path`) that resolve outside the readable paths;
 - **denies writes** (`Write`, `Edit`, `NotebookEdit`) that resolve outside the writable paths;
+- **allows the sandbox's own tools** (`mcp__lite-sandbox__*`) outright, so they stay prompt-free in subagents and skills, which don't inherit `permissions.allow` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950));
 - **defers** everything in-bounds to Claude Code's normal permission flow.
 
 The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go`): the working directory plus any `readable_paths`/`writable_paths` from config, plus the worktree parent when `git.allow_worktree_parent` is set. Writable paths are also treated as readable. Denials carry a clear reason telling the model the path is out of bounds and that the user can widen the boundary with `lite-sandbox config readable-paths add` / `writable-paths add`.

@@ -26,6 +26,14 @@ const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch
 // redirecting it) and leaves the filesystem tools to Claude Code's normal flow.
 const bashValidateMatcher = "Bash"
 
+// mcpToolPrefix identifies the sandbox's own MCP tools (mcp__lite-sandbox__bash
+// and its background-process companions), and mcpToolMatcher is the
+// corresponding settings.json hook matcher (matchers are regexes).
+const (
+	mcpToolPrefix  = "mcp__lite-sandbox__"
+	mcpToolMatcher = "mcp__lite-sandbox__.*"
+)
+
 // hookValidateBash selects the --bash-ast-hook-mode behavior: instead of denying the
 // built-in Bash tool, parse and validate its command against the sandbox and
 // allow it when it passes. Set by the --validate-bash flag.
@@ -36,9 +44,12 @@ var hookCmd = &cobra.Command{
 	Short: "Evaluate a Claude Code PreToolUse event from stdin",
 	Long: "Reads a Claude Code PreToolUse hook event as JSON on stdin and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
-		"writes outside the writable paths are denied. All other calls defer to " +
-		"Claude Code's normal permission flow. Invoked by Claude Code; register it " +
-		"with `lite-sandbox install --with-tool-hook`.\n\n" +
+		"writes outside the writable paths are denied. The sandbox's own MCP tools " +
+		"(mcp__lite-sandbox__*) are allowed outright, so they stay prompt-free in " +
+		"subagents and skills, which do not inherit permissions.allow " +
+		"(anthropics/claude-code#18950). All other calls defer to " +
+		"Claude Code's normal permission flow. Invoked by Claude Code; registered " +
+		"by `lite-sandbox install`.\n\n" +
 		"With --validate-bash, the built-in Bash tool is validated through the " +
 		"sandbox (AST whitelist + path boundaries) and allowed when it passes " +
 		"instead of being redirected to the MCP tool.",
@@ -90,6 +101,15 @@ func runHook(cmd *cobra.Command, validateBash bool) error {
 // the sandbox and allowed when it passes; otherwise it is redirected to the
 // sandboxed MCP tool. Filesystem tools are checked against path boundaries.
 func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
+	// The sandbox's own MCP tools are pre-approved via the hook because
+	// subagents and skills do not inherit permissions.allow from settings.json
+	// (anthropics/claude-code#18950) but PreToolUse hooks still fire there.
+	// This grants nothing the installer's allow rules don't already: the tools
+	// validate and sandbox every command themselves.
+	if strings.HasPrefix(event.ToolName, mcpToolPrefix) {
+		return hook.NewDecision(hook.DecisionAllow,
+			"Pre-approved by lite-sandbox: its MCP tools validate and sandbox every command themselves.")
+	}
 	if event.ToolName == hook.ToolBash {
 		if validateBash {
 			return validateBuiltinBash(event)

@@ -42,8 +42,10 @@ Per agent:
 
   claude   — adds the MCP server to ~/.claude.json, auto-allows the
              mcp__lite-sandbox__* tools and denies the built-in Bash tool in
-             ~/.claude/settings.json, and adds a usage directive to
-             ~/.claude/CLAUDE.md
+             ~/.claude/settings.json, registers a PreToolUse hook that
+             pre-approves those tools inside subagents and skills (which do
+             not inherit permissions.allow — anthropics/claude-code#18950),
+             and adds a usage directive to ~/.claude/CLAUDE.md
   codex    — registers the MCP server and a PreToolUse hook in
              ~/.codex/config.toml (honoring CODEX_HOME) and adds a usage
              directive to ~/.codex/AGENTS.md; Codex has no permission deny, so
@@ -282,22 +284,14 @@ func runInstallClaude(binPath string) error {
 		fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
 	}
 
-	// 4. Reconcile the built-in tool PreToolUse hook (register the right one for
-	// the chosen mode, removing any stale lite-sandbox hook from a prior install).
-	hookCommand := ""
-	matcher := hookToolMatcher
-	if wantHook {
-		if validateBash {
-			hookCommand = binPath + " hook --validate-bash"
-		} else {
-			hookCommand = binPath + " hook"
-		}
-		// On its own, --bash-ast-hook-mode governs only Bash; with --with-tool-hook
-		// it also confines the filesystem tools, so it matches all of them.
-		if !governFS {
-			matcher = bashValidateMatcher
-		}
-	}
+	// 4. Reconcile the PreToolUse hook (register the right one for the chosen
+	// mode, removing any stale lite-sandbox hook from a prior install). Whenever
+	// the MCP server is configured, the hook also matches the sandbox's own MCP
+	// tools and allows them: subagents and skills do not inherit
+	// permissions.allow from settings.json (anthropics/claude-code#18950), but
+	// PreToolUse hooks still fire there, so this is what keeps the sandbox tools
+	// prompt-free inside them.
+	hookCommand, matcher := claudeHookPlan(binPath, wantHook, validateBash, governFS, configMCP)
 	if err := reconcilePreToolUseHook(claudeDir, binPath, hookCommand, matcher); err != nil {
 		return fmt.Errorf("failed to configure tool hook: %w", err)
 	}
@@ -305,9 +299,11 @@ func runInstallClaude(binPath string) error {
 	case governFS && validateBash:
 		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) and confine reads/writes to sandbox paths in ~/.claude/settings.json")
 	case governFS:
-		fmt.Println("✓ Registered PreToolUse hook to redirect built-in Bash and confine reads/writes to sandbox paths in ~/.claude/settings.json")
+		fmt.Println("✓ Registered PreToolUse hook to redirect built-in Bash, confine reads/writes to sandbox paths, and pre-approve the sandbox tools in subagents in ~/.claude/settings.json")
 	case validateBash:
 		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in ~/.claude/settings.json")
+	case configMCP:
+		fmt.Println("✓ Registered PreToolUse hook to pre-approve the sandbox tools in subagents and skills in ~/.claude/settings.json")
 	}
 
 	fmt.Println("\n✓ Claude Code installation complete!")
@@ -451,6 +447,38 @@ func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 	cfg["permissions"] = permsRaw
 
 	return writeSettingsFile(settingsPath, cfg)
+}
+
+// claudeHookPlan computes the PreToolUse hook command and matcher for the
+// chosen Claude Code install mode. An empty command means no hook is
+// registered. See runInstallClaude for the mode flags; configMCP additionally
+// extends the matcher to the sandbox's own MCP tools so the hook can
+// pre-approve them in subagents and skills.
+func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP bool) (command, matcher string) {
+	if wantHook {
+		if validateBash {
+			command = binPath + " hook --validate-bash"
+		} else {
+			command = binPath + " hook"
+		}
+		// On its own, --bash-ast-hook-mode governs only Bash; with --with-tool-hook
+		// it also confines the filesystem tools, so it matches all of them.
+		matcher = hookToolMatcher
+		if !governFS {
+			matcher = bashValidateMatcher
+		}
+	}
+	if configMCP {
+		if command == "" {
+			command = binPath + " hook"
+		}
+		if matcher == "" {
+			matcher = mcpToolMatcher
+		} else {
+			matcher += "|" + mcpToolMatcher
+		}
+	}
+	return command, matcher
 }
 
 // reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook
