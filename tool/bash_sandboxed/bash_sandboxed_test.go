@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -609,11 +610,55 @@ func TestExecIsUnsandboxed(t *testing.T) {
 		{"subcommand mismatch stays confined", []string{"git", "status"}, false},
 		{"unrelated command", []string{"ls"}, false},
 		{"empty", nil, false},
+
+		// Wrapper commands (timeout, env, xargs) must peer through to the
+		// wrapped command so its unsandboxed status governs routing.
+		{"timeout wraps unsandboxed", []string{"timeout", "60", "curl", "https://x"}, true},
+		{"timeout with flags wraps unsandboxed", []string{"timeout", "-s", "SIGKILL", "60", "curl"}, true},
+		{"timeout wraps confined", []string{"timeout", "60", "ls"}, false},
+		{"timeout wraps subcommand match", []string{"timeout", "60", "git", "push"}, true},
+		{"timeout wraps subcommand mismatch", []string{"timeout", "60", "git", "status"}, false},
+		{"env wraps unsandboxed", []string{"env", "FOO=1", "curl"}, true},
+		{"env wraps confined", []string{"env", "FOO=1", "ls"}, false},
+		{"xargs wraps unsandboxed", []string{"xargs", "curl"}, true},
+		{"xargs default echo confined", []string{"xargs"}, false},
+		{"nested env timeout unsandboxed", []string{"env", "FOO=1", "timeout", "60", "curl"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := s.execIsUnsandboxed(context.Background(), tt.args); got != tt.want {
 				t.Errorf("execIsUnsandboxed(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnwrapWrapperArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"no wrapper", []string{"curl", "-s", "https://x"}, []string{"curl", "-s", "https://x"}},
+		{"timeout basic", []string{"timeout", "60", "curl", "-s"}, []string{"curl", "-s"}},
+		{"timeout duration only", []string{"timeout", "60"}, nil},
+		{"timeout short flag consumes", []string{"timeout", "-k", "5", "60", "cmd"}, []string{"cmd"}},
+		{"timeout long flag inline", []string{"timeout", "--signal=SIGKILL", "60", "cmd"}, []string{"cmd"}},
+		{"timeout end of options", []string{"timeout", "--", "60", "cmd"}, []string{"cmd"}},
+		{"env assignment", []string{"env", "A=1", "B=2", "cmd", "arg"}, []string{"cmd", "arg"}},
+		{"env unset flag", []string{"env", "-u", "PATH", "cmd"}, []string{"cmd"}},
+		{"env split-string rejected", []string{"env", "-S", "cmd arg"}, nil},
+		{"env no command", []string{"env", "A=1"}, nil},
+		{"xargs basic", []string{"xargs", "cmd"}, []string{"cmd"}},
+		{"xargs replace flag", []string{"xargs", "-I", "{}", "cmd", "{}"}, []string{"cmd", "{}"}},
+		{"xargs default echo", []string{"xargs"}, nil},
+		{"nested wrappers", []string{"timeout", "60", "env", "A=1", "cmd"}, []string{"cmd"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unwrapWrapperArgs(tt.args)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("unwrapWrapperArgs(%v) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
 	}
