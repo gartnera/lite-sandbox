@@ -652,6 +652,86 @@ func TestExecuteScript(t *testing.T) {
 	}
 }
 
+// Functions a nested script declares must count as allowed commands, the same
+// way they do for a top-level command string. Regression test: executeBash and
+// executeScript used the workDir-blind validate(), so a helper defined and
+// called inside the script failed with `command "..." is not allowed`.
+func TestNestedScript_DeclaredFunctionsAllowed(t *testing.T) {
+	const script = `ci_group() {
+  [[ -n "${CI:-}" ]] && echo "::group::$1"
+  return 0
+}
+ci_endgroup() {
+  [[ -n "${CI:-}" ]] && echo "::endgroup::"
+  return 0
+}
+ci_group "Run tests"
+echo body
+ci_endgroup
+`
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"direct invocation", `./ci.sh`},
+		{"via bash <script>", `bash ci.sh`},
+		{"via bash -c", `bash -c 'greet() { echo body; }; greet'`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ci.sh"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			s := newTestSandboxWithLocalBinaryExecution()
+			out, err := executeInDirWithSandbox(t, s, dir, tt.command)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.TrimSpace(out) != "body" {
+				t.Errorf("expected %q, got %q", "body", out)
+			}
+		})
+	}
+}
+
+// Sourcing a file from a nested script must also pick up its functions.
+func TestNestedScript_SourcedFunctionsAllowed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.sh"), []byte("helper() { echo from-lib; }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.sh"), []byte("source lib.sh\nhelper\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestSandboxWithLocalBinaryExecution()
+	out, err := executeInDirWithSandbox(t, s, dir, `./main.sh`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "from-lib" {
+		t.Errorf("expected %q, got %q", "from-lib", out)
+	}
+}
+
+// The function allowance must not become a hole: a script that declares
+// functions still cannot call a non-whitelisted command.
+func TestNestedScript_UndeclaredCommandStillBlocked(t *testing.T) {
+	dir := t.TempDir()
+	script := "helper() { echo hi; }\nhelper\nnot_a_real_command\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.sh"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestSandboxWithLocalBinaryExecution()
+	_, err := executeInDirWithSandbox(t, s, dir, `./main.sh`)
+	if err == nil {
+		t.Fatal("expected validation error for non-whitelisted command")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected 'not allowed' error, got: %v", err)
+	}
+}
+
 func TestExecuteScript_BlockedWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "script.sh"), []byte("echo hello\n"), 0755)
