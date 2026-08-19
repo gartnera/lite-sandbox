@@ -679,6 +679,10 @@ ci_endgroup
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Neutralize any ambient CI var (set in CI runners) so the
+			// ci_group/ci_endgroup markers stay out of the output and the
+			// assertion below is deterministic regardless of environment.
+			t.Setenv("CI", "")
 			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, "ci.sh"), []byte(script), 0755); err != nil {
 				t.Fatal(err)
