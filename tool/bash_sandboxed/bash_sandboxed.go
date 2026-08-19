@@ -1235,6 +1235,14 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	// Peer through wrapper commands (timeout, env, xargs) so the wrapped
+	// command's unsandboxed status governs routing, mirroring how the arg
+	// validators recurse into these wrappers. This lets e.g. `timeout 60 mycmd`
+	// run on the host when mycmd is an unsandboxed_commands entry.
+	args = unwrapWrapperArgs(args)
+	if len(args) == 0 {
+		return false
+	}
 	cmdName := args[0]
 	s.mu.RLock()
 	defer s.mu.RUnlock()

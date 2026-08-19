@@ -403,6 +403,188 @@ func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[i:])
 }
 
+// wrapperUnwrappers maps wrapper commands to a function that, given a full
+// invocation (command name first), returns the wrapped command's args (also
+// command name first) or nil when there is none. These mirror the AST arg
+// validators (validateTimeoutArgs/validateEnvArgs/validateXargsArgs) but operate
+// on already-expanded string args so routing (execIsUnsandboxed) can peer
+// through wrappers the same way validation does.
+var wrapperUnwrappers = map[string]func([]string) []string{
+	"timeout": unwrapTimeoutArgs,
+	"env":     unwrapEnvArgs,
+	"xargs":   unwrapXargsArgs,
+}
+
+// unwrapWrapperArgs repeatedly strips leading wrapper commands (timeout, env,
+// xargs) to expose the real command being run, so unsandboxed routing evaluates
+// the wrapped command rather than the wrapper. Returns the innermost args
+// (command name first); returns args unchanged when there is no wrapper, or nil
+// when a wrapper has no wrapped command. Each step drops at least the wrapper
+// token, so this terminates; the depth guard is belt-and-suspenders.
+func unwrapWrapperArgs(args []string) []string {
+	for guard := 0; guard <= maxBashDepth && len(args) > 0; guard++ {
+		unwrap, ok := wrapperUnwrappers[args[0]]
+		if !ok {
+			return args
+		}
+		inner := unwrap(args)
+		if len(inner) == 0 {
+			return nil
+		}
+		args = inner
+	}
+	return args
+}
+
+// unwrapTimeoutArgs returns the wrapped command from a `timeout ...` invocation,
+// mirroring validateTimeoutArgs' option/DURATION skipping.
+func unwrapTimeoutArgs(args []string) []string {
+	i := 1
+	for i < len(args) {
+		lit := args[i]
+		if lit == "--" {
+			i++
+			break
+		}
+		if strings.HasPrefix(lit, "--") {
+			name := lit[2:]
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				i++
+				continue
+			}
+			if name == "kill-after" || name == "signal" {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(lit, "-") && lit != "-" {
+			body := lit[1:]
+			consumesNext := false
+			for j := 0; j < len(body); j++ {
+				if timeoutConsumingShortFlags[body[j]] {
+					if j == len(body)-1 {
+						consumesNext = true
+					}
+					break
+				}
+			}
+			if consumesNext {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		break // first non-option token is DURATION
+	}
+	if i >= len(args) {
+		return nil
+	}
+	i++ // skip DURATION
+	if i >= len(args) {
+		return nil
+	}
+	return args[i:]
+}
+
+// unwrapEnvArgs returns the wrapped command from an `env ...` invocation,
+// mirroring validateEnvArgs' option/assignment skipping. -S/--split-string
+// builds argv from a string (rejected by validation) so it yields no command.
+func unwrapEnvArgs(args []string) []string {
+	i := 1
+	for i < len(args) {
+		lit := args[i]
+		if lit == "-" {
+			i++
+			continue
+		}
+		if lit == "--" {
+			i++
+			if i < len(args) {
+				return args[i:]
+			}
+			return nil
+		}
+		if strings.HasPrefix(lit, "--") {
+			name := lit[2:]
+			hasInlineValue := false
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+				hasInlineValue = true
+			}
+			if name == "split-string" {
+				return nil
+			}
+			if !hasInlineValue && (name == "unset" || name == "chdir") {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(lit, "-") {
+			body := lit[1:]
+			consumesNext := false
+			for j := 0; j < len(body); j++ {
+				c := body[j]
+				if c == 'S' {
+					return nil
+				}
+				if envConsumingShortFlags[c] {
+					if j == len(body)-1 {
+						consumesNext = true
+					}
+					break
+				}
+			}
+			if consumesNext {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if isEnvAssignment(lit) {
+			i++
+			continue
+		}
+		return args[i:] // first non-option, non-assignment operand: the COMMAND
+	}
+	return nil
+}
+
+// unwrapXargsArgs returns the wrapped utility command from an `xargs ...`
+// invocation, mirroring validateXargsArgs. With no explicit command xargs
+// defaults to echo, so this returns nil (nothing user-designated to unsandbox).
+func unwrapXargsArgs(args []string) []string {
+	i := 1
+	for i < len(args) {
+		lit := args[i]
+		if lit == "--" {
+			i++
+			if i < len(args) {
+				return args[i:]
+			}
+			return nil
+		}
+		if !strings.HasPrefix(lit, "-") {
+			return args[i:]
+		}
+		if strings.HasPrefix(lit, "--") {
+			i++
+			continue
+		}
+		if len(lit) == 2 && xargsArgConsumingFlags[lit[:2]] {
+			i += 2
+			continue
+		}
+		i++
+	}
+	return nil
+}
+
 // blockedTarOps lists tar operation flags that are not read-only.
 var blockedTarOps = map[byte]string{
 	'x': "extracts files",
