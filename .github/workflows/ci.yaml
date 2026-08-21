@@ -9,13 +9,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: |
+          for i in 1 2 3; do
+            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y bubblewrap && exit 0
+            echo "apt attempt $i timed out or failed, retrying..."
+            sleep 5
+          done
+          echo "apt failed after 3 attempts" >&2
+          exit 1
       - name: Enable unprivileged user namespaces
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
@@ -29,6 +37,7 @@ jobs:
 
   test-macos:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6

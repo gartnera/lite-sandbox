@@ -318,6 +318,8 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		i++
 	}
 
+	hc := interp.HandlerCtx(ctx)
+
 	// Determine the script content
 	var script string
 	if foundC {
@@ -326,7 +328,6 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		}
 		script = cmdString
 	} else if scriptFile != "" {
-		hc := interp.HandlerCtx(ctx)
 		path := absPath(scriptFile, hc.Dir)
 		// A bare extra_commands script entry is an explicit trust opt-in, so
 		// invoking it via `bash <script>` must behave the same as running it
@@ -360,12 +361,13 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		return fmt.Errorf("%s: %w", cmdName, err)
 	}
 
-	// Validate through the sandbox
-	if err := s.validate(f); err != nil {
+	// Validate through the sandbox. Use the workDir-aware variant so functions
+	// the script declares (or picks up via `source`) count as allowed commands,
+	// matching how the top-level command string is validated.
+	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
 		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
 	}
 
-	hc := interp.HandlerCtx(ctx)
 	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
 	}
@@ -424,7 +426,7 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("script %s: %w", args[0], err)
 	}
-	if err := s.validate(f); err != nil {
+	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
 		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
 	}
 	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
