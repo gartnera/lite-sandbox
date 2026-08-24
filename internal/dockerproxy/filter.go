@@ -7,6 +7,15 @@ import "regexp"
 // the allowlist patterns below stay version-agnostic.
 const versionPrefix = `^(/v[0-9]+\.[0-9]+)?`
 
+// imageName matches the {name} path segment of the image endpoints. Unlike a
+// container ID (a single opaque token), a Docker image reference is not a single
+// path component: it can carry a registry host and a slash-separated repository
+// path plus a tag or digest (e.g. ko.local/go-repeater:<sha>), so it must be
+// matched with a slash-permitting pattern. Each image rule still anchors a fixed
+// operation suffix (/json, /tag, ...) after the name, so widening the name does
+// not admit any additional verb.
+const imageName = `.+`
+
 // allowRule pairs an HTTP method with a path pattern. A request is permitted
 // when its method matches and its path matches the (anchored) pattern.
 type allowRule struct {
@@ -73,13 +82,13 @@ var allowRules = []allowRule{
 
 	// Images
 	rule("GET", `/images/json`),
-	rule("GET", `/images/[^/]+/json`),
-	rule("GET", `/images/[^/]+/history`),
+	rule("GET", `/images/`+imageName+`/json`),
+	rule("GET", `/images/`+imageName+`/history`),
 	rule("GET", `/images/search`),
 	rule("GET", `/images/get`),
 	rule("POST", `/images/create`),
-	rule("POST", `/images/[^/]+/push`),
-	rule("POST", `/images/[^/]+/tag`),
+	rule("POST", `/images/`+imageName+`/push`),
+	rule("POST", `/images/`+imageName+`/tag`),
 	rule("POST", `/images/load`),
 	rule("POST", `/build`),
 	rule("POST", `/build/prune`),
@@ -93,7 +102,7 @@ var allowRules = []allowRule{
 	// ingest files the sandboxed client itself can already read).
 	rule("POST", `/session`),
 	rule("POST", `/grpc`),
-	rule("DELETE", `/images/[^/]+`),
+	rule("DELETE", `/images/`+imageName),
 	rule("POST", `/images/prune`),
 
 	// Networks

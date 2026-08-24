@@ -423,6 +423,13 @@ func TestIsAllowed(t *testing.T) {
 		{"POST", "/v1.43/build"},
 		{"POST", "/session"},
 		{"POST", "/v1.43/grpc"},
+		// Image references carry a registry host and slash-separated repo path
+		// (e.g. ko/docker tag): the {name} segment must span slashes.
+		{"POST", "/v1.49/images/ko.local/go-repeater:80f5f28e/tag"},
+		{"POST", "/v1.43/images/ghcr.io/org/repo:v1/push"},
+		{"GET", "/v1.43/images/ko.local/go-repeater:latest/json"},
+		{"GET", "/v1.43/images/registry.example.com/team/app/history"},
+		{"DELETE", "/v1.43/images/ko.local/go-repeater:latest"},
 	}
 	for _, a := range allowed {
 		if !isAllowed(a[0], a[1]) {
@@ -435,6 +442,8 @@ func TestIsAllowed(t *testing.T) {
 		{"POST", "/v1.43/containers/abc/commit"},
 		{"GET", "/v1.43/containers/abc/json/extra"},
 		{"POST", "/swarm/init"},
+		// A slash-spanning image name must not smuggle in an unlisted verb.
+		{"POST", "/v1.43/images/ko.local/go-repeater/commit"},
 	}
 	for _, d := range denied {
 		if isAllowed(d[0], d[1]) {
