@@ -6,7 +6,7 @@ Commands go through multiple validation layers.
 
 1. **Command whitelist** — Only explicitly allowed, non-destructive commands can run (e.g., `cat`, `ls`, `grep`, `find`). Code execution runtimes, networking tools, package managers, and shell escape commands are all blocked. Additional commands can be allowed via config.
 2. **Argument validation** — Per-command validators block dangerous flags (e.g., `find -exec`, `tar -x`, `git push`). Write commands (`cp`, `mv`, `rm`, `sed`, etc.) are allowed but path-validated.
-3. **Structural restrictions** — Coprocesses, read-write redirections (`<>`), and dynamic (non-literal) command names are blocked. Process substitutions (`<(...)`) are allowed, but the validator recurses into them so every command nested inside is checked against the same whitelist.
+3. **Structural restrictions** — Coprocesses and read-write redirections (`<>`) are blocked. Dynamic (non-literal) command names — e.g. `$CMD ...` or `$(...)` in command position — cannot be resolved statically, so instead of being rejected they are deferred to the runtime layer, which re-checks the whitelist and re-runs the per-command argument validators against the fully expanded argv (see below). Dynamic command names remain rejected inside command *wrappers* (`env`, `xargs`, `find -exec`, `timeout`, `rg --pre`), because the wrapper spawns that child itself and it never re-enters the interpreter. Process substitutions (`<(...)`) are allowed, but the validator recurses into them so every command nested inside is checked against the same whitelist.
 4. **Static path validation** — Literal path-like arguments (including paths embedded in flags like `-f/path` and `--file=/path`) are resolved to absolute paths with symlink resolution and checked against an allowed directory list (defaults to cwd). Access to `.git` directories is blocked.
 
 ## Runtime validation (interpreter-level, during execution)
@@ -15,6 +15,7 @@ Commands are executed via the [mvdan.cc/sh/v3](https://pkg.go.dev/mvdan.cc/sh/v3
 
 5. **Expanded path validation** — A `CallHandler` intercepts every command after variable and command substitution expansion, validating that all resolved path arguments stay within allowed directories. This catches bypasses like `cat $HOME/secret` that static analysis cannot resolve.
 6. **Redirect path validation** — An `OpenHandler` intercepts all file opens from redirections (e.g., `< $FILE`, `> $OUTPUT`), validating expanded paths before any I/O occurs.
+7. **Expanded command validation** — The whitelist and per-command argument validators are re-enforced on the fully expanded argv. The `CallHandler` runs for every command *before* the interpreter resolves whether it is a builtin, function, or external, so it enforces the whitelist for builtins (an external is left for the `ExecHandler`); the `ExecHandler` runs only for external commands and there re-runs both the whitelist check and the per-command argument validator. This is the layer that safely handles a dynamically-named command (e.g. `$CMD push` resolving to `git`), whose real name and arguments are only concrete at runtime. `bash`/`sh`/`awk` are exempt from the re-run because they are dispatched to dedicated executors that re-parse and re-validate their contents through the interpreter.
 
 ## OS-level sandboxing (optional)
 

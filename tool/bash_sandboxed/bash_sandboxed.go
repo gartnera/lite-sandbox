@@ -898,32 +898,39 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 			}
 			if len(n.Args) > 0 {
 				cmdName := extractCommandName(n.Args[0])
-				if cmdName == "" {
-					validationErr = fmt.Errorf("dynamic command names are not allowed")
-					return false
-				}
-				// Check whether this command is allowed via extra_commands.
-				// Bare entries (no subcommand restriction) always match.
-				// Restricted entries (e.g. "pnpx prettier") only match when the
-				// first non-flag argument matches the restriction.
-				inExtra := extra[cmdName] && (bare[cmdName] || extraSubCommandMatches(extraSub, cmdName, n.Args))
-				// Process-control commands (kill, pkill) are allowed only when the
-				// OS sandbox is active, where they are contained to sandbox-spawned
-				// processes.
-				osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
-				if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] && !osOnly {
-					if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
-						validationErr = fmt.Errorf("command %q is not allowed", cmdName)
-						return false
-					}
-				}
-				// Skip per-command validators for commands allowed via extra_commands —
-				// the user has explicitly opted in to those commands.
-				if !inExtra {
-					if validator, ok := commandArgValidators[cmdName]; ok {
-						if err := validator(s, n.Args); err != nil {
-							validationErr = err
+				// A dynamically-named command (e.g. "$CMD ...", "$(...)") has no
+				// literal name to resolve against the whitelist or a per-command
+				// validator here, so static analysis cannot check it. Rather than
+				// rejecting it outright, defer to the runtime handlers, which see
+				// the fully expanded argv: the CallHandler enforces the whitelist
+				// for builtins and the ExecHandler enforces it (and re-runs the
+				// per-command argument validators) for external commands. Keep
+				// walking so nested commands in the arguments (command/process
+				// substitutions) are still validated statically.
+				if cmdName != "" {
+					// Check whether this command is allowed via extra_commands.
+					// Bare entries (no subcommand restriction) always match.
+					// Restricted entries (e.g. "pnpx prettier") only match when the
+					// first non-flag argument matches the restriction.
+					inExtra := extra[cmdName] && (bare[cmdName] || extraSubCommandMatches(extraSub, cmdName, n.Args))
+					// Process-control commands (kill, pkill) are allowed only when the
+					// OS sandbox is active, where they are contained to sandbox-spawned
+					// processes.
+					osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
+					if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] && !osOnly {
+						if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
+							validationErr = fmt.Errorf("command %q is not allowed", cmdName)
 							return false
+						}
+					}
+					// Skip per-command validators for commands allowed via extra_commands —
+					// the user has explicitly opted in to those commands.
+					if !inExtra {
+						if validator, ok := commandArgValidators[cmdName]; ok {
+							if err := validator(s, n.Args); err != nil {
+								validationErr = err
+								return false
+							}
 						}
 					}
 				}

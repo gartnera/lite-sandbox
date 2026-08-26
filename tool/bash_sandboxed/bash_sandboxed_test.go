@@ -441,15 +441,35 @@ func TestValidate_BlockedInCommandSubstitution(t *testing.T) {
 	}
 }
 
-func TestValidate_DynamicCommandBlocked(t *testing.T) {
-	// Commands that can't be statically determined should be blocked
+func TestValidate_DynamicCommandDeferredToRuntime(t *testing.T) {
+	// A dynamically-named top-level command can't be resolved statically, so
+	// static validation no longer rejects it — enforcement is deferred to the
+	// runtime Call/Exec handlers, which see the expanded argv.
 	f, err := ParseBash("$CMD arg1 arg2")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	err = newTestSandbox().validate(f)
-	if err == nil {
-		t.Fatal("expected validation error for dynamic command name")
+	if err := newTestSandbox().validate(f); err != nil {
+		t.Fatalf("expected dynamic command name to pass static validation, got: %v", err)
+	}
+}
+
+func TestValidate_DynamicWrappedCommandStillBlocked(t *testing.T) {
+	// A dynamically-named command wrapped by env/xargs/find/timeout is still
+	// rejected statically: the wrapper spawns the child itself, so it never
+	// re-enters our interpreter's runtime handlers.
+	for _, cmd := range []string{
+		`env $CMD arg`,
+		`timeout 5 $CMD arg`,
+		`find . -exec $CMD {} \;`,
+	} {
+		f, err := ParseBash(cmd)
+		if err != nil {
+			t.Fatalf("parse error for %q: %v", cmd, err)
+		}
+		if err := newTestSandbox().validate(f); err == nil {
+			t.Fatalf("expected %q to be rejected as a dynamic wrapped command name", cmd)
+		}
 	}
 }
 

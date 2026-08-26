@@ -275,6 +275,64 @@ func TestExecuteBash_WriteRedirectInNested(t *testing.T) {
 	}
 }
 
+func TestDynamicCommandName_RuntimeEnforcement(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("allowed builtin runs", func(t *testing.T) {
+		out, err := executeInDirWithSandbox(t, newTestSandbox(), dir, `CMD=echo; $CMD hello`)
+		if err != nil {
+			t.Fatalf("expected dynamic echo to run, got: %v", err)
+		}
+		if strings.TrimSpace(out) != "hello" {
+			t.Fatalf("unexpected output: %q", out)
+		}
+	})
+
+	t.Run("disallowed external blocked", func(t *testing.T) {
+		_, err := executeInDirWithSandbox(t, newTestSandbox(), dir, `CMD=curl; $CMD http://example.com`)
+		if err == nil {
+			t.Fatal("expected dynamically-named curl to be blocked at runtime")
+		}
+		if !strings.Contains(err.Error(), `"curl" is not allowed`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("disallowed builtin blocked", func(t *testing.T) {
+		// eval is a builtin and is not whitelisted; the ExecHandler never sees
+		// builtins, so the CallHandler must be the layer that rejects it.
+		_, err := executeInDirWithSandbox(t, newTestSandbox(), dir, `CMD=eval; $CMD 'echo hi'`)
+		if err == nil {
+			t.Fatal("expected dynamically-named eval to be blocked at runtime")
+		}
+		if !strings.Contains(err.Error(), `"eval" is not allowed`) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("dangerous flag on dynamic external blocked", func(t *testing.T) {
+		// git push is gated by the git arg validator (remote_write defaults off).
+		// The validator must re-run at runtime for the dynamically-named git.
+		_, err := executeInDirWithSandbox(t, newTestSandbox(), dir, `G=git; $G push origin main`)
+		if err == nil {
+			t.Fatal("expected dynamically-named git push to be blocked at runtime")
+		}
+		if !strings.Contains(err.Error(), "push") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("blocked find flag on dynamic external blocked", func(t *testing.T) {
+		_, err := executeInDirWithSandbox(t, newTestSandbox(), dir, `F=find; $F . -delete`)
+		if err == nil {
+			t.Fatal("expected dynamically-named find -delete to be blocked at runtime")
+		}
+		if !strings.Contains(err.Error(), "-delete") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestExecuteBash_PathValidation(t *testing.T) {
 	dir := t.TempDir()
 	s := newTestSandbox()
