@@ -490,6 +490,31 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 	return runner.Run(ctx, f)
 }
 
+// literalWords wraps each expanded argv string as a single-literal *syntax.Word
+// so the per-command argument validators (which operate on AST words via
+// .Lit()/wordText()) can be re-run at runtime on a fully expanded, concrete
+// command. This is what lets a dynamically-named command (e.g. "$CMD ...")
+// still be argument-validated once its real name and arguments are known.
+func literalWords(args []string) []*syntax.Word {
+	words := make([]*syntax.Word, len(args))
+	for i, a := range args {
+		words[i] = &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: a}}}
+	}
+	return words
+}
+
+// runtimeValidatorSkip lists commands whose per-command validator must NOT be
+// re-run by the runtime Call/Exec handlers. bash/sh/awk are dispatched to
+// dedicated executors (executeBash/executeAwk) that re-parse and re-validate
+// their contents through the sandbox interpreter, so running their AST-level
+// arg validators against the expanded argv here is both redundant and, for the
+// interpreter-form checks, incorrect.
+var runtimeValidatorSkip = map[string]bool{
+	"bash": true,
+	"sh":   true,
+	"awk":  true,
+}
+
 // buildSecurityHandlers returns the common CallHandler, OpenHandler, and
 // ExecHandler options used by both the top-level and nested interpreters.
 func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []string, useOSSandbox bool) []interp.RunnerOption {
@@ -498,6 +523,29 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			hc := interp.HandlerCtx(ctx)
 			if err := validateExpandedPaths(args, hc.Dir, readAllowedPaths, writeAllowedPaths); err != nil {
 				return nil, err
+			}
+			// The CallHandler runs for every command — functions, builtins, and
+			// externals — before the interpreter resolves which it is, so it is
+			// the only runtime layer that sees builtins (the ExecHandler runs
+			// solely for externals). Enforce the command whitelist for builtins
+			// here so a dynamically-named builtin (e.g. "$X" resolving to
+			// eval/exec/shopt, none whitelisted) cannot escape validation now
+			// that static analysis defers dynamic names to runtime. Functions
+			// and externals (IsBuiltin == false) are left untouched: functions
+			// run as user code and externals are gated by the ExecHandler.
+			if len(args) > 0 && interp.IsBuiltin(args[0]) {
+				name := args[0]
+				extra := s.getExtraCommands()
+				if !allowedCommands[name] && !extra[name] {
+					return nil, fmt.Errorf("command %q is not allowed", name)
+				}
+				if !extra[name] && !runtimeValidatorSkip[name] {
+					if validator, ok := commandArgValidators[name]; ok {
+						if err := validator(s, literalWords(args)); err != nil {
+							return nil, err
+						}
+					}
+				}
 			}
 			return args, nil
 		}),
@@ -520,6 +568,22 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 				if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
 					if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
 						return fmt.Errorf("command %q is not allowed", cmdName)
+					}
+				}
+				// Runtime per-command argument validation on the fully expanded
+				// argv. Static validation already runs these validators for
+				// statically-named commands; this is the enforcement layer for a
+				// dynamically-named external (e.g. "$CMD push" resolving to git),
+				// whose real name and arguments are only concrete here. It also
+				// re-applies the runtime-enable gates for config-gated runtimes.
+				// bash/sh/awk are skipped: they are dispatched to dedicated
+				// executors below that re-validate their contents. extra_commands
+				// are user-opted-in and bypass validation, matching static.
+				if !extra[cmdName] && !runtimeValidatorSkip[cmdName] {
+					if validator, ok := commandArgValidators[cmdName]; ok {
+						if err := validator(s, literalWords(args)); err != nil {
+							return err
+						}
 					}
 				}
 				// Configure deno's permission flags to mirror the sandbox policy.
