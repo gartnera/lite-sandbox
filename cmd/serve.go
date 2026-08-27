@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,7 +216,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 // sandboxPaths computes the read- and write-allowed path lists for a command
 // executed from cwd, combining the working directory, detected runtime paths,
-// user-configured paths, and any git worktree parent. Writable paths are also
+// user-configured paths, the Claude Code scratchpad root (claudeScratchpadPath),
+// and any git worktree parent. Writable paths are also
 // readable, so they are folded into the read set. This is the single source of
 // truth shared with the PreToolUse hook (cmd/hook.go) so the bash tool and the
 // built-in file tools enforce the same boundary.
@@ -231,11 +234,27 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
 	readPaths = append(readPaths, sandbox.ConfigWritePaths()...)
 	writePaths = append([]string{cwd}, sandbox.ConfigWritePaths()...)
+	if scratch := claudeScratchpadPath(); scratch != "" {
+		readPaths = append(readPaths, scratch)
+		writePaths = append(writePaths, scratch)
+	}
 	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
 		readPaths = append(readPaths, parent)
 		writePaths = append(writePaths, parent)
 	}
 	return readPaths, writePaths
+}
+
+// claudeScratchpadPath returns the Claude Code per-user scratchpad root, which
+// the harness places under the system temp dir as claude-<uid> (e.g.
+// /tmp/claude-501, resolved to /private/tmp/claude-501 on macOS). It is always
+// allowed so agents can use their scratchpad for temporary files without a
+// writable_paths config entry. The path is uid-scoped and already writable at
+// the OS-sandbox layer; this only opens the AST/file-tool boundary to match.
+// Symlink resolution of the allowed set (resolveAllowedPaths) maps /tmp to
+// /private/tmp on macOS, so returning the /tmp form matches either spelling.
+func claudeScratchpadPath() string {
+	return filepath.Join("/tmp", "claude-"+strconv.Itoa(os.Getuid()))
 }
 
 // dockerSocketBaseDir returns the base directory for the docker proxy socket.
