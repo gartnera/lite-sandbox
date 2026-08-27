@@ -137,6 +137,14 @@ var allowedCommands = map[string]bool{
 	"printenv": true,
 	"date":     true,
 	"cal":      true,
+	// cygpath translates path strings between Windows and POSIX formats. It is
+	// Cygwin/MSYS-only and does not exist on macOS or Linux, so it is inert
+	// here. It is allowlisted because npm/pnpm cmd-shim launchers
+	// (node_modules/.bin/*) all include a `case *CYGWIN*|*MINGW*|*MSYS*) ...
+	// cygpath ...` branch that is dead code off Windows; without this the static
+	// validator rejects every such launcher. Its path argument is still
+	// path-validated like any other command.
+	"cygpath": true,
 
 	// Math / calculation (pure computation)
 	"bc":      true,
