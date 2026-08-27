@@ -86,6 +86,12 @@ read an individual peer worktree while blocking a single `grep`/`ls` from
 sweeping every worktree at once. Manage these with
 `lite-sandbox config readable-paths add <path>` / `writable-paths add <path>`.
 
+The Claude Code per-user scratchpad root (`/tmp/claude-<uid>`, which macOS
+resolves to `/private/tmp/claude-<uid>`) is always readable and writable without
+a config entry, so agents can use it for temporary files. It is uid-scoped and
+was already writable at the OS-sandbox layer; this only opens the agent-facing
+boundary to match.
+
 ## Internal readable / writable paths (OS sandbox only)
 
 `internal_readable_paths` / `internal_writable_paths` grant access **only at the
