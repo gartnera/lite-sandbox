@@ -139,6 +139,7 @@ func TestValidate_AllowedCommands(t *testing.T) {
 		{"dirname", "dirname /etc/hostname"},
 		{"id", "id"},
 		{"uname", "uname -a"},
+		{"cygpath", "cygpath -w /some/path"},
 		{"timeout", "timeout 1 echo hello"},
 		{"command", "command -v echo"},
 		{"tar list", "tar -tf archive.tar"},
@@ -194,6 +195,33 @@ func TestValidate_AllowedCommands(t *testing.T) {
 				t.Fatalf("expected command to be allowed, got: %v", err)
 			}
 		})
+	}
+}
+
+// TestValidate_NpmCmdShimCygpathBranch verifies that the portable prologue every
+// npm/pnpm cmd-shim launcher (node_modules/.bin/*) carries passes static
+// validation. The `case *CYGWIN*|*MINGW*|*MSYS*) ... cygpath ...` branch is dead
+// code off Windows; before cygpath was allowlisted the validator rejected the
+// whole script, blocking any CLI installed as a local bin (e.g. sst). The exec
+// tail that invokes node is a separate concern (extra_commands /
+// local_binary_execution), so it is left out here.
+func TestValidate_NpmCmdShimCygpathBranch(t *testing.T) {
+	const shim = `basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
+
+case ` + "`uname`" + ` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=` + "`cygpath -w \"$basedir\"`" + `
+        fi
+    ;;
+esac
+`
+	f, err := ParseBash(shim)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if err := newTestSandbox().validate(f); err != nil {
+		t.Fatalf("expected npm cmd-shim cygpath branch to validate, got: %v", err)
 	}
 }
 
