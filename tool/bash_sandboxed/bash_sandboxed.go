@@ -74,6 +74,12 @@ type Sandbox struct {
 	unsandboxedBareScriptPaths map[string]bool
 	unsandboxedSub             map[string][][]string
 	imdsEndpoint               string
+	// imdsRegion is the AWS region resolved for the brokered profile (from the
+	// host-side ~/.aws config, which is masked inside the sandbox). It is injected
+	// as AWS_REGION so regional AWS commands work without an explicit --region,
+	// matching how the profile behaves outside the sandbox. Empty when no region
+	// is configured for the profile or no IMDS server is running.
+	imdsRegion string
 	// dockerHost is the DOCKER_HOST value (unix://… proxy socket) injected into
 	// sandboxed commands when the docker proxy is running. dockerSocketDir is the
 	// directory holding that socket, bind-mounted into the OS sandbox worker so
@@ -269,6 +275,36 @@ func (s *Sandbox) SetIMDSEndpoint(endpoint string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.imdsEndpoint = endpoint
+}
+
+// SetIMDSRegion sets (or clears, with "") the AWS region injected as AWS_REGION
+// for the brokered profile. See the imdsRegion field.
+func (s *Sandbox) SetIMDSRegion(region string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imdsRegion = region
+}
+
+// awsRegionToInject returns the region to inject (as both AWS_REGION and
+// AWS_DEFAULT_REGION) for brokered IMDS mode, or "" when injection should be
+// skipped: no region is configured for the profile, or the caller's environment
+// already sets AWS_REGION/AWS_DEFAULT_REGION (an explicit choice we must not
+// override). Both vars are set because tooling is split on which it honors (the
+// AWS CLI v2 and Go SDK prefer AWS_REGION; older boto-based tools read only
+// AWS_DEFAULT_REGION). A command-level assignment (AWS_REGION=… aws …) or an
+// explicit --region flag still wins, since those are applied over this base
+// environment.
+func awsRegionToInject(region string) string {
+	if region == "" {
+		return ""
+	}
+	if _, ok := os.LookupEnv("AWS_REGION"); ok {
+		return ""
+	}
+	if _, ok := os.LookupEnv("AWS_DEFAULT_REGION"); ok {
+		return ""
+	}
+	return region
 }
 
 // DockerHostConfigured reports whether a docker proxy endpoint has been wired
@@ -1415,6 +1451,7 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	s.mu.RLock()
 	useOSSandbox := s.osSandbox && !forceHost
 	imdsEndpoint := s.imdsEndpoint
+	imdsRegion := s.imdsRegion
 	dockerHost := s.dockerHost
 	s.mu.RUnlock()
 
@@ -1424,12 +1461,15 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 	// runs each command in its own process group and kills the whole subtree on
 	// cancellation, so newProcessGroup is only needed for the host path below.
 	if useOSSandbox {
-		return s.runRawInWorker(ctx, command, workDir, imdsEndpoint, dockerHost, out)
+		return s.runRawInWorker(ctx, command, workDir, imdsEndpoint, imdsRegion, dockerHost, out)
 	}
 
 	env := os.Environ()
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
+	}
+	if r := awsRegionToInject(imdsRegion); r != "" {
+		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
 	}
 	// Skip the docker filtering proxy for unsandboxed commands (forceHost) so
 	// they reach the real docker daemon rather than the proxy socket.
@@ -1482,7 +1522,7 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 // the OS sandbox worker, streaming combined stdout/stderr to out. No AST
 // parsing or validation is performed — trust comes from the user's explicit
 // opt-in plus the worker's bwrap/sandbox-exec confinement.
-func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndpoint, dockerHost string, out io.Writer) error {
+func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndpoint, imdsRegion, dockerHost string, out io.Writer) error {
 	w, err := s.getOrCreateWorker()
 	if err != nil {
 		return fmt.Errorf("failed to get worker: %w", err)
@@ -1496,6 +1536,10 @@ func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndp
 	}
 	if imdsEndpoint != "" {
 		env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = imdsEndpoint
+	}
+	if r := awsRegionToInject(imdsRegion); r != "" {
+		env["AWS_REGION"] = r
+		env["AWS_DEFAULT_REGION"] = r
 	}
 	if dockerHost != "" {
 		env["DOCKER_HOST"] = dockerHost
@@ -1587,6 +1631,7 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	s.mu.RLock()
 	useOSSandbox := s.osSandbox
 	imdsEndpoint := s.imdsEndpoint
+	imdsRegion := s.imdsRegion
 	s.mu.RUnlock()
 
 	// Build environment with IMDS endpoint if AWS is enabled. The interpreter
@@ -1600,6 +1645,9 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	env := os.Environ()
 	if imdsEndpoint != "" {
 		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
+	}
+	if r := awsRegionToInject(imdsRegion); r != "" {
+		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
 	}
 
 	// Store sandbox paths in context so nested bash/sh can access them

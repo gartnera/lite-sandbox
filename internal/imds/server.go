@@ -32,11 +32,17 @@ type Server struct {
 	server      *http.Server
 	listener    net.Listener
 
-	// credsMu guards lazy initialization of creds only. It is NOT held across
-	// Retrieve(), so a slow/cold credential refresh never serializes concurrent
-	// requests that already have valid cached credentials.
+	// credsMu guards lazy initialization of creds and region only. It is NOT held
+	// across Retrieve(), so a slow/cold credential refresh never serializes
+	// concurrent requests that already have valid cached credentials.
 	credsMu sync.Mutex
 	creds   aws.CredentialsProvider
+	// region is the AWS region resolved for the profile during the config load
+	// (from the profile's config file, AWS_REGION, etc.). It is captured
+	// alongside creds because region resolution reads the shared config and does
+	// not require valid credentials — so it is available even for an expired SSO
+	// session. Empty when the profile configures no region.
+	region string
 }
 
 // credExpiryWindow tells the SDK CredentialsCache to refresh this far ahead of
@@ -244,9 +250,19 @@ func (s *Server) validateSession(r *http.Request) bool {
 func (s *Server) provider(ctx context.Context) (aws.CredentialsProvider, error) {
 	s.credsMu.Lock()
 	defer s.credsMu.Unlock()
+	if err := s.ensureLoadedLocked(ctx); err != nil {
+		return nil, err
+	}
+	return s.creds, nil
+}
 
+// ensureLoadedLocked lazily loads the profile's AWS config, caching both the
+// credential provider and the resolved region. credsMu must be held. On error
+// nothing is cached, so the load is retried on the next call rather than
+// wedging the server until restart.
+func (s *Server) ensureLoadedLocked(ctx context.Context) error {
 	if s.creds != nil {
-		return s.creds, nil
+		return nil
 	}
 
 	slog.Info("loading AWS credential provider", "profile", s.profile)
@@ -254,7 +270,8 @@ func (s *Server) provider(ctx context.Context) (aws.CredentialsProvider, error) 
 	// Load AWS config with the specified profile. The resulting cfg.Credentials
 	// is an aws.CredentialsCache wrapping the profile's provider (SSO,
 	// assume-role, or IAM user). Setting an expiry window makes it refresh ahead
-	// of actual expiry instead of at the last moment.
+	// of actual expiry instead of at the last moment. cfg.Region is resolved from
+	// the shared config here too, without needing valid credentials.
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithSharedConfigProfile(s.profile),
 		config.WithCredentialsCacheOptions(func(o *aws.CredentialsCacheOptions) {
@@ -262,11 +279,28 @@ func (s *Server) provider(ctx context.Context) (aws.CredentialsProvider, error) 
 		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	s.creds = cfg.Credentials
-	return s.creds, nil
+	s.region = cfg.Region
+	return nil
+}
+
+// Region returns the AWS region resolved for the configured profile, or "" if
+// the profile configures none. It shares the lazy config load with credential
+// resolution and does not require valid credentials, so it returns the region
+// even when the profile's SSO session is expired. The sandbox injects this as
+// AWS_REGION so regional AWS commands work without an explicit --region (the
+// profile's own config, which holds the region, is masked inside the sandbox).
+func (s *Server) Region(ctx context.Context) string {
+	s.credsMu.Lock()
+	defer s.credsMu.Unlock()
+	if err := s.ensureLoadedLocked(ctx); err != nil {
+		slog.Warn("could not resolve region for profile", "profile", s.profile, "error", err)
+		return ""
+	}
+	return s.region
 }
 
 // getCredentials returns current AWS credentials for the configured profile.

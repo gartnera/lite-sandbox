@@ -23,6 +23,8 @@ aws:
 
 > SSH private keys in `~/.ssh` are always blocked by the OS sandbox regardless of the AWS mode.
 
+> **Region.** In brokered IMDS mode `~/.aws/config` is masked, so the profile's `region` setting isn't visible to commands. lite-sandbox resolves the brokered profile's region on the host and injects it as both `AWS_REGION` and `AWS_DEFAULT_REGION` (tooling is split on which it honors), so regional AWS commands work without an explicit `--region` — matching how the profile behaves outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag all still take precedence. If the profile configures no region, nothing is injected. Note the injected region reflects the brokered profile; a command that selects a *different* profile inline (`AWS_PROFILE=other aws …`) without its own `--region`/`AWS_REGION` inherits the brokered profile's region.
+
 ### Per-directory overrides
 
 `overrides` lets either mode be changed for specific working directories, so one
