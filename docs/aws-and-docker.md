@@ -83,6 +83,8 @@ lite-sandbox config aws show                            # Show current AWS mode 
 lite-sandbox config aws allow-raw-credentials           # Enable raw-credentials mode
 lite-sandbox config aws force-profile <profile>         # Enable brokered IMDS mode for <profile>
 lite-sandbox config aws force-profile <profile> --dir <path>   # ...only for commands run under <path>
+lite-sandbox config aws allowed-profiles <name...>      # Set profiles selectable via AWS_PROFILE (no args clears)
+lite-sandbox config aws allowed-profiles <name...> --dir <path>  # ...for a per-directory override (set force-profile there first)
 lite-sandbox config aws allow-raw-credentials --dir <path>     # ...only for commands run under <path>
 lite-sandbox config aws remove-override <path>          # Remove a per-directory override
 lite-sandbox config aws disable                         # Disable AWS access entirely
