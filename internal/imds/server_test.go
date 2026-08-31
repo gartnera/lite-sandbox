@@ -2,6 +2,8 @@ package imds
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -278,5 +280,56 @@ func TestServer_GracefulShutdown(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Error("server did not stop")
+	}
+}
+
+// TestRegion_ReturnsCachedRegion verifies Region reports the region captured
+// during the config load without re-loading once credentials are warm.
+func TestRegion_ReturnsCachedRegion(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", "default")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	// Simulate a completed config load: creds present short-circuits the lazy
+	// loader, so Region returns the cached value.
+	server.creds = aws.NewCredentialsCache(&slowProvider{})
+	server.region = "ap-southeast-2"
+
+	if got := server.Region(context.Background()); got != "ap-southeast-2" {
+		t.Errorf("expected cached region ap-southeast-2, got %q", got)
+	}
+}
+
+// TestRegion_LoadsFromProfileConfig exercises the real load path: Region reads
+// the profile's region from the shared config (no credentials required) and
+// caches it, which is exactly what the lifecycle relies on to inject AWS_REGION.
+func TestRegion_LoadsFromProfileConfig(t *testing.T) {
+	// Isolate config resolution from the host's real AWS environment.
+	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(cfgPath, []byte("[profile testregion]\nregion = eu-north-1\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("AWS_CONFIG_FILE", cfgPath)
+
+	server, err := NewServer("127.0.0.1:0", "testregion")
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	defer server.Shutdown(context.Background())
+
+	if got := server.Region(context.Background()); got != "eu-north-1" {
+		t.Fatalf("expected region eu-north-1 loaded from profile config, got %q", got)
+	}
+
+	// The load is cached: creds/region are set after the first call.
+	if server.creds == nil || server.region != "eu-north-1" {
+		t.Errorf("expected load to be cached, creds=%v region=%q", server.creds != nil, server.region)
 	}
 }

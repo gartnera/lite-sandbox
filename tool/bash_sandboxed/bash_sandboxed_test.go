@@ -73,6 +73,73 @@ func TestBashSandboxed_FailingCommand(t *testing.T) {
 	}
 }
 
+// clearAWSRegionEnv unsets AWS_REGION/AWS_DEFAULT_REGION for the test so the
+// injected value is the only source, restoring the originals afterward.
+func clearAWSRegionEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
+		k := k
+		old, had := os.LookupEnv(k)
+		os.Unsetenv(k)
+		t.Cleanup(func() {
+			if had {
+				os.Setenv(k, old)
+			} else {
+				os.Unsetenv(k)
+			}
+		})
+	}
+}
+
+func TestAWSRegionToInject(t *testing.T) {
+	clearAWSRegionEnv(t)
+
+	if got := awsRegionToInject(""); got != "" {
+		t.Errorf("empty region should inject nothing, got %q", got)
+	}
+	if got := awsRegionToInject("us-west-2"); got != "us-west-2" {
+		t.Errorf("expected us-west-2, got %q", got)
+	}
+
+	os.Setenv("AWS_REGION", "eu-central-1")
+	if got := awsRegionToInject("us-west-2"); got != "" {
+		t.Errorf("existing AWS_REGION should suppress injection, got %q", got)
+	}
+	os.Unsetenv("AWS_REGION")
+
+	os.Setenv("AWS_DEFAULT_REGION", "eu-west-1")
+	if got := awsRegionToInject("us-west-2"); got != "" {
+		t.Errorf("existing AWS_DEFAULT_REGION should suppress injection, got %q", got)
+	}
+}
+
+func TestBashSandboxed_IMDSRegionInjection(t *testing.T) {
+	clearAWSRegionEnv(t)
+	workDir := t.TempDir()
+
+	// A configured region reaches the command as both AWS_REGION and
+	// AWS_DEFAULT_REGION.
+	s := NewSandbox()
+	s.SetIMDSRegion("us-west-2")
+	out, err := s.Execute(context.Background(), `bash -c 'echo [$AWS_REGION][$AWS_DEFAULT_REGION]'`, workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "[us-west-2][us-west-2]" {
+		t.Errorf("expected region in AWS_REGION and AWS_DEFAULT_REGION, got %q", out)
+	}
+
+	// No region configured -> neither var is set.
+	empty := NewSandbox()
+	out, err = empty.Execute(context.Background(), `bash -c 'echo [$AWS_REGION][$AWS_DEFAULT_REGION]'`, workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "[][]" {
+		t.Errorf("expected no region vars when none configured, got %q", out)
+	}
+}
+
 func TestBashSandboxed_InvalidSyntax(t *testing.T) {
 	workDir := t.TempDir()
 	_, err := NewSandbox().Execute(context.Background(), "echo 'hello", workDir, []string{workDir}, []string{workDir})

@@ -59,6 +59,13 @@ func (l *imdsLifecycle) apply(awsCfg *config.AWSConfig) error {
 		l.server = server
 		l.profile = profile
 		l.sandbox.SetIMDSEndpoint(server.Endpoint())
+		// Resolve the profile's region on the host (where ~/.aws is readable) and
+		// inject it as AWS_REGION, so regional AWS commands work without --region.
+		// Region resolution reads the config file and does not need valid creds,
+		// so this succeeds even when the SSO session is expired.
+		regionCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		l.sandbox.SetIMDSRegion(server.Region(regionCtx))
+		cancel()
 	}
 	return nil
 }
@@ -93,4 +100,5 @@ func (l *imdsLifecycle) stopLocked() {
 	l.server = nil
 	l.profile = ""
 	l.sandbox.SetIMDSEndpoint("")
+	l.sandbox.SetIMDSRegion("")
 }
