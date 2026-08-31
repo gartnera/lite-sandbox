@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -278,6 +279,53 @@ func TestAWSConfig_ForDirectory_TildeExpansion(t *testing.T) {
 	got := cfg.ForDirectory(filepath.Join(home, "work", "sub"))
 	if got.IMDSProfile() != "home-work" {
 		t.Fatalf("IMDSProfile() = %q, want home-work", got.IMDSProfile())
+	}
+}
+
+func TestAWSConfig_IMDSProfiles(t *testing.T) {
+	// Off when IMDS mode is off.
+	off := &AWSConfig{}
+	if got := off.IMDSProfiles(); got != nil {
+		t.Errorf("IMDSProfiles() with no force_profile = %v, want nil", got)
+	}
+
+	// Default first, then allowed, de-duplicated (default and a repeat dropped).
+	cfg := &AWSConfig{ForceProfile: "default", AllowedProfiles: []string{"dev", "default", "prod", "dev"}}
+	got := cfg.IMDSProfiles()
+	want := []string{"default", "dev", "prod"}
+	if !slices.Equal(got, want) {
+		t.Errorf("IMDSProfiles() = %v, want %v", got, want)
+	}
+}
+
+func TestAWSConfig_ForDirectory_AllowedProfiles(t *testing.T) {
+	cfg := &AWSConfig{
+		ForceProfile:    "default",
+		AllowedProfiles: []string{"dev"},
+		Overrides: []AWSDirectoryOverride{
+			{Path: "/work/multi", ForceProfile: "team", AllowedProfiles: []string{"team-dev", "team-prod"}},
+		},
+	}
+
+	// Base carries its allowed_profiles.
+	if got := cfg.ForDirectory("/elsewhere").AllowedProfiles; !slices.Equal(got, []string{"dev"}) {
+		t.Errorf("base AllowedProfiles = %v, want [dev]", got)
+	}
+	// Override replaces (does not merge) the allowed set.
+	got := cfg.ForDirectory("/work/multi/app")
+	if got.IMDSProfile() != "team" {
+		t.Errorf("override IMDSProfile() = %q, want team", got.IMDSProfile())
+	}
+	if !slices.Equal(got.AllowedProfiles, []string{"team-dev", "team-prod"}) {
+		t.Errorf("override AllowedProfiles = %v, want [team-dev team-prod]", got.AllowedProfiles)
+	}
+	// Override replaces rather than merges, so the base 'dev' profile is gone and
+	// only the override's profiles feed IMDSProfiles.
+	if slices.Contains(got.AllowedProfiles, "dev") {
+		t.Error("override should not inherit base allowed profile 'dev'")
+	}
+	if want := []string{"team", "team-dev", "team-prod"}; !slices.Equal(got.IMDSProfiles(), want) {
+		t.Errorf("override IMDSProfiles() = %v, want %v", got.IMDSProfiles(), want)
 	}
 }
 

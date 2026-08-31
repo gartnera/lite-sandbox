@@ -557,6 +557,12 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)
 		}),
 		interp.ExecHandler(func(ctx context.Context, args []string) error {
+			// Intercept `aws configure list-profiles` in brokered IMDS mode so an
+			// agent can discover the profiles it may select via AWS_PROFILE (the
+			// real command would read the masked ~/.aws and return nothing).
+			if handled, err := s.maybeListProfiles(ctx, args); handled || err != nil {
+				return err
+			}
 			extra := s.getExtraCommands()
 			if len(args) > 0 {
 				cmdName := args[0]

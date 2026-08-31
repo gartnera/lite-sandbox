@@ -43,16 +43,47 @@ func TestIMDSLifecycle(t *testing.T) {
 	if lc.endpoint() == "" {
 		t.Fatal("expected a running server after profile change")
 	}
-	if lc.profile != "prod" {
-		t.Fatalf("expected profile %q, got %q", "prod", lc.profile)
+	if lc.defProfile != "prod" {
+		t.Fatalf("expected default profile %q, got %q", "prod", lc.defProfile)
+	}
+	if _, ok := lc.servers["dev"]; ok {
+		t.Fatal("expected dev server stopped after profile change")
 	}
 
-	// Switching to raw-credentials mode stops the server.
+	// allowed_profiles start additional servers alongside the default; the
+	// default endpoint stays the force_profile's.
+	if err := lc.apply(&config.AWSConfig{ForceProfile: "prod", AllowedProfiles: []string{"dev", "staging"}}); err != nil {
+		t.Fatalf("apply(prod + allowed) failed: %v", err)
+	}
+	for _, p := range []string{"prod", "dev", "staging"} {
+		if _, ok := lc.servers[p]; !ok {
+			t.Fatalf("expected a server for profile %q", p)
+		}
+	}
+	if lc.endpoint() != lc.servers["prod"].Endpoint() {
+		t.Fatal("default endpoint should be the force_profile's server")
+	}
+
+	// Dropping an allowed profile stops just that server.
+	if err := lc.apply(&config.AWSConfig{ForceProfile: "prod", AllowedProfiles: []string{"dev"}}); err != nil {
+		t.Fatalf("apply(prod + dev) failed: %v", err)
+	}
+	if _, ok := lc.servers["staging"]; ok {
+		t.Fatal("expected staging server stopped after removal from allowed_profiles")
+	}
+	if len(lc.servers) != 2 {
+		t.Fatalf("expected 2 servers (prod, dev), got %d", len(lc.servers))
+	}
+
+	// Switching to raw-credentials mode stops all servers.
 	rawCreds := true
 	if err := lc.apply(&config.AWSConfig{AllowRawCredentials: &rawCreds}); err != nil {
 		t.Fatalf("apply(raw credentials) failed: %v", err)
 	}
 	if ep := lc.endpoint(); ep != "" {
 		t.Fatalf("expected server stopped after disabling IMDS mode, got endpoint %q", ep)
+	}
+	if len(lc.servers) != 0 {
+		t.Fatalf("expected all servers stopped, got %d", len(lc.servers))
 	}
 }

@@ -122,9 +122,16 @@ func (p *PnpmConfig) PnpmPublish() bool {
 // where the sandbox is launched. Resolve the effective settings for a directory
 // with ForDirectory before reading the mode accessors.
 type AWSConfig struct {
-	AllowRawCredentials *bool                  `yaml:"allow_raw_credentials,omitempty"`
-	ForceProfile        string                 `yaml:"force_profile,omitempty"`
-	Overrides           []AWSDirectoryOverride `yaml:"overrides,omitempty"`
+	AllowRawCredentials *bool  `yaml:"allow_raw_credentials,omitempty"`
+	ForceProfile        string `yaml:"force_profile,omitempty"`
+	// AllowedProfiles lists additional profiles a command may select at runtime
+	// via AWS_PROFILE, on top of ForceProfile (which is the default when no
+	// AWS_PROFILE is set and is always implicitly allowed). Each listed profile
+	// gets its own brokered IMDS server; a command that sets AWS_PROFILE to a
+	// profile outside this set (∪ ForceProfile) is denied. Only meaningful in
+	// IMDS mode (ForceProfile set).
+	AllowedProfiles []string               `yaml:"allowed_profiles,omitempty"`
+	Overrides       []AWSDirectoryOverride `yaml:"overrides,omitempty"`
 }
 
 // AWSDirectoryOverride replaces the AWS credential mode for commands whose
@@ -134,9 +141,10 @@ type AWSConfig struct {
 // fields replace the base force_profile / allow_raw_credentials rather than
 // merging, so the two modes never mix.
 type AWSDirectoryOverride struct {
-	Path                string `yaml:"path"`
-	AllowRawCredentials *bool  `yaml:"allow_raw_credentials,omitempty"`
-	ForceProfile        string `yaml:"force_profile,omitempty"`
+	Path                string   `yaml:"path"`
+	AllowRawCredentials *bool    `yaml:"allow_raw_credentials,omitempty"`
+	ForceProfile        string   `yaml:"force_profile,omitempty"`
+	AllowedProfiles     []string `yaml:"allowed_profiles,omitempty"`
 }
 
 // ForDirectory returns the effective AWS configuration for commands running in
@@ -150,10 +158,12 @@ func (a *AWSConfig) ForDirectory(dir string) *AWSConfig {
 	resolved := &AWSConfig{
 		AllowRawCredentials: a.AllowRawCredentials,
 		ForceProfile:        a.ForceProfile,
+		AllowedProfiles:     a.AllowedProfiles,
 	}
 	if o := a.matchOverride(dir); o != nil {
 		resolved.AllowRawCredentials = o.AllowRawCredentials
 		resolved.ForceProfile = o.ForceProfile
+		resolved.AllowedProfiles = o.AllowedProfiles
 	}
 	return resolved
 }
@@ -213,10 +223,30 @@ func (a *AWSConfig) UsesIMDS() bool {
 	return a.ForceProfile != ""
 }
 
-// IMDSProfile returns the AWS profile to use for IMDS credentials.
-// Only valid when UsesIMDS() returns true.
+// IMDSProfile returns the default AWS profile to use for IMDS credentials (used
+// when a command sets no AWS_PROFILE). Only valid when UsesIMDS() returns true.
 func (a *AWSConfig) IMDSProfile() string {
 	return a.ForceProfile
+}
+
+// IMDSProfiles returns every profile that needs a brokered IMDS server: the
+// default (ForceProfile) followed by AllowedProfiles, de-duplicated and with the
+// default first. Returns nil when IMDS mode is off. Callers start one server per
+// entry.
+func (a *AWSConfig) IMDSProfiles() []string {
+	if !a.UsesIMDS() {
+		return nil
+	}
+	profiles := []string{a.ForceProfile}
+	seen := map[string]bool{a.ForceProfile: true}
+	for _, p := range a.AllowedProfiles {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		profiles = append(profiles, p)
+	}
+	return profiles
 }
 
 // DockerConfig controls access to the Docker daemon. When enabled, a local

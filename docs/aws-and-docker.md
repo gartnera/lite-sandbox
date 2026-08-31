@@ -23,7 +23,36 @@ aws:
 
 > SSH private keys in `~/.ssh` are always blocked by the OS sandbox regardless of the AWS mode.
 
-> **Region.** In brokered IMDS mode `~/.aws/config` is masked, so the profile's `region` setting isn't visible to commands. lite-sandbox resolves the brokered profile's region on the host and injects it as both `AWS_REGION` and `AWS_DEFAULT_REGION` (tooling is split on which it honors), so regional AWS commands work without an explicit `--region` — matching how the profile behaves outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag all still take precedence. If the profile configures no region, nothing is injected. Note the injected region reflects the brokered profile; a command that selects a *different* profile inline (`AWS_PROFILE=other aws …`) without its own `--region`/`AWS_REGION` inherits the brokered profile's region.
+> **Region.** In brokered IMDS mode `~/.aws/config` is masked, so the profile's `region` setting isn't visible to commands. lite-sandbox resolves the brokered profile's region on the host and injects it as both `AWS_REGION` and `AWS_DEFAULT_REGION` (tooling is split on which it honors), so regional AWS commands work without an explicit `--region` — matching how the profile behaves outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag all still take precedence. If the profile configures no region, nothing is injected.
+
+### Multiple profiles
+
+`allowed_profiles` lets a command choose among several brokered profiles at
+runtime via `AWS_PROFILE`, on top of the default `force_profile`. Each listed
+profile gets its own IMDS server; `force_profile` is the default (used when a
+command sets no `AWS_PROFILE`) and is always implicitly allowed.
+
+```yaml
+aws:
+  force_profile: "ro"                 # default profile when no AWS_PROFILE is set
+  allowed_profiles: ["dev", "prod"]   # additionally selectable via AWS_PROFILE
+```
+
+With this config:
+
+- `aws s3 ls` → uses the `ro` profile (the default).
+- `AWS_PROFILE=dev aws s3 ls` → routed to the `dev` profile's broker; the `dev` profile's region is applied.
+- `AWS_PROFILE=staging aws s3 ls` → **denied** with `AWS profile "staging" is not in allowed_profiles (dev, prod, ro)` (the message lists what is allowed).
+- `aws configure list-profiles` → prints the brokered profiles (`dev`, `prod`, `ro`) so an agent can discover what it may select. (The real command reads the masked `~/.aws` and would return nothing, so lite-sandbox answers it directly.) Only this exact command is intercepted — any additional args or flags run the real command.
+
+How it works: for a command that sets `AWS_PROFILE` (inline `AWS_PROFILE=X aws …`
+or an `export` in the same command), lite-sandbox strips the selector and
+repoints `AWS_EC2_METADATA_SERVICE_ENDPOINT` (and the region) at that profile's
+server — the SDK never reads the masked `~/.aws`. Notes:
+
+- A **shell-level** `AWS_PROFILE` inherited from the host is ignored (stripped) — select a profile per command, not via a session-wide export. This prevents a stray host `AWS_PROFILE` from affecting every command.
+- Selecting a profile applies that profile's region, unless the same command sets an explicit `AWS_REGION`/`AWS_DEFAULT_REGION` (or passes `--region`), which is honored.
+- Routing applies to normal validated commands. Bare `extra_commands`/`unsandboxed_commands` (which run via raw `bash -c`) always use the default profile.
 
 ### Per-directory overrides
 
