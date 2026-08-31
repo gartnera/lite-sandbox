@@ -29,29 +29,37 @@ func resolveDirArg(dir string) string {
 	return dir
 }
 
-// upsertAWSOverride sets the override for dir to the given mode, replacing any
-// existing override for the same path. dir is canonicalized to an absolute path
-// first so "." and other relative inputs are stored as a concrete directory
-// rather than something that re-resolves against the server's working directory.
-func upsertAWSOverride(cfg *config.Config, dir string, allowRaw *bool, forceProfile string) {
+// findAWSOverride returns a pointer to the existing override for dir, or nil if
+// none is configured. dir is canonicalized to an absolute path first so relative
+// inputs match the concrete directory they were stored as.
+func findAWSOverride(cfg *config.Config, dir string) *config.AWSDirectoryOverride {
+	if cfg == nil || cfg.AWS == nil {
+		return nil
+	}
+	dir = resolveDirArg(dir)
+	for i := range cfg.AWS.Overrides {
+		if cfg.AWS.Overrides[i].Path == dir {
+			return &cfg.AWS.Overrides[i]
+		}
+	}
+	return nil
+}
+
+// awsOverridePtr returns a pointer to the override for dir, creating an empty one
+// (appended) when none exists yet. Callers mutate only the fields relevant to
+// the mode they set, so unrelated fields (e.g. allowed_profiles across a
+// force-profile change) are preserved. dir is canonicalized to an absolute path
+// so "." and other relative inputs are stored as the concrete directory meant.
+func awsOverridePtr(cfg *config.Config, dir string) *config.AWSDirectoryOverride {
 	if cfg.AWS == nil {
 		cfg.AWS = &config.AWSConfig{}
 	}
-	if resolved := config.ExpandPath(dir); resolved != "" {
-		dir = resolved
+	dir = resolveDirArg(dir)
+	if o := findAWSOverride(cfg, dir); o != nil {
+		return o
 	}
-	override := config.AWSDirectoryOverride{
-		Path:                dir,
-		AllowRawCredentials: allowRaw,
-		ForceProfile:        forceProfile,
-	}
-	for i := range cfg.AWS.Overrides {
-		if cfg.AWS.Overrides[i].Path == dir {
-			cfg.AWS.Overrides[i] = override
-			return
-		}
-	}
-	cfg.AWS.Overrides = append(cfg.AWS.Overrides, override)
+	cfg.AWS.Overrides = append(cfg.AWS.Overrides, config.AWSDirectoryOverride{Path: dir})
+	return &cfg.AWS.Overrides[len(cfg.AWS.Overrides)-1]
 }
 
 var awsShowCmd = &cobra.Command{
@@ -134,7 +142,10 @@ This mode is simpler but less secure. Use for development/testing only.`,
 		t := true
 		if awsOverrideDir != "" {
 			dir := resolveDirArg(awsOverrideDir)
-			upsertAWSOverride(cfg, dir, &t, "")
+			o := awsOverridePtr(cfg, dir)
+			o.AllowRawCredentials = &t
+			o.ForceProfile = ""
+			o.AllowedProfiles = nil // raw mode has no brokered profiles
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
@@ -148,9 +159,10 @@ This mode is simpler but less secure. Use for development/testing only.`,
 			cfg.AWS = &config.AWSConfig{}
 		}
 
-		// Enable raw credentials, clear force_profile
+		// Enable raw credentials, clear force_profile and its brokered profiles
 		cfg.AWS.AllowRawCredentials = &t
 		cfg.AWS.ForceProfile = ""
+		cfg.AWS.AllowedProfiles = nil
 
 		if err := saveConfig(cfg); err != nil {
 			return err
@@ -188,7 +200,10 @@ This mode is more secure and recommended for production use.`,
 
 		if awsOverrideDir != "" {
 			dir := resolveDirArg(awsOverrideDir)
-			upsertAWSOverride(cfg, dir, nil, profile)
+			o := awsOverridePtr(cfg, dir)
+			o.ForceProfile = profile
+			o.AllowRawCredentials = nil
+			// o.AllowedProfiles is preserved across a profile change.
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
@@ -217,6 +232,69 @@ This mode is more secure and recommended for production use.`,
 		fmt.Println("  ~/.ssh private keys will remain blocked")
 		return nil
 	},
+}
+
+var awsAllowedProfilesCmd = &cobra.Command{
+	Use:   "allowed-profiles [profile...]",
+	Short: "Set the profiles selectable at runtime via AWS_PROFILE (force_profile mode)",
+	Long: `Set allowed_profiles for force_profile (IMDS) mode.
+
+These profiles are additionally selectable per command via AWS_PROFILE=<name>, on
+top of the default force_profile (which is always allowed). Each gets its own
+brokered IMDS server. Pass no names to clear the list.
+
+Requires force_profile to be set — for the base config, or for the --dir override
+being edited. Set it first with "config aws force-profile <profile> [--dir ...]".`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		var profiles []string
+		if len(args) > 0 {
+			profiles = args
+		}
+
+		if awsOverrideDir != "" {
+			dir := resolveDirArg(awsOverrideDir)
+			o := findAWSOverride(cfg, dir)
+			if o == nil || o.ForceProfile == "" {
+				return fmt.Errorf("no force_profile override for %s; run `lite-sandbox config aws force-profile <profile> --dir %s` first", dir, awsOverrideDir)
+			}
+			o.AllowedProfiles = profiles
+			if err := saveConfig(cfg); err != nil {
+				return err
+			}
+			printAllowedProfilesResult(dir, o.ForceProfile, profiles)
+			return nil
+		}
+
+		if cfg.AWS == nil || cfg.AWS.ForceProfile == "" {
+			return fmt.Errorf("allowed_profiles requires force_profile; run `lite-sandbox config aws force-profile <profile>` first")
+		}
+		cfg.AWS.AllowedProfiles = profiles
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+		printAllowedProfilesResult("", cfg.AWS.ForceProfile, profiles)
+		return nil
+	},
+}
+
+// printAllowedProfilesResult reports the outcome of an allowed-profiles change.
+func printAllowedProfilesResult(dir, forceProfile string, profiles []string) {
+	where := ""
+	if dir != "" {
+		where = " in " + dir
+	}
+	if len(profiles) == 0 {
+		fmt.Printf("Cleared AWS allowed_profiles%s (only %q is selectable)\n", where, forceProfile)
+		return
+	}
+	fmt.Printf("AWS allowed_profiles%s: %s\n", where, strings.Join(profiles, ", "))
+	fmt.Printf("  Selectable per command via AWS_PROFILE=<name>; default remains %q\n", forceProfile)
+	fmt.Println("  Each must be a real profile in ~/.aws/config on the host")
 }
 
 var awsRemoveOverrideCmd = &cobra.Command{
@@ -290,10 +368,13 @@ func init() {
 		"Apply this mode only to commands run in this directory (adds a per-directory override)")
 	awsForceProfileCmd.Flags().StringVar(&awsOverrideDir, "dir", "",
 		"Apply this profile only to commands run in this directory (adds a per-directory override)")
+	awsAllowedProfilesCmd.Flags().StringVar(&awsOverrideDir, "dir", "",
+		"Set allowed_profiles only for the per-directory override at this path (must already have a force_profile)")
 
 	awsCmd.AddCommand(awsShowCmd)
 	awsCmd.AddCommand(awsAllowRawCredentialsCmd)
 	awsCmd.AddCommand(awsForceProfileCmd)
+	awsCmd.AddCommand(awsAllowedProfilesCmd)
 	awsCmd.AddCommand(awsRemoveOverrideCmd)
 	awsCmd.AddCommand(awsDisableCmd)
 	configCmd.AddCommand(awsCmd)
