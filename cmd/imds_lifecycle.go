@@ -13,92 +13,138 @@ import (
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
-// imdsLifecycle owns the IMDS server on behalf of a long-running command
-// (serve-mcp, shell) so startup and config reloads share one reconciliation
-// path: apply starts the server when AWS IMDS mode is enabled, stops it when
-// disabled, and restarts it when the forced profile changes. The sandbox's
-// IMDS endpoint is kept in sync so commands only receive
-// AWS_EC2_METADATA_SERVICE_ENDPOINT while a server is actually running.
+// imdsLifecycle owns the pool of IMDS servers on behalf of a long-running
+// command (serve-mcp, shell) so startup and config reloads share one
+// reconciliation path. In IMDS mode it runs one server per brokered profile —
+// the default force_profile plus any allowed_profiles — starting and stopping
+// servers as the resolved set changes. The sandbox is kept in sync: the default
+// profile's endpoint/region drive the base command environment, and the full
+// profile→{endpoint,region} table drives per-command AWS_PROFILE routing.
 type imdsLifecycle struct {
 	mu      sync.Mutex
 	sandbox *bash_sandboxed.Sandbox
-	server  *imds.Server
-	profile string
+	// servers maps each brokered profile name to its running server.
+	servers map[string]*imds.Server
+	// defProfile is the default profile (force_profile) whose endpoint/region
+	// seed the base environment for commands that select no AWS_PROFILE.
+	defProfile string
 }
 
-// apply reconciles the running IMDS server with the AWS config resolved for
-// the working directory (see AWSConfig.ForDirectory). It returns an error
-// only when a server that should be running could not be created; stopping
-// is best-effort.
+// apply reconciles the running IMDS servers with the AWS config resolved for the
+// working directory (see AWSConfig.ForDirectory). It starts a server for every
+// desired profile not yet running and stops any running server no longer
+// desired, then republishes routing state to the sandbox. It returns an error
+// only when a server that should be running could not be created; stopping is
+// best-effort.
 func (l *imdsLifecycle) apply(awsCfg *config.AWSConfig) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if l.servers == nil {
+		l.servers = map[string]*imds.Server{}
+	}
+	// Always republish so the sandbox routing table reflects the actual server
+	// pool, even if a NewServer below fails partway through reconciliation.
+	defer l.publishLocked()
+
 	desired := awsCfg != nil && awsCfg.UsesIMDS()
-	profile := ""
+	var profiles []string
+	l.defProfile = ""
 	if desired {
-		profile = awsCfg.IMDSProfile()
+		profiles = awsCfg.IMDSProfiles()
+		l.defProfile = awsCfg.IMDSProfile()
+	}
+	want := make(map[string]bool, len(profiles))
+	for _, p := range profiles {
+		want[p] = true
 	}
 
-	if l.server != nil && (!desired || profile != l.profile) {
-		slog.Info("stopping IMDS server", "profile", l.profile)
-		l.stopLocked()
-	}
-	if l.server == nil && desired {
-		// Use port 0 to get a random available port.
-		server, err := imds.NewServer("127.0.0.1:0", profile)
-		if err != nil {
-			return fmt.Errorf("failed to create IMDS server: %w", err)
+	// Stop servers for profiles no longer desired.
+	for p, srv := range l.servers {
+		if !want[p] {
+			slog.Info("stopping IMDS server", "profile", p)
+			l.shutdown(srv)
+			delete(l.servers, p)
 		}
-		go func() {
-			slog.Info("IMDS server endpoint", "url", server.Endpoint())
-			if err := server.Start(); err != nil && err != http.ErrServerClosed {
-				slog.Error("IMDS server failed", "error", err)
-			}
-		}()
-		l.server = server
-		l.profile = profile
-		l.sandbox.SetIMDSEndpoint(server.Endpoint())
-		// Resolve the profile's region on the host (where ~/.aws is readable) and
-		// inject it as AWS_REGION, so regional AWS commands work without --region.
-		// Region resolution reads the config file and does not need valid creds,
-		// so this succeeds even when the SSO session is expired.
-		regionCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		l.sandbox.SetIMDSRegion(server.Region(regionCtx))
-		cancel()
 	}
+
+	// Start servers for newly desired profiles.
+	for _, p := range profiles {
+		if l.servers[p] != nil {
+			continue
+		}
+		server, err := imds.NewServer("127.0.0.1:0", p)
+		if err != nil {
+			return fmt.Errorf("failed to create IMDS server for profile %q: %w", p, err)
+		}
+		go func(server *imds.Server, profile string) {
+			slog.Info("IMDS server endpoint", "profile", profile, "url", server.Endpoint())
+			if err := server.Start(); err != nil && err != http.ErrServerClosed {
+				slog.Error("IMDS server failed", "profile", profile, "error", err)
+			}
+		}(server, p)
+		l.servers[p] = server
+	}
+
 	return nil
 }
 
-// endpoint returns the running server's URL, or "" when no server is running.
+// publishLocked pushes the current server pool to the sandbox: the default
+// profile's endpoint/region (base environment) and the full per-profile routing
+// table. l.mu must be held. Each profile's region is resolved on the host (where
+// ~/.aws is readable) and cached by the server, so repeated publishes are cheap.
+func (l *imdsLifecycle) publishLocked() {
+	if len(l.servers) == 0 {
+		l.sandbox.SetIMDSEndpoint("")
+		l.sandbox.SetIMDSRegion("")
+		l.sandbox.SetIMDSProfiles(nil)
+		return
+	}
+
+	targets := make(map[string]bash_sandboxed.IMDSTarget, len(l.servers))
+	for p, srv := range l.servers {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		region := srv.Region(ctx)
+		cancel()
+		targets[p] = bash_sandboxed.IMDSTarget{Endpoint: srv.Endpoint(), Region: region}
+	}
+
+	def := targets[l.defProfile]
+	l.sandbox.SetIMDSEndpoint(def.Endpoint)
+	l.sandbox.SetIMDSRegion(def.Region)
+	l.sandbox.SetIMDSProfiles(targets)
+}
+
+// endpoint returns the default profile's server URL, or "" when no server is
+// running. Used by the interactive shell to seed its own process environment.
 func (l *imdsLifecycle) endpoint() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.server == nil {
-		return ""
+	if srv := l.servers[l.defProfile]; srv != nil {
+		return srv.Endpoint()
 	}
-	return l.server.Endpoint()
+	return ""
 }
 
-// stop shuts down the IMDS server if one is running.
+// stop shuts down every running IMDS server and clears the sandbox routing state.
 func (l *imdsLifecycle) stop() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.server != nil {
-		l.stopLocked()
+	for p, srv := range l.servers {
+		l.shutdown(srv)
+		delete(l.servers, p)
 	}
-}
-
-// stopLocked shuts down the running server and clears the sandbox endpoint so
-// commands stop receiving AWS_EC2_METADATA_SERVICE_ENDPOINT. l.mu must be held.
-func (l *imdsLifecycle) stopLocked() {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := l.server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("failed to shutdown IMDS server", "error", err)
-	}
-	l.server = nil
-	l.profile = ""
+	l.defProfile = ""
 	l.sandbox.SetIMDSEndpoint("")
 	l.sandbox.SetIMDSRegion("")
+	l.sandbox.SetIMDSProfiles(nil)
+}
+
+// shutdown gracefully stops one server. l.mu must be held.
+func (l *imdsLifecycle) shutdown(srv *imds.Server) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("failed to shutdown IMDS server", "error", err)
+	}
 }

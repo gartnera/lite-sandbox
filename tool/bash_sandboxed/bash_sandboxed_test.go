@@ -118,8 +118,10 @@ func TestBashSandboxed_IMDSRegionInjection(t *testing.T) {
 	workDir := t.TempDir()
 
 	// A configured region reaches the command as both AWS_REGION and
-	// AWS_DEFAULT_REGION.
+	// AWS_DEFAULT_REGION. Region is only injected in IMDS mode, so the endpoint
+	// must also be set (the lifecycle always sets both together).
 	s := NewSandbox()
+	s.SetIMDSEndpoint("http://imds/")
 	s.SetIMDSRegion("us-west-2")
 	out, err := s.Execute(context.Background(), `bash -c 'echo [$AWS_REGION][$AWS_DEFAULT_REGION]'`, workDir, []string{workDir}, []string{workDir})
 	if err != nil {
@@ -129,14 +131,266 @@ func TestBashSandboxed_IMDSRegionInjection(t *testing.T) {
 		t.Errorf("expected region in AWS_REGION and AWS_DEFAULT_REGION, got %q", out)
 	}
 
-	// No region configured -> neither var is set.
+	// No region configured -> neither var is set (endpoint set, region empty).
 	empty := NewSandbox()
+	empty.SetIMDSEndpoint("http://imds/")
 	out, err = empty.Execute(context.Background(), `bash -c 'echo [$AWS_REGION][$AWS_DEFAULT_REGION]'`, workDir, []string{workDir}, []string{workDir})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.TrimSpace(out) != "[][]" {
 		t.Errorf("expected no region vars when none configured, got %q", out)
+	}
+}
+
+func TestRouteAWSProfile(t *testing.T) {
+	profiles := map[string]IMDSTarget{
+		"default":  {Endpoint: "http://default/", Region: "us-east-1"},
+		"dev":      {Endpoint: "http://dev/", Region: "eu-west-1"},
+		"noregion": {Endpoint: "http://noregion/"},
+	}
+	newSandbox := func() *Sandbox {
+		s := NewSandbox()
+		s.SetIMDSProfiles(profiles)
+		// The default profile's region seeds the base env; routing uses it to tell
+		// an explicit per-command AWS_REGION from the base-injected default.
+		s.SetIMDSRegion("us-east-1")
+		return s
+	}
+
+	t.Run("allowed profile repoints endpoint/region and strips selector", func(t *testing.T) {
+		env := map[string]string{
+			"AWS_PROFILE":                       "dev",
+			"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://default/",
+			"AWS_REGION":                        "us-east-1",
+			"AWS_DEFAULT_REGION":                "us-east-1",
+		}
+		if err := newSandbox().routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := env["AWS_PROFILE"]; ok {
+			t.Error("AWS_PROFILE should be stripped after routing")
+		}
+		if env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] != "http://dev/" {
+			t.Errorf("endpoint = %q, want http://dev/", env["AWS_EC2_METADATA_SERVICE_ENDPOINT"])
+		}
+		if env["AWS_REGION"] != "eu-west-1" || env["AWS_DEFAULT_REGION"] != "eu-west-1" {
+			t.Errorf("region = %q/%q, want eu-west-1", env["AWS_REGION"], env["AWS_DEFAULT_REGION"])
+		}
+	})
+
+	t.Run("AWS_DEFAULT_PROFILE also selects", func(t *testing.T) {
+		env := map[string]string{"AWS_DEFAULT_PROFILE": "dev"}
+		if err := newSandbox().routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := env["AWS_DEFAULT_PROFILE"]; ok {
+			t.Error("AWS_DEFAULT_PROFILE should be stripped")
+		}
+		if env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] != "http://dev/" {
+			t.Errorf("endpoint = %q, want http://dev/", env["AWS_EC2_METADATA_SERVICE_ENDPOINT"])
+		}
+	})
+
+	t.Run("profile without region drops inherited region", func(t *testing.T) {
+		env := map[string]string{"AWS_PROFILE": "noregion", "AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "us-east-1"}
+		if err := newSandbox().routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := env["AWS_REGION"]; ok {
+			t.Error("AWS_REGION should be dropped for a profile with no region")
+		}
+		if _, ok := env["AWS_DEFAULT_REGION"]; ok {
+			t.Error("AWS_DEFAULT_REGION should be dropped for a profile with no region")
+		}
+	})
+
+	t.Run("explicit per-command region is preserved", func(t *testing.T) {
+		// A command-set AWS_REGION differs from the default profile's region, so it
+		// is honored rather than overwritten with the selected profile's region.
+		env := map[string]string{"AWS_PROFILE": "dev", "AWS_REGION": "ap-south-1", "AWS_DEFAULT_REGION": "ap-south-1"}
+		if err := newSandbox().routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env["AWS_REGION"] != "ap-south-1" {
+			t.Errorf("explicit AWS_REGION should be preserved, got %q", env["AWS_REGION"])
+		}
+	})
+
+	t.Run("disallowed profile is denied and lists allowed profiles", func(t *testing.T) {
+		env := map[string]string{"AWS_PROFILE": "staging"}
+		err := newSandbox().routeAWSProfile(env)
+		if err == nil {
+			t.Fatal("expected an error for a disallowed profile")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "staging") || !strings.Contains(msg, "allowed_profiles") {
+			t.Errorf("error = %v, want mention of the profile and allowed_profiles", err)
+		}
+		for _, p := range []string{"default", "dev", "noregion"} {
+			if !strings.Contains(msg, p) {
+				t.Errorf("error should list allowed profile %q, got: %v", p, err)
+			}
+		}
+	})
+
+	t.Run("no profile selected is a no-op", func(t *testing.T) {
+		env := map[string]string{"AWS_EC2_METADATA_SERVICE_ENDPOINT": "http://default/"}
+		if err := newSandbox().routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] != "http://default/" {
+			t.Error("endpoint should be untouched when no profile is selected")
+		}
+	})
+
+	t.Run("inactive routing leaves AWS_PROFILE untouched", func(t *testing.T) {
+		s := NewSandbox() // no SetIMDSProfiles
+		env := map[string]string{"AWS_PROFILE": "whatever"}
+		if err := s.routeAWSProfile(env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env["AWS_PROFILE"] != "whatever" {
+			t.Error("AWS_PROFILE should be left untouched when routing is not configured")
+		}
+	})
+}
+
+func TestAWSBaseEnv(t *testing.T) {
+	clearAWSRegionEnv(t)
+
+	// IMDS off: returned unchanged.
+	base := []string{"PATH=/bin", "AWS_PROFILE=leftover"}
+	if got := awsBaseEnv(base, "", ""); !slices.Equal(got, base) {
+		t.Errorf("awsBaseEnv with no endpoint should be a no-op, got %v", got)
+	}
+
+	// IMDS on: strips ambient profile selectors, injects endpoint + region.
+	got := awsBaseEnv([]string{"PATH=/bin", "AWS_PROFILE=leftover", "AWS_DEFAULT_PROFILE=x"}, "http://ep/", "us-west-2")
+	joined := strings.Join(got, "\n")
+	for _, unwanted := range []string{"AWS_PROFILE=", "AWS_DEFAULT_PROFILE="} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("expected %s stripped, got %v", unwanted, got)
+		}
+	}
+	if !slices.Contains(got, "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://ep/") {
+		t.Errorf("expected endpoint injected, got %v", got)
+	}
+	if !slices.Contains(got, "AWS_REGION=us-west-2") || !slices.Contains(got, "AWS_DEFAULT_REGION=us-west-2") {
+		t.Errorf("expected region injected, got %v", got)
+	}
+	if !slices.Contains(got, "PATH=/bin") {
+		t.Errorf("expected unrelated vars preserved, got %v", got)
+	}
+}
+
+func TestBashSandboxed_AWSProfileRouting(t *testing.T) {
+	clearAWSRegionEnv(t)
+	workDir := t.TempDir()
+
+	s := NewSandbox()
+	s.SetIMDSEndpoint("http://default/")
+	s.SetIMDSRegion("us-east-1")
+	s.SetIMDSProfiles(map[string]IMDSTarget{
+		"default": {Endpoint: "http://default/", Region: "us-east-1"},
+		"dev":     {Endpoint: "http://dev/", Region: "eu-west-1"},
+	})
+
+	// A per-command AWS_PROFILE routes the external command to that profile's
+	// endpoint and region (printenv is an external command, so it goes through
+	// the routing path — unlike the bash/sh builtins). BSD printenv takes a
+	// single variable, so query them separately; export makes the selection apply
+	// to both invocations.
+	out, err := s.Execute(context.Background(), `export AWS_PROFILE=dev; printenv AWS_EC2_METADATA_SERVICE_ENDPOINT; printenv AWS_REGION`, workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "http://dev/\neu-west-1" {
+		t.Errorf("expected dev endpoint/region, got %q", out)
+	}
+
+	// No AWS_PROFILE uses the default profile's base environment.
+	out, err = s.Execute(context.Background(), `printenv AWS_EC2_METADATA_SERVICE_ENDPOINT; printenv AWS_REGION`, workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "http://default/\nus-east-1" {
+		t.Errorf("expected default endpoint/region, got %q", out)
+	}
+
+	// A disallowed profile is denied with a clear error.
+	_, err = s.Execute(context.Background(), `AWS_PROFILE=staging printenv AWS_REGION`, workDir, []string{workDir}, []string{workDir})
+	if err == nil {
+		t.Fatal("expected an error for a disallowed profile")
+	}
+	if !strings.Contains(err.Error(), "staging") {
+		t.Errorf("error should name the disallowed profile, got: %v", err)
+	}
+}
+
+func TestBashSandboxed_AWSProfileHostStripped(t *testing.T) {
+	clearAWSRegionEnv(t)
+	// A stray host AWS_PROFILE must not leak into commands (it can't work — ~/.aws
+	// is masked — and would otherwise trigger routing for every command).
+	t.Setenv("AWS_PROFILE", "host-leftover")
+	workDir := t.TempDir()
+
+	s := NewSandbox()
+	s.SetIMDSEndpoint("http://default/")
+	s.SetIMDSProfiles(map[string]IMDSTarget{"default": {Endpoint: "http://default/"}})
+
+	// printenv AWS_PROFILE exits non-zero when unset; `|| echo STRIPPED` proves it.
+	out, err := s.Execute(context.Background(), `printenv AWS_PROFILE || echo STRIPPED`, workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "STRIPPED" {
+		t.Errorf("expected host AWS_PROFILE stripped, got %q", out)
+	}
+}
+
+func TestBashSandboxed_AWSListProfilesInterception(t *testing.T) {
+	workDir := t.TempDir()
+
+	s := NewSandbox()
+	// force_profile enables the aws command (passes static validation).
+	s.UpdateConfig(&config.Config{AWS: &config.AWSConfig{ForceProfile: "ro"}}, workDir)
+	s.SetIMDSEndpoint("http://ro/")
+	s.SetIMDSProfiles(map[string]IMDSTarget{
+		"ro":  {Endpoint: "http://ro/"},
+		"dev": {Endpoint: "http://dev/"},
+	})
+
+	// `aws configure list-profiles` is intercepted and returns the brokered
+	// profiles (sorted), since the real command would read the masked ~/.aws.
+	out, err := s.Execute(context.Background(), "aws configure list-profiles", workDir, []string{workDir}, []string{workDir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.TrimSpace(out) != "dev\nro" {
+		t.Errorf("expected brokered profiles listed, got %q", out)
+	}
+}
+
+func TestMaybeListProfiles_OnlyExactMatch(t *testing.T) {
+	s := NewSandbox()
+	s.SetIMDSProfiles(map[string]IMDSTarget{"ro": {}, "dev": {}})
+
+	// Only the exact 3-token `aws configure list-profiles` is intercepted; any
+	// extra args, flags, or a different command route to the real binary. These
+	// all return early (handled=false) without touching the handler context.
+	for _, args := range [][]string{
+		{"aws", "configure", "list-profiles", "--output", "json"},
+		{"aws", "configure", "list-profiles", "--debug"},
+		{"aws", "--region", "us-east-1", "configure", "list-profiles"},
+		{"aws", "configure", "list"},
+		{"aws", "s3", "ls"},
+		{"awsx", "configure", "list-profiles"},
+	} {
+		handled, err := s.maybeListProfiles(context.Background(), args)
+		if handled || err != nil {
+			t.Errorf("args %v: handled=%v err=%v, want routed to real command", args, handled, err)
+		}
 	}
 }
 

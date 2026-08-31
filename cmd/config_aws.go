@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/spf13/cobra"
@@ -77,6 +78,7 @@ var awsShowCmd = &cobra.Command{
 				printAWSMode(&config.AWSConfig{
 					AllowRawCredentials: o.AllowRawCredentials,
 					ForceProfile:        o.ForceProfile,
+					AllowedProfiles:     o.AllowedProfiles,
 				}, "    ")
 			}
 		}
@@ -99,6 +101,9 @@ func printAWSMode(a *config.AWSConfig, indent string) {
 		fmt.Printf("%sMode: force_profile (%s)\n", indent, a.IMDSProfile())
 		fmt.Printf("%sDescription: AWS CLI uses IMDS server with temporary credentials\n", indent)
 		fmt.Printf("%sSecurity: More secure (1-hour STS tokens)\n", indent)
+		if len(a.AllowedProfiles) > 0 {
+			fmt.Printf("%sAllowed profiles (via AWS_PROFILE): %s\n", indent, strings.Join(a.AllowedProfiles, ", "))
+		}
 		fmt.Printf("%s~/.aws: Blocked\n", indent)
 		fmt.Printf("%s~/.ssh: Private keys blocked\n", indent)
 	default:

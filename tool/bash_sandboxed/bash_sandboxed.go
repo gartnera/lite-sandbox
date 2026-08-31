@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,6 +81,13 @@ type Sandbox struct {
 	// matching how the profile behaves outside the sandbox. Empty when no region
 	// is configured for the profile or no IMDS server is running.
 	imdsRegion string
+	// imdsProfiles maps each brokered AWS profile (the default force_profile plus
+	// any allowed_profiles) to its IMDS endpoint and region. It drives per-command
+	// AWS_PROFILE routing in the exec handlers: a command that sets AWS_PROFILE to
+	// a key here is repointed at that profile's server; one that selects a profile
+	// absent from the map is denied. Empty (nil) when multi-profile routing is not
+	// configured, in which case the exec handlers leave AWS_PROFILE untouched.
+	imdsProfiles map[string]IMDSTarget
 	// dockerHost is the DOCKER_HOST value (unix://… proxy socket) injected into
 	// sandboxed commands when the docker proxy is running. dockerSocketDir is the
 	// directory holding that socket, bind-mounted into the OS sandbox worker so
@@ -285,6 +293,113 @@ func (s *Sandbox) SetIMDSRegion(region string) {
 	s.imdsRegion = region
 }
 
+// IMDSTarget is the brokered IMDS endpoint and resolved region for one AWS
+// profile. Region may be "" when the profile configures none.
+type IMDSTarget struct {
+	Endpoint string
+	Region   string
+}
+
+// SetIMDSProfiles installs (or clears, with nil) the per-profile IMDS routing
+// table used for AWS_PROFILE selection. See the imdsProfiles field.
+func (s *Sandbox) SetIMDSProfiles(profiles map[string]IMDSTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imdsProfiles = profiles
+}
+
+// routeAWSProfile applies per-command AWS_PROFILE selection to a command's
+// environment map. When the command explicitly selects a profile (via
+// AWS_PROFILE or AWS_DEFAULT_PROFILE — ambient host values are stripped from the
+// base env in IMDS mode, so a value present here was set by the command), the
+// profile must be one of the brokered profiles: the selector vars are removed
+// (so the SDK uses the IMDS endpoint instead of reading the masked ~/.aws) and
+// the endpoint/region are repointed at that profile's server. Selecting a
+// profile outside the brokered set is denied. It is a no-op when the command
+// selects no profile or when multi-profile routing is not configured.
+func (s *Sandbox) routeAWSProfile(env map[string]string) error {
+	profile := env["AWS_PROFILE"]
+	if profile == "" {
+		profile = env["AWS_DEFAULT_PROFILE"]
+	}
+	if profile == "" {
+		return nil
+	}
+
+	s.mu.RLock()
+	target, ok := s.imdsProfiles[profile]
+	active := len(s.imdsProfiles) > 0
+	defaultRegion := s.imdsRegion
+	var allowed []string
+	if active && !ok {
+		allowed = make([]string, 0, len(s.imdsProfiles))
+		for p := range s.imdsProfiles {
+			allowed = append(allowed, p)
+		}
+	}
+	s.mu.RUnlock()
+
+	if !active {
+		// Multi-profile routing not configured (e.g. raw-credentials mode); leave
+		// the command's AWS_PROFILE untouched.
+		return nil
+	}
+	if !ok {
+		sort.Strings(allowed)
+		return fmt.Errorf("AWS profile %q is not in allowed_profiles (%s)", profile, strings.Join(allowed, ", "))
+	}
+
+	delete(env, "AWS_PROFILE")
+	delete(env, "AWS_DEFAULT_PROFILE")
+	if target.Endpoint != "" {
+		env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = target.Endpoint
+	}
+	// Preserve an AWS_REGION the command set explicitly (one that differs from the
+	// default profile's base-injected region), mirroring the base-env rule that an
+	// explicit AWS_REGION wins. Otherwise apply the selected profile's region, or
+	// drop the inherited default region when the profile configures none so the
+	// command doesn't silently run in the wrong one (pass --region to be explicit).
+	if cur, has := env["AWS_REGION"]; has && cur != defaultRegion {
+		// Explicit per-command region: leave AWS_REGION/AWS_DEFAULT_REGION as-is.
+	} else if target.Region != "" {
+		env["AWS_REGION"] = target.Region
+		env["AWS_DEFAULT_REGION"] = target.Region
+	} else {
+		delete(env, "AWS_REGION")
+		delete(env, "AWS_DEFAULT_REGION")
+	}
+	return nil
+}
+
+// maybeListProfiles intercepts `aws configure list-profiles` when brokered IMDS
+// mode is active. The real command reads ~/.aws, which is masked in the sandbox,
+// so it would return nothing; instead we print the brokered profile names (the
+// default force_profile plus any allowed_profiles), one per line like the CLI,
+// so an agent can discover which profiles it may select via AWS_PROFILE. Returns
+// handled=false (letting the command run normally) when it is not this
+// invocation or when routing is not configured. When routing is active the aws
+// command is allowed, so intercepting before the whitelist check is safe.
+func (s *Sandbox) maybeListProfiles(ctx context.Context, args []string) (handled bool, err error) {
+	if len(args) != 3 || args[0] != "aws" || args[1] != "configure" || args[2] != "list-profiles" {
+		return false, nil
+	}
+	s.mu.RLock()
+	profiles := make([]string, 0, len(s.imdsProfiles))
+	for p := range s.imdsProfiles {
+		profiles = append(profiles, p)
+	}
+	s.mu.RUnlock()
+	if len(profiles) == 0 {
+		return false, nil // IMDS not active; let the real command run.
+	}
+	sort.Strings(profiles)
+	hc := interp.HandlerCtx(ctx)
+	for _, p := range profiles {
+		fmt.Fprintln(hc.Stdout, p)
+	}
+	return true, nil
+}
+
 // awsRegionToInject returns the region to inject (as both AWS_REGION and
 // AWS_DEFAULT_REGION) for brokered IMDS mode, or "" when injection should be
 // skipped: no region is configured for the profile, or the caller's environment
@@ -305,6 +420,31 @@ func awsRegionToInject(region string) string {
 		return ""
 	}
 	return region
+}
+
+// awsBaseEnv applies the default brokered-IMDS AWS environment to a base env
+// slice: it strips any inherited AWS_PROFILE/AWS_DEFAULT_PROFILE (which can't
+// work — ~/.aws is masked — and would otherwise trigger per-command routing for
+// commands that never meant to select a profile), then injects the default
+// profile's IMDS endpoint and region. Per-command AWS_PROFILE selection (routed
+// in the exec handlers) still works because it is set on the command itself, not
+// inherited here. A no-op when IMDS is not active (endpoint == "").
+func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
+	if imdsEndpoint == "" {
+		return base
+	}
+	env := make([]string, 0, len(base)+3)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "AWS_PROFILE=") || strings.HasPrefix(kv, "AWS_DEFAULT_PROFILE=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "AWS_EC2_METADATA_SERVICE_ENDPOINT="+imdsEndpoint)
+	if r := awsRegionToInject(imdsRegion); r != "" {
+		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
+	}
+	return env
 }
 
 // DockerHostConfigured reports whether a docker proxy endpoint has been wired
@@ -1359,21 +1499,29 @@ func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox 
 func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerProxy bool) error {
 	hc := interp.HandlerCtx(ctx)
 
-	var env []string
+	envMap := make(map[string]string)
 	hc.Env.Each(func(name string, vr expand.Variable) bool {
-		if !vr.IsSet() {
-			return true
+		if vr.IsSet() {
+			envMap[name] = vr.String()
 		}
-		env = append(env, name+"="+vr.String())
 		return true
 	})
+	// Route a per-command AWS_PROFILE to its brokered IMDS server (or deny an
+	// out-of-set profile) before the command runs.
+	if err := s.routeAWSProfile(envMap); err != nil {
+		return err
+	}
 	if injectDockerProxy {
 		s.mu.RLock()
 		proxyHost := s.dockerHost
 		s.mu.RUnlock()
 		if proxyHost != "" {
-			env = append(env, "DOCKER_HOST="+proxyHost)
+			envMap["DOCKER_HOST"] = proxyHost
 		}
+	}
+	env := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		env = append(env, k+"="+v)
 	}
 
 	path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
@@ -1464,13 +1612,7 @@ func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir st
 		return s.runRawInWorker(ctx, command, workDir, imdsEndpoint, imdsRegion, dockerHost, out)
 	}
 
-	env := os.Environ()
-	if imdsEndpoint != "" {
-		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
-	}
-	if r := awsRegionToInject(imdsRegion); r != "" {
-		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
-	}
+	env := awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion)
 	// Skip the docker filtering proxy for unsandboxed commands (forceHost) so
 	// they reach the real docker daemon rather than the proxy socket.
 	if dockerHost != "" && !forceHost {
@@ -1535,6 +1677,10 @@ func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndp
 		}
 	}
 	if imdsEndpoint != "" {
+		// Strip ambient profile selectors (see awsBaseEnv); bare extra_commands
+		// run under the default brokered profile.
+		delete(env, "AWS_PROFILE")
+		delete(env, "AWS_DEFAULT_PROFILE")
 		env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = imdsEndpoint
 	}
 	if r := awsRegionToInject(imdsRegion); r != "" {
@@ -1642,13 +1788,7 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	// so unsandboxed_commands can reach the real daemon while everything else is
 	// routed through the proxy. The host's own DOCKER_HOST (if any) flows through
 	// untouched via os.Environ().
-	env := os.Environ()
-	if imdsEndpoint != "" {
-		env = append(env, fmt.Sprintf("AWS_EC2_METADATA_SERVICE_ENDPOINT=%s", imdsEndpoint))
-	}
-	if r := awsRegionToInject(imdsRegion); r != "" {
-		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
-	}
+	env := awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion)
 
 	// Store sandbox paths in context so nested bash/sh can access them
 	ctx = context.WithValue(ctx, sandboxPathsKey, &sandboxPaths{
@@ -1735,6 +1875,12 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 		envMap[name] = vr.String()
 		return true
 	})
+
+	// Route a per-command AWS_PROFILE to its brokered IMDS server (or deny an
+	// out-of-set profile) before the command runs.
+	if err := s.routeAWSProfile(envMap); err != nil {
+		return err
+	}
 
 	// Route docker through the filtering proxy. DOCKER_HOST is injected here
 	// rather than into the interpreter's base env so that unsandboxed_commands
