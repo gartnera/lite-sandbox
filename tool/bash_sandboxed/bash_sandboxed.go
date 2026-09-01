@@ -130,6 +130,13 @@ func NewSandbox() *Sandbox {
 }
 
 // UpdateConfig replaces the sandbox configuration with the provided config.
+//
+// cfg must already be resolved for workDir by the caller (via
+// config.LoadForDirectory or Config.ForDirectory): per-directory overrides are
+// merged once at the entrypoint and the effective config injected here, so the
+// sandbox — like every other subsystem — applies it verbatim and never has to
+// know overrides exist. workDir is still needed to anchor bare script paths and
+// the OS-sandbox worker's working directory.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	m := make(map[string]bool, len(cfg.ExtraCommands)+len(cfg.UnsandboxedCommands))
 	sub := make(map[string][][]string)
@@ -176,9 +183,9 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	for _, c := range cfg.UnsandboxedCommands {
 		processEntry(c, true)
 	}
-	// Determine if AWS credentials should be blocked, resolving any
-	// per-directory override for the worker's working directory.
-	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS.ForDirectory(workDir))
+	// Determine if AWS credentials should be blocked. cfg is already resolved for
+	// workDir by the caller, so its AWS section reflects any per-directory override.
+	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
 
 	s.mu.Lock()
 	s.cfg = cfg
@@ -240,16 +247,17 @@ func (s *Sandbox) getConfig() *config.Config {
 	return s.cfg
 }
 
-// awsConfigForWorker returns the AWS config resolved for the worker's working
-// directory, so per-directory overrides apply to command validation the same
-// way they apply to the IMDS server and credential blocking.
+// awsConfigForWorker returns the AWS config in effect for the worker's working
+// directory. s.cfg was already resolved for that directory by the caller of
+// UpdateConfig, so any per-directory override applies to command validation the
+// same way it applies to the IMDS server and credential blocking.
 func (s *Sandbox) awsConfigForWorker() *config.AWSConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.cfg == nil {
 		return nil
 	}
-	return s.cfg.AWS.ForDirectory(s.workerWorkDir)
+	return s.cfg.AWS
 }
 
 // osSandboxEnabled reports whether the OS sandbox (bwrap/sandbox-exec worker)

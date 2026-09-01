@@ -31,7 +31,7 @@ type imdsLifecycle struct {
 }
 
 // apply reconciles the running IMDS servers with the AWS config resolved for the
-// working directory (see AWSConfig.ForDirectory). It starts a server for every
+// working directory (see Config.ForDirectory). It starts a server for every
 // desired profile not yet running and stops any running server no longer
 // desired, then republishes routing state to the sandbox. It returns an error
 // only when a server that should be running could not be created; stopping is

@@ -39,7 +39,9 @@ func runShell() error {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	cfg, err := config.Load()
+	// Resolve per-directory overrides once for the shell's working directory, so
+	// the sandbox, IMDS, and docker proxy below all get the same effective config.
+	cfg, err := config.LoadForDirectory(workDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to load config, using defaults: %v\n", err)
 	} else {
@@ -47,12 +49,11 @@ func runShell() error {
 	}
 	defer sandbox.Close()
 
-	// Start IMDS server if AWS uses IMDS (force_profile is set). The profile is
-	// resolved for the shell's working directory so per-directory overrides take
-	// effect.
+	// Start IMDS server if AWS uses IMDS (force_profile is set). cfg is already
+	// resolved for workDir, so per-directory overrides take effect.
 	var awsCfg *config.AWSConfig
 	if cfg != nil {
-		awsCfg = cfg.AWS.ForDirectory(workDir)
+		awsCfg = cfg.AWS
 	}
 	imdsLC := &imdsLifecycle{sandbox: sandbox}
 	if err := imdsLC.apply(awsCfg); err != nil {

@@ -116,6 +116,60 @@ the sandbox's `/tmp` overlay on Linux. Manage these with
 `lite-sandbox config internal-readable-paths add <path>` /
 `internal-writable-paths add <path>`.
 
+## Per-directory overrides
+
+Any part of the configuration can be changed for specific working directories via
+the top-level `overrides` list. Each entry pairs a `path` with any config
+sections that replace the base for commands run **at or under** that path. This is
+not AWS-specific — `aws`, `docker`, `runtimes`, `readable_paths`/`writable_paths`,
+`os_sandbox`, and every other section can be overridden the same way.
+
+```yaml
+os_sandbox: true
+writable_paths:
+  - ~/scratch
+aws:
+  force_profile: "default"        # base mode for everything else
+
+overrides:
+  - path: ~/work/acme             # ~ is expanded
+    aws:
+      force_profile: "acme-dev"   # broker a different AWS profile here
+    writable_paths:
+      - ~/work/acme/artifacts     # replaces (not extends) writable_paths here
+  - path: ~/work/acme/prod
+    aws:
+      force_profile: "acme-prod"  # more specific path wins under prod/
+  - path: ~/scratch
+    os_sandbox: false             # any section can be overridden
+  - path: ~/work/trusted
+    merge: true                   # deep-merge instead of replace (see below)
+    docker:
+      allow_privileged: true      # only this flag changes; docker.enabled etc. kept
+```
+
+Resolution rules:
+
+- **Most specific wins.** When a directory lies under more than one override
+  `path`, the longest matching path applies; the others are ignored (overrides do
+  not stack).
+- **Replace vs. merge.** By default an override **replaces** each section it sets:
+  an override with an `aws:` block defines the *entire* AWS mode for its
+  directory, dropping any base `aws:` fields it doesn't restate. Set `merge: true`
+  on an override to **deep-merge** it instead — it recurses into a section and
+  applies only the fields it sets, inheriting the rest (so the `~/work/trusted`
+  example above flips just `docker.allow_privileged` and keeps the base
+  `docker.enabled`). Either way, sections the override never mentions are
+  inherited from the base unchanged, and leaf values it does set (scalars, flags,
+  and lists like `writable_paths`) come from the override.
+- **Paths support `~`** and are resolved to absolute paths, so relative inputs
+  match the concrete directory they denote.
+
+The `config aws` subcommands accept a `--dir <path>` flag to edit the AWS section
+of an override instead of the base (e.g. `lite-sandbox config aws force-profile
+<profile> --dir <path>`). Overrides for other sections — and the `merge` flag —
+are authored by editing the `overrides` list in the config file directly.
+
 ## Git Support
 
 Git commands are enabled by default with granular permission levels that can be configured:

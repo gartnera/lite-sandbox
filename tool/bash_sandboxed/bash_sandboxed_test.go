@@ -349,6 +349,56 @@ func TestBashSandboxed_AWSProfileHostStripped(t *testing.T) {
 	}
 }
 
+// TestUpdateConfig_AppliesResolvedSections verifies the sandbox applies a
+// config resolved for its working directory across every section, not just AWS:
+// once the entrypoint resolves the per-directory override, the sandbox's writable
+// paths and os_sandbox toggle reflect it. Resolution lives at the entrypoint
+// (config.LoadForDirectory / Config.ForDirectory), so the test resolves the way
+// serve/shell/hook do before calling UpdateConfig.
+func TestUpdateConfig_AppliesResolvedSections(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	workDir := t.TempDir()
+	override := filepath.Join(workDir, "artifacts")
+
+	cfg := &config.Config{
+		WritablePaths: []string{"/base-only"},
+		OSSandbox:     bp(false),
+		Overrides: []config.DirectoryOverride{
+			{Path: workDir, Config: config.Config{
+				WritablePaths: []string{override},
+				OSSandbox:     bp(true),
+			}},
+		},
+	}
+
+	s := NewSandbox()
+	s.UpdateConfig(cfg.ForDirectory(workDir), workDir)
+
+	// writable_paths override replaces the base for this directory.
+	got := s.ConfigWritePaths()
+	if !slices.Contains(got, override) {
+		t.Errorf("ConfigWritePaths() = %v, want it to contain override %q", got, override)
+	}
+	if slices.Contains(got, "/base-only") {
+		t.Errorf("ConfigWritePaths() = %v, should not contain base %q (override replaces it)", got, "/base-only")
+	}
+
+	// os_sandbox override flips the runtime toggle.
+	if !s.osSandboxEnabled() {
+		t.Error("os_sandbox override should enable the OS sandbox for this directory")
+	}
+
+	// A directory outside the override falls back to the base config.
+	other := t.TempDir()
+	s.UpdateConfig(cfg.ForDirectory(other), other)
+	if got := s.ConfigWritePaths(); !slices.Equal(got, []string{"/base-only"}) {
+		t.Errorf("outside override, ConfigWritePaths() = %v, want [/base-only]", got)
+	}
+	if s.osSandboxEnabled() {
+		t.Error("outside override, os_sandbox should stay disabled")
+	}
+}
+
 func TestBashSandboxed_AWSListProfilesInterception(t *testing.T) {
 	workDir := t.TempDir()
 

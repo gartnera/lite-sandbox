@@ -215,15 +215,15 @@ func TestGitConfig_AllowsWorktreeParent(t *testing.T) {
 	}
 }
 
-func TestAWSConfig_ForDirectory(t *testing.T) {
+func TestConfig_ForDirectory_AWS(t *testing.T) {
 	bp := func(b bool) *bool { return &b }
 
-	cfg := &AWSConfig{
-		ForceProfile: "default",
-		Overrides: []AWSDirectoryOverride{
-			{Path: "/work/projects", ForceProfile: "team"},
-			{Path: "/work/projects/secure", ForceProfile: "secure"},
-			{Path: "/work/raw", AllowRawCredentials: bp(true)},
+	cfg := &Config{
+		AWS: &AWSConfig{ForceProfile: "default"},
+		Overrides: []DirectoryOverride{
+			{Path: "/work/projects", Config: Config{AWS: &AWSConfig{ForceProfile: "team"}}},
+			{Path: "/work/projects/secure", Config: Config{AWS: &AWSConfig{ForceProfile: "secure"}}},
+			{Path: "/work/raw", Config: Config{AWS: &AWSConfig{AllowRawCredentials: bp(true)}}},
 		},
 	}
 
@@ -242,7 +242,7 @@ func TestAWSConfig_ForDirectory(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := cfg.ForDirectory(tt.dir)
+			got := cfg.ForDirectory(tt.dir).AWS
 			if got.IMDSProfile() != tt.wantProfile {
 				t.Errorf("IMDSProfile() = %q, want %q", got.IMDSProfile(), tt.wantProfile)
 			}
@@ -253,32 +253,69 @@ func TestAWSConfig_ForDirectory(t *testing.T) {
 				t.Errorf("AllowsRawCredentials() = %v, want %v", got.AllowsRawCredentials(), tt.wantRaw)
 			}
 			// The resolved config must not carry overrides itself.
-			if len(got.Overrides) != 0 {
-				t.Errorf("resolved config carried %d overrides, want 0", len(got.Overrides))
+			if len(cfg.ForDirectory(tt.dir).Overrides) != 0 {
+				t.Errorf("resolved config carried overrides, want 0")
 			}
 		})
 	}
 }
 
-func TestAWSConfig_ForDirectory_Nil(t *testing.T) {
-	var cfg *AWSConfig
+func TestConfig_ForDirectory_Nil(t *testing.T) {
+	var cfg *Config
 	if got := cfg.ForDirectory("/anywhere"); got != nil {
 		t.Fatalf("expected nil, got %+v", got)
 	}
 }
 
-func TestAWSConfig_ForDirectory_TildeExpansion(t *testing.T) {
+func TestConfig_ForDirectory_TildeExpansion(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("failed to get home dir: %v", err)
 	}
-	cfg := &AWSConfig{
-		ForceProfile: "default",
-		Overrides:    []AWSDirectoryOverride{{Path: "~/work", ForceProfile: "home-work"}},
+	cfg := &Config{
+		AWS:       &AWSConfig{ForceProfile: "default"},
+		Overrides: []DirectoryOverride{{Path: "~/work", Config: Config{AWS: &AWSConfig{ForceProfile: "home-work"}}}},
 	}
-	got := cfg.ForDirectory(filepath.Join(home, "work", "sub"))
+	got := cfg.ForDirectory(filepath.Join(home, "work", "sub")).AWS
 	if got.IMDSProfile() != "home-work" {
 		t.Fatalf("IMDSProfile() = %q, want home-work", got.IMDSProfile())
+	}
+}
+
+// TestConfig_ForDirectory_AnySection verifies the override mechanism is generic:
+// sections other than AWS (here writable_paths and os_sandbox) are overridden
+// per directory too, and only the sections an override sets are replaced while
+// the rest are inherited from the base.
+func TestConfig_ForDirectory_AnySection(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	cfg := &Config{
+		WritablePaths: []string{"/base"},
+		OSSandbox:     bp(false),
+		AWS:           &AWSConfig{ForceProfile: "default"},
+		Overrides: []DirectoryOverride{
+			{Path: "/work", Config: Config{
+				WritablePaths: []string{"/work/out"},
+				OSSandbox:     bp(true),
+			}},
+		},
+	}
+
+	// Outside the override: base everywhere.
+	base := cfg.ForDirectory("/elsewhere")
+	if !slices.Equal(base.WritablePaths, []string{"/base"}) || base.OSSandboxEnabled() {
+		t.Fatalf("base dir = {writable:%v os_sandbox:%v}, want {[/base] false}", base.WritablePaths, base.OSSandboxEnabled())
+	}
+
+	// Inside the override: the set sections are replaced, AWS is inherited.
+	over := cfg.ForDirectory("/work/svc")
+	if !slices.Equal(over.WritablePaths, []string{"/work/out"}) {
+		t.Errorf("override WritablePaths = %v, want [/work/out]", over.WritablePaths)
+	}
+	if !over.OSSandboxEnabled() {
+		t.Error("override should enable os_sandbox")
+	}
+	if over.AWS.IMDSProfile() != "default" {
+		t.Errorf("override AWS = %q, want inherited default", over.AWS.IMDSProfile())
 	}
 }
 
@@ -298,21 +335,23 @@ func TestAWSConfig_IMDSProfiles(t *testing.T) {
 	}
 }
 
-func TestAWSConfig_ForDirectory_AllowedProfiles(t *testing.T) {
-	cfg := &AWSConfig{
-		ForceProfile:    "default",
-		AllowedProfiles: []string{"dev"},
-		Overrides: []AWSDirectoryOverride{
-			{Path: "/work/multi", ForceProfile: "team", AllowedProfiles: []string{"team-dev", "team-prod"}},
+func TestConfig_ForDirectory_AllowedProfiles(t *testing.T) {
+	cfg := &Config{
+		AWS: &AWSConfig{
+			ForceProfile:    "default",
+			AllowedProfiles: []string{"dev"},
+		},
+		Overrides: []DirectoryOverride{
+			{Path: "/work/multi", Config: Config{AWS: &AWSConfig{ForceProfile: "team", AllowedProfiles: []string{"team-dev", "team-prod"}}}},
 		},
 	}
 
 	// Base carries its allowed_profiles.
-	if got := cfg.ForDirectory("/elsewhere").AllowedProfiles; !slices.Equal(got, []string{"dev"}) {
+	if got := cfg.ForDirectory("/elsewhere").AWS.AllowedProfiles; !slices.Equal(got, []string{"dev"}) {
 		t.Errorf("base AllowedProfiles = %v, want [dev]", got)
 	}
 	// Override replaces (does not merge) the allowed set.
-	got := cfg.ForDirectory("/work/multi/app")
+	got := cfg.ForDirectory("/work/multi/app").AWS
 	if got.IMDSProfile() != "team" {
 		t.Errorf("override IMDSProfile() = %q, want team", got.IMDSProfile())
 	}
@@ -326,6 +365,58 @@ func TestAWSConfig_ForDirectory_AllowedProfiles(t *testing.T) {
 	}
 	if want := []string{"team", "team-dev", "team-prod"}; !slices.Equal(got.IMDSProfiles(), want) {
 		t.Errorf("override IMDSProfiles() = %v, want %v", got.IMDSProfiles(), want)
+	}
+}
+
+func TestConfig_ForDirectory_DeepMerge(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	cfg := &Config{
+		Docker: &DockerConfig{Enabled: bp(true), SocketPath: "/base.sock"},
+		AWS:    &AWSConfig{ForceProfile: "default", AllowedProfiles: []string{"dev"}},
+		Overrides: []DirectoryOverride{
+			{Path: "/replace", Config: Config{
+				// Replace mode: whole docker section replaced, so Enabled is lost.
+				Docker: &DockerConfig{AllowPrivileged: bp(true)},
+			}},
+			{Path: "/merge", Merge: true, Config: Config{
+				// Deep merge: only allow_privileged changes; enabled/socket kept.
+				Docker: &DockerConfig{AllowPrivileged: bp(true)},
+			}},
+		},
+	}
+
+	// Replace mode drops the base docker fields the override didn't restate.
+	rep := cfg.ForDirectory("/replace/app").Docker
+	if rep.DockerEnabled() {
+		t.Error("replace mode should not inherit base docker.enabled")
+	}
+	if !rep.AllowsPrivileged() {
+		t.Error("replace mode should apply override docker.allow_privileged")
+	}
+
+	// Deep merge keeps base docker fields and layers the override's field on top.
+	mrg := cfg.ForDirectory("/merge/app").Docker
+	if !mrg.DockerEnabled() {
+		t.Error("deep merge should inherit base docker.enabled")
+	}
+	if mrg.UpstreamSocket() != "/base.sock" {
+		t.Errorf("deep merge should inherit base docker.socket_path, got %q", mrg.UpstreamSocket())
+	}
+	if !mrg.AllowsPrivileged() {
+		t.Error("deep merge should apply override docker.allow_privileged")
+	}
+
+	// Sections the merge override doesn't mention are inherited whole.
+	if got := cfg.ForDirectory("/merge/app").AWS.IMDSProfile(); got != "default" {
+		t.Errorf("deep merge should inherit base aws, got profile %q", got)
+	}
+
+	// Critical: deep merge must NOT mutate the stored base config.
+	if cfg.Docker.AllowsPrivileged() {
+		t.Fatal("deep merge leaked into the stored base docker config")
+	}
+	if !cfg.Docker.DockerEnabled() || cfg.Docker.UpstreamSocket() != "/base.sock" {
+		t.Fatal("stored base docker config was altered by deep merge")
 	}
 }
 

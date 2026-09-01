@@ -14,52 +14,33 @@ var awsCmd = &cobra.Command{
 }
 
 // awsOverrideDir holds the --dir flag value shared by the mode commands. When
-// set, the command edits the directory override for that path instead of the
-// base AWS settings.
+// set, the command edits the AWS section of the directory override for that path
+// instead of the base AWS settings.
 var awsOverrideDir string
 
-// resolveDirArg canonicalizes a user-supplied directory to an absolute path so
-// inputs like "." or "../sibling" are stored (and matched) as the concrete
-// directory the user meant, not re-resolved later against the server's cwd. It
-// falls back to the raw input if resolution fails.
-func resolveDirArg(dir string) string {
-	if resolved := config.ExpandPath(dir); resolved != "" {
-		return resolved
-	}
-	return dir
-}
-
-// findAWSOverride returns a pointer to the existing override for dir, or nil if
-// none is configured. dir is canonicalized to an absolute path first so relative
-// inputs match the concrete directory they were stored as.
-func findAWSOverride(cfg *config.Config, dir string) *config.AWSDirectoryOverride {
-	if cfg == nil || cfg.AWS == nil {
-		return nil
-	}
-	dir = resolveDirArg(dir)
-	for i := range cfg.AWS.Overrides {
-		if cfg.AWS.Overrides[i].Path == dir {
-			return &cfg.AWS.Overrides[i]
-		}
+// findAWSOverride returns the AWS section of the existing directory override for
+// dir, or nil if no override (or no AWS section within it) is configured. The
+// override lookup itself is the generic, section-agnostic one in
+// config_overrides.go.
+func findAWSOverride(cfg *config.Config, dir string) *config.AWSConfig {
+	if o := findOverride(cfg, dir); o != nil {
+		return o.AWS
 	}
 	return nil
 }
 
-// awsOverridePtr returns a pointer to the override for dir, creating an empty one
-// (appended) when none exists yet. Callers mutate only the fields relevant to
-// the mode they set, so unrelated fields (e.g. allowed_profiles across a
-// force-profile change) are preserved. dir is canonicalized to an absolute path
-// so "." and other relative inputs are stored as the concrete directory meant.
-func awsOverridePtr(cfg *config.Config, dir string) *config.AWSDirectoryOverride {
-	if cfg.AWS == nil {
-		cfg.AWS = &config.AWSConfig{}
+// awsOverridePtr returns the AWS section of the directory override for dir,
+// creating the override and/or its AWS section when either is missing. Callers
+// mutate only the fields relevant to the mode they set, so unrelated fields (and
+// unrelated sections stored for the same directory) are preserved. dir is
+// canonicalized to an absolute path so "." and other relative inputs are stored
+// as the concrete directory meant.
+func awsOverridePtr(cfg *config.Config, dir string) *config.AWSConfig {
+	o := overridePtr(cfg, dir)
+	if o.AWS == nil {
+		o.AWS = &config.AWSConfig{}
 	}
-	dir = resolveDirArg(dir)
-	if o := findAWSOverride(cfg, dir); o != nil {
-		return o
-	}
-	cfg.AWS.Overrides = append(cfg.AWS.Overrides, config.AWSDirectoryOverride{Path: dir})
-	return &cfg.AWS.Overrides[len(cfg.AWS.Overrides)-1]
+	return o.AWS
 }
 
 var awsShowCmd = &cobra.Command{
@@ -71,24 +52,37 @@ var awsShowCmd = &cobra.Command{
 			return err
 		}
 
-		if cfg.AWS == nil {
-			fmt.Println("AWS: disabled (not configured)")
-			return nil
+		// Directory overrides can set an aws section without a base aws section
+		// existing (e.g. `config aws force-profile X --dir Y` with no base), so
+		// don't early-return on a nil base — that would hide those overrides. A
+		// single pass over cfg.Overrides prints them and, lazily on the first one,
+		// the header (plus a note when there is no base to show).
+		if cfg.AWS != nil {
+			fmt.Println("AWS Configuration:")
+			printAWSMode(cfg.AWS, "  ")
 		}
 
-		fmt.Println("AWS Configuration:")
-		printAWSMode(cfg.AWS, "  ")
-
-		if len(cfg.AWS.Overrides) > 0 {
-			fmt.Println("\nDirectory overrides (most specific match wins):")
-			for _, o := range cfg.AWS.Overrides {
-				fmt.Printf("  %s:\n", o.Path)
-				printAWSMode(&config.AWSConfig{
-					AllowRawCredentials: o.AllowRawCredentials,
-					ForceProfile:        o.ForceProfile,
-					AllowedProfiles:     o.AllowedProfiles,
-				}, "    ")
+		printedHeader := false
+		for i := range cfg.Overrides {
+			o := &cfg.Overrides[i]
+			if o.AWS == nil {
+				continue
 			}
+			if !printedHeader {
+				if cfg.AWS != nil {
+					fmt.Println()
+				} else {
+					fmt.Println("AWS: no base configuration (overrides only)")
+				}
+				fmt.Println("Directory overrides (most specific match wins):")
+				printedHeader = true
+			}
+			fmt.Printf("  %s:\n", o.Path)
+			printAWSMode(o.AWS, "    ")
+		}
+
+		if cfg.AWS == nil && !printedHeader {
+			fmt.Println("AWS: disabled (not configured)")
 		}
 
 		return nil
@@ -309,34 +303,24 @@ var awsRemoveOverrideCmd = &cobra.Command{
 			return err
 		}
 
-		if cfg.AWS == nil || len(cfg.AWS.Overrides) == 0 {
-			fmt.Printf("No override configured for %s\n", dir)
+		o := findOverride(cfg, dir)
+		if o == nil || o.AWS == nil {
+			fmt.Printf("No AWS override configured for %s\n", dir)
 			return nil
 		}
 
-		kept := cfg.AWS.Overrides[:0]
-		removed := false
-		for _, o := range cfg.AWS.Overrides {
-			if o.Path == dir {
-				removed = true
-				continue
-			}
-			kept = append(kept, o)
-		}
-		cfg.AWS.Overrides = kept
-		if len(cfg.AWS.Overrides) == 0 {
-			cfg.AWS.Overrides = nil
+		// Clear only the AWS section, preserving any other sections stored for
+		// this directory. Drop the whole override once it sets nothing.
+		o.AWS = nil
+		if !o.SetsAnySection() {
+			removeOverride(cfg, dir)
 		}
 
 		if err := saveConfig(cfg); err != nil {
 			return err
 		}
 
-		if removed {
-			fmt.Printf("Removed AWS override for %s\n", dir)
-		} else {
-			fmt.Printf("No override configured for %s\n", dir)
-		}
+		fmt.Printf("Removed AWS override for %s\n", dir)
 		return nil
 	},
 }

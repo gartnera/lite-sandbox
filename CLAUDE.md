@@ -36,7 +36,7 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 - `cmd/` — Cobra CLI: MCP server (`serve.go`), installers (`install*.go`), PreToolUse hook (`hook.go`), interactive shell (`shell.go`), config subcommands (`config_*.go`)
 - `tool/bash_sandboxed/` — parsing, validation (static + runtime), execution, background process management
 - `os_sandbox/` — sandboxed worker process and pool (bwrap/sandbox-exec, gob protocol)
-- `config/` — YAML config loading, watching, and per-directory AWS overrides
+- `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`)
 - `internal/hook` — hook event/decision types; `internal/imds` — IMDS credential server; `internal/dockerproxy` — Docker socket filtering proxy
 
 ## Testing

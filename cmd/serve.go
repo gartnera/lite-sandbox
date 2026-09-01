@@ -282,7 +282,10 @@ func runServe() error {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	cfg, err := config.Load()
+	// Resolve per-directory overrides once, here at the entrypoint, so the sandbox
+	// and the startup lifecycle (IMDS, docker) are all handed the same effective
+	// config for cwd and none has to re-resolve.
+	cfg, err := config.LoadForDirectory(cwd)
 	if err != nil {
 		slog.Warn("failed to load config, using defaults", "error", err)
 	} else {
@@ -294,13 +297,13 @@ func runServe() error {
 	defer cancel()
 	defer sandbox.Close() // Clean up worker pool on exit
 
-	// Start IMDS server if AWS uses IMDS (force_profile is set). The profile is
-	// resolved for the server's working directory so per-directory overrides take
-	// effect. The lifecycle also reacts to config reloads below, starting or
-	// stopping the server as AWS settings change.
+	// Start IMDS server if AWS uses IMDS (force_profile is set). cfg is already
+	// resolved for cwd, so per-directory AWS overrides take effect. The lifecycle
+	// also reacts to config reloads below, starting or stopping the server as AWS
+	// settings change.
 	var awsCfg *config.AWSConfig
 	if cfg != nil {
-		awsCfg = cfg.AWS.ForDirectory(cwd)
+		awsCfg = cfg.AWS
 	}
 	imdsLC := &imdsLifecycle{sandbox: sandbox}
 	if err := imdsLC.apply(awsCfg); err != nil {
@@ -309,7 +312,9 @@ func runServe() error {
 	defer imdsLC.stop()
 
 	// Start docker proxy if docker is enabled and usable (the docker command is
-	// only permitted under the OS sandbox, unless allow_unsandboxed is set).
+	// only permitted under the OS sandbox, unless allow_unsandboxed is set). cfg is
+	// already resolved for cwd, so a per-directory docker/os_sandbox override is
+	// honored here too.
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
 		// Resolve the upstream socket once and reuse it for both the proxy and
@@ -346,11 +351,14 @@ func runServe() error {
 
 	go func() {
 		err := config.Watch(ctx, func(newCfg *config.Config) {
+			// Watch hands back the raw reloaded config; resolve it for cwd once so
+			// the sandbox and IMDS below both see the effective config.
+			newCfg = newCfg.ForDirectory(cwd)
 			sandbox.UpdateConfig(newCfg, cwd)
 			slog.Info("reloaded config", "extra_commands", newCfg.ExtraCommands, "unsandboxed_commands", newCfg.UnsandboxedCommands)
 
 			// Start, stop, or restart the IMDS server to match the new AWS settings.
-			if err := imdsLC.apply(newCfg.AWS.ForDirectory(cwd)); err != nil {
+			if err := imdsLC.apply(newCfg.AWS); err != nil {
 				slog.Error("failed to apply AWS config change", "error", err)
 			}
 		})
