@@ -644,6 +644,21 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
+// LoadForDirectory loads the config and resolves it for dir, applying any
+// per-directory overrides (see Config.ForDirectory) so the returned config is the
+// effective one for commands run in dir. Callers that operate from a single
+// working directory should use this instead of Load()+ForDirectory, so the merge
+// happens once at load and every subsystem is handed an already-resolved config —
+// none has to know overrides exist. Returns a zero-value config (resolved) when
+// no file exists, matching Load.
+func LoadForDirectory(dir string) (*Config, error) {
+	cfg, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.ForDirectory(dir), nil
+}
+
 // Save writes the config to the YAML file, creating the directory if needed.
 func Save(cfg *Config) error {
 	p, err := Path()

@@ -136,7 +136,7 @@ overrides:
     aws:
       force_profile: "acme-dev"   # broker a different AWS profile here
     writable_paths:
-      - ~/work/acme/artifacts     # ...and widen writes for this tree
+      - ~/work/acme/artifacts     # replaces (not extends) writable_paths here
   - path: ~/work/acme/prod
     aws:
       force_profile: "acme-prod"  # more specific path wins under prod/

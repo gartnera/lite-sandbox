@@ -349,11 +349,13 @@ func TestBashSandboxed_AWSProfileHostStripped(t *testing.T) {
 	}
 }
 
-// TestUpdateConfig_DirectoryOverridesAllSections verifies UpdateConfig resolves
-// per-directory overrides for every section, not just AWS: an override matching
-// the sandbox's working directory must change the writable paths and the
-// os_sandbox toggle the runtime actually enforces.
-func TestUpdateConfig_DirectoryOverridesAllSections(t *testing.T) {
+// TestUpdateConfig_AppliesResolvedSections verifies the sandbox applies a
+// config resolved for its working directory across every section, not just AWS:
+// once the entrypoint resolves the per-directory override, the sandbox's writable
+// paths and os_sandbox toggle reflect it. Resolution lives at the entrypoint
+// (config.LoadForDirectory / Config.ForDirectory), so the test resolves the way
+// serve/shell/hook do before calling UpdateConfig.
+func TestUpdateConfig_AppliesResolvedSections(t *testing.T) {
 	bp := func(b bool) *bool { return &b }
 	workDir := t.TempDir()
 	override := filepath.Join(workDir, "artifacts")
@@ -370,7 +372,7 @@ func TestUpdateConfig_DirectoryOverridesAllSections(t *testing.T) {
 	}
 
 	s := NewSandbox()
-	s.UpdateConfig(cfg, workDir)
+	s.UpdateConfig(cfg.ForDirectory(workDir), workDir)
 
 	// writable_paths override replaces the base for this directory.
 	got := s.ConfigWritePaths()
@@ -388,7 +390,7 @@ func TestUpdateConfig_DirectoryOverridesAllSections(t *testing.T) {
 
 	// A directory outside the override falls back to the base config.
 	other := t.TempDir()
-	s.UpdateConfig(cfg, other)
+	s.UpdateConfig(cfg.ForDirectory(other), other)
 	if got := s.ConfigWritePaths(); !slices.Equal(got, []string{"/base-only"}) {
 		t.Errorf("outside override, ConfigWritePaths() = %v, want [/base-only]", got)
 	}

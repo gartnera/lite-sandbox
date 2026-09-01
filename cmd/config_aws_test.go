@@ -1,12 +1,77 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/config"
 )
+
+// captureStdout redirects os.Stdout for the duration of fn and returns what it
+// wrote. The config `show` commands print via fmt to os.Stdout, so this is how
+// their output is asserted.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done
+}
+
+// TestAWSShowCmd_DirectoryOnlyOverride guards the regression where `aws show`
+// early-returned on a nil base aws section and hid a directory-only override —
+// which `config aws force-profile --dir` creates without touching the base.
+func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { awsOverrideDir = "" })
+
+	// Create a directory override with no base aws section.
+	awsOverrideDir = "/work/acme"
+	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"acme-dev"}); err != nil {
+		t.Fatalf("dir force-profile: %v", err)
+	}
+	awsOverrideDir = ""
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AWS != nil {
+		t.Fatalf("expected no base aws section, got %+v", cfg.AWS)
+	}
+	if findAWSOverride(cfg, "/work/acme") == nil {
+		t.Fatal("expected a directory override for /work/acme")
+	}
+
+	out := captureStdout(t, func() {
+		if err := awsShowCmd.RunE(awsShowCmd, nil); err != nil {
+			t.Fatalf("show: %v", err)
+		}
+	})
+	if !strings.Contains(out, "/work/acme") || !strings.Contains(out, "acme-dev") {
+		t.Errorf("aws show omitted the directory override; got:\n%s", out)
+	}
+	if strings.Contains(out, "disabled (not configured)") {
+		t.Errorf("aws show wrongly reported disabled; got:\n%s", out)
+	}
+}
 
 func TestAWSAllowedProfilesCmd(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))

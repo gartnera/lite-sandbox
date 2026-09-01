@@ -52,13 +52,28 @@ var awsShowCmd = &cobra.Command{
 			return err
 		}
 
-		if cfg.AWS == nil {
+		// Directory overrides can set an aws section without a base aws section
+		// existing (e.g. `config aws force-profile X --dir Y` with no base), so
+		// don't early-return on a nil base — that would hide those overrides.
+		hasAWSOverride := false
+		for i := range cfg.Overrides {
+			if cfg.Overrides[i].AWS != nil {
+				hasAWSOverride = true
+				break
+			}
+		}
+
+		if cfg.AWS == nil && !hasAWSOverride {
 			fmt.Println("AWS: disabled (not configured)")
 			return nil
 		}
 
-		fmt.Println("AWS Configuration:")
-		printAWSMode(cfg.AWS, "  ")
+		if cfg.AWS != nil {
+			fmt.Println("AWS Configuration:")
+			printAWSMode(cfg.AWS, "  ")
+		} else {
+			fmt.Println("AWS: no base configuration (overrides only)")
+		}
 
 		var printedHeader bool
 		for i := range cfg.Overrides {

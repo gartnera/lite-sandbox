@@ -131,16 +131,13 @@ func NewSandbox() *Sandbox {
 
 // UpdateConfig replaces the sandbox configuration with the provided config.
 //
-// The sandbox runs commands from a single working directory (workDir), so the
-// config is resolved for that directory up front: any per-directory override
-// matching workDir replaces its sections here, and every downstream consumer
-// (extra commands, path boundaries, runtimes, git/docker validators, the AWS
-// credential mask, the os_sandbox toggle) reads the resolved config. This is
-// what makes directory overrides apply to every section, not just AWS.
+// cfg must already be resolved for workDir by the caller (via
+// config.LoadForDirectory or Config.ForDirectory): per-directory overrides are
+// merged once at the entrypoint and the effective config injected here, so the
+// sandbox — like every other subsystem — applies it verbatim and never has to
+// know overrides exist. workDir is still needed to anchor bare script paths and
+// the OS-sandbox worker's working directory.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
-	if cfg != nil {
-		cfg = cfg.ForDirectory(workDir)
-	}
 	m := make(map[string]bool, len(cfg.ExtraCommands)+len(cfg.UnsandboxedCommands))
 	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
@@ -187,7 +184,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		processEntry(c, true)
 	}
 	// Determine if AWS credentials should be blocked. cfg is already resolved for
-	// workDir above, so its AWS section reflects any per-directory override.
+	// workDir by the caller, so its AWS section reflects any per-directory override.
 	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
 
 	s.mu.Lock()
@@ -251,9 +248,9 @@ func (s *Sandbox) getConfig() *config.Config {
 }
 
 // awsConfigForWorker returns the AWS config in effect for the worker's working
-// directory. s.cfg is already resolved for that directory by UpdateConfig, so any
-// per-directory override applies to command validation the same way it applies to
-// the IMDS server and credential blocking.
+// directory. s.cfg was already resolved for that directory by the caller of
+// UpdateConfig, so any per-directory override applies to command validation the
+// same way it applies to the IMDS server and credential blocking.
 func (s *Sandbox) awsConfigForWorker() *config.AWSConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
