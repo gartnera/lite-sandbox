@@ -14,8 +14,11 @@ import (
 
 // captureStdout redirects os.Stdout for the duration of fn and returns what it
 // wrote. The config `show` commands print via fmt to os.Stdout, so this is how
-// their output is asserted.
-func captureStdout(t *testing.T, fn func()) string {
+// their output is asserted. The cleanup runs in a defer — closing the writer,
+// draining the reader, and restoring os.Stdout — so even if fn calls t.Fatalf
+// (runtime.Goexit) the pipe and goroutine don't leak and later tests aren't left
+// writing into an abandoned pipe.
+func captureStdout(t *testing.T, fn func()) (out string) {
 	t.Helper()
 	orig := os.Stdout
 	r, w, err := os.Pipe()
@@ -29,10 +32,13 @@ func captureStdout(t *testing.T, fn func()) string {
 		_, _ = io.Copy(&buf, r)
 		done <- buf.String()
 	}()
+	defer func() {
+		_ = w.Close()
+		os.Stdout = orig
+		out = <-done
+	}()
 	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done
+	return
 }
 
 // TestAWSShowCmd_DirectoryOnlyOverride guards the regression where `aws show`

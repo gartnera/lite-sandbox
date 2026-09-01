@@ -368,6 +368,58 @@ func TestConfig_ForDirectory_AllowedProfiles(t *testing.T) {
 	}
 }
 
+func TestConfig_ForDirectory_DeepMerge(t *testing.T) {
+	bp := func(b bool) *bool { return &b }
+	cfg := &Config{
+		Docker: &DockerConfig{Enabled: bp(true), SocketPath: "/base.sock"},
+		AWS:    &AWSConfig{ForceProfile: "default", AllowedProfiles: []string{"dev"}},
+		Overrides: []DirectoryOverride{
+			{Path: "/replace", Config: Config{
+				// Replace mode: whole docker section replaced, so Enabled is lost.
+				Docker: &DockerConfig{AllowPrivileged: bp(true)},
+			}},
+			{Path: "/merge", Merge: true, Config: Config{
+				// Deep merge: only allow_privileged changes; enabled/socket kept.
+				Docker: &DockerConfig{AllowPrivileged: bp(true)},
+			}},
+		},
+	}
+
+	// Replace mode drops the base docker fields the override didn't restate.
+	rep := cfg.ForDirectory("/replace/app").Docker
+	if rep.DockerEnabled() {
+		t.Error("replace mode should not inherit base docker.enabled")
+	}
+	if !rep.AllowsPrivileged() {
+		t.Error("replace mode should apply override docker.allow_privileged")
+	}
+
+	// Deep merge keeps base docker fields and layers the override's field on top.
+	mrg := cfg.ForDirectory("/merge/app").Docker
+	if !mrg.DockerEnabled() {
+		t.Error("deep merge should inherit base docker.enabled")
+	}
+	if mrg.UpstreamSocket() != "/base.sock" {
+		t.Errorf("deep merge should inherit base docker.socket_path, got %q", mrg.UpstreamSocket())
+	}
+	if !mrg.AllowsPrivileged() {
+		t.Error("deep merge should apply override docker.allow_privileged")
+	}
+
+	// Sections the merge override doesn't mention are inherited whole.
+	if got := cfg.ForDirectory("/merge/app").AWS.IMDSProfile(); got != "default" {
+		t.Errorf("deep merge should inherit base aws, got profile %q", got)
+	}
+
+	// Critical: deep merge must NOT mutate the stored base config.
+	if cfg.Docker.AllowsPrivileged() {
+		t.Fatal("deep merge leaked into the stored base docker config")
+	}
+	if !cfg.Docker.DockerEnabled() || cfg.Docker.UpstreamSocket() != "/base.sock" {
+		t.Fatal("stored base docker config was altered by deep merge")
+	}
+}
+
 func TestLocalBinaryExecutionConfig_IsEnabled(t *testing.T) {
 	boolPtr := func(b bool) *bool { return &b }
 

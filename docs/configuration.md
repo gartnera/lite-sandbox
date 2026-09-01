@@ -142,6 +142,10 @@ overrides:
       force_profile: "acme-prod"  # more specific path wins under prod/
   - path: ~/scratch
     os_sandbox: false             # any section can be overridden
+  - path: ~/work/trusted
+    merge: true                   # deep-merge instead of replace (see below)
+    docker:
+      allow_privileged: true      # only this flag changes; docker.enabled etc. kept
 ```
 
 Resolution rules:
@@ -149,10 +153,15 @@ Resolution rules:
 - **Most specific wins.** When a directory lies under more than one override
   `path`, the longest matching path applies; the others are ignored (overrides do
   not stack).
-- **Whole sections replace, they don't merge.** An override that sets `aws:`
-  defines the *entire* AWS mode for its directory — its fields do not merge with
-  the base `aws:` block. Sections the override leaves unset are inherited from the
-  base config unchanged.
+- **Replace vs. merge.** By default an override **replaces** each section it sets:
+  an override with an `aws:` block defines the *entire* AWS mode for its
+  directory, dropping any base `aws:` fields it doesn't restate. Set `merge: true`
+  on an override to **deep-merge** it instead — it recurses into a section and
+  applies only the fields it sets, inheriting the rest (so the `~/work/trusted`
+  example above flips just `docker.allow_privileged` and keeps the base
+  `docker.enabled`). Either way, sections the override never mentions are
+  inherited from the base unchanged, and leaf values it does set (scalars, flags,
+  and lists like `writable_paths`) come from the override.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
 

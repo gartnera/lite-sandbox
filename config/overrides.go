@@ -6,17 +6,26 @@ import (
 	"strings"
 )
 
-// DirectoryOverride replaces parts of the configuration for commands whose
+// DirectoryOverride changes parts of the configuration for commands whose
 // working directory is at (or under) Path. It embeds a full Config, so an
 // override can set any section — aws, docker, runtimes, readable/writable paths,
-// os_sandbox, and so on — not just one. Each section the override specifies fully
-// replaces that section from the base config (sections it leaves unset are
-// inherited), so, for example, an override's `aws:` block defines the entire AWS
-// mode for its directory rather than merging field-by-field. Path supports ~
-// expansion. When a directory matches more than one override the most specific
-// (longest) Path wins. A nested Overrides list on an override is ignored.
+// os_sandbox, and so on — not just one. Path supports ~ expansion. When a
+// directory matches more than one override the most specific (longest) Path wins.
+// A nested Overrides list on an override is ignored.
+//
+// Merge selects how the override combines with the base config:
+//   - false (default): each section the override sets fully REPLACES that section
+//     from the base, so an override's `aws:` block defines the entire AWS mode
+//     for its directory. Sections it leaves unset are inherited.
+//   - true: the override is DEEP-MERGED into the base — it recurses into struct
+//     sections and applies only the fields it sets, inheriting the rest. This
+//     lets an override change, say, just `docker.allow_privileged` while keeping
+//     the base's `docker.enabled`. Leaf values (scalars, `*bool` flags, and
+//     slices such as writable_paths) are still taken from the override when set,
+//     otherwise inherited.
 type DirectoryOverride struct {
 	Path   string `yaml:"path"`
+	Merge  bool   `yaml:"merge,omitempty"`
 	Config `yaml:",inline"`
 }
 
@@ -42,19 +51,19 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 }
 
 // ForDirectory returns the configuration in effect for commands whose working
-// directory is dir: the base config overlaid with the single most specific
-// matching directory override. Every section the override sets replaces that
-// whole section from the base, while sections it leaves unset are inherited — so
-// a directory can switch AWS profiles, widen writable paths, enable a runtime,
-// and so on, all through one mechanism. The returned config carries no overrides
-// itself, so reading any section off it reflects dir directly. A nil receiver
-// returns nil.
+// directory is dir: the base config combined with the single most specific
+// matching directory override. How they combine depends on the override's Merge
+// flag — whole-section replace by default, deep merge when Merge is true (see
+// DirectoryOverride) — so a directory can switch AWS profiles, widen writable
+// paths, flip a single docker flag, and so on, all through one mechanism. The
+// returned config carries no overrides itself, so reading any section off it
+// reflects dir directly. A nil receiver returns nil.
 //
-// The result is a read-only resolved view: its section pointers and slices are
-// shared with the receiver (and with the matched override), not deep-copied.
-// Callers must treat it as immutable — read the accessors, do not mutate the
-// returned Config or the values it points at, or the change would leak into the
-// stored config and other directories.
+// The result is a read-only resolved view. In replace mode its section pointers
+// and slices are shared with the receiver (and with the matched override); deep
+// merge clones the structs it writes into so it never mutates the stored config.
+// Either way, treat the result as immutable — read the accessors, do not mutate
+// it or the values it points at.
 func (c *Config) ForDirectory(dir string) *Config {
 	if c == nil {
 		return nil
@@ -62,19 +71,18 @@ func (c *Config) ForDirectory(dir string) *Config {
 	resolved := *c
 	resolved.Overrides = nil
 	if i := MatchDirectoryOverride(dir, c.Overrides, func(o DirectoryOverride) string { return o.Path }); i >= 0 {
-		overlayConfig(&resolved, &c.Overrides[i].Config)
+		overlayConfig(&resolved, &c.Overrides[i].Config, c.Overrides[i].Merge)
 	}
 	return &resolved
 }
 
-// overlayConfig copies every set section from over onto base (mutating base). A
-// section is "set" when its field is a non-nil pointer, slice, or map; unset
-// sections leave base's value untouched. The Overrides field is never copied, so
-// an override cannot nest further overrides. Because it walks the struct
-// reflectively, it stays complete automatically as new config sections are added
-// — every overridable section uses a pointer or slice type by convention, which
-// is exactly what this treats as overridable.
-func overlayConfig(base, over *Config) {
+// overlayConfig combines the set sections of over onto base (mutating base),
+// skipping the Overrides field so an override cannot nest further overrides.
+// When deep is false each set section replaces base's wholesale; when deep is
+// true it recurses into struct sections and applies only the fields over sets.
+// Walking the struct reflectively keeps it complete automatically as new config
+// sections are added.
+func overlayConfig(base, over *Config, deep bool) {
 	bv := reflect.ValueOf(base).Elem()
 	ov := reflect.ValueOf(over).Elem()
 	t := bv.Type()
@@ -83,12 +91,55 @@ func overlayConfig(base, over *Config) {
 		if f.Name == "Overrides" || !f.IsExported() {
 			continue
 		}
+		if deep {
+			mergeField(bv.Field(i), ov.Field(i))
+			continue
+		}
 		of := ov.Field(i)
 		switch of.Kind() {
 		case reflect.Pointer, reflect.Slice, reflect.Map:
 			if !of.IsNil() {
 				bv.Field(i).Set(of)
 			}
+		}
+	}
+}
+
+// mergeField deep-merges the value in over into base (same type), used for
+// merge:true overrides. Struct pointers recurse field-by-field into a clone of
+// base's struct, so an override can set individual fields of a section while
+// inheriting the rest without ever mutating the shared base struct. Every other
+// kind is a leaf: over's value is taken when it is "set" (a non-nil pointer,
+// slice, or map, or a non-zero scalar), otherwise base is kept.
+func mergeField(base, over reflect.Value) {
+	switch over.Kind() {
+	case reflect.Pointer:
+		if over.IsNil() {
+			return // override does not set this; keep base
+		}
+		if over.Elem().Kind() == reflect.Struct {
+			merged := reflect.New(over.Elem().Type())
+			if !base.IsNil() {
+				merged.Elem().Set(base.Elem()) // start from a copy of base's struct
+			}
+			st := over.Elem().Type()
+			for i := 0; i < st.NumField(); i++ {
+				if !st.Field(i).IsExported() {
+					continue
+				}
+				mergeField(merged.Elem().Field(i), over.Elem().Field(i))
+			}
+			base.Set(merged)
+			return
+		}
+		base.Set(over) // pointer to a scalar (e.g. *bool): override wins
+	case reflect.Slice, reflect.Map:
+		if !over.IsNil() {
+			base.Set(over)
+		}
+	default:
+		if !over.IsZero() {
+			base.Set(over)
 		}
 	}
 }

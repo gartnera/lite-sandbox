@@ -54,39 +54,35 @@ var awsShowCmd = &cobra.Command{
 
 		// Directory overrides can set an aws section without a base aws section
 		// existing (e.g. `config aws force-profile X --dir Y` with no base), so
-		// don't early-return on a nil base — that would hide those overrides.
-		hasAWSOverride := false
-		for i := range cfg.Overrides {
-			if cfg.Overrides[i].AWS != nil {
-				hasAWSOverride = true
-				break
-			}
-		}
-
-		if cfg.AWS == nil && !hasAWSOverride {
-			fmt.Println("AWS: disabled (not configured)")
-			return nil
-		}
-
+		// don't early-return on a nil base — that would hide those overrides. A
+		// single pass over cfg.Overrides prints them and, lazily on the first one,
+		// the header (plus a note when there is no base to show).
 		if cfg.AWS != nil {
 			fmt.Println("AWS Configuration:")
 			printAWSMode(cfg.AWS, "  ")
-		} else {
-			fmt.Println("AWS: no base configuration (overrides only)")
 		}
 
-		var printedHeader bool
+		printedHeader := false
 		for i := range cfg.Overrides {
 			o := &cfg.Overrides[i]
 			if o.AWS == nil {
 				continue
 			}
 			if !printedHeader {
-				fmt.Println("\nDirectory overrides (most specific match wins):")
+				if cfg.AWS != nil {
+					fmt.Println()
+				} else {
+					fmt.Println("AWS: no base configuration (overrides only)")
+				}
+				fmt.Println("Directory overrides (most specific match wins):")
 				printedHeader = true
 			}
 			fmt.Printf("  %s:\n", o.Path)
 			printAWSMode(o.AWS, "    ")
+		}
+
+		if cfg.AWS == nil && !printedHeader {
+			fmt.Println("AWS: disabled (not configured)")
 		}
 
 		return nil
