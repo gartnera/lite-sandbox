@@ -45,6 +45,11 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 			if !fv.IsNil() {
 				return true
 			}
+		default:
+			// By-value scalar section (none today): set means non-zero.
+			if !fv.IsZero() {
+				return true
+			}
 		}
 	}
 	return false
@@ -99,6 +104,11 @@ func overlayConfig(base, over *Config, deep bool) {
 		switch of.Kind() {
 		case reflect.Pointer, reflect.Slice, reflect.Map:
 			if !of.IsNil() {
+				bv.Field(i).Set(of)
+			}
+		default:
+			// By-value scalar section (none today): set means non-zero.
+			if !of.IsZero() {
 				bv.Field(i).Set(of)
 			}
 		}

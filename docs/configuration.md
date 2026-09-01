@@ -165,9 +165,10 @@ Resolution rules:
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
 
-Section-specific CLI subcommands accept a `--dir <path>` flag to edit the
-corresponding section of an override instead of the base (e.g. `lite-sandbox
-config aws force-profile <profile> --dir <path>`).
+The `config aws` subcommands accept a `--dir <path>` flag to edit the AWS section
+of an override instead of the base (e.g. `lite-sandbox config aws force-profile
+<profile> --dir <path>`). Overrides for other sections — and the `merge` flag —
+are authored by editing the `overrides` list in the config file directly.
 
 ## Git Support
 
