@@ -49,6 +49,12 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 // and so on, all through one mechanism. The returned config carries no overrides
 // itself, so reading any section off it reflects dir directly. A nil receiver
 // returns nil.
+//
+// The result is a read-only resolved view: its section pointers and slices are
+// shared with the receiver (and with the matched override), not deep-copied.
+// Callers must treat it as immutable — read the accessors, do not mutate the
+// returned Config or the values it points at, or the change would leak into the
+// stored config and other directories.
 func (c *Config) ForDirectory(dir string) *Config {
 	if c == nil {
 		return nil
