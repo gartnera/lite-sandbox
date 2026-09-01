@@ -300,7 +300,7 @@ func runServe() error {
 	// stopping the server as AWS settings change.
 	var awsCfg *config.AWSConfig
 	if cfg != nil {
-		awsCfg = cfg.AWS.ForDirectory(cwd)
+		awsCfg = cfg.ForDirectory(cwd).AWS
 	}
 	imdsLC := &imdsLifecycle{sandbox: sandbox}
 	if err := imdsLC.apply(awsCfg); err != nil {
@@ -350,7 +350,7 @@ func runServe() error {
 			slog.Info("reloaded config", "extra_commands", newCfg.ExtraCommands, "unsandboxed_commands", newCfg.UnsandboxedCommands)
 
 			// Start, stop, or restart the IMDS server to match the new AWS settings.
-			if err := imdsLC.apply(newCfg.AWS.ForDirectory(cwd)); err != nil {
+			if err := imdsLC.apply(newCfg.ForDirectory(cwd).AWS); err != nil {
 				slog.Error("failed to apply AWS config change", "error", err)
 			}
 		})

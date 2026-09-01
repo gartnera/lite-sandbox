@@ -56,24 +56,28 @@ server — the SDK never reads the masked `~/.aws`. Notes:
 
 ### Per-directory overrides
 
-`overrides` lets either mode be changed for specific working directories, so one
-config can broker a different profile (or switch modes entirely) depending on
-where the sandbox is launched. Each override matches the working directory it is
-started in — at the override's `path` or any directory beneath it — and the most
-specific (longest) matching `path` wins. A matching override fully defines the
-mode for that directory; its fields replace the base settings rather than
-merging, so the two modes never mix.
+AWS settings can be changed for specific working directories through the
+top-level [`overrides`](configuration.md#per-directory-overrides) list — the same
+generic mechanism every config section uses, not an AWS-only feature. An override
+that sets `aws:` fully defines the mode for its directory (at the override's
+`path` or any directory beneath it); its fields replace the base AWS settings
+rather than merging, so the two modes never mix, and the most specific (longest)
+matching `path` wins.
 
 ```yaml
 aws:
-  force_profile: "default"        # base mode for everything else
-  overrides:
-    - path: ~/work/acme           # ~ is expanded
-      force_profile: "acme-dev"   # broker a different profile here
-    - path: ~/work/acme/prod
-      force_profile: "acme-prod"  # more specific path wins under prod/
-    - path: ~/scratch
-      allow_raw_credentials: true # switch modes for this tree
+  force_profile: "default"          # base mode for everything else
+
+overrides:
+  - path: ~/work/acme               # ~ is expanded
+    aws:
+      force_profile: "acme-dev"     # broker a different profile here
+  - path: ~/work/acme/prod
+    aws:
+      force_profile: "acme-prod"    # more specific path wins under prod/
+  - path: ~/scratch
+    aws:
+      allow_raw_credentials: true   # switch modes for this tree
 ```
 
 ### CLI

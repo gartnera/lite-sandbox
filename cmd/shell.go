@@ -52,7 +52,7 @@ func runShell() error {
 	// effect.
 	var awsCfg *config.AWSConfig
 	if cfg != nil {
-		awsCfg = cfg.AWS.ForDirectory(workDir)
+		awsCfg = cfg.ForDirectory(workDir).AWS
 	}
 	imdsLC := &imdsLifecycle{sandbox: sandbox}
 	if err := imdsLC.apply(awsCfg); err != nil {

@@ -178,7 +178,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	}
 	// Determine if AWS credentials should be blocked, resolving any
 	// per-directory override for the worker's working directory.
-	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS.ForDirectory(workDir))
+	blockAWSCredentials := shouldBlockAWSCredentials(cfg.ForDirectory(workDir).AWS)
 
 	s.mu.Lock()
 	s.cfg = cfg
@@ -249,7 +249,7 @@ func (s *Sandbox) awsConfigForWorker() *config.AWSConfig {
 	if s.cfg == nil {
 		return nil
 	}
-	return s.cfg.AWS.ForDirectory(s.workerWorkDir)
+	return s.cfg.ForDirectory(s.workerWorkDir).AWS
 }
 
 // osSandboxEnabled reports whether the OS sandbox (bwrap/sandbox-exec worker)

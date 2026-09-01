@@ -116,6 +116,50 @@ the sandbox's `/tmp` overlay on Linux. Manage these with
 `lite-sandbox config internal-readable-paths add <path>` /
 `internal-writable-paths add <path>`.
 
+## Per-directory overrides
+
+Any part of the configuration can be changed for specific working directories via
+the top-level `overrides` list. Each entry pairs a `path` with any config
+sections that replace the base for commands run **at or under** that path. This is
+not AWS-specific — `aws`, `docker`, `runtimes`, `readable_paths`/`writable_paths`,
+`os_sandbox`, and every other section can be overridden the same way.
+
+```yaml
+os_sandbox: true
+writable_paths:
+  - ~/scratch
+aws:
+  force_profile: "default"        # base mode for everything else
+
+overrides:
+  - path: ~/work/acme             # ~ is expanded
+    aws:
+      force_profile: "acme-dev"   # broker a different AWS profile here
+    writable_paths:
+      - ~/work/acme/artifacts     # ...and widen writes for this tree
+  - path: ~/work/acme/prod
+    aws:
+      force_profile: "acme-prod"  # more specific path wins under prod/
+  - path: ~/scratch
+    os_sandbox: false             # any section can be overridden
+```
+
+Resolution rules:
+
+- **Most specific wins.** When a directory lies under more than one override
+  `path`, the longest matching path applies; the others are ignored (overrides do
+  not stack).
+- **Whole sections replace, they don't merge.** An override that sets `aws:`
+  defines the *entire* AWS mode for its directory — its fields do not merge with
+  the base `aws:` block. Sections the override leaves unset are inherited from the
+  base config unchanged.
+- **Paths support `~`** and are resolved to absolute paths, so relative inputs
+  match the concrete directory they denote.
+
+Section-specific CLI subcommands accept a `--dir <path>` flag to edit the
+corresponding section of an override instead of the base (e.g. `lite-sandbox
+config aws force-profile <profile> --dir <path>`).
+
 ## Git Support
 
 Git commands are enabled by default with granular permission levels that can be configured:

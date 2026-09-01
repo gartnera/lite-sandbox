@@ -117,10 +117,12 @@ func (p *PnpmConfig) PnpmPublish() bool {
 //  1. allow_raw_credentials: true - AWS CLI reads from ~/.aws/credentials directly (no blocking)
 //  2. force_profile: "name" - AWS CLI uses IMDS server with specified profile (blocks ~/.aws/)
 //
-// Overrides let either mode be changed for specific working directories, so a
-// single config can broker a different profile (or switch modes) depending on
-// where the sandbox is launched. Resolve the effective settings for a directory
-// with ForDirectory before reading the mode accessors.
+// Like every config section, AWS settings can be changed per working directory
+// through the top-level directory overrides (see Config.Overrides and
+// Config.ForDirectory): an override that sets `aws:` replaces this whole section
+// for its directory, so a single config can broker a different profile (or switch
+// modes) depending on where the sandbox is launched. Resolve the config for a
+// directory with Config.ForDirectory before reading the mode accessors.
 type AWSConfig struct {
 	AllowRawCredentials *bool  `yaml:"allow_raw_credentials,omitempty"`
 	ForceProfile        string `yaml:"force_profile,omitempty"`
@@ -130,70 +132,7 @@ type AWSConfig struct {
 	// gets its own brokered IMDS server; a command that sets AWS_PROFILE to a
 	// profile outside this set (∪ ForceProfile) is denied. Only meaningful in
 	// IMDS mode (ForceProfile set).
-	AllowedProfiles []string               `yaml:"allowed_profiles,omitempty"`
-	Overrides       []AWSDirectoryOverride `yaml:"overrides,omitempty"`
-}
-
-// AWSDirectoryOverride replaces the AWS credential mode for commands whose
-// working directory is at (or under) Path. Path supports ~ expansion. When a
-// directory matches more than one override the most specific (longest) Path
-// wins. A matching override fully defines the mode for that directory — its
-// fields replace the base force_profile / allow_raw_credentials rather than
-// merging, so the two modes never mix.
-type AWSDirectoryOverride struct {
-	Path                string   `yaml:"path"`
-	AllowRawCredentials *bool    `yaml:"allow_raw_credentials,omitempty"`
-	ForceProfile        string   `yaml:"force_profile,omitempty"`
-	AllowedProfiles     []string `yaml:"allowed_profiles,omitempty"`
-}
-
-// ForDirectory returns the effective AWS configuration for commands running in
-// dir, applying the most specific matching directory override (if any) on top
-// of the base settings. The returned config carries no overrides itself, so all
-// the mode accessors (AWSEnabled, UsesIMDS, IMDSProfile, ...) reflect dir.
-func (a *AWSConfig) ForDirectory(dir string) *AWSConfig {
-	if a == nil {
-		return nil
-	}
-	resolved := &AWSConfig{
-		AllowRawCredentials: a.AllowRawCredentials,
-		ForceProfile:        a.ForceProfile,
-		AllowedProfiles:     a.AllowedProfiles,
-	}
-	if o := a.matchOverride(dir); o != nil {
-		resolved.AllowRawCredentials = o.AllowRawCredentials
-		resolved.ForceProfile = o.ForceProfile
-		resolved.AllowedProfiles = o.AllowedProfiles
-	}
-	return resolved
-}
-
-// matchOverride returns the most specific override whose Path contains dir, or
-// nil when none match. dir is matched if it equals an override Path or lies
-// beneath it; the longest matching Path wins so nested overrides take priority.
-func (a *AWSConfig) matchOverride(dir string) *AWSDirectoryOverride {
-	if a == nil || dir == "" || len(a.Overrides) == 0 {
-		return nil
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		abs = dir
-	}
-	var best *AWSDirectoryOverride
-	bestLen := -1
-	for i := range a.Overrides {
-		base := expandPath(a.Overrides[i].Path)
-		if base == "" {
-			continue
-		}
-		if abs == base || strings.HasPrefix(abs, base+string(filepath.Separator)) {
-			if len(base) > bestLen {
-				best = &a.Overrides[i]
-				bestLen = len(base)
-			}
-		}
-	}
-	return best
+	AllowedProfiles []string `yaml:"allowed_profiles,omitempty"`
 }
 
 // AWSEnabled returns whether aws commands are allowed at all (default: false).
@@ -586,6 +525,12 @@ type Config struct {
 	Docker                *DockerConfig               `yaml:"docker,omitempty"`
 	LocalBinaryExecution  *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox             *bool                       `yaml:"os_sandbox,omitempty"`
+	// Overrides change parts of the configuration for specific working
+	// directories. Each entry pairs a path with a subset of config sections that
+	// replace the base for commands run at or under that path; the most specific
+	// match wins. Resolve the effective config for a directory with ForDirectory.
+	// Any section can be overridden, not just AWS.
+	Overrides []DirectoryOverride `yaml:"overrides,omitempty"`
 }
 
 // ExpandedReadablePaths returns ReadablePaths with ~ expanded to the user's
