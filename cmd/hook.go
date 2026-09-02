@@ -154,16 +154,11 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 		return nil
 	}
 
-	cwd := event.CWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if cwd == "" {
+	sb, cwd := sandboxForEvent(event)
+	if sb == nil {
 		// Without a working directory we cannot resolve path boundaries; defer.
 		return nil
 	}
-
-	sb := configuredSandbox(cwd)
 	defer sb.Close()
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 
@@ -202,16 +197,11 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		return nil
 	}
 
-	cwd := event.CWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if cwd == "" {
+	sb, cwd := sandboxForEvent(event)
+	if sb == nil {
 		// Without a working directory we cannot resolve the boundary; fail-open.
 		return nil
 	}
-
-	sb := configuredSandbox(cwd)
 	defer sb.Close()
 
 	what := event.ToolName
@@ -233,16 +223,11 @@ func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decis
 		return nil
 	}
 
-	cwd := event.CWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if cwd == "" {
+	sb, cwd := sandboxForEvent(event)
+	if sb == nil {
 		// Without a working directory we cannot resolve the boundary; fail-open.
 		return nil
 	}
-
-	sb := configuredSandbox(cwd)
 	defer sb.Close()
 
 	for _, p := range paths {
@@ -328,6 +313,22 @@ func fsTarget(e *hook.Event) (path string, write bool, governed bool) {
 		return in.NotebookPath, true, true
 	}
 	return "", false, false
+}
+
+// sandboxForEvent resolves the working directory an event's paths are relative
+// to (the event's cwd, falling back to the process's) and returns a sandbox
+// configured for it. A nil sandbox means no working directory could be
+// determined, so the caller must defer to Claude Code's normal flow. The caller
+// owns Close() on a non-nil sandbox.
+func sandboxForEvent(event *hook.Event) (*bash_sandboxed.Sandbox, string) {
+	cwd := event.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if cwd == "" {
+		return nil, ""
+	}
+	return configuredSandbox(cwd), cwd
 }
 
 // configuredSandbox builds a sandbox for cwd with the user's config applied,

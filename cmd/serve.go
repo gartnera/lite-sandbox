@@ -263,12 +263,56 @@ func claudeScratchpadPath() string {
 // socket well under macOS's ~104-byte sun_path limit. Falls back to the system
 // temp dir when it is unset or missing (e.g. on macOS).
 func dockerSocketBaseDir() string {
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			return d
-		}
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" && dirExists(d) {
+		return d
 	}
 	return os.TempDir()
+}
+
+// startDockerProxy starts the docker filtering proxy for sandbox: it creates a
+// temporary socket directory, serves the proxy from it with bind mounts checked
+// against readPaths/writePaths and workDir, and points the sandbox at the
+// resulting endpoint. logStart runs in the serving goroutine just before the
+// proxy accepts connections, so each caller keeps its own log line verbatim.
+//
+// The returned cleanup shuts the proxy down (5s grace) and then removes the
+// socket directory, matching the LIFO order of the defers it replaces; callers
+// must `defer cleanup()` immediately, so it unwinds at the same point in their
+// teardown as before.
+func startDockerProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readPaths, writePaths []string, workDir string, logStart func(endpoint string)) (string, func(), error) {
+	// Resolve the upstream socket once and reuse it for both the proxy and
+	// the OS-sandbox mask so they can't disagree.
+	upstream := cfg.Docker.UpstreamSocket()
+	socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create docker proxy socket dir: %w", err)
+	}
+
+	dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
+		readPaths, writePaths, workDir, cfg.Docker.AllowsPrivileged(), cfg.Docker.AllowsHostNamespaces())
+	if err != nil {
+		os.RemoveAll(socketDir)
+		return "", nil, fmt.Errorf("failed to create docker proxy: %w", err)
+	}
+
+	go func() {
+		logStart(dockerSrv.Endpoint())
+		if err := dockerSrv.Start(); err != nil && err != http.ErrServerClosed {
+			slog.Error("docker proxy failed", "error", err)
+		}
+	}()
+
+	sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
+
+	cleanup := func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := dockerSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("failed to shutdown docker proxy", "error", err)
+		}
+		os.RemoveAll(socketDir)
+	}
+	return dockerSrv.Endpoint(), cleanup, nil
 }
 
 func runServe() error {
@@ -317,36 +361,13 @@ func runServe() error {
 	// honored here too.
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
-		// Resolve the upstream socket once and reuse it for both the proxy and
-		// the OS-sandbox mask so they can't disagree.
-		upstream := cfg.Docker.UpstreamSocket()
-		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
+		_, cleanup, err := startDockerProxy(cfg, sandbox, readPaths, writePaths, cwd, func(endpoint string) {
+			slog.Info("docker proxy endpoint", "host", endpoint)
+		})
 		if err != nil {
-			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
+			return err
 		}
-		defer os.RemoveAll(socketDir)
-
-		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
-			readPaths, writePaths, cwd, cfg.Docker.AllowsPrivileged(), cfg.Docker.AllowsHostNamespaces())
-		if err != nil {
-			return fmt.Errorf("failed to create docker proxy: %w", err)
-		}
-
-		go func() {
-			slog.Info("docker proxy endpoint", "host", dockerSrv.Endpoint())
-			if err := dockerSrv.Start(); err != nil && err != http.ErrServerClosed {
-				slog.Error("docker proxy failed", "error", err)
-			}
-		}()
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			if err := dockerSrv.Shutdown(shutdownCtx); err != nil {
-				slog.Error("failed to shutdown docker proxy", "error", err)
-			}
-		}()
-
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
+		defer cleanup()
 	}
 
 	go func() {
