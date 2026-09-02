@@ -44,7 +44,7 @@ func newTestSandboxWithRuntimesConfig(runtimesCfg *config.RuntimesConfig) *Sandb
 }
 
 // newTestSandboxWithOSSandbox returns a Sandbox with the OS sandbox enabled.
-// Worker startup is lazy, so this only flips the osSandbox flag (no bwrap is
+// Worker startup is lazy, so this only flips the os_sandbox config toggle (no bwrap is
 // spawned until a command is actually executed).
 func newTestSandboxWithOSSandbox() *Sandbox {
 	s := NewSandbox()

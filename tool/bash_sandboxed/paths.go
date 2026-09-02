@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -196,11 +197,9 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 			switch r.Op {
 			case syntax.RdrIn:
 				allowedPaths = sets.read
+			// RdrInOut (<>) opens read+write, so it must satisfy write permissions.
 			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut,
-				syntax.RdrAll, syntax.AppAll:
-				allowedPaths = sets.write
-			case syntax.RdrInOut:
-				// Read+write; must satisfy write permissions
+				syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 				allowedPaths = sets.write
 			default:
 				continue
@@ -240,13 +239,7 @@ func IsGitInternalPath(resolved string) bool {
 // (hooks, config) and to force usage through the git command with its validator.
 func isGitInternalPath(resolved string) bool {
 	// Check each path component for ".git"
-	parts := strings.Split(resolved, string(filepath.Separator))
-	for _, part := range parts {
-		if part == ".git" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(resolved, string(filepath.Separator)), ".git")
 }
 
 // noFlagPathExtractionCommands is the set of commands whose short-flag values
@@ -283,10 +276,11 @@ func looksLikePath(s string) bool {
 func extractPathFromFlag(flag string) string {
 	// Long flag with = separator: --file=/etc/passwd
 	if strings.HasPrefix(flag, "--") {
-		if idx := strings.Index(flag, "="); idx != -1 {
-			return flag[idx+1:]
+		_, value, ok := strings.Cut(flag, "=")
+		if !ok {
+			return ""
 		}
-		return ""
+		return value
 	}
 	// Short flag with appended value: -f/etc/passwd
 	// Must be -X<value> where X is a single letter

@@ -341,7 +341,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		// registered as `./web/foo/build.sh`.
 		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
 			s.mu.RLock()
-			useOSSandbox := s.osSandbox
+			useOSSandbox := s.cfg.OSSandboxEnabled()
 			s.mu.RUnlock()
 			return s.dispatchExec(ctx, args, useOSSandbox)
 		}
@@ -443,7 +443,7 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 // security handlers as the parent.
 func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths) error {
 	s.mu.RLock()
-	useOSSandbox := s.osSandbox
+	useOSSandbox := s.cfg.OSSandboxEnabled()
 	s.mu.RUnlock()
 
 	// Build environment from parent context

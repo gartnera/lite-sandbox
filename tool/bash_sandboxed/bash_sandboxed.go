@@ -107,10 +107,8 @@ type Sandbox struct {
 	// worktreeParentCache memoizes detectWorktreeParent per working directory
 	// so long-lived callers (the MCP server) don't fork git on every command.
 	worktreeParentCache map[string]string
-	osSandbox           bool
 	worker              *os_sandbox.Worker
 	workerWorkDir       string
-	workerBlockAWS      bool
 	// argValidators holds a reference to commandArgValidators so that
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
@@ -183,11 +181,11 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	for _, c := range cfg.UnsandboxedCommands {
 		processEntry(c, true)
 	}
-	// Determine if AWS credentials should be blocked. cfg is already resolved for
-	// workDir by the caller, so its AWS section reflects any per-directory override.
-	blockAWSCredentials := shouldBlockAWSCredentials(cfg.AWS)
-
 	s.mu.Lock()
+	// The OS sandbox toggle and the AWS credential mask are read straight off
+	// s.cfg wherever they are needed, so only the previous value of the toggle
+	// has to be captured here (for the enable-transition log below).
+	prevOSSandbox := s.cfg.OSSandboxEnabled()
 	s.cfg = cfg
 	s.extraCommands = m
 	s.extraSubCommands = sub
@@ -206,7 +204,6 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
-	s.workerBlockAWS = blockAWSCredentials
 
 	// Close any live worker on every config update: the AWS credential mask,
 	// writable_paths, worktree-parent grant, runtime binds, and more are all
@@ -215,29 +212,15 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	// which of those inputs changed, recycle unconditionally — UpdateConfig only
 	// fires when the config actually changed, and the next command lazily starts
 	// a replacement with the new settings.
-	newOSSandbox := cfg.OSSandboxEnabled()
 	if s.worker != nil {
 		slog.Info("closing existing worker after config update")
 		s.worker.Close()
 		s.worker = nil
 	}
-	if newOSSandbox && !s.osSandbox {
-		slog.Info("enabling OS sandbox", "block_aws_credentials", blockAWSCredentials)
+	if cfg.OSSandboxEnabled() && !prevOSSandbox {
+		slog.Info("enabling OS sandbox", "block_aws_credentials", cfg.AWS.UsesIMDS())
 	}
-	s.osSandbox = newOSSandbox
 	s.mu.Unlock()
-}
-
-// shouldBlockAWSCredentials determines if ~/.aws/ should be blocked.
-// Returns true if AWS is configured to use IMDS (force_profile set).
-// Returns false if AWS allows raw credentials or is not configured.
-// Note: ~/.ssh/ private keys are ALWAYS blocked regardless of this setting.
-func shouldBlockAWSCredentials(awsCfg *config.AWSConfig) bool {
-	if awsCfg == nil {
-		return false
-	}
-	// Block AWS credentials only when using IMDS (force_profile is set)
-	return awsCfg.UsesIMDS()
 }
 
 // getConfig returns a snapshot of the current config.
@@ -247,26 +230,13 @@ func (s *Sandbox) getConfig() *config.Config {
 	return s.cfg
 }
 
-// awsConfigForWorker returns the AWS config in effect for the worker's working
-// directory. s.cfg was already resolved for that directory by the caller of
-// UpdateConfig, so any per-directory override applies to command validation the
-// same way it applies to the IMDS server and credential blocking.
-func (s *Sandbox) awsConfigForWorker() *config.AWSConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.cfg == nil {
-		return nil
-	}
-	return s.cfg.AWS
-}
-
 // osSandboxEnabled reports whether the OS sandbox (bwrap/sandbox-exec worker)
 // is currently active. Used to gate process-control commands that are only
 // safe when execution is contained.
 func (s *Sandbox) osSandboxEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.osSandbox
+	return s.cfg.OSSandboxEnabled()
 }
 
 // getExtraCommands returns a snapshot of the current extra commands.
@@ -455,6 +425,19 @@ func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
 	return env
 }
 
+// envSliceToMap converts a "KEY=VALUE" environment slice into a map, dropping
+// entries with no "=" and letting later entries win — the same precedence
+// os/exec applies when it de-duplicates a command's environment.
+func envSliceToMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
 // DockerHostConfigured reports whether a docker proxy endpoint has been wired
 // in via SetDockerHost. Command gating uses this so the "docker" command is
 // only allowed when the filtering proxy is actually running and DOCKER_HOST
@@ -496,7 +479,7 @@ func dedupeMaskPaths(sockets []string) []string {
 	for _, p := range sockets {
 		add(p)
 	}
-	add("/var/run/docker.sock")
+	add(config.DefaultDockerSocket)
 	return out
 }
 
@@ -704,36 +687,40 @@ func detectPnpmBinds() []string {
 	return paths
 }
 
+// existingHomeSubdir resolves a runtime directory that is configured by an
+// environment variable and otherwise defaults to a subdirectory of the user's
+// home. It returns "" when the variable is unset and no home directory can be
+// resolved, or when the resulting directory does not exist — unlike the caches
+// materialized by ensureDir, these are never created here, so a toolchain that
+// is not installed contributes no bind.
+func existingHomeSubdir(envVar, homeSubdir string) string {
+	dir := os.Getenv(envVar)
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = home + "/" + homeSubdir
+		}
+	}
+	if dir == "" {
+		return ""
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	return dir
+}
+
 // detectRustBinds detects Rust/Cargo paths that need to be writable.
 // Returns CARGO_HOME (registry, git) and RUSTUP_HOME directories.
 func detectRustBinds() []string {
 	var paths []string
 
-	// Detect CARGO_HOME (defaults to ~/.cargo)
-	cargoHome := os.Getenv("CARGO_HOME")
-	if cargoHome == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			cargoHome = home + "/.cargo"
-		}
-	}
-	if cargoHome != "" {
-		if _, err := os.Stat(cargoHome); err == nil {
-			paths = append(paths, cargoHome)
-		}
-	}
-
-	// Detect RUSTUP_HOME (defaults to ~/.rustup)
-	rustupHome := os.Getenv("RUSTUP_HOME")
-	if rustupHome == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			rustupHome = home + "/.rustup"
-		}
-	}
-	if rustupHome != "" {
-		if _, err := os.Stat(rustupHome); err == nil {
-			paths = append(paths, rustupHome)
+	// CARGO_HOME defaults to ~/.cargo; RUSTUP_HOME defaults to ~/.rustup.
+	for _, d := range []struct{ envVar, homeSubdir string }{
+		{"CARGO_HOME", ".cargo"},
+		{"RUSTUP_HOME", ".rustup"},
+	} {
+		if p := existingHomeSubdir(d.envVar, d.homeSubdir); p != "" {
+			paths = append(paths, p)
 		}
 	}
 
@@ -1483,14 +1470,16 @@ func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox 
 	return s.execOnHost(ctx, args, !unsandboxed)
 }
 
-// execOnHost runs a command directly on the host, mirroring
-// interp.DefaultExecHandler. When injectDockerProxy is true and a docker
-// filtering proxy is configured, DOCKER_HOST is set to the proxy socket so the
-// command is routed through it; when false the command inherits whatever
+// commandEnv builds the environment for one dispatched command, shared by both
+// exec paths (execOnHost and execInWorker) so a command sees the same variables
+// wherever it runs. It starts from the interpreter's current variables (which
+// already carry the base brokered-IMDS environment from awsBaseEnv), applies
+// per-command AWS_PROFILE routing, and — when injectDockerProxy is set and the
+// docker filtering proxy is running — points DOCKER_HOST at the proxy socket.
+// execInWorker always injects (worker commands are never unsandboxed_commands);
+// execOnHost passes false for unsandboxed_commands so they inherit whatever
 // DOCKER_HOST the interpreter environment already carries (the host's, or none).
-func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerProxy bool) error {
-	hc := interp.HandlerCtx(ctx)
-
+func (s *Sandbox) commandEnv(hc interp.HandlerContext, injectDockerProxy bool) (map[string]string, error) {
 	envMap := make(map[string]string)
 	hc.Env.Each(func(name string, vr expand.Variable) bool {
 		if vr.IsSet() {
@@ -1501,7 +1490,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	// Route a per-command AWS_PROFILE to its brokered IMDS server (or deny an
 	// out-of-set profile) before the command runs.
 	if err := s.routeAWSProfile(envMap); err != nil {
-		return err
+		return nil, err
 	}
 	if injectDockerProxy {
 		s.mu.RLock()
@@ -1510,6 +1499,18 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		if proxyHost != "" {
 			envMap["DOCKER_HOST"] = proxyHost
 		}
+	}
+	return envMap, nil
+}
+
+// execOnHost runs a command directly on the host, mirroring
+// interp.DefaultExecHandler. injectDockerProxy is passed through to commandEnv.
+func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerProxy bool) error {
+	hc := interp.HandlerCtx(ctx)
+
+	envMap, err := s.commandEnv(hc, injectDockerProxy)
+	if err != nil {
+		return err
 	}
 	env := make([]string, 0, len(envMap))
 	for k, v := range envMap {
@@ -1589,7 +1590,7 @@ func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string
 // sandbox is enabled — used for bare unsandboxed_commands entries.
 func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup, forceHost bool) error {
 	s.mu.RLock()
-	useOSSandbox := s.osSandbox && !forceHost
+	useOSSandbox := s.cfg.OSSandboxEnabled() && !forceHost
 	imdsEndpoint := s.imdsEndpoint
 	imdsRegion := s.imdsRegion
 	dockerHost := s.dockerHost
@@ -1662,19 +1663,16 @@ func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndp
 		return fmt.Errorf("failed to get worker: %w", err)
 	}
 
-	env := make(map[string]string)
-	for _, kv := range os.Environ() {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			env[k] = v
-		}
-	}
-	if imdsEndpoint != "" {
-		// Strip ambient profile selectors (see awsBaseEnv); bare extra_commands
-		// run under the default brokered profile.
-		delete(env, "AWS_PROFILE")
-		delete(env, "AWS_DEFAULT_PROFILE")
-		env["AWS_EC2_METADATA_SERVICE_ENDPOINT"] = imdsEndpoint
-	}
+	// Same base environment the host raw path uses (ambient profile selectors
+	// stripped, default brokered endpoint/region injected), as a map for the
+	// worker protocol. Converting after awsBaseEnv is equivalent to deleting and
+	// re-setting the keys by hand: awsBaseEnv appends its injections last and
+	// later entries win in a map, matching os/exec's own duplicate handling.
+	env := envSliceToMap(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion))
+	// awsBaseEnv only injects the region alongside an IMDS endpoint; this path has
+	// always injected it whenever a region is configured, so re-apply it here to
+	// keep the worker environment unchanged. (The two agree in practice: the IMDS
+	// lifecycle only ever publishes a region together with an endpoint.)
 	if r := awsRegionToInject(imdsRegion); r != "" {
 		env["AWS_REGION"] = r
 		env["AWS_DEFAULT_REGION"] = r
@@ -1759,7 +1757,7 @@ const runnerKillGracePeriod = 5 * time.Second
 // cancellation for OS-level subprocesses).
 func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, out io.Writer) error {
 	s.mu.RLock()
-	useOSSandbox := s.osSandbox
+	useOSSandbox := s.cfg.OSSandboxEnabled()
 	imdsEndpoint := s.imdsEndpoint
 	imdsRegion := s.imdsRegion
 	s.mu.RUnlock()
@@ -1850,30 +1848,13 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 
 	hc := interp.HandlerCtx(ctx)
 
-	// Convert environment
-	envMap := make(map[string]string)
-	hc.Env.Each(func(name string, vr expand.Variable) bool {
-		if !vr.IsSet() {
-			return true
-		}
-		envMap[name] = vr.String()
-		return true
-	})
-
-	// Route a per-command AWS_PROFILE to its brokered IMDS server (or deny an
-	// out-of-set profile) before the command runs.
-	if err := s.routeAWSProfile(envMap); err != nil {
+	// Same environment the host path builds, always with the docker filtering
+	// proxy injected: DOCKER_HOST is set here rather than in the interpreter's
+	// base env so that unsandboxed_commands (which never reach the worker) can
+	// talk to the real daemon instead.
+	envMap, err := s.commandEnv(hc, true)
+	if err != nil {
 		return err
-	}
-
-	// Route docker through the filtering proxy. DOCKER_HOST is injected here
-	// rather than into the interpreter's base env so that unsandboxed_commands
-	// (which never reach the worker) can talk to the real daemon instead.
-	s.mu.RLock()
-	proxyHost := s.dockerHost
-	s.mu.RUnlock()
-	if proxyHost != "" {
-		envMap["DOCKER_HOST"] = proxyHost
 	}
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
@@ -1953,8 +1934,15 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		return s.worker, nil
 	}
 
-	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", s.workerBlockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, roBinds, s.workerBlockAWS, dockerMaskPaths)
+	// ~/.aws is masked inside the worker only in brokered IMDS mode, where
+	// credentials come from the IMDS server instead of the (unreadable) files.
+	// Raw-credentials mode and an unconfigured AWS section leave it readable.
+	// Note: ~/.ssh private keys are ALWAYS masked, regardless of this flag.
+	// s.cfg is read directly rather than via getConfig(): s.mu is already held
+	// exclusively here and sync.RWMutex is not reentrant.
+	blockAWS := s.cfg.AWS.UsesIMDS()
+	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", blockAWS)
+	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, roBinds, blockAWS, dockerMaskPaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}
