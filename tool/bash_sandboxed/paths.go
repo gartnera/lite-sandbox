@@ -73,7 +73,7 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 		if !ok || len(callExpr.Args) == 0 {
 			return true
 		}
-		cmdName := extractCommandName(callExpr.Args[0])
+		cmdName := callExpr.Args[0].Lit()
 		if err := validateCommandArgPaths(cmdName, wordLits(callExpr.Args), workDir, sets.forCommand(cmdName)); err != nil {
 			validationErr = err
 			return false

@@ -1013,7 +1013,7 @@ func collectDeclaredFunctions(f *syntax.File, workDir string) map[string]bool {
 			funcs[n.Name.Value] = true
 		case *syntax.CallExpr:
 			if len(n.Args) >= 2 {
-				cmdName := extractCommandName(n.Args[0])
+				cmdName := n.Args[0].Lit()
 				if cmdName == "source" || cmdName == "." {
 					filePath := n.Args[1].Lit()
 					if filePath != "" && workDir != "" {
@@ -1111,7 +1111,10 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 				return false
 			}
 			if len(n.Args) > 0 {
-				cmdName := extractCommandName(n.Args[0])
+				// Word.Lit() is "" when the command name is not a plain
+				// literal (a variable, quoted string, or substitution), i.e.
+				// when it cannot be statically determined.
+				cmdName := n.Args[0].Lit()
 				// A dynamically-named command (e.g. "$CMD ...", "$(...)") has no
 				// literal name to resolve against the whitelist or a per-command
 				// validator here, so static analysis cannot check it. Rather than
@@ -1166,12 +1169,6 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 	return validationErr
 }
 
-// extractCommandName returns the literal name of a command from a Word node.
-// Returns empty string if the command name cannot be statically determined.
-func extractCommandName(w *syntax.Word) string {
-	return w.Lit()
-}
-
 // extraSubCommandMatches reports whether a command invocation satisfies any
 // subcommand restriction registered for cmdName in extraSub.
 //
@@ -1181,39 +1178,16 @@ func extractCommandName(w *syntax.Word) string {
 //     must match one of the recorded token sequences as a prefix.
 //   - If the invocation has no non-flag arguments at all, it is allowed
 //     (typically prints help).
+//
+// The prefix match itself is argsMatchSubCommand, shared with the expanded-argv
+// path: wordLits yields "" for non-literal words, which that matcher skips
+// exactly as it skips empty expanded arguments.
 func extraSubCommandMatches(extraSub map[string][][]string, cmdName string, args []*syntax.Word) bool {
 	allowed, hasRestriction := extraSub[cmdName]
 	if !hasRestriction {
 		return true // bare "cmd" entry, no subcommand restriction
 	}
-	// Collect non-flag arguments in order.
-	var nonFlag []string
-	for _, arg := range args[1:] {
-		lit := arg.Lit()
-		if lit == "" || strings.HasPrefix(lit, "-") {
-			continue
-		}
-		nonFlag = append(nonFlag, lit)
-	}
-	if len(nonFlag) == 0 {
-		return true // no subcommand argument — safe (prints help)
-	}
-	for _, seq := range allowed {
-		if len(seq) > len(nonFlag) {
-			continue
-		}
-		match := true
-		for i, tok := range seq {
-			if nonFlag[i] != tok {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
+	return argsMatchSubCommand(allowed, wordLits(args[1:]))
 }
 
 // ValidateCommand parses and validates a bash command without executing it.
@@ -1261,7 +1235,7 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 			return true
 		}
 
-		cmdName := extractCommandName(ce.Args[0])
+		cmdName := ce.Args[0].Lit()
 		if cmdName == "" {
 			return true
 		}
@@ -1462,11 +1436,11 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 	return false
 }
 
-// argsMatchSubCommand reports whether the expanded arguments (already stripped
-// of the command name) satisfy any recorded subcommand-prefix restriction. It
-// mirrors extraSubCommandMatches but operates on plain strings from the
-// ExecHandler rather than AST words. An invocation with no non-flag arguments
-// matches (typically prints help).
+// argsMatchSubCommand reports whether the arguments (already stripped of the
+// command name) satisfy any recorded subcommand-prefix restriction. It backs
+// both the expanded-argv path (execIsUnsandboxed, plain strings from the
+// ExecHandler) and the AST path (extraSubCommandMatches, via wordLits). An
+// invocation with no non-flag arguments matches (typically prints help).
 func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 	var nonFlag []string
 	for _, a := range args {

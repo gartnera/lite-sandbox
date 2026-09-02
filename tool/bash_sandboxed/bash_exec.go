@@ -88,7 +88,9 @@ func isBinaryExecutable(path string) bool {
 
 // validateSourceArgs validates source/. command arguments at the AST level.
 // Requires a file path argument (no bare "source" which would be a no-op).
-func validateSourceArgs(s *Sandbox, args []*syntax.Word) error {
+// The *Sandbox parameter is unused but required by the commandArgValidators
+// function type.
+func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	cmdName := wordText(args[0])
 	if len(args) < 2 {
 		return fmt.Errorf("bare %q (no file argument) is not allowed", cmdName)
@@ -274,9 +276,11 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 			continue
 		}
 
-		// Known safe flags
-		if allowedBashFlags[arg] || arg == "--norc" || arg == "--noprofile" {
-			if arg != "-c" && arg != "--norc" && arg != "--noprofile" {
+		// Known safe flags. --norc/--noprofile are accepted but not forwarded:
+		// they configure a real bash's startup files and are not `set` options.
+		// -c cannot reach here (handled above).
+		if allowedBashFlags[arg] {
+			if arg != "--norc" && arg != "--noprofile" {
 				shellFlags = append(shellFlags, arg)
 			}
 			i++

@@ -17,49 +17,48 @@ var blockedCargoSubcommands = map[string]string{
 	"yank":    "removes a version from the registry index",
 }
 
+// cargoGlobalValueFlags are cargo global options that consume the following
+// token as their value, so it is not mistaken for the subcommand.
+var cargoGlobalValueFlags = map[string]bool{
+	"-C":              true,
+	"--manifest-path": true,
+	"--config":        true,
+	"-Z":              true,
+}
+
+// cargoInstallValueFlags are `cargo install` options that consume the following
+// token as their value, so it is not mistaken for a crate name.
+var cargoInstallValueFlags = map[string]bool{
+	"--version":    true,
+	"--vers":       true,
+	"--git":        true,
+	"--branch":     true,
+	"--tag":        true,
+	"--rev":        true,
+	"--path":       true,
+	"--root":       true,
+	"--registry":   true,
+	"--index":      true,
+	"--target":     true,
+	"--target-dir": true,
+	"--jobs":       true,
+	"-j":           true,
+}
+
 // validateCargoArgs validates cargo commands according to the runtime config.
 func validateCargoArgs(args []*syntax.Word, rustCfg *config.RustConfig) error {
-	if len(args) < 2 {
-		// bare "cargo" with no subcommand is fine (prints help)
-		return nil
+	subcommand, _, err := findSubcommand("cargo", args, cargoGlobalValueFlags)
+	if err != nil {
+		return err
 	}
-
-	// Find the subcommand, skipping global flags
-	subcommand := ""
-	skipNext := false
-	for _, arg := range args[1:] {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		lit := arg.Lit()
-		if lit == "" {
-			return fmt.Errorf("cargo arguments must be literal strings")
-		}
-		// Skip global cargo flags that take a value argument
-		if lit == "-C" || lit == "--manifest-path" || lit == "--config" || lit == "-Z" {
-			skipNext = true
-			continue
-		}
-		// Skip flags (start with -)
-		if strings.HasPrefix(lit, "-") {
-			continue
-		}
-		subcommand = lit
-		break
-	}
-
 	if subcommand == "" {
-		// Only flags, no subcommand (e.g., "cargo --version")
+		// Bare "cargo", or only flags (e.g. "cargo --version") — prints help.
 		return nil
 	}
 
 	// Check if publish is explicitly blocked
 	if subcommand == "publish" {
-		if !rustCfg.RustPublish() {
-			return fmt.Errorf("cargo publish is not allowed (runtimes.rust.publish is disabled)")
-		}
-		return nil
+		return publishGate("cargo", "runtimes.rust.publish", rustCfg.RustPublish())
 	}
 
 	// Check for other blocked subcommands
@@ -70,27 +69,22 @@ func validateCargoArgs(args []*syntax.Word, rustCfg *config.RustConfig) error {
 	// Validate specific subcommands
 	switch subcommand {
 	case "install":
-		return validateCargoInstallArgs(args)
+		return validateCargoInstallArgs(argsAfterToken(args, "install"))
 	}
 
 	// All other subcommands are allowed (build, check, test, run, fmt, clippy, add, remove, new, init, etc.)
 	return nil
 }
 
-// validateCargoInstallArgs checks that cargo install is not invoked with remote crate references.
-// Local path installs (--path) are allowed, but remote crate installs fetch and execute build scripts.
-func validateCargoInstallArgs(args []*syntax.Word) error {
-	foundInstall := false
+// validateCargoInstallArgs checks that cargo install is not invoked with remote
+// crate references. Local path installs (--path) are allowed, but remote crate
+// installs fetch and execute build scripts. rest is the argument list following
+// "install".
+func validateCargoInstallArgs(rest []*syntax.Word) error {
 	hasPath := false
-	for _, arg := range args[1:] {
+	for _, arg := range rest {
 		lit := arg.Lit()
 		if lit == "" {
-			continue
-		}
-		if !foundInstall {
-			if lit == "install" {
-				foundInstall = true
-			}
 			continue
 		}
 		if lit == "--path" || strings.HasPrefix(lit, "--path=") {
@@ -102,9 +96,8 @@ func validateCargoInstallArgs(args []*syntax.Word) error {
 		return nil
 	}
 	// Check if there are positional arguments (crate names) after "install"
-	foundInstall = false
 	skipNext := false
-	for _, arg := range args[1:] {
+	for _, arg := range rest {
 		if skipNext {
 			skipNext = false
 			continue
@@ -113,17 +106,8 @@ func validateCargoInstallArgs(args []*syntax.Word) error {
 		if lit == "" {
 			continue
 		}
-		if !foundInstall {
-			if lit == "install" {
-				foundInstall = true
-			}
-			continue
-		}
 		// Skip flags that take values
-		if lit == "--version" || lit == "--vers" || lit == "--git" || lit == "--branch" ||
-			lit == "--tag" || lit == "--rev" || lit == "--path" || lit == "--root" ||
-			lit == "--registry" || lit == "--index" || lit == "--target" ||
-			lit == "--target-dir" || lit == "--jobs" || lit == "-j" {
+		if cargoInstallValueFlags[lit] {
 			skipNext = true
 			continue
 		}

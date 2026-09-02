@@ -7,6 +7,85 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// findSubcommand locates the subcommand of a multi-command tool: the first
+// argument after the command name that does not start with "-", skipping any
+// global flag listed in valueFlags together with the token that follows it
+// (the space form `--flag value`; the `--flag=value` form carries its own value
+// and is skipped by the plain flag test, never consuming the next token).
+// valueFlags is matched by exact equality and may be nil for tools whose global
+// flags never take a separate value (deno).
+//
+// It returns the subcommand and its index in args, or ("", 0, nil) when the
+// invocation has no subcommand at all (bare command, or only flags — typically
+// prints help, which every caller allows). A word that is not a plain literal
+// cannot be resolved statically, so it is rejected with a per-tool message;
+// tool names the tool as it appears in that message.
+//
+// Note the skipNext test runs before the literal test, so a non-literal word in
+// a value position (e.g. `go -C $DIR build`) is consumed as the flag's value
+// rather than rejected — the behavior every copy of this loop had.
+func findSubcommand(tool string, args []*syntax.Word, valueFlags map[string]bool) (string, int, error) {
+	if len(args) < 2 {
+		// bare command with no subcommand
+		return "", 0, nil
+	}
+	skipNext := false
+	for i, arg := range args[1:] {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		lit := arg.Lit()
+		if lit == "" {
+			return "", 0, fmt.Errorf("%s arguments must be literal strings", tool)
+		}
+		// Skip global flags that take a separate value argument.
+		if valueFlags[lit] {
+			skipNext = true
+			continue
+		}
+		// Skip flags (start with -)
+		if strings.HasPrefix(lit, "-") {
+			continue
+		}
+		return lit, i + 1, nil
+	}
+	return "", 0, nil
+}
+
+// argsAfterToken returns the arguments that follow the first argument (after
+// the command name) whose literal text equals token, or nil when the token does
+// not appear. Words that are not plain literals are skipped while searching.
+//
+// This is deliberately a plain scan for the token rather than a slice at the
+// index findSubcommand reported: the two can differ when the token also appears
+// earlier as a global flag's value (e.g. `go -C run run main.go`), and the scan
+// is what every per-subcommand validator here has always done — it inspects a
+// superset of the arguments the tool itself would treat as subcommand flags, so
+// it can only be stricter.
+func argsAfterToken(args []*syntax.Word, token string) []*syntax.Word {
+	for i, arg := range args[1:] {
+		lit := arg.Lit()
+		if lit == "" {
+			continue
+		}
+		if lit == token {
+			return args[i+2:]
+		}
+	}
+	return nil
+}
+
+// publishGate reports the shared "publishing is gated" error for a runtime's
+// publish subcommand (pnpm/cargo/uv/deno), or nil when allowed is true. tool
+// and configKey keep each runtime's message byte-identical to its own wording.
+func publishGate(tool, configKey string, allowed bool) error {
+	if !allowed {
+		return fmt.Errorf("%s publish is not allowed (%s is disabled)", tool, configKey)
+	}
+	return nil
+}
+
 // validateRgArgs checks that rg --pre (preprocessor) references only
 // whitelisted commands. --pre executes COMMAND for each file searched,
 // so the command is validated recursively against the allowlist.

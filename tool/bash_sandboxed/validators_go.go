@@ -8,49 +8,25 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// blockedGoSubcommands are dangerous subcommands that allow arbitrary execution.
-var blockedGoSubcommands = map[string]string{
-	"generate": "runs arbitrary shell commands from //go:generate directives",
+// goGlobalValueFlags are go global options that consume the following token as
+// their value, so it is not mistaken for the subcommand.
+var goGlobalValueFlags = map[string]bool{
+	"-C": true,
 }
 
 // validateGoArgs validates go commands according to the runtime config.
 func validateGoArgs(args []*syntax.Word, goCfg *config.GoConfig) error {
-	if len(args) < 2 {
-		// bare "go" with no subcommand is fine (prints help)
-		return nil
+	subcommand, _, err := findSubcommand("go", args, goGlobalValueFlags)
+	if err != nil {
+		return err
 	}
-
-	// Find the subcommand, skipping global flags
-	subcommand := ""
-	skipNext := false
-	for _, arg := range args[1:] {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		lit := arg.Lit()
-		if lit == "" {
-			return fmt.Errorf("go arguments must be literal strings")
-		}
-		// Skip global go flags that take a value argument
-		if lit == "-C" {
-			skipNext = true
-			continue
-		}
-		// Skip flags (start with -)
-		if strings.HasPrefix(lit, "-") {
-			continue
-		}
-		subcommand = lit
-		break
-	}
-
 	if subcommand == "" {
-		// Only flags, no subcommand (e.g., "go --help")
+		// Bare "go", or only flags (e.g. "go --help") — prints help.
 		return nil
 	}
 
-	// Check if generate is explicitly blocked
+	// go generate runs arbitrary shell commands from //go:generate directives,
+	// so it is gated behind its own permission.
 	if subcommand == "generate" {
 		if !goCfg.GoGenerate() {
 			return fmt.Errorf("go generate is not allowed (runtimes.go.generate is disabled)")
@@ -58,36 +34,25 @@ func validateGoArgs(args []*syntax.Word, goCfg *config.GoConfig) error {
 		return nil
 	}
 
-	// Check for other blocked subcommands
-	if reason, blocked := blockedGoSubcommands[subcommand]; blocked {
-		return fmt.Errorf("go subcommand %q is not allowed: %s", subcommand, reason)
-	}
-
 	// Validate specific subcommands
 	switch subcommand {
 	case "run":
-		return validateGoRunArgs(args)
+		return validateGoRunArgs(argsAfterToken(args, "run"))
 	case "install":
-		return validateGoInstallArgs(args)
+		return validateGoInstallArgs(argsAfterToken(args, "install"))
 	}
 
 	// All other subcommands are allowed (build, test, mod, list, etc.)
 	return nil
 }
 
-// validateGoRunArgs checks that go run is not invoked with remote package references or -exec flag.
-func validateGoRunArgs(args []*syntax.Word) error {
-	foundRun := false
+// validateGoRunArgs checks that go run is not invoked with remote package
+// references or the -exec flag. rest is the argument list following "run".
+func validateGoRunArgs(rest []*syntax.Word) error {
 	skipNext := false
-	for _, arg := range args[1:] {
+	for _, arg := range rest {
 		lit := arg.Lit()
 		if lit == "" {
-			continue
-		}
-		if !foundRun {
-			if lit == "run" {
-				foundRun = true
-			}
 			continue
 		}
 		if skipNext {
@@ -112,18 +77,12 @@ func validateGoRunArgs(args []*syntax.Word) error {
 	return nil
 }
 
-// validateGoInstallArgs checks that go install is not invoked with remote package references.
-func validateGoInstallArgs(args []*syntax.Word) error {
-	foundInstall := false
-	for _, arg := range args[1:] {
+// validateGoInstallArgs checks that go install is not invoked with remote
+// package references. rest is the argument list following "install".
+func validateGoInstallArgs(rest []*syntax.Word) error {
+	for _, arg := range rest {
 		lit := arg.Lit()
 		if lit == "" {
-			continue
-		}
-		if !foundInstall {
-			if lit == "install" {
-				foundInstall = true
-			}
 			continue
 		}
 		// Skip flags

@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"fmt"
 
+	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -262,30 +263,43 @@ var writeCommands = map[string]bool{
 // validator here to block those flags while still allowing the command itself.
 // Validators receive the *Sandbox so they can access config (e.g., runtimes, git).
 var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	"awk":     validateAwkArgs,
-	"bash":    validateBashCommand,
-	"sh":      validateBashCommand,
-	"source":  validateSourceCommand,
-	".":       validateSourceCommand,
-	"rg":      validateRgArgs,
-	"find":    validateFindArgs,
-	"tar":     validateTarArgs,
-	"unzip":   validateUnzipArgs,
-	"ar":      validateArArgs,
-	"rm":      validateRmArgs,
-	"sed":     validateSedArgs,
-	"git":     validateGitCommand,
-	"go":      validateGoCommand,
-	"gofmt":   validateGofmtCommand,
-	"pnpm":    validatePnpmCommand,
-	"cargo":   validateCargoCommand,
-	"rustc":   validateRustcCommand,
-	"deno":    validateDenoCommand,
-	"flutter": validateFlutterCommand,
-	"dart":    validateDartCommand,
-	"fvm":     validateFvmCommand,
-	"uv":      validateUvCommand,
-	"uvx":     validateUvxCommand,
+	"awk":    validateAwkArgs,
+	"bash":   validateBashArgs,
+	"sh":     validateBashArgs,
+	"source": validateSourceArgs,
+	".":      validateSourceArgs,
+	"rg":     validateRgArgs,
+	"find":   validateFindArgs,
+	"tar":    validateTarArgs,
+	"unzip":  validateUnzipArgs,
+	"ar":     validateArArgs,
+	"rm":     validateRmArgs,
+	"sed":    validateSedArgs,
+	"git":    validateGitCommand,
+	"go":     runtimeGate("go", "runtimes.go.enabled", goRuntimeEnabled, validateGoRuntimeArgs),
+	// gofmt is the standalone formatter binary, gated behind the Go runtime.
+	// It is a pure source formatter with no code-execution path, so beyond the
+	// runtime check there are no arguments to validate; its only side effect
+	// (-w writing files in place) is confined by the OS sandbox like go fmt.
+	"gofmt": runtimeGate("gofmt", "runtimes.go.enabled", goRuntimeEnabled, nil),
+	"pnpm":  runtimeGate("pnpm", "runtimes.pnpm.enabled", pnpmRuntimeEnabled, validatePnpmRuntimeArgs),
+	"cargo": runtimeGate("cargo", "runtimes.rust.enabled", rustRuntimeEnabled, validateCargoRuntimeArgs),
+	"rustc": runtimeGate("rustc", "runtimes.rust.enabled", rustRuntimeEnabled, nil),
+	"deno":  runtimeGate("deno", "runtimes.deno.enabled", denoRuntimeEnabled, validateDenoRuntimeArgs),
+	// flutter/dart/fvm are code-execution runtimes (like go/cargo/deno): their
+	// containment relies on the OS sandbox rather than argument validation, so
+	// once the runtime is enabled all subcommands are permitted. dart ships
+	// with the Flutter SDK and fvm proxies both against a cached SDK version,
+	// so one switch covers all three; the paths they read and write (SDK cache,
+	// pub cache, config dirs) are made accessible via detectFlutterBinds.
+	"flutter": runtimeGate("flutter", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
+	"dart":    runtimeGate("dart", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
+	"fvm":     runtimeGate("fvm", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
+	"uv":      runtimeGate("uv", "runtimes.uv.enabled", uvRuntimeEnabled, validateUvRuntimeArgs),
+	// uvx is an alias of `uv tool run`: it takes a tool name rather than a uv
+	// subcommand, so beyond the runtime check there is nothing to gate —
+	// running the tool is confined by the OS sandbox like `uv run`.
+	"uvx":     runtimeGate("uvx", "runtimes.uv.enabled", uvRuntimeEnabled, nil),
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
 	"xargs":   validateXargsArgs,
@@ -293,88 +307,67 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"timeout": validateTimeoutArgs,
 }
 
+// runtimeGate builds a per-command argument validator that first enforces a
+// config-gated runtime's enable switch and then, if the runtime is on, runs
+// that runtime's own argument validation (validate may be nil when there is
+// nothing further to check).
+//
+// name is the command as it appears in the error message and configKey the
+// config field the user must set, so each command keeps its own exact message.
+// The cfg.Runtimes nil check is required because enabled dereferences that
+// pointer; the per-runtime section below it may be nil, which every leaf
+// accessor (GoEnabled, PnpmEnabled, RustEnabled, DenoEnabled, FlutterEnabled,
+// UvEnabled) treats as "disabled" on a nil receiver rather than panicking.
+// validate therefore only ever runs with a non-nil section.
+func runtimeGate(
+	name, configKey string,
+	enabled func(*config.RuntimesConfig) bool,
+	validate func(*config.RuntimesConfig, []*syntax.Word) error,
+) func(*Sandbox, []*syntax.Word) error {
+	return func(s *Sandbox, args []*syntax.Word) error {
+		cfg := s.getConfig()
+		if cfg.Runtimes == nil || !enabled(cfg.Runtimes) {
+			return fmt.Errorf("command %q is not allowed (%s is disabled)", name, configKey)
+		}
+		if validate == nil {
+			return nil
+		}
+		return validate(cfg.Runtimes, args)
+	}
+}
+
+// Runtime enable accessors and argument-validation adapters used by runtimeGate.
+// Each accessor is nil-safe on its runtime section (see runtimeGate).
+
+func goRuntimeEnabled(r *config.RuntimesConfig) bool      { return r.Go.GoEnabled() }
+func pnpmRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Pnpm.PnpmEnabled() }
+func rustRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Rust.RustEnabled() }
+func denoRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Deno.DenoEnabled() }
+func flutterRuntimeEnabled(r *config.RuntimesConfig) bool { return r.Flutter.FlutterEnabled() }
+func uvRuntimeEnabled(r *config.RuntimesConfig) bool      { return r.Uv.UvEnabled() }
+
+func validateGoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
+	return validateGoArgs(args, r.Go)
+}
+
+func validatePnpmRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
+	return validatePnpmArgs(args, r.Pnpm)
+}
+
+func validateCargoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
+	return validateCargoArgs(args, r.Rust)
+}
+
+func validateDenoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
+	return validateDenoArgs(args, r.Deno)
+}
+
+func validateUvRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
+	return validateUvArgs(args, r.Uv)
+}
+
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
 	return validateGitArgs(args, s.getConfig().Git)
-}
-
-func validateGoCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Go == nil || !cfg.Runtimes.Go.GoEnabled() {
-		return fmt.Errorf("command \"go\" is not allowed (runtimes.go.enabled is disabled)")
-	}
-	return validateGoArgs(args, cfg.Runtimes.Go)
-}
-
-// validateGofmtCommand gates the standalone gofmt binary behind the Go runtime.
-// gofmt is a pure source formatter with no code-execution path, so beyond the
-// runtime check there are no arguments to validate; its only side effect (-w
-// writing files in place) is confined by the OS sandbox like go fmt itself.
-func validateGofmtCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Go == nil || !cfg.Runtimes.Go.GoEnabled() {
-		return fmt.Errorf("command \"gofmt\" is not allowed (runtimes.go.enabled is disabled)")
-	}
-	return nil
-}
-
-func validatePnpmCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Pnpm == nil || !cfg.Runtimes.Pnpm.PnpmEnabled() {
-		return fmt.Errorf("command \"pnpm\" is not allowed (runtimes.pnpm.enabled is disabled)")
-	}
-	return validatePnpmArgs(args, cfg.Runtimes.Pnpm)
-}
-
-func validateBashCommand(s *Sandbox, args []*syntax.Word) error {
-	return validateBashArgs(s, args)
-}
-
-func validateSourceCommand(s *Sandbox, args []*syntax.Word) error {
-	return validateSourceArgs(s, args)
-}
-
-func validateCargoCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Rust == nil || !cfg.Runtimes.Rust.RustEnabled() {
-		return fmt.Errorf("command \"cargo\" is not allowed (runtimes.rust.enabled is disabled)")
-	}
-	return validateCargoArgs(args, cfg.Runtimes.Rust)
-}
-
-func validateRustcCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Rust == nil || !cfg.Runtimes.Rust.RustEnabled() {
-		return fmt.Errorf("command \"rustc\" is not allowed (runtimes.rust.enabled is disabled)")
-	}
-	return nil
-}
-
-func validateDenoCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Deno == nil || !cfg.Runtimes.Deno.DenoEnabled() {
-		return fmt.Errorf("command \"deno\" is not allowed (runtimes.deno.enabled is disabled)")
-	}
-	return validateDenoArgs(args, cfg.Runtimes.Deno)
-}
-
-func validateUvCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Uv == nil || !cfg.Runtimes.Uv.UvEnabled() {
-		return fmt.Errorf("command \"uv\" is not allowed (runtimes.uv.enabled is disabled)")
-	}
-	return validateUvArgs(args, cfg.Runtimes.Uv)
-}
-
-// validateUvxCommand gates uvx (an alias of `uv tool run`) behind the uv
-// runtime. uvx takes a tool name rather than a uv subcommand, so beyond the
-// runtime check there is nothing to gate — running the tool is confined by the
-// OS sandbox like `uv run`.
-func validateUvxCommand(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes == nil || cfg.Runtimes.Uv == nil || !cfg.Runtimes.Uv.UvEnabled() {
-		return fmt.Errorf("command \"uvx\" is not allowed (runtimes.uv.enabled is disabled)")
-	}
-	return nil
 }
 
 func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
