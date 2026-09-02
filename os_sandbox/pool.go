@@ -21,6 +21,14 @@ import (
 // before it (and its group) is forcibly SIGKILLed.
 const gracefulKillTimeout = 3 * time.Second
 
+// streamChunkSize is the read buffer size used by the stdin/stdout/stderr
+// pumps. Each read becomes one gob message, so a larger buffer means fewer
+// messages and flushes on high-volume streams. The read buffer is handed
+// straight to the encoder: lockedEncoder.send serializes the message fully
+// (into the buffered writer, under its lock) before returning, so the buffer is
+// free to be reused for the next read.
+const streamChunkSize = 64 * 1024
+
 // HostMsgType identifies messages sent from host to worker.
 type HostMsgType int
 
@@ -60,19 +68,24 @@ type WorkerMsg struct {
 	Error    string
 }
 
-// hostLockedEncoder wraps a gob.Encoder with a mutex and buffered writer for concurrent HostMsg sends.
-type hostLockedEncoder struct {
+// lockedEncoder wraps a gob.Encoder with a mutex and buffered writer so
+// concurrent goroutines can send messages of type T over one stream. Used with
+// HostMsg on the host side and WorkerMsg inside the worker.
+type lockedEncoder[T any] struct {
 	mu  sync.Mutex
 	buf *bufio.Writer
 	enc *gob.Encoder
 }
 
-func newHostLockedEncoder(w io.Writer) *hostLockedEncoder {
+func newLockedEncoder[T any](w io.Writer) *lockedEncoder[T] {
 	buf := bufio.NewWriter(w)
-	return &hostLockedEncoder{buf: buf, enc: gob.NewEncoder(buf)}
+	return &lockedEncoder[T]{buf: buf, enc: gob.NewEncoder(buf)}
 }
 
-func (e *hostLockedEncoder) send(msg HostMsg) error {
+// send encodes and flushes msg. The lock is held across both, so a message is
+// never interleaved with another and msg is fully serialized before send
+// returns (callers may reuse any buffer it references afterwards).
+func (e *lockedEncoder[T]) send(msg T) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.enc.Encode(msg); err != nil {
@@ -87,7 +100,7 @@ type Worker struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
-	enc    *hostLockedEncoder
+	enc    *lockedEncoder[HostMsg]
 	dec    *gob.Decoder
 
 	mu   sync.Mutex
@@ -128,6 +141,33 @@ func getSSHPrivateKeyPaths(sshDir string) []string {
 	return keys
 }
 
+// credentialMasks are the home-relative credential paths hidden from a sandbox
+// worker. They are resolved once per worker start and applied by both platform
+// backends (bwrap mounts on Linux, SBPL deny rules on macOS).
+type credentialMasks struct {
+	// sshKeyPaths are the ~/.ssh private keys, which are always masked.
+	sshKeyPaths []string
+	// awsDir is ~/.aws when AWS credential blocking is on, otherwise empty.
+	awsDir string
+	// homeErr is non-nil when the home directory could not be resolved, in
+	// which case no credential path could be determined at all.
+	homeErr error
+}
+
+// resolveCredentialMasks locates the credential paths to hide from the worker.
+func resolveCredentialMasks(blockAWSCredentials bool) credentialMasks {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return credentialMasks{homeErr: err}
+	}
+	// Block SSH private keys but allow known_hosts and config.
+	masks := credentialMasks{sshKeyPaths: getSSHPrivateKeyPaths(filepath.Join(homeDir, ".ssh"))}
+	if blockAWSCredentials {
+		masks.awsDir = filepath.Join(homeDir, ".aws")
+	}
+	return masks
+}
+
 // StartWorker starts a new sandbox worker process.
 // The worker runs the "lite-sandbox sandbox-worker" subcommand inside a platform-specific sandbox.
 // On Linux, this uses bwrap. On macOS, this uses sandbox-exec with SBPL profiles.
@@ -151,28 +191,24 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 	baseName := filepath.Base(self)
 	isTestBinary := baseName != "lite-sandbox" && (filepath.Ext(self) == ".test" || filepath.Ext(baseName) == ".test")
 	if isTestBinary {
-		found := false
-		// Try to find lite-sandbox in current working directory
-		cwd, err := os.Getwd()
-		if err == nil {
-			candidatePath := filepath.Join(cwd, "lite-sandbox")
-			if _, err := os.Stat(candidatePath); err == nil {
-				self = candidatePath
-				found = true
-			} else {
-				// Try two levels up (for tests in tool/bash_sandboxed)
-				candidatePath = filepath.Join(cwd, "../..", "lite-sandbox")
-				if absPath, err := filepath.Abs(candidatePath); err == nil {
-					if _, err := os.Stat(absPath); err == nil {
-						self = absPath
-						found = true
-					}
+		// Look for lite-sandbox next to the test's working directory, then two
+		// levels up (for tests in tool/bash_sandboxed).
+		found := ""
+		if cwd, err := os.Getwd(); err == nil {
+			for _, candidate := range []string{
+				filepath.Join(cwd, "lite-sandbox"),
+				filepath.Join(cwd, "../..", "lite-sandbox"),
+			} {
+				if _, err := os.Stat(candidate); err == nil {
+					found = candidate
+					break
 				}
 			}
 		}
-		if !found {
+		if found == "" {
 			return nil, fmt.Errorf("lite-sandbox binary not found (required for OS sandbox tests, run 'go build -o lite-sandbox' first)")
 		}
+		self = found
 	}
 
 	// Resolve symlinks in workDir (e.g., /tmp might be a symlink)
@@ -187,6 +223,10 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 	}
 
 	slog.InfoContext(ctx, "starting worker", "binary", self, "workDir", realWorkDir, "platform", runtime.GOOS)
+
+	// Gather the credential masks once; both platform backends apply the same
+	// set, each in its own form.
+	masks := resolveCredentialMasks(blockAWSCredentials)
 
 	// Platform-specific sandbox command setup
 	var cmd *exec.Cmd
@@ -215,25 +255,17 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 			roMounts = append(roMounts, path)
 		}
 
-		// Gather the credential/socket masks. These are applied last (see
-		// buildBwrapArgs) so an overlapping writable bind cannot re-expose them.
-		var sshKeyPaths []string
-		var awsTmpfsDir string
-		homeDir, err := os.UserHomeDir()
-		if err == nil {
-			// Block SSH private keys but allow known_hosts and config.
-			sshKeyPaths = getSSHPrivateKeyPaths(filepath.Join(homeDir, ".ssh"))
-
-			// Conditionally block ~/.aws (only if it exists).
-			if blockAWSCredentials {
-				awsDir := filepath.Join(homeDir, ".aws")
-				if _, err := os.Stat(awsDir); err == nil {
-					awsTmpfsDir = awsDir
-				}
+		// The credential/socket masks are applied last (see buildBwrapArgs) so
+		// an overlapping writable bind cannot re-expose them. bwrap can only
+		// overlay a path that exists, so drop an absent ~/.aws.
+		awsTmpfsDir := masks.awsDir
+		if awsTmpfsDir != "" {
+			if _, err := os.Stat(awsTmpfsDir); err != nil {
+				awsTmpfsDir = ""
 			}
 		}
 
-		args := buildBwrapArgs(self, realWorkDir, binds, roMounts, sshKeyPaths, maskPaths, awsTmpfsDir)
+		args := buildBwrapArgs(self, realWorkDir, binds, roMounts, masks.sshKeyPaths, maskPaths, awsTmpfsDir)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
 
 	case "darwin":
@@ -241,7 +273,7 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds.
 		// roBinds are not needed here: the profile's "(allow default)" already
 		// permits reads everywhere except the credential/socket masks.
-		profile := generateSBPLProfile(realWorkDir, extraBinds, blockAWSCredentials, maskPaths)
+		profile := generateSBPLProfile(realWorkDir, extraBinds, masks, maskPaths)
 
 		// sandbox-exec -p <profile> <binary> <args>
 		cmd = exec.CommandContext(ctx, "sandbox-exec", "-p", profile, self, "sandbox-worker")
@@ -284,7 +316,7 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 		cmd:     cmd,
 		stdin:   stdin,
 		stdout:  stdout,
-		enc:     newHostLockedEncoder(stdin),
+		enc:     newLockedEncoder[HostMsg](stdin),
 		dec:     gob.NewDecoder(bufStdout),
 		pending: make(map[uint64]chan WorkerMsg),
 	}
@@ -381,33 +413,29 @@ func buildBwrapArgs(self, realWorkDir string, binds, roBinds, sshKeyPaths, maskP
 // generateSBPLProfile generates a Scheme-based sandbox profile for macOS sandbox-exec.
 // The profile allows read-only access to the entire filesystem, but restricts writes
 // to specific directories (workDir, extraBinds, and system temp directories).
-// blockAWSCredentials controls whether ~/.aws is blocked.
-// Note: ~/.ssh private keys are ALWAYS blocked regardless of blockAWSCredentials.
-func generateSBPLProfile(workDir string, extraBinds []string, blockAWSCredentials bool, maskPaths []string) string {
+// masks carries the credential paths to deny (see resolveCredentialMasks):
+// ~/.ssh private keys are ALWAYS blocked, ~/.aws only when AWS blocking is on.
+func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMasks, maskPaths []string) string {
 	var sb strings.Builder
 
 	sb.WriteString("(version 1)\n")
 	sb.WriteString("(allow default)\n")
 
-	// Get home directory for credential blocking
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if masks.homeErr != nil {
 		// Fall back to not blocking if we can't get home dir
-		slog.Warn("failed to get home directory for SBPL profile", "error", err)
+		slog.Warn("failed to get home directory for SBPL profile", "error", masks.homeErr)
 		return sb.String()
 	}
 
 	// Deny access to credential files (must come after allow default)
 	// Block SSH private keys but allow known_hosts and config
-	sshDir := filepath.Join(homeDir, ".ssh")
-	for _, keyPath := range getSSHPrivateKeyPaths(sshDir) {
+	for _, keyPath := range masks.sshKeyPaths {
 		sb.WriteString(fmt.Sprintf("(deny file-read* (literal \"%s\"))\n", keyPath))
 	}
 
 	// Conditionally block ~/.aws
-	if blockAWSCredentials {
-		awsDir := filepath.Join(homeDir, ".aws")
-		sb.WriteString(fmt.Sprintf("(deny file-read* (subpath \"%s\"))\n", awsDir))
+	if masks.awsDir != "" {
+		sb.WriteString(fmt.Sprintf("(deny file-read* (subpath \"%s\"))\n", masks.awsDir))
 	}
 
 	// Mask broker sockets (e.g. the real Docker daemon socket): deny both file
@@ -571,17 +599,15 @@ loop:
 	return exitCode, execErr
 }
 
-// pumpStdinForID reads from r in 4096-byte chunks and sends them to the worker with the given ID,
+// pumpStdinForID reads from r in streamChunkSize chunks and sends them to the worker with the given ID,
 // then sends HostMsgStdinEOF. If r is nil, only the EOF is sent.
 func (w *Worker) pumpStdinForID(id uint64, r io.Reader) error {
 	if r != nil {
-		buf := make([]byte, 4096)
+		buf := make([]byte, streamChunkSize)
 		for {
 			n, err := r.Read(buf)
 			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				if encErr := w.enc.send(HostMsg{ID: id, Type: HostMsgStdin, Data: chunk}); encErr != nil {
+				if encErr := w.enc.send(HostMsg{ID: id, Type: HostMsgStdin, Data: buf[:n]}); encErr != nil {
 					return fmt.Errorf("failed to send stdin chunk: %w", encErr)
 				}
 			}

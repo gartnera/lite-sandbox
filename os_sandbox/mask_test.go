@@ -11,7 +11,7 @@ import (
 // Docker daemon socket) produce deny rules in the macOS sandbox profile, so a
 // sandboxed command cannot reach the underlying socket directly.
 func TestGenerateSBPLProfile_MasksPaths(t *testing.T) {
-	profile := generateSBPLProfile("/tmp/work", nil, false, []string{"/var/run/docker.sock"})
+	profile := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, []string{"/var/run/docker.sock"})
 
 	for _, want := range []string{
 		`(deny file-read* file-write* (literal "/var/run/docker.sock"))`,
@@ -23,7 +23,7 @@ func TestGenerateSBPLProfile_MasksPaths(t *testing.T) {
 	}
 
 	// No mask paths → no docker.sock deny rules.
-	plain := generateSBPLProfile("/tmp/work", nil, false, nil)
+	plain := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, nil)
 	if strings.Contains(plain, "docker.sock") {
 		t.Errorf("unexpected docker.sock rule with no mask paths:\n%s", plain)
 	}
@@ -35,7 +35,7 @@ func TestGenerateSBPLProfile_MasksPaths(t *testing.T) {
 // "(deny file-write* (subpath "/"))" placed before the specific write allows is
 // what actually confines writes to the working directory and temp dirs.
 func TestGenerateSBPLProfile_ConfinesWrites(t *testing.T) {
-	profile := generateSBPLProfile("/tmp/work", nil, false, nil)
+	profile := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, nil)
 
 	deny := `(deny file-write* (subpath "/"))`
 	if !strings.Contains(profile, deny) {
@@ -71,7 +71,7 @@ func TestGenerateSBPLProfile_ExtraBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile := generateSBPLProfile("/tmp/work", []string{link}, false, nil)
+	profile := generateSBPLProfile("/tmp/work", []string{link}, credentialMasks{}, nil)
 
 	if want := `(allow file-write* (subpath "` + link + `"))`; !strings.Contains(profile, want) {
 		t.Errorf("SBPL profile missing extra bind allow %q\nprofile:\n%s", want, profile)

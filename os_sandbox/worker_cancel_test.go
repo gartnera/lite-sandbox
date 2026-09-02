@@ -48,7 +48,7 @@ func startBareWorker(t *testing.T) *Worker {
 		cmd:     cmd,
 		stdin:   stdin,
 		stdout:  stdout,
-		enc:     newHostLockedEncoder(stdin),
+		enc:     newLockedEncoder[HostMsg](stdin),
 		dec:     gob.NewDecoder(bufio.NewReader(stdout)),
 		pending: make(map[uint64]chan WorkerMsg),
 	}

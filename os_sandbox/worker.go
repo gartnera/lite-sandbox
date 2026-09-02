@@ -1,7 +1,6 @@
 package os_sandbox
 
 import (
-	"bufio"
 	"encoding/gob"
 	"fmt"
 	"io"
@@ -90,30 +89,6 @@ func setProcGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// lockedEncoder wraps a gob.Encoder with a mutex and buffered writer for concurrent use.
-type lockedEncoder struct {
-	mu  sync.Mutex
-	buf *bufio.Writer
-	enc *gob.Encoder
-}
-
-func newLockedEncoder(w io.Writer) *lockedEncoder {
-	buf := bufio.NewWriter(w)
-	return &lockedEncoder{
-		buf: buf,
-		enc: gob.NewEncoder(buf),
-	}
-}
-
-func (le *lockedEncoder) send(msg WorkerMsg) error {
-	le.mu.Lock()
-	defer le.mu.Unlock()
-	if err := le.enc.Encode(msg); err != nil {
-		return err
-	}
-	return le.buf.Flush()
-}
-
 // RunWorker is the main loop for a sandbox worker process (runs inside bwrap/sandbox-exec).
 // It reads HostMsg messages from stdin and dispatches them to concurrent executions.
 // Multiple executions may be in flight simultaneously, identified by their ID.
@@ -124,7 +99,7 @@ func RunWorker() error {
 
 	slog.Info("sandbox worker started")
 
-	enc := newLockedEncoder(os.Stdout)
+	enc := newLockedEncoder[WorkerMsg](os.Stdout)
 	dec := gob.NewDecoder(os.Stdin)
 
 	// Send ready signal
@@ -210,7 +185,7 @@ func RunWorker() error {
 // streamCommand starts the command described by req, uses stdinReader for its stdin,
 // and streams stdout/stderr back via the encoder. Sends WorkerMsgDone when finished.
 // The id parameter is included in all outgoing WorkerMsg messages for multiplexing.
-func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Reader, procs *procRegistry) error {
+func streamCommand(enc *lockedEncoder[WorkerMsg], id uint64, req HostMsg, stdinReader io.Reader, procs *procRegistry) error {
 	if len(req.Args) == 0 {
 		return enc.send(WorkerMsg{ID: id, Type: WorkerMsgDone, ExitCode: 1, Error: "no command specified"})
 	}
@@ -251,13 +226,11 @@ func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Re
 
 	// Goroutine 1: stream stdout chunks to host.
 	wg.Go(func() {
-		buf := make([]byte, 4096)
+		buf := make([]byte, streamChunkSize)
 		for {
 			n, err := stdoutPipe.Read(buf)
 			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				if encErr := enc.send(WorkerMsg{ID: id, Type: WorkerMsgStdout, Data: chunk}); encErr != nil {
+				if encErr := enc.send(WorkerMsg{ID: id, Type: WorkerMsgStdout, Data: buf[:n]}); encErr != nil {
 					slog.Error("failed to send stdout chunk", "error", encErr)
 					return
 				}
@@ -270,13 +243,11 @@ func streamCommand(enc *lockedEncoder, id uint64, req HostMsg, stdinReader io.Re
 
 	// Goroutine 2: stream stderr chunks to host.
 	wg.Go(func() {
-		buf := make([]byte, 4096)
+		buf := make([]byte, streamChunkSize)
 		for {
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				if encErr := enc.send(WorkerMsg{ID: id, Type: WorkerMsgStderr, Data: chunk}); encErr != nil {
+				if encErr := enc.send(WorkerMsg{ID: id, Type: WorkerMsgStderr, Data: buf[:n]}); encErr != nil {
 					slog.Error("failed to send stderr chunk", "error", encErr)
 					return
 				}
