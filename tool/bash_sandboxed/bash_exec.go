@@ -340,10 +340,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		// the resolved absolute path so `bash web/foo/build.sh` matches an entry
 		// registered as `./web/foo/build.sh`.
 		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
-			s.mu.RLock()
-			useOSSandbox := s.cfg.OSSandboxEnabled()
-			s.mu.RUnlock()
-			return s.dispatchExec(ctx, args, useOSSandbox)
+			return s.dispatchExec(ctx, args, s.osSandboxEnabled())
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -442,9 +439,7 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 // runNestedInterp creates and runs a nested interpreter with the same
 // security handlers as the parent.
 func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths) error {
-	s.mu.RLock()
-	useOSSandbox := s.cfg.OSSandboxEnabled()
-	s.mu.RUnlock()
+	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context
 	var env []string

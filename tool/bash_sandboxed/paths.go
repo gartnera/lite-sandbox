@@ -432,7 +432,12 @@ func resolveAllowedPaths(allowedPaths []string) []resolvedAllowedPath {
 // Pinning the resolution for the duration of an execution is at least as
 // restrictive as re-resolving per call: candidate paths are still resolved
 // individually at check time, so a symlinked allowed directory that is
-// re-pointed mid-execution cannot move the boundary along with it.
+// re-pointed mid-execution cannot move the boundary along with it. The one
+// observable difference is fail-closed: an allowed entry that does not exist
+// when the execution starts keeps its literal spelling (see
+// resolveAllowedPaths), so if the command itself creates it under a symlinked
+// ancestor (e.g. /tmp -> /private/tmp on macOS) later accesses resolve to the
+// real path and no longer match until the next execution.
 type resolvedPathSets struct {
 	read  []resolvedAllowedPath
 	write []resolvedAllowedPath
