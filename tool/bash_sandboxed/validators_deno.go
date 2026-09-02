@@ -41,38 +41,21 @@ var denoFetchSubcommands = map[string]bool{
 // upgrade` (self-modifying binary) unconditionally, and the remote-fetch
 // subcommands behind runtimes.deno.allow_import.
 func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
-	if len(args) < 2 {
-		// bare "deno" with no subcommand is fine (prints help)
-		return nil
+	// Find the subcommand, skipping global flags. Deno's global flags (-q,
+	// --quiet, --unstable, --version, etc.) do not take separate value
+	// arguments, hence the nil value-flag set.
+	subcommand, _, err := findSubcommand("deno", args, nil)
+	if err != nil {
+		return err
 	}
-
-	// Find the subcommand, skipping global flags.
-	subcommand := ""
-	for _, arg := range args[1:] {
-		lit := arg.Lit()
-		if lit == "" {
-			return fmt.Errorf("deno arguments must be literal strings")
-		}
-		// Skip flags (start with -). Deno's global flags (-q, --quiet,
-		// --unstable, --version, etc.) do not take separate value arguments.
-		if strings.HasPrefix(lit, "-") {
-			continue
-		}
-		subcommand = lit
-		break
-	}
-
 	if subcommand == "" {
-		// Only flags, no subcommand (e.g., "deno --version")
+		// Bare "deno", or only flags (e.g. "deno --version") — prints help.
 		return nil
 	}
 
 	// Gate publish behind the publish permission (affects the JSR registry).
 	if subcommand == "publish" {
-		if !denoCfg.DenoPublish() {
-			return fmt.Errorf("deno publish is not allowed (runtimes.deno.publish is disabled)")
-		}
-		return nil
+		return publishGate("deno", "runtimes.deno.publish", denoCfg.DenoPublish())
 	}
 
 	// Check for other blocked subcommands.

@@ -36,50 +36,18 @@ var uvGlobalValueFlags = map[string]bool{
 //   - `uv self update` rewrites the uv executable in place (always blocked,
 //     mirroring `deno upgrade`)
 func validateUvArgs(args []*syntax.Word, uvCfg *config.UvConfig) error {
-	if len(args) < 2 {
-		// bare "uv" with no subcommand is fine (prints help)
-		return nil
+	subcommand, subcommandIdx, err := findSubcommand("uv", args, uvGlobalValueFlags)
+	if err != nil {
+		return err
 	}
-
-	// Find the subcommand, skipping global flags (and their values).
-	subcommand := ""
-	subcommandIdx := 0
-	skipNext := false
-	for i, arg := range args[1:] {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		lit := arg.Lit()
-		if lit == "" {
-			return fmt.Errorf("uv arguments must be literal strings")
-		}
-		// Skip global flags that take a separate value argument (space form).
-		// The --flag=value form carries its own value and never consumes the
-		// next token.
-		if uvGlobalValueFlags[lit] {
-			skipNext = true
-			continue
-		}
-		if strings.HasPrefix(lit, "-") {
-			continue
-		}
-		subcommand = lit
-		subcommandIdx = i + 1
-		break
-	}
-
 	if subcommand == "" {
-		// Only flags, no subcommand (e.g., "uv --version")
+		// Bare "uv", or only flags (e.g. "uv --version") — prints help.
 		return nil
 	}
 
 	switch subcommand {
 	case "publish":
-		if !uvCfg.UvPublish() {
-			return fmt.Errorf("uv publish is not allowed (runtimes.uv.publish is disabled)")
-		}
-		return nil
+		return publishGate("uv", "runtimes.uv.publish", uvCfg.UvPublish())
 	case "self":
 		return validateUvSelfArgs(args[subcommandIdx+1:])
 	}

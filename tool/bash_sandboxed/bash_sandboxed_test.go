@@ -1364,7 +1364,7 @@ func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 }
 
 func TestValidate_ExtraCommandsSkipsValidators(t *testing.T) {
-	// pnpm dlx is blocked by validatePnpmCommand when pnpm is enabled.
+	// pnpm dlx is blocked by the pnpm runtime validator when pnpm is enabled.
 	// Adding "pnpm dlx" to extra_commands should bypass that validator entirely.
 	pnpmEnabled := &config.RuntimesConfig{
 		Pnpm: &config.PnpmConfig{Enabled: boolPtr(true)},

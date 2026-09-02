@@ -122,41 +122,28 @@ var blockedRemoteWriteSubcommands = map[string]bool{
 	"prune":        true,
 }
 
+// gitGlobalValueFlags are git global options that consume the following token
+// as their value, so it is not mistaken for the subcommand. (This is a superset
+// of gitGlobalPathFlags in paths.go, which covers only the value flags whose
+// value is a path exempt from the sandbox boundary check.)
+var gitGlobalValueFlags = map[string]bool{
+	"-C":             true,
+	"-c":             true,
+	"--git-dir":      true,
+	"--work-tree":    true,
+	"--namespace":    true,
+	"--super-prefix": true,
+	"--config-env":   true,
+}
+
 // validateGitArgs validates git commands according to the granular permission model.
 func validateGitArgs(args []*syntax.Word, gitCfg *config.GitConfig) error {
-	if len(args) < 2 {
-		// bare "git" with no subcommand is fine (prints help)
-		return nil
+	subcommand, _, err := findSubcommand("git", args, gitGlobalValueFlags)
+	if err != nil {
+		return err
 	}
-
-	// Find the subcommand, skipping global flags like -C, --git-dir, etc.
-	subcommand := ""
-	skipNext := false
-	for _, arg := range args[1:] {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		lit := arg.Lit()
-		if lit == "" {
-			return fmt.Errorf("git arguments must be literal strings")
-		}
-		// Skip global git flags that take a value argument
-		if lit == "-C" || lit == "-c" || lit == "--git-dir" || lit == "--work-tree" ||
-			lit == "--namespace" || lit == "--super-prefix" || lit == "--config-env" {
-			skipNext = true
-			continue
-		}
-		// Skip flags (start with -)
-		if strings.HasPrefix(lit, "-") {
-			continue
-		}
-		subcommand = lit
-		break
-	}
-
 	if subcommand == "" {
-		// Only flags, no subcommand (e.g., "git --version")
+		// Bare "git", or only flags (e.g. "git --version") — prints help.
 		return nil
 	}
 
@@ -267,19 +254,9 @@ func validateGitRemoteSubcommand(args []*syntax.Word, subcommand string, gitCfg 
 
 // findSubSubcommand finds the first non-flag argument after the given subcommand.
 func findSubSubcommand(args []*syntax.Word, subcommand string) string {
-	foundSub := false
-	for _, arg := range args[1:] {
+	for _, arg := range argsAfterToken(args, subcommand) {
 		lit := arg.Lit()
-		if lit == "" {
-			continue
-		}
-		if !foundSub {
-			if lit == subcommand {
-				foundSub = true
-			}
-			continue
-		}
-		if strings.HasPrefix(lit, "-") {
+		if lit == "" || strings.HasPrefix(lit, "-") {
 			continue
 		}
 		return lit

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +15,7 @@ var configOSSandboxShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show current OS sandbox configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
@@ -29,13 +28,13 @@ var configOSSandboxEnableCmd = &cobra.Command{
 	Use:   "enable",
 	Short: "Enable OS-level sandboxing with bubblewrap",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 		t := true
 		cfg.OSSandbox = &t
-		if err := config.Save(cfg); err != nil {
+		if err := saveConfig(cfg); err != nil {
 			return err
 		}
 		fmt.Println("OS sandbox enabled")
@@ -47,13 +46,13 @@ var configOSSandboxDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Disable OS-level sandboxing",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 		f := false
 		cfg.OSSandbox = &f
-		if err := config.Save(cfg); err != nil {
+		if err := saveConfig(cfg); err != nil {
 			return err
 		}
 		fmt.Println("OS sandbox disabled")

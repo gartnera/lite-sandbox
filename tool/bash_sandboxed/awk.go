@@ -176,10 +176,10 @@ func absPath(path, dir string) string {
 // appendVar appends a "name=value" string to vars in goawk's interleaved
 // format: ["name", "value", ...].
 func appendVar(vars []string, assignment string) []string {
-	eq := strings.IndexByte(assignment, '=')
-	if eq < 0 {
+	name, value, ok := strings.Cut(assignment, "=")
+	if !ok {
 		// Not a valid assignment; pass as-is and let goawk report the error.
 		return append(vars, assignment, "")
 	}
-	return append(vars, assignment[:eq], assignment[eq+1:])
+	return append(vars, name, value)
 }

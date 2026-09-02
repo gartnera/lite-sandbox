@@ -5,17 +5,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/gartnera/lite-sandbox/config"
-	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
@@ -78,37 +74,15 @@ func runShell() error {
 	// against the same path boundary the shell enforces. The docker command is
 	// only permitted under the OS sandbox unless allow_unsandboxed is set.
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
-		// Resolve the upstream socket once and reuse it for both the proxy and
-		// the OS-sandbox mask so they can't disagree.
-		upstream := cfg.Docker.UpstreamSocket()
-		socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
+		endpoint, cleanup, err := startDockerProxy(cfg, sandbox, readPaths, writePaths, startDir, func(endpoint string) {
+			slog.Debug("starting docker proxy", "host", endpoint)
+		})
 		if err != nil {
-			return fmt.Errorf("failed to create docker proxy socket dir: %w", err)
+			return err
 		}
-		defer os.RemoveAll(socketDir)
+		defer cleanup()
 
-		dockerSrv, err := dockerproxy.NewServer(socketDir, upstream,
-			readPaths, writePaths, startDir, cfg.Docker.AllowsPrivileged(), cfg.Docker.AllowsHostNamespaces())
-		if err != nil {
-			return fmt.Errorf("failed to create docker proxy: %w", err)
-		}
-
-		go func() {
-			slog.Debug("starting docker proxy", "host", dockerSrv.Endpoint())
-			if err := dockerSrv.Start(); err != nil && err != http.ErrServerClosed {
-				slog.Error("docker proxy failed", "error", err)
-			}
-		}()
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			if err := dockerSrv.Shutdown(shutdownCtx); err != nil {
-				slog.Error("failed to shutdown docker proxy", "error", err)
-			}
-		}()
-
-		sandbox.SetDockerHost(dockerSrv.Endpoint(), dockerSrv.SocketDir(), upstream)
-		os.Setenv("DOCKER_HOST", dockerSrv.Endpoint())
+		os.Setenv("DOCKER_HOST", endpoint)
 	}
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
@@ -189,11 +163,8 @@ func changeDir(workDir, prevDir, target string, allowedPaths []string) (string, 
 		newDir = prevDir
 		fmt.Fprintln(os.Stderr, newDir)
 	default:
-		if filepath.IsAbs(target) {
-			newDir = target
-		} else {
-			newDir = filepath.Join(workDir, target)
-		}
+		// ResolvePath below joins a relative target onto workDir itself.
+		newDir = target
 	}
 
 	resolved := bash_sandboxed.ResolvePath(newDir, workDir)

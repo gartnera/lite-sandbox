@@ -836,7 +836,7 @@ func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateExpandedPaths(tt.args, workDir, []string{workDir}, []string{workDir})
+			err := validateExpandedPaths(tt.args, workDir, resolvePathSets([]string{workDir}, []string{workDir}))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected validation error, got nil")

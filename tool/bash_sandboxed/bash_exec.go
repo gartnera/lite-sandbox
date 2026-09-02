@@ -88,7 +88,9 @@ func isBinaryExecutable(path string) bool {
 
 // validateSourceArgs validates source/. command arguments at the AST level.
 // Requires a file path argument (no bare "source" which would be a no-op).
-func validateSourceArgs(s *Sandbox, args []*syntax.Word) error {
+// The *Sandbox parameter is unused but required by the commandArgValidators
+// function type.
+func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	cmdName := wordText(args[0])
 	if len(args) < 2 {
 		return fmt.Errorf("bare %q (no file argument) is not allowed", cmdName)
@@ -274,9 +276,11 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 			continue
 		}
 
-		// Known safe flags
-		if allowedBashFlags[arg] || arg == "--norc" || arg == "--noprofile" {
-			if arg != "-c" && arg != "--norc" && arg != "--noprofile" {
+		// Known safe flags. --norc/--noprofile are accepted but not forwarded:
+		// they configure a real bash's startup files and are not `set` options.
+		// -c cannot reach here (handled above).
+		if allowedBashFlags[arg] {
+			if arg != "--norc" && arg != "--noprofile" {
 				shellFlags = append(shellFlags, arg)
 			}
 			i++
@@ -336,10 +340,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		// the resolved absolute path so `bash web/foo/build.sh` matches an entry
 		// registered as `./web/foo/build.sh`.
 		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
-			s.mu.RLock()
-			useOSSandbox := s.osSandbox
-			s.mu.RUnlock()
-			return s.dispatchExec(ctx, args, useOSSandbox)
+			return s.dispatchExec(ctx, args, s.osSandboxEnabled())
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -364,14 +365,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	// Validate through the sandbox. Use the workDir-aware variant so functions
 	// the script declares (or picks up via `source`) count as allowed commands,
 	// matching how the top-level command string is validated.
-	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
-		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
-	}
-
-	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
-		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
-	}
-	if err := validateRedirectPaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
 	}
 
@@ -410,29 +404,14 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read script %s: %w", scriptPath, err)
 	}
-	script := string(data)
-
-	// Strip shebang line if present
-	if strings.HasPrefix(script, "#!") {
-		if idx := strings.IndexByte(script, '\n'); idx >= 0 {
-			script = script[idx+1:]
-		} else {
-			script = ""
-		}
-	}
+	script := stripShebang(string(data))
 
 	// Parse and validate
 	f, err := ParseBash(script)
 	if err != nil {
 		return fmt.Errorf("script %s: %w", args[0], err)
 	}
-	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
-		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
-	}
-	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
-		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
-	}
-	if err := validateRedirectPaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
 	}
 
@@ -460,9 +439,7 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 // runNestedInterp creates and runs a nested interpreter with the same
 // security handlers as the parent.
 func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths) error {
-	s.mu.RLock()
-	useOSSandbox := s.osSandbox
-	s.mu.RUnlock()
+	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context
 	var env []string
@@ -515,13 +492,43 @@ var runtimeValidatorSkip = map[string]bool{
 	"awk":  true,
 }
 
+// runtimeArgValidator re-runs the per-command argument validator for name
+// against the fully expanded argv, shared by the runtime Call and Exec
+// handlers. Static validation already runs these validators for statically
+// named commands; this is the enforcement layer for a dynamically-named one
+// (e.g. "$CMD push" resolving to git), whose real name and arguments are only
+// concrete at runtime. It also re-applies the runtime-enable gates for
+// config-gated runtimes. extra_commands are user-opted-in and bypass
+// validation, matching static; runtimeValidatorSkip commands are dispatched to
+// dedicated executors that re-validate their contents instead. extra is the
+// caller's already-read extra-commands snapshot, so both checks in a handler
+// see one consistent view of the config.
+func (s *Sandbox) runtimeArgValidator(name string, args []string, extra map[string]bool) error {
+	if extra[name] || runtimeValidatorSkip[name] {
+		return nil
+	}
+	validator, ok := commandArgValidators[name]
+	if !ok {
+		return nil
+	}
+	return validator(s, literalWords(args))
+}
+
 // buildSecurityHandlers returns the common CallHandler, OpenHandler, and
 // ExecHandler options used by both the top-level and nested interpreters.
 func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []string, useOSSandbox bool) []interp.RunnerOption {
+	// Resolve the allowed-path sets once for this interpreter. The Call and Open
+	// handlers fire for every command and every file open, so resolving per
+	// invocation would run EvalSymlinks over the whole allowed set thousands of
+	// times in a loop. Candidate paths are still resolved individually at check
+	// time, so pinning the boundary here is never less restrictive: an allowed
+	// directory whose symlink is re-pointed mid-execution cannot drag the
+	// boundary to its new target.
+	sets := resolvePathSets(readAllowedPaths, writeAllowedPaths)
 	return []interp.RunnerOption{
 		interp.CallHandler(func(ctx context.Context, args []string) ([]string, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateExpandedPaths(args, hc.Dir, readAllowedPaths, writeAllowedPaths); err != nil {
+			if err := validateExpandedPaths(args, hc.Dir, sets); err != nil {
 				return nil, err
 			}
 			// The CallHandler runs for every command — functions, builtins, and
@@ -533,25 +540,28 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			// that static analysis defers dynamic names to runtime. Functions
 			// and externals (IsBuiltin == false) are left untouched: functions
 			// run as user code and externals are gated by the ExecHandler.
+			//
+			// Process-control commands get the same OS-sandbox exemption as in
+			// the ExecHandler. The interpreter lists kill as a builtin it does
+			// not implement, so letting it through here surfaces the
+			// interpreter's own "unsupported builtin" error rather than a
+			// misleading "not allowed"; agents fall back to pkill.
 			if len(args) > 0 && interp.IsBuiltin(args[0]) {
 				name := args[0]
 				extra := s.getExtraCommands()
-				if !allowedCommands[name] && !extra[name] {
+				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
+				if !allowedCommands[name] && !extra[name] && !osOnly {
 					return nil, fmt.Errorf("command %q is not allowed", name)
 				}
-				if !extra[name] && !runtimeValidatorSkip[name] {
-					if validator, ok := commandArgValidators[name]; ok {
-						if err := validator(s, literalWords(args)); err != nil {
-							return nil, err
-						}
-					}
+				if err := s.runtimeArgValidator(name, args, extra); err != nil {
+					return nil, err
 				}
 			}
 			return args, nil
 		}),
 		interp.OpenHandler(func(ctx context.Context, path string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateOpenPath(path, flag, hc.Dir, readAllowedPaths, writeAllowedPaths); err != nil {
+			if err := validateOpenPath(path, flag, hc.Dir, sets); err != nil {
 				return nil, err
 			}
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)
@@ -563,81 +573,72 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			if handled, err := s.maybeListProfiles(ctx, args); handled || err != nil {
 				return err
 			}
+			if len(args) == 0 {
+				return s.dispatchExec(ctx, args, useOSSandbox)
+			}
 			extra := s.getExtraCommands()
-			if len(args) > 0 {
-				cmdName := args[0]
-				// Runtime command whitelist check — catches blocked commands
-				// introduced via source/. or other dynamic execution paths.
-				// Process-control commands (kill, pkill) are permitted only when
-				// the OS sandbox is active, where they are contained.
-				osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-				if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
-					if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
-						return fmt.Errorf("command %q is not allowed", cmdName)
-					}
+			cmdName := args[0]
+			// Runtime command whitelist check — catches blocked commands
+			// introduced via source/. or other dynamic execution paths.
+			// Process-control commands (kill, pkill) are permitted only when
+			// the OS sandbox is active, where they are contained.
+			osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
+			if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
+				if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
+					return fmt.Errorf("command %q is not allowed", cmdName)
 				}
-				// Runtime per-command argument validation on the fully expanded
-				// argv. Static validation already runs these validators for
-				// statically-named commands; this is the enforcement layer for a
-				// dynamically-named external (e.g. "$CMD push" resolving to git),
-				// whose real name and arguments are only concrete here. It also
-				// re-applies the runtime-enable gates for config-gated runtimes.
-				// bash/sh/awk are skipped: they are dispatched to dedicated
-				// executors below that re-validate their contents. extra_commands
-				// are user-opted-in and bypass validation, matching static.
-				if !extra[cmdName] && !runtimeValidatorSkip[cmdName] {
-					if validator, ok := commandArgValidators[cmdName]; ok {
-						if err := validator(s, literalWords(args)); err != nil {
-							return err
-						}
-					}
+			}
+			// Runtime per-command argument validation on the fully expanded
+			// argv (bash/sh/awk are skipped: they are dispatched to dedicated
+			// executors below that re-validate their contents).
+			if err := s.runtimeArgValidator(cmdName, args, extra); err != nil {
+				return err
+			}
+			// Configure deno's permission flags to mirror the sandbox policy.
+			// The runtime gate (deno enabled) is enforced earlier by the AST
+			// validator, so by here deno is known to be allowed. Network and
+			// import denials are applied independent of auto_sandbox so the
+			// policy holds even when filesystem auto-scoping is off.
+			if cmdName == "deno" {
+				cfg := s.getConfig()
+				if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil {
+					d := cfg.Runtimes.Deno
+					// Deno needs real directories for --allow-read/-write, so strip
+					// any descendants-only "/*" markers down to their base subtree.
+					denoRead := stripNestedOnlyMarkers(readAllowedPaths)
+					denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
+					args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
 				}
-				// Configure deno's permission flags to mirror the sandbox policy.
-				// The runtime gate (deno enabled) is enforced earlier by the AST
-				// validator, so by here deno is known to be allowed. Network and
-				// import denials are applied independent of auto_sandbox so the
-				// policy holds even when filesystem auto-scoping is off.
-				if cmdName == "deno" {
-					cfg := s.getConfig()
-					if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil {
-						d := cfg.Runtimes.Deno
-						// Deno needs real directories for --allow-read/-write, so strip
-						// any descendants-only "/*" markers down to their base subtree.
-						denoRead := stripNestedOnlyMarkers(readAllowedPaths)
-						denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
-						args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
-					}
+			}
+			switch cmdName {
+			case "awk":
+				return executeAwk(ctx, args)
+			case "bash", "sh":
+				return s.executeBash(ctx, args)
+			}
+			if isScriptPath(cmdName) {
+				hc := interp.HandlerCtx(ctx)
+				path := absPath(cmdName, hc.Dir)
+				// Bare extra_commands entries are explicitly opted in by the
+				// user — run them directly without reading/validating script
+				// contents. Match either by the literal invocation string
+				// (e.g. the entry was registered as `./my-script.sh` and is
+				// invoked the same way) or by the script's absolute path,
+				// which lets the same script registered as e.g.
+				// `./web/foo/build.sh` still match when invoked as
+				// `./build.sh` from inside `web/foo`. interp tracks cwd in
+				// HandlerContext, so the resolution sees the post-`cd` dir.
+				if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
+					return s.dispatchExec(ctx, args, useOSSandbox)
 				}
-				switch cmdName {
-				case "awk":
-					return executeAwk(ctx, args)
-				case "bash", "sh":
-					return s.executeBash(ctx, args)
+				if !s.getConfig().LocalBinaryExecution.IsEnabled() {
+					return fmt.Errorf("direct execution of %q is not allowed", cmdName)
 				}
-				if isScriptPath(cmdName) {
-					hc := interp.HandlerCtx(ctx)
-					path := absPath(cmdName, hc.Dir)
-					// Bare extra_commands entries are explicitly opted in by the
-					// user — run them directly without reading/validating script
-					// contents. Match either by the literal invocation string
-					// (e.g. the entry was registered as `./my-script.sh` and is
-					// invoked the same way) or by the script's absolute path,
-					// which lets the same script registered as e.g.
-					// `./web/foo/build.sh` still match when invoked as
-					// `./build.sh` from inside `web/foo`. interp tracks cwd in
-					// HandlerContext, so the resolution sees the post-`cd` dir.
-					if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
-						return s.dispatchExec(ctx, args, useOSSandbox)
-					}
-					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
-						return fmt.Errorf("direct execution of %q is not allowed", cmdName)
-					}
-					// Check if file is a compiled binary (ELF/Mach-O)
-					if isBinaryExecutable(path) {
-						return s.dispatchExec(ctx, args, useOSSandbox)
-					}
-					return s.executeScript(ctx, args)
+				// Check if file is a compiled binary (ELF/Mach-O)
+				if isBinaryExecutable(path) {
+					return s.dispatchExec(ctx, args, useOSSandbox)
 				}
+				return s.executeScript(ctx, args)
 			}
 			return s.dispatchExec(ctx, args, useOSSandbox)
 		}),
