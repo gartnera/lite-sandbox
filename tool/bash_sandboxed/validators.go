@@ -171,24 +171,40 @@ var xargsArgConsumingFlags = map[string]bool{
 	"-s": true, // max chars per command line
 }
 
-// validateXargsArgs validates xargs by extracting the utility command from
-// its arguments and recursively validating it against the command whitelist.
-// If no command is given, xargs defaults to echo which is safe.
-func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
+// Wrapper commands (xargs, env, timeout) are handled by a single option walker
+// each, shared by the AST-level argument validator and the []string unwrapper
+// used for unsandboxed routing (execIsUnsandboxed). The walkers work on the
+// literal text of each argument and return the index of the wrapped command, so
+// the validator can hand the corresponding *syntax.Word slice to
+// validateSubCommand while the unwrapper slices the expanded argv. Keeping one
+// implementation is what guarantees routing and validation cannot diverge.
+const (
+	// wrapperNoCommand means the invocation wraps no command at all (e.g.
+	// `env FOO=bar`, `xargs` with its default echo, `timeout 5`).
+	wrapperNoCommand = -1
+	// wrapperRejected means the invocation uses an option that makes the
+	// wrapped command unknowable and is therefore refused outright
+	// (env -S/--split-string).
+	wrapperRejected = -2
+)
+
+// xargsCommandIndex returns the index of the utility command in an `xargs ...`
+// invocation (lits[0] is "xargs"), or wrapperNoCommand when none is given.
+func xargsCommandIndex(lits []string) int {
 	i := 1 // skip "xargs"
-	for i < len(args) {
-		lit := args[i].Lit()
+	for i < len(lits) {
+		lit := lits[i]
 		// End of options marker
 		if lit == "--" {
 			i++
-			if i < len(args) {
-				return validateSubCommand(s, args[i:])
+			if i < len(lits) {
+				return i
 			}
-			return nil
+			return wrapperNoCommand
 		}
 		// Non-flag argument = start of the utility command
 		if !strings.HasPrefix(lit, "-") {
-			return validateSubCommand(s, args[i:])
+			return i
 		}
 		// Long option (--foo or --foo=val): always a single token
 		if strings.HasPrefix(lit, "--") {
@@ -197,14 +213,25 @@ func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
 		}
 		// Short flag: if exactly 2 chars ("-X") and it consumes the next arg,
 		// skip both. A longer token like "-I{}" has the value attached.
-		if len(lit) >= 2 && len(lit) == 2 && xargsArgConsumingFlags[lit[:2]] {
+		if len(lit) == 2 && xargsArgConsumingFlags[lit] {
 			i += 2
 			continue
 		}
 		i++
 	}
 	// No explicit command — xargs defaults to echo, which is safe
-	return nil
+	return wrapperNoCommand
+}
+
+// validateXargsArgs validates xargs by extracting the utility command from
+// its arguments and recursively validating it against the command whitelist.
+// If no command is given, xargs defaults to echo which is safe.
+func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
+	idx := xargsCommandIndex(wordLits(args))
+	if idx < 0 {
+		return nil
+	}
+	return validateSubCommand(s, args[idx:])
 }
 
 // wordLeadingLit returns the maximal literal prefix of a word: the text of its
@@ -221,6 +248,15 @@ func wordLeadingLit(w *syntax.Word) string {
 		b.WriteString(lit.Value)
 	}
 	return b.String()
+}
+
+// wordLeadingLits maps wordLeadingLit over words.
+func wordLeadingLits(words []*syntax.Word) []string {
+	lits := make([]string, len(words))
+	for i, w := range words {
+		lits[i] = wordLeadingLit(w)
+	}
+	return lits
 }
 
 // isEnvAssignment reports whether lit is an env NAME=VALUE operand, i.e. a
@@ -260,16 +296,18 @@ func errEnvSplitString() error {
 	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
 }
 
-// validateEnvArgs validates env by skipping its options and NAME=VALUE
-// assignments, then recursively validating the wrapped COMMAND against the
-// whitelist. env execs COMMAND as a child that never re-enters the sandbox
-// interpreter, so without this an otherwise-blocked command (curl, sh -c, ...)
-// would run unvalidated. With no COMMAND, env merely prints the environment,
-// which is safe.
-func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
+// envCommandIndex returns the index of the wrapped COMMAND in an `env ...`
+// invocation (lits[0] is "env"), wrapperNoCommand when env only prints the
+// environment, or wrapperRejected for -S/--split-string.
+//
+// assignLits is consulted only for the NAME=VALUE assignment test, which needs
+// the maximal literal prefix of the operand (so `FOO=$BAR` still classifies as
+// an assignment) while every option test must keep using the strict literal.
+// Callers with already-expanded strings pass the same slice for both.
+func envCommandIndex(lits, assignLits []string) int {
 	i := 1 // skip "env"
-	for i < len(args) {
-		lit := args[i].Lit()
+	for i < len(lits) {
+		lit := lits[i]
 		// A lone "-" means "-i" (start with an empty environment), not a command.
 		if lit == "-" {
 			i++
@@ -278,10 +316,10 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 		// End-of-options marker: everything after is the command and its args.
 		if lit == "--" {
 			i++
-			if i < len(args) {
-				return validateSubCommand(s, args[i:])
+			if i < len(lits) {
+				return i
 			}
-			return nil
+			return wrapperNoCommand
 		}
 		if strings.HasPrefix(lit, "--") {
 			name := lit[2:]
@@ -291,7 +329,7 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 				hasInlineValue = true
 			}
 			if name == "split-string" {
-				return errEnvSplitString()
+				return wrapperRejected
 			}
 			if !hasInlineValue && (name == "unset" || name == "chdir") {
 				i += 2 // consumes the following value argument
@@ -307,7 +345,7 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 			for j := 0; j < len(body); j++ {
 				c := body[j]
 				if c == 'S' {
-					return errEnvSplitString()
+					return wrapperRejected
 				}
 				if envConsumingShortFlags[c] {
 					// The value is the remainder of this token, or the next arg.
@@ -325,17 +363,34 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 			continue
 		}
 		// Not an option. A NAME=VALUE operand sets a variable; keep scanning.
-		// wordLeadingLit handles values that are non-literal expansions
-		// (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
-		if isEnvAssignment(wordLeadingLit(args[i])) {
+		if isEnvAssignment(assignLits[i]) {
 			i++
 			continue
 		}
 		// First non-option, non-assignment operand: the COMMAND.
-		return validateSubCommand(s, args[i:])
+		return i
 	}
 	// No COMMAND: env merely prints the environment, which is safe.
-	return nil
+	return wrapperNoCommand
+}
+
+// validateEnvArgs validates env by skipping its options and NAME=VALUE
+// assignments, then recursively validating the wrapped COMMAND against the
+// whitelist. env execs COMMAND as a child that never re-enters the sandbox
+// interpreter, so without this an otherwise-blocked command (curl, sh -c, ...)
+// would run unvalidated. With no COMMAND, env merely prints the environment,
+// which is safe.
+func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
+	// wordLeadingLits handles assignment values that are non-literal expansions
+	// (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
+	idx := envCommandIndex(wordLits(args), wordLeadingLits(args))
+	if idx == wrapperRejected {
+		return errEnvSplitString()
+	}
+	if idx < 0 {
+		return nil
+	}
+	return validateSubCommand(s, args[idx:])
 }
 
 // timeoutConsumingShortFlags are timeout short options that consume the
@@ -345,15 +400,13 @@ var timeoutConsumingShortFlags = map[byte]bool{
 	's': true, // --signal=SIGNAL
 }
 
-// validateTimeoutArgs validates timeout by skipping its options and the
-// mandatory DURATION operand, then recursively validating the wrapped COMMAND
-// against the whitelist. Like env, timeout execs COMMAND as a native child
-// that never re-enters the sandbox interpreter, so the command must be
-// validated here. With no COMMAND, there is nothing to run.
-func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
+// timeoutCommandIndex returns the index of the wrapped COMMAND in a
+// `timeout ...` invocation (lits[0] is "timeout"), skipping timeout's options
+// and the mandatory DURATION operand, or wrapperNoCommand when there is none.
+func timeoutCommandIndex(lits []string) int {
 	i := 1 // skip "timeout"
-	for i < len(args) {
-		lit := args[i].Lit()
+	for i < len(lits) {
+		lit := lits[i]
 		// End-of-options marker: the next operand is DURATION.
 		if lit == "--" {
 			i++
@@ -393,22 +446,36 @@ func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
 		// First non-option token is the DURATION operand.
 		break
 	}
-	if i >= len(args) {
-		return nil // no DURATION/COMMAND — timeout will error at runtime
+	if i >= len(lits) {
+		return wrapperNoCommand // no DURATION/COMMAND — timeout errors at runtime
 	}
 	i++ // skip DURATION
-	if i >= len(args) {
-		return nil // DURATION but no COMMAND
+	if i >= len(lits) {
+		return wrapperNoCommand // DURATION but no COMMAND
 	}
-	return validateSubCommand(s, args[i:])
+	return i
+}
+
+// validateTimeoutArgs validates timeout by skipping its options and the
+// mandatory DURATION operand, then recursively validating the wrapped COMMAND
+// against the whitelist. Like env, timeout execs COMMAND as a native child
+// that never re-enters the sandbox interpreter, so the command must be
+// validated here. With no COMMAND, there is nothing to run.
+func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
+	idx := timeoutCommandIndex(wordLits(args))
+	if idx < 0 {
+		return nil
+	}
+	return validateSubCommand(s, args[idx:])
 }
 
 // wrapperUnwrappers maps wrapper commands to a function that, given a full
 // invocation (command name first), returns the wrapped command's args (also
-// command name first) or nil when there is none. These mirror the AST arg
-// validators (validateTimeoutArgs/validateEnvArgs/validateXargsArgs) but operate
-// on already-expanded string args so routing (execIsUnsandboxed) can peer
-// through wrappers the same way validation does.
+// command name first) or nil when there is none. These share their option
+// walkers with the AST arg validators
+// (validateTimeoutArgs/validateEnvArgs/validateXargsArgs) but operate on
+// already-expanded string args, so routing (execIsUnsandboxed) peers through
+// wrappers exactly the same way validation does.
 var wrapperUnwrappers = map[string]func([]string) []string{
 	"timeout": unwrapTimeoutArgs,
 	"env":     unwrapEnvArgs,
@@ -437,152 +504,33 @@ func unwrapWrapperArgs(args []string) []string {
 }
 
 // unwrapTimeoutArgs returns the wrapped command from a `timeout ...` invocation,
-// mirroring validateTimeoutArgs' option/DURATION skipping.
+// using the same walker as validateTimeoutArgs.
 func unwrapTimeoutArgs(args []string) []string {
-	i := 1
-	for i < len(args) {
-		lit := args[i]
-		if lit == "--" {
-			i++
-			break
-		}
-		if strings.HasPrefix(lit, "--") {
-			name := lit[2:]
-			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				i++
-				continue
-			}
-			if name == "kill-after" || name == "signal" {
-				i += 2
-				continue
-			}
-			i++
-			continue
-		}
-		if strings.HasPrefix(lit, "-") && lit != "-" {
-			body := lit[1:]
-			consumesNext := false
-			for j := 0; j < len(body); j++ {
-				if timeoutConsumingShortFlags[body[j]] {
-					if j == len(body)-1 {
-						consumesNext = true
-					}
-					break
-				}
-			}
-			if consumesNext {
-				i += 2
-			} else {
-				i++
-			}
-			continue
-		}
-		break // first non-option token is DURATION
-	}
-	if i >= len(args) {
-		return nil
-	}
-	i++ // skip DURATION
-	if i >= len(args) {
-		return nil
-	}
-	return args[i:]
+	return sliceWrappedCommand(args, timeoutCommandIndex(args))
 }
 
-// unwrapEnvArgs returns the wrapped command from an `env ...` invocation,
-// mirroring validateEnvArgs' option/assignment skipping. -S/--split-string
-// builds argv from a string (rejected by validation) so it yields no command.
+// unwrapEnvArgs returns the wrapped command from an `env ...` invocation, using
+// the same walker as validateEnvArgs. -S/--split-string builds argv from a
+// string (rejected by validation) so it yields no command.
 func unwrapEnvArgs(args []string) []string {
-	i := 1
-	for i < len(args) {
-		lit := args[i]
-		if lit == "-" {
-			i++
-			continue
-		}
-		if lit == "--" {
-			i++
-			if i < len(args) {
-				return args[i:]
-			}
-			return nil
-		}
-		if strings.HasPrefix(lit, "--") {
-			name := lit[2:]
-			hasInlineValue := false
-			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				name = name[:eq]
-				hasInlineValue = true
-			}
-			if name == "split-string" {
-				return nil
-			}
-			if !hasInlineValue && (name == "unset" || name == "chdir") {
-				i += 2
-				continue
-			}
-			i++
-			continue
-		}
-		if strings.HasPrefix(lit, "-") {
-			body := lit[1:]
-			consumesNext := false
-			for j := 0; j < len(body); j++ {
-				c := body[j]
-				if c == 'S' {
-					return nil
-				}
-				if envConsumingShortFlags[c] {
-					if j == len(body)-1 {
-						consumesNext = true
-					}
-					break
-				}
-			}
-			if consumesNext {
-				i += 2
-			} else {
-				i++
-			}
-			continue
-		}
-		if isEnvAssignment(lit) {
-			i++
-			continue
-		}
-		return args[i:] // first non-option, non-assignment operand: the COMMAND
-	}
-	return nil
+	return sliceWrappedCommand(args, envCommandIndex(args, args))
 }
 
 // unwrapXargsArgs returns the wrapped utility command from an `xargs ...`
-// invocation, mirroring validateXargsArgs. With no explicit command xargs
-// defaults to echo, so this returns nil (nothing user-designated to unsandbox).
+// invocation, using the same walker as validateXargsArgs. With no explicit
+// command xargs defaults to echo, so this returns nil (nothing user-designated
+// to unsandbox).
 func unwrapXargsArgs(args []string) []string {
-	i := 1
-	for i < len(args) {
-		lit := args[i]
-		if lit == "--" {
-			i++
-			if i < len(args) {
-				return args[i:]
-			}
-			return nil
-		}
-		if !strings.HasPrefix(lit, "-") {
-			return args[i:]
-		}
-		if strings.HasPrefix(lit, "--") {
-			i++
-			continue
-		}
-		if len(lit) == 2 && xargsArgConsumingFlags[lit[:2]] {
-			i += 2
-			continue
-		}
-		i++
+	return sliceWrappedCommand(args, xargsCommandIndex(args))
+}
+
+// sliceWrappedCommand turns a walker result into the wrapped command's args,
+// or nil when there is no command (or the invocation is rejected).
+func sliceWrappedCommand(args []string, idx int) []string {
+	if idx < 0 {
+		return nil
 	}
-	return nil
+	return args[idx:]
 }
 
 // blockedTarOps lists tar operation flags that are not read-only.
