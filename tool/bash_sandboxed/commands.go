@@ -237,6 +237,10 @@ var allowedCommands = map[string]bool{
 // signaling any process outside the worker's process group. This lets an agent
 // start a background server and then stop it (e.g. `srv & ...; pkill -f srv`)
 // without being able to reach host processes.
+//
+// Note: since mvdan.cc/sh v3.13 the interpreter claims kill as a builtin but
+// does not implement it, so `kill` fails with "unsupported builtin" and never
+// reaches the worker; pkill is the working form.
 var osSandboxOnlyCommands = map[string]bool{
 	"kill":  true,
 	"pkill": true,

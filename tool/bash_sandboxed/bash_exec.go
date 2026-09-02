@@ -540,10 +540,17 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			// that static analysis defers dynamic names to runtime. Functions
 			// and externals (IsBuiltin == false) are left untouched: functions
 			// run as user code and externals are gated by the ExecHandler.
+			//
+			// Process-control commands get the same OS-sandbox exemption as in
+			// the ExecHandler. The interpreter lists kill as a builtin it does
+			// not implement, so letting it through here surfaces the
+			// interpreter's own "unsupported builtin" error rather than a
+			// misleading "not allowed"; agents fall back to pkill.
 			if len(args) > 0 && interp.IsBuiltin(args[0]) {
 				name := args[0]
 				extra := s.getExtraCommands()
-				if !allowedCommands[name] && !extra[name] {
+				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
+				if !allowedCommands[name] && !extra[name] && !osOnly {
 					return nil, fmt.Errorf("command %q is not allowed", name)
 				}
 				if err := s.runtimeArgValidator(name, args, extra); err != nil {
