@@ -52,11 +52,18 @@ func wordLits(words []*syntax.Word) []string {
 // the sandbox boundary (e.g., cat /etc/passwd, cat ../../../etc/shadow).
 // Write commands (cp, mv, rm, etc.) are checked against writeAllowedPaths;
 // all other commands are checked against readAllowedPaths.
+//
+// It resolves the allowed-path sets itself; callers that also run another path
+// pass over the same sets should resolve once with resolvePathSets and call
+// validatePathsResolved instead (see Sandbox.validateFile).
 func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
-	// Resolve each allowed-path set once and reuse across every node, rather
-	// than re-resolving symlinks for every argument of every command.
-	resolvedRead := resolveAllowedPaths(readAllowedPaths)
-	resolvedWrite := resolveAllowedPaths(writeAllowedPaths)
+	return validatePathsResolved(f, workDir, resolvePathSets(readAllowedPaths, writeAllowedPaths))
+}
+
+// validatePathsResolved is validatePaths over an already-resolved allowed-path
+// pair. The sets are resolved once and reused across every node, rather than
+// re-resolving symlinks for every argument of every command.
+func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets) error {
 	var validationErr error
 	syntax.Walk(f, func(node syntax.Node) bool {
 		if validationErr != nil {
@@ -67,11 +74,7 @@ func validatePaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowe
 			return true
 		}
 		cmdName := extractCommandName(callExpr.Args[0])
-		allowedPaths := resolvedRead
-		if writeCommands[cmdName] {
-			allowedPaths = resolvedWrite
-		}
-		if err := validateCommandArgPaths(cmdName, wordLits(callExpr.Args), workDir, allowedPaths); err != nil {
+		if err := validateCommandArgPaths(cmdName, wordLits(callExpr.Args), workDir, sets.forCommand(cmdName)); err != nil {
 			validationErr = err
 			return false
 		}
@@ -166,9 +169,17 @@ func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resol
 // and output redirects (>, >>, etc.) which must respect path boundaries.
 // Input redirects are checked against readAllowedPaths; output redirects are
 // checked against writeAllowedPaths. Output redirects to /dev/null are always allowed.
+//
+// It resolves the allowed-path sets itself; callers that also run another path
+// pass over the same sets should resolve once with resolvePathSets and call
+// validateRedirectPathsResolved instead (see Sandbox.validateFile).
 func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
-	resolvedRead := resolveAllowedPaths(readAllowedPaths)
-	resolvedWrite := resolveAllowedPaths(writeAllowedPaths)
+	return validateRedirectPathsResolved(f, workDir, resolvePathSets(readAllowedPaths, writeAllowedPaths))
+}
+
+// validateRedirectPathsResolved is validateRedirectPaths over an
+// already-resolved allowed-path pair.
+func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolvedPathSets) error {
 	var validationErr error
 	syntax.Walk(f, func(node syntax.Node) bool {
 		if validationErr != nil {
@@ -184,13 +195,13 @@ func validateRedirectPaths(f *syntax.File, workDir string, readAllowedPaths, wri
 			var allowedPaths []resolvedAllowedPath
 			switch r.Op {
 			case syntax.RdrIn:
-				allowedPaths = resolvedRead
+				allowedPaths = sets.read
 			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut,
 				syntax.RdrAll, syntax.AppAll:
-				allowedPaths = resolvedWrite
+				allowedPaths = sets.write
 			case syntax.RdrInOut:
 				// Read+write; must satisfy write permissions
-				allowedPaths = resolvedWrite
+				allowedPaths = sets.write
 			default:
 				continue
 			}
@@ -418,6 +429,39 @@ func resolveAllowedPaths(allowedPaths []string) []resolvedAllowedPath {
 	return out
 }
 
+// resolvedPathSets is the read/write allowed-path pair with both sets already
+// symlink-resolved. Resolution is a filesystem syscall per entry, so it is done
+// once per execution — when an interpreter's security handlers are built, and
+// once at the top of each static validation pass — instead of once per command
+// call, per file open and per validation pass.
+//
+// Pinning the resolution for the duration of an execution is at least as
+// restrictive as re-resolving per call: candidate paths are still resolved
+// individually at check time, so a symlinked allowed directory that is
+// re-pointed mid-execution cannot move the boundary along with it.
+type resolvedPathSets struct {
+	read  []resolvedAllowedPath
+	write []resolvedAllowedPath
+}
+
+// resolvePathSets resolves both allowed-path sets once.
+func resolvePathSets(readAllowedPaths, writeAllowedPaths []string) resolvedPathSets {
+	return resolvedPathSets{
+		read:  resolveAllowedPaths(readAllowedPaths),
+		write: resolveAllowedPaths(writeAllowedPaths),
+	}
+}
+
+// forCommand returns the allowed-path set that applies to cmdName: write
+// commands (cp, mv, rm, ...) are checked against the write set, everything else
+// against the read set.
+func (p resolvedPathSets) forCommand(cmdName string) []resolvedAllowedPath {
+	if writeCommands[cmdName] {
+		return p.write
+	}
+	return p.read
+}
+
 // isUnderResolvedAllowedPaths reports whether path is equal to or nested under
 // one of the pre-resolved allowed paths. See IsUnderAllowedPaths for the
 // descendants-only semantics.
@@ -541,37 +585,35 @@ func grepNonPathArgIndices(args []string) map[int]bool {
 // This is called by the interpreter's CallHandler, where all variables and
 // command substitutions have been resolved to their actual values.
 // This catches bypasses like "cat $HOME/secret" that static validation misses.
-// Write commands are checked against writeAllowedPaths; others against readAllowedPaths.
-func validateExpandedPaths(args []string, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+// Write commands are checked against the write set; others against the read set.
+// The sets arrive pre-resolved because the CallHandler fires for every command
+// in a script — a loop over a thousand files would otherwise re-run
+// EvalSymlinks over the whole allowed set a thousand times.
+func validateExpandedPaths(args []string, workDir string, sets resolvedPathSets) error {
 	if len(args) == 0 {
 		return nil
 	}
 	cmdName := args[0]
-	allowedPaths := readAllowedPaths
-	if writeCommands[cmdName] {
-		allowedPaths = writeAllowedPaths
-	}
-	// Resolve the allowed-path set once; a single command (e.g. a glob) can
-	// expand to thousands of args, and re-resolving inside the loop would do
-	// O(args × allowedPaths) EvalSymlinks syscalls.
-	return validateCommandArgPaths(cmdName, args, workDir, resolveAllowedPaths(allowedPaths))
+	return validateCommandArgPaths(cmdName, args, workDir, sets.forCommand(cmdName))
 }
 
 // validateOpenPath checks a file path before the interpreter opens it (for
 // redirections). This is called by the interpreter's OpenHandler, where
 // variables in redirect targets have been expanded to actual paths.
-// If the open flags include any write bits, the path is checked against
-// writeAllowedPaths; otherwise it is checked against readAllowedPaths.
-func validateOpenPath(path string, flag int, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+// If the open flags include any write bits, the path is checked against the
+// write set; otherwise it is checked against the read set. The sets arrive
+// pre-resolved (see resolvedPathSets) so opening many files does not re-resolve
+// the allowed set per open.
+func validateOpenPath(path string, flag int, workDir string, sets resolvedPathSets) error {
 	if path == "/dev/null" {
 		return nil
 	}
 	isWrite := isWriteFlag(flag)
-	allowedPaths := readAllowedPaths
+	allowedPaths := sets.read
 	if isWrite {
-		allowedPaths = writeAllowedPaths
+		allowedPaths = sets.write
 	}
-	return checkPathBoundary(path, path, workDir, isWrite, resolveAllowedPaths(allowedPaths))
+	return checkPathBoundary(path, path, workDir, isWrite, allowedPaths)
 }
 
 // isWriteFlag returns true if the open flags include any write-related bits.

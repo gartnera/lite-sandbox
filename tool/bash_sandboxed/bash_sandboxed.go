@@ -961,6 +961,20 @@ func ParseBash(command string) (*syntax.File, error) {
 	return f, nil
 }
 
+// stripShebang removes a leading "#!" interpreter line from a script's source,
+// which the bash parser would otherwise treat as a comment. A file whose only
+// line is the shebang (no trailing newline) becomes empty: an interpreter line
+// carries no shell statements, so dropping it never discards executable code.
+func stripShebang(script string) string {
+	if !strings.HasPrefix(script, "#!") {
+		return script
+	}
+	if idx := strings.IndexByte(script, '\n'); idx >= 0 {
+		return script[idx+1:]
+	}
+	return ""
+}
+
 // blockedEnvVars lists environment variables that cannot be assigned in sandboxed commands.
 // PATH is inherited but cannot be mutated (prevents command whitelist bypass).
 // Others prevent shared library injection, auto-sourced scripts, and unexpected behavior.
@@ -1021,13 +1035,7 @@ func extractFunctionsFromFile(filePath, workDir string, funcs map[string]bool) {
 	if err != nil {
 		return
 	}
-	script := string(data)
-	if strings.HasPrefix(script, "#!") {
-		if idx := strings.IndexByte(script, '\n'); idx >= 0 {
-			script = script[idx+1:]
-		}
-	}
-	sf, err := ParseBash(script)
+	sf, err := ParseBash(stripShebang(string(data)))
 	if err != nil {
 		return
 	}
@@ -1054,6 +1062,28 @@ func (s *Sandbox) validate(f *syntax.File) error {
 func (s *Sandbox) validateWithWorkDir(f *syntax.File, workDir string) error {
 	funcs := collectDeclaredFunctions(f, workDir)
 	return s.validateWithFunctions(f, funcs)
+}
+
+// validateFile runs the full static preflight over a parsed AST: the command /
+// redirection / assignment validation (workDir-aware, so declared and sourced
+// functions count as allowed commands), then the argument and redirection path
+// boundary checks. It is the single entry point used by every site that
+// statically validates a parsed script — Execute, ExecuteBackground,
+// ValidateCommand, validateScriptFile, executeBash and executeScript — so the
+// three passes always run in the same order with the same inputs. Callers wrap
+// the returned error with their own context prefix.
+//
+// The allowed-path sets are symlink-resolved once here and shared by both path
+// passes rather than being resolved separately by each.
+func (s *Sandbox) validateFile(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	if err := s.validateWithWorkDir(f, workDir); err != nil {
+		return err
+	}
+	sets := resolvePathSets(readAllowedPaths, writeAllowedPaths)
+	if err := validatePathsResolved(f, workDir, sets); err != nil {
+		return err
+	}
+	return validateRedirectPathsResolved(f, workDir, sets)
 }
 
 // validateWithFunctions is the core validation logic, optionally accepting
@@ -1200,13 +1230,7 @@ func (s *Sandbox) ValidateCommand(command string, workDir string, readAllowedPat
 	if err != nil {
 		return err
 	}
-	if err := s.validateWithWorkDir(f, workDir); err != nil {
-		return err
-	}
-	if err := validatePaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-		return err
-	}
-	if err := validateRedirectPaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return err
 	}
 	if err := s.validateScriptContents(f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
@@ -1274,25 +1298,11 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	if err != nil {
 		return nil // fail-open: file may not exist at validation time
 	}
-	script := string(data)
-	if strings.HasPrefix(script, "#!") {
-		if idx := strings.IndexByte(script, '\n'); idx >= 0 {
-			script = script[idx+1:]
-		} else {
-			script = ""
-		}
-	}
-	sf, err := ParseBash(script)
+	sf, err := ParseBash(stripShebang(string(data)))
 	if err != nil {
 		return nil // fail-open: unparseable scripts handled at runtime
 	}
-	if err := s.validateWithWorkDir(sf, workDir); err != nil {
-		return fmt.Errorf("script %s: %w", scriptPath, err)
-	}
-	if err := validatePaths(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-		return fmt.Errorf("script %s: %w", scriptPath, err)
-	}
-	if err := validateRedirectPaths(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	if err := s.validateFile(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return fmt.Errorf("script %s: %w", scriptPath, err)
 	}
 	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
@@ -1732,15 +1742,7 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 		return "", err
 	}
 
-	if err := s.validateWithWorkDir(f, workDir); err != nil {
-		return "", fmt.Errorf("validation failed: %w", err)
-	}
-
-	if err := validatePaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-		return "", fmt.Errorf("validation failed: %w", err)
-	}
-
-	if err := validateRedirectPaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return "", fmt.Errorf("validation failed: %w", err)
 	}
 

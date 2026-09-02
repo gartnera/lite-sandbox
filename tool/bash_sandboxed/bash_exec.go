@@ -364,14 +364,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	// Validate through the sandbox. Use the workDir-aware variant so functions
 	// the script declares (or picks up via `source`) count as allowed commands,
 	// matching how the top-level command string is validated.
-	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
-		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
-	}
-
-	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
-		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
-	}
-	if err := validateRedirectPaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
 	}
 
@@ -410,29 +403,14 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read script %s: %w", scriptPath, err)
 	}
-	script := string(data)
-
-	// Strip shebang line if present
-	if strings.HasPrefix(script, "#!") {
-		if idx := strings.IndexByte(script, '\n'); idx >= 0 {
-			script = script[idx+1:]
-		} else {
-			script = ""
-		}
-	}
+	script := stripShebang(string(data))
 
 	// Parse and validate
 	f, err := ParseBash(script)
 	if err != nil {
 		return fmt.Errorf("script %s: %w", args[0], err)
 	}
-	if err := s.validateWithWorkDir(f, hc.Dir); err != nil {
-		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
-	}
-	if err := validatePaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
-		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
-	}
-	if err := validateRedirectPaths(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
 	}
 
@@ -518,10 +496,18 @@ var runtimeValidatorSkip = map[string]bool{
 // buildSecurityHandlers returns the common CallHandler, OpenHandler, and
 // ExecHandler options used by both the top-level and nested interpreters.
 func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []string, useOSSandbox bool) []interp.RunnerOption {
+	// Resolve the allowed-path sets once for this interpreter. The Call and Open
+	// handlers fire for every command and every file open, so resolving per
+	// invocation would run EvalSymlinks over the whole allowed set thousands of
+	// times in a loop. Candidate paths are still resolved individually at check
+	// time, so pinning the boundary here is never less restrictive: an allowed
+	// directory whose symlink is re-pointed mid-execution cannot drag the
+	// boundary to its new target.
+	sets := resolvePathSets(readAllowedPaths, writeAllowedPaths)
 	return []interp.RunnerOption{
 		interp.CallHandler(func(ctx context.Context, args []string) ([]string, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateExpandedPaths(args, hc.Dir, readAllowedPaths, writeAllowedPaths); err != nil {
+			if err := validateExpandedPaths(args, hc.Dir, sets); err != nil {
 				return nil, err
 			}
 			// The CallHandler runs for every command — functions, builtins, and
@@ -551,7 +537,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 		}),
 		interp.OpenHandler(func(ctx context.Context, path string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateOpenPath(path, flag, hc.Dir, readAllowedPaths, writeAllowedPaths); err != nil {
+			if err := validateOpenPath(path, flag, hc.Dir, sets); err != nil {
 				return nil, err
 			}
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)

@@ -284,13 +284,7 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 		if err != nil {
 			return nil, err
 		}
-		if err := s.validateWithWorkDir(f, workDir); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-		if err := validatePaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-		if err := validateRedirectPaths(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 			return nil, fmt.Errorf("validation failed: %w", err)
 		}
 	}
