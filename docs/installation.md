@@ -147,11 +147,11 @@ lite-sandbox install opencode
 
 This automatically edits opencode's **global** config and rules (in `~/.config/opencode`, honoring `$XDG_CONFIG_HOME`):
 
-1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json`
+1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json` (or `opencode.jsonc`, whichever exists)
 2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked and opencode must use the sandbox (the analogue of the Claude installer's `Bash` permission deny; any existing granular `bash` rule is replaced), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_bash_output`, ...) never prompt
 3. Adds a usage directive to `AGENTS.md`
 
-All other keys in `opencode.json` are preserved, and re-running is idempotent. Note lite-sandbox can only edit plain JSON — if your global config is `opencode.jsonc` or uses comments, add the entries below manually instead.
+All other keys are preserved, and re-running is idempotent. Both `opencode.json` (plain JSON) and `opencode.jsonc` (JSONC, with comments and trailing commas) are edited in place — for a `.jsonc` config your comments and formatting are preserved across the edit. When both files exist, `opencode.json` is edited; when neither exists, a new `opencode.json` is created. If you'd rather configure it by hand, add the entries below manually instead.
 
 Unlike Claude Code and Codex, opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` is a no-op for opencode (use opencode's own `permission.edit` / `permission.external_directory` rules to confine its file tools), and `--bash-ast-hook-mode` skips opencode entirely. Reads and writes made *through the sandboxed shell* are still confined at runtime like on every other agent.
 

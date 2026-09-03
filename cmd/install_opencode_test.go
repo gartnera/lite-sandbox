@@ -6,12 +6,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tailscale/hujson"
 )
 
 func parseOpencodeConfig(t *testing.T, path string) map[string]json.RawMessage {
 	t.Helper()
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(readFile(t, path)), &cfg); err != nil {
+		t.Fatalf("failed to parse %s: %v", path, err)
+	}
+	return cfg
+}
+
+// parseJSONCConfig strips comments/trailing commas from a JSONC file and
+// unmarshals the result, so tests can assert on the effective config.
+func parseJSONCConfig(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	std, err := hujson.Standardize([]byte(readFile(t, path)))
+	if err != nil {
+		t.Fatalf("failed to standardize %s: %v", path, err)
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(std, &cfg); err != nil {
 		t.Fatalf("failed to parse %s: %v", path, err)
 	}
 	return cfg
@@ -180,6 +197,127 @@ func TestConfigureOpencodeConfigRejectsInvalidJSON(t *testing.T) {
 	// The unparseable file must be left untouched.
 	if readFile(t, configPath) != jsonc {
 		t.Error("unparseable config was modified")
+	}
+}
+
+// TestConfigureOpencodeJSONCPreservesComments verifies that editing an
+// opencode.jsonc keeps the user's comments and other keys, while adding the
+// sandbox entries. The result must still parse once comments are stripped.
+func TestConfigureOpencodeJSONCPreservesComments(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "opencode.jsonc")
+
+	existing := `{
+  // pick the model I like
+  "model": "anthropic/claude-sonnet-4-5",
+  "mcp": {
+    // an existing remote server
+    "other": {"type": "remote", "url": "https://example.com/mcp"}
+  },
+  "permission": {
+    "edit": "ask", // careful with edits
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("failed to write existing config: %v", err)
+	}
+
+	if err := configureOpencodeJSONC(configPath, "/opt/lite-sandbox"); err != nil {
+		t.Fatalf("configureOpencodeJSONC failed: %v", err)
+	}
+
+	raw := readFile(t, configPath)
+	if !strings.Contains(raw, "// pick the model I like") {
+		t.Errorf("top-level comment lost:\n%s", raw)
+	}
+	if !strings.Contains(raw, "// careful with edits") {
+		t.Errorf("nested comment lost:\n%s", raw)
+	}
+
+	cfg := parseJSONCConfig(t, configPath)
+	if string(cfg["model"]) != `"anthropic/claude-sonnet-4-5"` {
+		t.Errorf("unrelated key lost, got %s", cfg["model"])
+	}
+
+	var mcp map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["mcp"], &mcp); err != nil {
+		t.Fatalf("failed to parse mcp: %v", err)
+	}
+	if _, ok := mcp["other"]; !ok {
+		t.Error("existing MCP server lost")
+	}
+	var server opencodeMCPLocal
+	if err := json.Unmarshal(mcp["lite-sandbox"], &server); err != nil {
+		t.Fatalf("lite-sandbox server not added/parseable: %v", err)
+	}
+	if server.Type != "local" || !server.Enabled || len(server.Command) != 2 || server.Command[0] != "/opt/lite-sandbox" {
+		t.Errorf("unexpected server config: %+v", server)
+	}
+
+	var perm map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["permission"], &perm); err != nil {
+		t.Fatalf("failed to parse permission: %v", err)
+	}
+	if string(perm["edit"]) != `"ask"` {
+		t.Errorf("existing edit permission lost, got %s", perm["edit"])
+	}
+	if string(perm["bash"]) != `"deny"` {
+		t.Errorf("built-in bash not denied, got %s", perm["bash"])
+	}
+	if string(perm["lite-sandbox*"]) != `"allow"` {
+		t.Errorf("sandbox tools not auto-allowed, got %s", perm["lite-sandbox*"])
+	}
+}
+
+// TestConfigureOpencodeJSONCStringPermission verifies a bare-string permission
+// in a .jsonc is preserved as the catch-all "*" rule.
+func TestConfigureOpencodeJSONCStringPermission(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "opencode.jsonc")
+
+	if err := os.WriteFile(configPath, []byte("{\n  // everything allowed\n  \"permission\": \"allow\"\n}\n"), 0644); err != nil {
+		t.Fatalf("failed to write existing config: %v", err)
+	}
+
+	if err := configureOpencodeJSONC(configPath, "/bin/lite-sandbox"); err != nil {
+		t.Fatalf("configureOpencodeJSONC failed: %v", err)
+	}
+
+	cfg := parseJSONCConfig(t, configPath)
+	var perm map[string]json.RawMessage
+	if err := json.Unmarshal(cfg["permission"], &perm); err != nil {
+		t.Fatalf("failed to parse permission: %v", err)
+	}
+	if string(perm["*"]) != `"allow"` {
+		t.Errorf("global action not preserved as catch-all, got %s", perm["*"])
+	}
+	if string(perm["bash"]) != `"deny"` {
+		t.Errorf("built-in bash not denied, got %s", perm["bash"])
+	}
+}
+
+// TestConfigureOpencodeJSONCIsIdempotent verifies re-running rewrites the same
+// entries without duplicating the server.
+func TestConfigureOpencodeJSONCIsIdempotent(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "opencode.jsonc")
+	if err := os.WriteFile(configPath, []byte("{\n  // hi\n}\n"), 0644); err != nil {
+		t.Fatalf("failed to write existing config: %v", err)
+	}
+
+	if err := configureOpencodeJSONC(configPath, "/first/lite-sandbox"); err != nil {
+		t.Fatalf("first configureOpencodeJSONC failed: %v", err)
+	}
+	if err := configureOpencodeJSONC(configPath, "/second/lite-sandbox"); err != nil {
+		t.Fatalf("second configureOpencodeJSONC failed: %v", err)
+	}
+
+	content := readFile(t, configPath)
+	if strings.Contains(content, "/first/lite-sandbox") {
+		t.Errorf("stale command not replaced:\n%s", content)
+	}
+	if got := strings.Count(content, `"lite-sandbox":`); got != 1 {
+		t.Errorf("expected one lite-sandbox server entry, got %d:\n%s", got, content)
+	}
+	if !strings.Contains(content, "// hi") {
+		t.Errorf("comment lost across idempotent runs:\n%s", content)
 	}
 }
 

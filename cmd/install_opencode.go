@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/tailscale/hujson"
 )
 
 // opencodeDirective is appended to the global AGENTS.md so opencode prefers the
@@ -57,19 +59,27 @@ func runInstallOpencode(binPath string) error {
 		return fmt.Errorf("failed to create %s: %w", opencodeDir, err)
 	}
 
-	configPath := filepath.Join(opencodeDir, "opencode.json")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// A JSONC global config can't be edited safely with encoding/json (its
-		// comments would be rejected on read and lost on write), and writing a
-		// sibling opencode.json next to it would be confusing. Bail with pointers.
-		jsoncPath := filepath.Join(opencodeDir, "opencode.jsonc")
-		if _, err := os.Stat(jsoncPath); err == nil {
-			return fmt.Errorf("found %s — lite-sandbox can only edit plain JSON; add the mcp/permission entries manually (see docs/installation.md#opencode)", jsoncPath)
-		}
+	// opencode accepts either opencode.json (plain JSON) or opencode.jsonc
+	// (JSONC, with comments and trailing commas). Edit whichever exists in
+	// place — creating a sibling of the other name would be ignored or
+	// confusing — preferring opencode.json when both are present. When neither
+	// exists, create a plain opencode.json.
+	jsonPath := filepath.Join(opencodeDir, "opencode.json")
+	jsoncPath := filepath.Join(opencodeDir, "opencode.jsonc")
+	configPath := jsonPath
+	editErr := error(nil)
+	switch {
+	case fileExists(jsonPath):
+		configPath = jsonPath
+		editErr = configureOpencodeConfig(jsonPath, binPath)
+	case fileExists(jsoncPath):
+		configPath = jsoncPath
+		editErr = configureOpencodeJSONC(jsoncPath, binPath)
+	default:
+		editErr = configureOpencodeConfig(jsonPath, binPath)
 	}
-
-	if err := configureOpencodeConfig(configPath, binPath); err != nil {
-		return fmt.Errorf("failed to configure opencode: %w", err)
+	if editErr != nil {
+		return fmt.Errorf("failed to configure opencode: %w", editErr)
 	}
 	fmt.Printf("✓ Added MCP server, denied the built-in bash tool, and auto-allowed the sandbox tools in %s\n", configPath)
 
@@ -167,6 +177,157 @@ func configureOpencodeConfig(configPath, binPath string) error {
 		return err
 	}
 	return os.WriteFile(configPath, append(out, '\n'), 0644)
+}
+
+// fileExists reports whether path exists (as any file type).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// configureOpencodeJSONC applies the same edits as configureOpencodeConfig to a
+// JSONC (opencode.jsonc) global config, but parses and re-serializes it as a
+// JWCC syntax tree (via hujson) so the user's comments, trailing commas, and
+// formatting survive the round trip — encoding/json would reject them on read
+// and drop them on write. Idempotent: re-running replaces the same entries in
+// place. Only the lite-sandbox MCP server and the bash / lite-sandbox*
+// permission rules are overwritten; every other key and its comments are kept.
+func configureOpencodeJSONC(configPath, binPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	v, err := hujson.Parse(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse %s as JSONC: %w", configPath, err)
+	}
+	root, ok := v.Value.(*hujson.Object)
+	if !ok {
+		return fmt.Errorf("%s: expected a JSON object at the top level", configPath)
+	}
+
+	if hujsonFindMember(root, "$schema") == nil {
+		hujsonSetMember(root, "$schema", hujsonString("https://opencode.ai/config.json"))
+	}
+
+	// mcp.lite-sandbox — a local server launched via `lite-sandbox serve-mcp`.
+	mcp, err := hujsonEnsureObject(root, "mcp")
+	if err != nil {
+		return fmt.Errorf("%s: %w", configPath, err)
+	}
+	serverRaw, err := json.Marshal(opencodeMCPLocal{
+		Type:    "local",
+		Command: []string{binPath, "serve-mcp"},
+		Enabled: true,
+	})
+	if err != nil {
+		return err
+	}
+	serverVal, err := hujson.Parse(serverRaw)
+	if err != nil {
+		return err
+	}
+	hujsonSetMember(mcp, "lite-sandbox", serverVal)
+
+	// permission.bash = "deny" and permission."lite-sandbox*" = "allow", matching
+	// the plain-JSON path. A bare-string permission ("allow"/"ask"/"deny")
+	// applying to everything is preserved as the catch-all "*" rule.
+	perm, err := hujsonEnsurePermissionObject(root, configPath)
+	if err != nil {
+		return err
+	}
+	hujsonSetMember(perm, "bash", hujsonString("deny"))
+	hujsonSetMember(perm, "lite-sandbox*", hujsonString("allow"))
+
+	v.Format()
+	return os.WriteFile(configPath, v.Pack(), 0644)
+}
+
+// hujsonString wraps a Go string as a hujson JSON-string Value.
+func hujsonString(s string) hujson.Value {
+	return hujson.Value{Value: hujson.String(s)}
+}
+
+// hujsonMemberName returns the decoded string name of an object member, or ""
+// if the name is not a JSON string literal.
+func hujsonMemberName(name hujson.Value) string {
+	lit, ok := name.Value.(hujson.Literal)
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal([]byte(lit), &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// hujsonFindMember returns a pointer to the value of the member named key, or
+// nil if absent. The pointer aliases into obj.Members, so mutating *result
+// mutates the tree.
+func hujsonFindMember(obj *hujson.Object, key string) *hujson.Value {
+	for i := range obj.Members {
+		if hujsonMemberName(obj.Members[i].Name) == key {
+			return &obj.Members[i].Value
+		}
+	}
+	return nil
+}
+
+// hujsonSetMember sets obj[key] = val, replacing the existing member's value
+// (preserving its name and comments) or appending a new member.
+func hujsonSetMember(obj *hujson.Object, key string, val hujson.Value) {
+	if mv := hujsonFindMember(obj, key); mv != nil {
+		mv.Value = val.Value
+		mv.BeforeExtra, mv.AfterExtra = val.BeforeExtra, val.AfterExtra
+		return
+	}
+	obj.Members = append(obj.Members, hujson.ObjectMember{
+		Name:  hujsonString(key),
+		Value: val,
+	})
+}
+
+// hujsonEnsureObject returns obj[key] as an *Object, creating an empty one if
+// the member is absent. It errors if the member exists but is not an object.
+func hujsonEnsureObject(obj *hujson.Object, key string) (*hujson.Object, error) {
+	if mv := hujsonFindMember(obj, key); mv != nil {
+		sub, ok := mv.Value.(*hujson.Object)
+		if !ok {
+			return nil, fmt.Errorf("%q is not a JSON object", key)
+		}
+		return sub, nil
+	}
+	sub := &hujson.Object{}
+	hujsonSetMember(obj, key, hujson.Value{Value: sub})
+	return sub, nil
+}
+
+// hujsonEnsurePermissionObject returns the "permission" object, creating it if
+// absent and, mirroring the plain-JSON path, converting a bare-string
+// permission action into a catch-all "*" rule so it is preserved.
+func hujsonEnsurePermissionObject(root *hujson.Object, configPath string) (*hujson.Object, error) {
+	mv := hujsonFindMember(root, "permission")
+	if mv == nil {
+		perm := &hujson.Object{}
+		hujsonSetMember(root, "permission", hujson.Value{Value: perm})
+		return perm, nil
+	}
+	switch pv := mv.Value.(type) {
+	case *hujson.Object:
+		return pv, nil
+	case hujson.Literal:
+		var action string
+		if err := json.Unmarshal([]byte(pv), &action); err != nil {
+			return nil, fmt.Errorf("failed to parse permission in %s", configPath)
+		}
+		perm := &hujson.Object{}
+		hujsonSetMember(perm, "*", hujson.Value{Value: pv})
+		mv.Value = perm
+		return perm, nil
+	default:
+		return nil, fmt.Errorf("failed to parse permission in %s", configPath)
+	}
 }
 
 // configureOpencodeAGENTSMD appends the usage directive to the global
