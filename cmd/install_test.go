@@ -13,7 +13,7 @@ func TestConfigureMCPServer(t *testing.T) {
 	claudeJsonPath := filepath.Join(tmpDir, ".claude.json")
 
 	// Test with non-existent file
-	err := configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox")
+	err := configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox", true)
 	if err != nil {
 		t.Fatalf("configureMCPServer failed: %v", err)
 	}
@@ -51,8 +51,12 @@ func TestConfigureMCPServer(t *testing.T) {
 		t.Errorf("expected args [serve], got %v", server.Args)
 	}
 
+	if !server.AlwaysLoad {
+		t.Error("expected alwaysLoad to be true when requested")
+	}
+
 	// Test updating existing file
-	err = configureMCPServer(claudeJsonPath, "/opt/lite-sandbox")
+	err = configureMCPServer(claudeJsonPath, "/opt/lite-sandbox", true)
 	if err != nil {
 		t.Fatalf("configureMCPServer failed on update: %v", err)
 	}
@@ -82,7 +86,7 @@ func TestConfigureMCPServer(t *testing.T) {
 		t.Fatalf("failed to write existing .claude.json: %v", err)
 	}
 
-	err = configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox")
+	err = configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox", true)
 	if err != nil {
 		t.Fatalf("configureMCPServer failed with existing content: %v", err)
 	}
@@ -106,6 +110,43 @@ func TestConfigureMCPServer(t *testing.T) {
 	// Verify mcpServers was added
 	if _, ok := cfg["mcpServers"]; !ok {
 		t.Error("mcpServers key was not added")
+	}
+}
+
+// TestConfigureMCPServerAlwaysLoadFalse verifies that alwaysLoad=false omits the
+// key entirely and strips a stale one left by a prior alwaysLoad=true install.
+func TestConfigureMCPServerAlwaysLoadFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	claudeJsonPath := filepath.Join(tmpDir, ".claude.json")
+
+	// Seed with alwaysLoad enabled, then disable it.
+	if err := configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox", true); err != nil {
+		t.Fatalf("configureMCPServer failed: %v", err)
+	}
+	if err := configureMCPServer(claudeJsonPath, "/usr/local/bin/lite-sandbox", false); err != nil {
+		t.Fatalf("configureMCPServer failed on disable: %v", err)
+	}
+
+	data, err := os.ReadFile(claudeJsonPath)
+	if err != nil {
+		t.Fatalf("failed to read .claude.json: %v", err)
+	}
+
+	// The raw JSON must not carry the alwaysLoad key when disabled.
+	if contains(string(data), "alwaysLoad") {
+		t.Errorf("expected alwaysLoad key to be absent when false, got:\n%s", data)
+	}
+
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("failed to parse .claude.json: %v", err)
+	}
+	var mcpServers map[string]mcpServerConfig
+	if err := json.Unmarshal(cfg["mcpServers"], &mcpServers); err != nil {
+		t.Fatalf("failed to parse mcpServers: %v", err)
+	}
+	if mcpServers["lite-sandbox"].AlwaysLoad {
+		t.Error("expected alwaysLoad to be false after disable")
 	}
 }
 

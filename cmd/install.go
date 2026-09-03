@@ -15,6 +15,7 @@ import (
 
 var installWithToolHook bool
 var installBashASTHookMode bool
+var installAlwaysLoad bool
 
 // mcpToolPermissions are the Claude Code permission entries auto-allowed for the
 // lite-sandbox MCP server: the bash tool and its background-process management
@@ -70,7 +71,14 @@ enforcement, only this up-front static check — so it is a weaker guarantee tha
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
 governs only Bash. Applies to claude and codex; opencode is skipped in this mode
-since the check requires a hook.`,
+since the check requires a hook.
+
+For claude, --always-load (on by default) sets alwaysLoad on the MCP server
+entry so its tools skip Claude Code's Tool Search deferral and load at session
+start — the built-in Bash tool is denied, so the sandbox bash tool is needed on
+essentially every turn. Pass --always-load=false to let the tools be deferred.
+The flag is a no-op for codex and opencode, and in --bash-ast-hook-mode (which
+does not configure the MCP server).`,
 	ValidArgs: []string{"claude", "codex", "opencode"},
 	Args:      cobra.OnlyValidArgs,
 	RunE:      runInstall,
@@ -81,6 +89,8 @@ func init() {
 		"register a PreToolUse hook that redirects built-in Bash to the MCP tool and confines built-in Read/Write/Edit to the sandbox's readable/writable paths")
 	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
+	installCmd.Flags().BoolVar(&installAlwaysLoad, "always-load", true,
+		"(claude only) set alwaysLoad on the MCP server so the sandbox tools skip Tool Search deferral and load at session start; --always-load=false to defer them")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
 		"configure OpenAI Codex CLI")
 	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")
@@ -253,10 +263,14 @@ func runInstallClaude(binPath string) error {
 
 	// 1. Configure MCP server in ~/.claude.json (user-scoped)
 	if configMCP {
-		if err := configureMCPServer(claudeJsonPath, binPath); err != nil {
+		if err := configureMCPServer(claudeJsonPath, binPath, installAlwaysLoad); err != nil {
 			return fmt.Errorf("failed to configure MCP server: %w", err)
 		}
-		fmt.Println("✓ Added MCP server to ~/.claude.json")
+		if installAlwaysLoad {
+			fmt.Println("✓ Added MCP server to ~/.claude.json (alwaysLoad: tools skip Tool Search deferral)")
+		} else {
+			fmt.Println("✓ Added MCP server to ~/.claude.json")
+		}
 	}
 
 	// 2. Configure permissions. Allow the MCP tool only when it's configured.
@@ -317,9 +331,17 @@ func runInstallClaude(binPath string) error {
 type mcpServerConfig struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
+	// AlwaysLoad exempts the server from Claude Code's Tool Search deferral, so
+	// its tools load into context at session start instead of on demand. omitempty
+	// keeps the key absent (and strips a stale one) when false.
+	AlwaysLoad bool `json:"alwaysLoad,omitempty"`
 }
 
-func configureMCPServer(claudeJsonPath, binPath string) error {
+// configureMCPServer adds (or updates) the lite-sandbox MCP server entry in
+// ~/.claude.json. alwaysLoad sets Claude Code's alwaysLoad flag so the sandbox
+// tools are never deferred behind Tool Search — the built-in Bash tool is
+// denied, so the sandbox bash tool is needed on essentially every turn.
+func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 	// Read existing ~/.claude.json (preserving all other keys)
 	var cfg map[string]json.RawMessage
 	data, err := os.ReadFile(claudeJsonPath)
@@ -345,8 +367,9 @@ func configureMCPServer(claudeJsonPath, binPath string) error {
 
 	// Add or update the lite-sandbox server
 	mcpServers["lite-sandbox"] = mcpServerConfig{
-		Command: binPath,
-		Args:    []string{"serve-mcp"},
+		Command:    binPath,
+		Args:       []string{"serve-mcp"},
+		AlwaysLoad: alwaysLoad,
 	}
 
 	// Marshal mcpServers back into the config

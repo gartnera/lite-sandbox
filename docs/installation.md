@@ -21,7 +21,7 @@ The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to
 ## Claude Code
 
 For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`) automatically:
-1. Adds the MCP server to `~/.claude.json` (user-scoped)
+1. Adds the MCP server to `~/.claude.json` (user-scoped) with `"alwaysLoad": true` (see [`--always-load`](#always-load) below)
 2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools outright — subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow.
 4. Adds usage directive to `~/.claude/CLAUDE.md`
@@ -44,6 +44,33 @@ lite-sandbox install --with-tool-hook --bash-ast-hook-mode # AST-check Bash + co
 ```
 
 `--bash-ast-hook-mode` changes how the hook treats `Bash`: instead of redirecting it to the MCP tool, the hook parses each `Bash` command's AST and checks it against the same whitelist and path boundaries as the bash tool — allowing it when it passes (no permission prompt) and denying it with the validation error when it doesn't. **`Bash` itself still runs unsandboxed** — there is no runtime enforcement, only this up-front static check, so it's a weaker guarantee than routing execution through the MCP tool (see [Built-in tool boundaries](#built-in-tool-boundaries) for the trade-off). Because nothing redirects to the MCP tool, this mode **does not configure the MCP server** (no MCP allow, no `CLAUDE.md` directive). On its own it governs only `Bash`; combine it with `--with-tool-hook` to also confine the built-in `Read`/`Write`/`Edit` tools to the sandbox's paths.
+
+<a id="always-load"></a>
+
+### `--always-load`
+
+Claude Code's [Tool Search](https://docs.claude.com/en/docs/claude-code/mcp) defers MCP tool definitions by default, loading them on demand to save context. Because the install command denies the built-in `Bash` tool, the sandbox `bash` tool is needed on essentially every turn, so `install claude` sets `"alwaysLoad": true` on the MCP server entry — exempting it from deferral so its tools are present at session start rather than surfaced only after a Tool Search:
+
+```jsonc
+// ~/.claude.json
+{
+  "mcpServers": {
+    "lite-sandbox": {
+      "command": "/path/to/lite-sandbox",
+      "args": ["serve-mcp"],
+      "alwaysLoad": true
+    }
+  }
+}
+```
+
+This is the default. To opt out and let the sandbox tools be deferred like any other MCP server, pass `--always-load=false`:
+
+```bash
+lite-sandbox install claude --always-load=false
+```
+
+The flag applies only to Claude Code; it is a no-op for Codex and opencode, and in `--bash-ast-hook-mode` (which doesn't configure the MCP server at all).
 
 Restart Claude Code after running the install command.
 
