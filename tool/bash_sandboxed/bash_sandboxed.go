@@ -1066,11 +1066,55 @@ func (s *Sandbox) validateFile(f *syntax.File, workDir string, readAllowedPaths,
 	if err := s.validateWithWorkDir(f, workDir); err != nil {
 		return err
 	}
+	if s.getConfig().RejectsRedundantCd() {
+		if err := validateNoRedundantCd(f, workDir); err != nil {
+			return err
+		}
+	}
 	sets := resolvePathSets(readAllowedPaths, writeAllowedPaths)
 	if err := validatePathsResolved(f, workDir, sets); err != nil {
 		return err
 	}
 	return validateRedirectPathsResolved(f, workDir, sets)
+}
+
+// validateNoRedundantCd rejects a `cd <absolute-path>` whose target resolves to
+// the working directory itself. Agents habitually prefix commands with
+// `cd /abs/path/to/repo && ...` even though the sandbox already runs there, so
+// the cd is pure noise; surfacing it as an error prompts the agent to drop it.
+//
+// The match is deliberately narrow — only a `cd` with a single literal argument
+// that is an absolute path resolving exactly to workDir. `cd .`, a relative
+// path, a dynamic target (`cd "$PWD"`), a cd carrying flags, or a cd into a
+// subdirectory are all left alone: those are either legitimate or not the
+// redundant form agents emit.
+func validateNoRedundantCd(f *syntax.File, workDir string) error {
+	if workDir == "" {
+		return nil
+	}
+	resolvedWorkDir := ResolvePath(workDir, workDir)
+	var validationErr error
+	syntax.Walk(f, func(node syntax.Node) bool {
+		if validationErr != nil {
+			return false
+		}
+		ce, ok := node.(*syntax.CallExpr)
+		// Only `cd <arg>` with exactly one argument; a cd with flags (e.g.
+		// `cd -P /path`) or no argument is not the redundant prefix we target.
+		if !ok || len(ce.Args) != 2 || ce.Args[0].Lit() != "cd" {
+			return true
+		}
+		arg := ce.Args[1].Lit()
+		if arg == "" || !filepath.IsAbs(arg) {
+			return true
+		}
+		if ResolvePath(arg, workDir) == resolvedWorkDir {
+			validationErr = fmt.Errorf("unneeded cd: cwd is already %s (drop the leading %q)", resolvedWorkDir, "cd "+arg)
+			return false
+		}
+		return true
+	})
+	return validationErr
 }
 
 // validateWithFunctions is the core validation logic, optionally accepting
