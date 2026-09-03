@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,15 +14,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
-	"mvdan.cc/sh/v3/interp"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
-
-const runtimeErrorFallbackHint = "\n\nNote: This command passed sandbox validation but failed during execution. " +
-	"You may retry this command using the Bash tool with dangerouslyDisableSandbox set to true."
 
 var serveCmd = &cobra.Command{
 	Use:   "serve-mcp",
@@ -51,7 +46,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 	bashTool := mcp.NewTool(
 		"bash",
-		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution. If a command fails at runtime (not validation), you may retry it using the Bash tool with dangerouslyDisableSandbox set to true.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id you can poll with the bash_output tool and stop with the kill_shell tool."),
+		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id you can poll with the bash_output tool and stop with the kill_shell tool."),
 		mcp.WithString("command",
 			mcp.Description("The bash command to execute"),
 			mcp.Required(),
@@ -120,13 +115,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 		output, err := sandbox.Execute(timeoutCtx, command, cwd, readPaths, writePaths)
 		if err != nil {
-			errMsg := err.Error()
-			var cmdErr *bash_sandboxed.CommandFailedError
-			var exitStatus interp.ExitStatus
-			if errors.As(err, &cmdErr) && !errors.As(err, &exitStatus) {
-				errMsg += runtimeErrorFallbackHint
-			}
-			return mcp.NewToolResultError(errMsg), nil
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		return mcp.NewToolResultText(output), nil
@@ -217,7 +206,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 // sandboxPaths computes the read- and write-allowed path lists for a command
 // executed from cwd, combining the working directory, detected runtime paths,
 // user-configured paths, the Claude Code scratchpad root (claudeScratchpadPath),
-// and any git worktree parent. Writable paths are also
+// the per-user system temp dir (systemTempPath), and any git worktree parent.
+// Writable paths are also
 // readable, so they are folded into the read set. This is the single source of
 // truth shared with the PreToolUse hook (cmd/hook.go) so the bash tool and the
 // built-in file tools enforce the same boundary.
@@ -238,6 +228,10 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 		readPaths = append(readPaths, scratch)
 		writePaths = append(writePaths, scratch)
 	}
+	if tmp := systemTempPath(); tmp != "" {
+		readPaths = append(readPaths, tmp)
+		writePaths = append(writePaths, tmp)
+	}
 	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
 		readPaths = append(readPaths, parent)
 		writePaths = append(writePaths, parent)
@@ -255,6 +249,34 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 // /private/tmp on macOS, so returning the /tmp form matches either spelling.
 func claudeScratchpadPath() string {
 	return filepath.Join("/tmp", "claude-"+strconv.Itoa(os.Getuid()))
+}
+
+// sharedTempDirs are the well-known world-writable temp directories that must
+// NOT be granted wholesale: doing so would open the AST/file-tool boundary to a
+// directory every user on the host can write to. os.TempDir() lands on one of
+// these on the common Linux default (no $TMPDIR); there the uid-scoped
+// claudeScratchpadPath still covers /tmp/claude-<uid>.
+var sharedTempDirs = map[string]bool{
+	"/tmp":             true,
+	"/private/tmp":     true,
+	"/var/tmp":         true,
+	"/private/var/tmp": true,
+}
+
+// systemTempPath returns the per-user system temp directory (os.TempDir(),
+// which honors $TMPDIR) when it is a private, per-user location rather than a
+// world-shared temp dir. On macOS this is $TMPDIR (/var/folders/<...>/T), the
+// default scratch location for many tools; granting it read+write keeps the
+// AST/file-tool boundary in step with the OS-sandbox layer, which already
+// allows /var/folders (see os_sandbox/pool.go). It returns "" when os.TempDir()
+// resolves to a shared temp dir (the common Linux default), so the boundary is
+// never widened to a world-writable directory.
+func systemTempPath() string {
+	tmp := filepath.Clean(os.TempDir())
+	if sharedTempDirs[tmp] {
+		return ""
+	}
+	return tmp
 }
 
 // dockerSocketBaseDir returns the base directory for the docker proxy socket.

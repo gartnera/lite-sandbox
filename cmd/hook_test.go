@@ -15,9 +15,15 @@ import (
 
 // isolateConfig points config.Load() at a non-existent file so tests run
 // against an empty config (cwd-only boundaries) regardless of the host's real
-// lite-sandbox config.
+// lite-sandbox config. It also pins TMPDIR to the world-shared /tmp so that
+// systemTempPath() (which auto-grants a *per-user* $TMPDIR such as macOS's
+// /var/folders/.../T) returns nothing: otherwise t.TempDir()-based "outside"
+// paths would fall inside the granted per-user temp dir and defeat the
+// boundary these tests exercise. t.TempDir() consequently roots under /tmp,
+// matching the Linux default.
 func isolateConfig(t *testing.T) {
 	t.Helper()
+	t.Setenv("TMPDIR", "/tmp")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "nonexistent.yaml"))
 }
 

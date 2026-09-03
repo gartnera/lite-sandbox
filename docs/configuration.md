@@ -92,6 +92,14 @@ a config entry, so agents can use it for temporary files. It is uid-scoped and
 was already writable at the OS-sandbox layer; this only opens the agent-facing
 boundary to match.
 
+The per-user system temp directory (`$TMPDIR`, e.g. macOS's
+`/var/folders/.../T`) is likewise always readable and writable without a config
+entry, since many tools place scratch files there by default. It is granted only
+when it is a private, per-user location; when `$TMPDIR` is unset and the temp dir
+is the world-shared `/tmp` (the common Linux default), it is **not** granted
+wholesale — the uid-scoped scratchpad above still covers `/tmp/claude-<uid>`
+there.
+
 ## Internal readable / writable paths (OS sandbox only)
 
 `internal_readable_paths` / `internal_writable_paths` grant access **only at the
