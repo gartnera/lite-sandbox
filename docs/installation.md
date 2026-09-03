@@ -70,9 +70,9 @@ This is the default. To opt out and let the sandbox tools be deferred like any o
 lite-sandbox install claude --always-load=false
 ```
 
-The flag applies only to Claude Code; it is a no-op for Codex and opencode, and in `--bash-ast-hook-mode` (which doesn't configure the MCP server at all).
+Codex has the same behavior. Newer Codex models defer MCP tools behind Codex's own `tool_search` by default, so `install codex` sets the equivalent key on its server table — `omit_tools_from = ["deferred"]` — which removes the "deferred" tool-exposure surface and keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag is a no-op only for opencode, and in `--bash-ast-hook-mode` (which doesn't configure the MCP server at all).
 
-Restart Claude Code after running the install command.
+Restart the agent after running the install command.
 
 ## OpenAI Codex CLI
 
@@ -85,7 +85,7 @@ lite-sandbox install codex
 (The old `--codex` flag still works but is deprecated in favor of the positional name.)
 
 This automatically:
-1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`, with `default_tools_approval_mode = "approve"` so Codex auto-approves the sandboxed tools (the mirror of the Claude installer's `mcp__lite-sandbox__*` allow entries — lite-sandbox is itself the boundary, so a per-call Codex prompt is redundant). Only this server's tools are affected. Requires a Codex build new enough to honor the key; older versions ignore it harmlessly and will still prompt.
+1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`, with `default_tools_approval_mode = "approve"` so Codex auto-approves the sandboxed tools (the mirror of the Claude installer's `mcp__lite-sandbox__*` allow entries — lite-sandbox is itself the boundary, so a per-call Codex prompt is redundant) and `omit_tools_from = ["deferred"]` (Codex's equivalent of Claude's `alwaysLoad`; see [`--always-load`](#always-load)). Only this server's tools are affected. Requires a Codex build new enough to honor the keys; older versions ignore them harmlessly.
 2. Adds a usage directive to `~/.codex/AGENTS.md` steering Codex to the sandboxed `bash` tool
 3. Registers a `PreToolUse` hook (`[[hooks.PreToolUse]]`) that blocks Codex's built-in shell and redirects it to the sandboxed MCP tool
 
@@ -119,6 +119,7 @@ Add the MCP server and hook to `~/.codex/config.toml` (replace the path with you
 command = "/path/to/lite-sandbox"
 args = ["serve-mcp"]
 default_tools_approval_mode = "approve"
+omit_tools_from = ["deferred"]  # keep the tools out of tool-search deferral
 
 [[hooks.PreToolUse]]
 matcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"

@@ -73,12 +73,13 @@ confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
 governs only Bash. Applies to claude and codex; opencode is skipped in this mode
 since the check requires a hook.
 
-For claude, --always-load (on by default) sets alwaysLoad on the MCP server
-entry so its tools skip Claude Code's Tool Search deferral and load at session
-start — the built-in Bash tool is denied, so the sandbox bash tool is needed on
-essentially every turn. Pass --always-load=false to let the tools be deferred.
-The flag is a no-op for codex and opencode, and in --bash-ast-hook-mode (which
-does not configure the MCP server).`,
+--always-load (on by default) exempts the sandbox MCP tools from tool-search
+deferral so they are present in the model's initial tool list rather than loaded
+on demand — the built-in shell is denied/redirected, so the sandbox bash tool is
+needed on essentially every turn. For claude it sets alwaysLoad on the MCP server
+entry; for codex it sets omit_tools_from = ["deferred"]. Pass --always-load=false
+to let the tools be deferred. The flag is a no-op for opencode, and in
+--bash-ast-hook-mode (which does not configure the MCP server).`,
 	ValidArgs: []string{"claude", "codex", "opencode"},
 	Args:      cobra.OnlyValidArgs,
 	RunE:      runInstall,
@@ -90,7 +91,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	installCmd.Flags().BoolVar(&installAlwaysLoad, "always-load", true,
-		"(claude only) set alwaysLoad on the MCP server so the sandbox tools skip Tool Search deferral and load at session start; --always-load=false to defer them")
+		"exempt the sandbox MCP tools from tool-search deferral so they load at session start (claude: alwaysLoad; codex: omit_tools_from=[\"deferred\"]); --always-load=false to defer them")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
 		"configure OpenAI Codex CLI")
 	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")

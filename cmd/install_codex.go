@@ -85,10 +85,14 @@ func runInstallCodex(binPath string) error {
 	// --bash-ast-hook-mode, which routes nothing to the MCP tool, so the
 	// directive would have nothing to point at.
 	if configMCP {
-		if err := configureCodexMCPServer(configTomlPath, binPath); err != nil {
+		if err := configureCodexMCPServer(configTomlPath, binPath, installAlwaysLoad); err != nil {
 			return fmt.Errorf("failed to configure Codex MCP server: %w", err)
 		}
-		fmt.Printf("✓ Added MCP server (tools auto-approved) to %s\n", configTomlPath)
+		if installAlwaysLoad {
+			fmt.Printf("✓ Added MCP server (tools auto-approved, omit_tools_from=[\"deferred\"]) to %s\n", configTomlPath)
+		} else {
+			fmt.Printf("✓ Added MCP server (tools auto-approved) to %s\n", configTomlPath)
+		}
 
 		if err := configureCodexAGENTSMD(codexDir); err != nil {
 			return fmt.Errorf("failed to configure AGENTS.md: %w", err)
@@ -139,7 +143,13 @@ func runInstallCodex(binPath string) error {
 // [mcp_servers.lite-sandbox] table (and any of its sub-tables) is rewritten. The
 // operation is idempotent: re-running replaces our table in place instead of
 // appending a duplicate.
-func configureCodexMCPServer(configTomlPath, binPath string) error {
+//
+// alwaysLoad adds omit_tools_from = ["deferred"], Codex's analog of Claude
+// Code's alwaysLoad: it removes the "deferred" tool-exposure surface so the
+// sandbox tools stay in the model's initial tool list instead of being deferred
+// behind Codex's tool_search. Because the whole table body is rewritten each
+// run, passing false drops a stale key from a prior alwaysLoad install.
+func configureCodexMCPServer(configTomlPath, binPath string, alwaysLoad bool) error {
 	header := "[mcp_servers." + codexServerName + "]"
 	// Auto-approve this server's tools so Codex doesn't prompt on every call —
 	// the mirror of the mcp__lite-sandbox__* allow entries the Claude installer
@@ -153,6 +163,15 @@ func configureCodexMCPServer(configTomlPath, binPath string) error {
 		"command = " + tomlString(binPath) + "\n" +
 		`args = ["serve-mcp"]` + "\n" +
 		`default_tools_approval_mode = "approve"` + "\n"
+	if alwaysLoad {
+		// Newer Codex models defer MCP tools behind tool_search by default;
+		// omitting the "deferred" exposure surface keeps ours always present in
+		// the model's initial tool list (the built-in shell is redirected to
+		// them, so they're needed on essentially every turn). This is Codex's
+		// analog of Claude Code's alwaysLoad. Older Codex builds that predate the
+		// key ignore it harmlessly, like default_tools_approval_mode above.
+		block += `omit_tools_from = ["deferred"]` + "\n"
+	}
 
 	data, err := os.ReadFile(configTomlPath)
 	if err != nil {
