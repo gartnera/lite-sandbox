@@ -11,7 +11,7 @@ func TestConfigureCodexMCPServerNewFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 
-	if err := configureCodexMCPServer(configPath, "/usr/local/bin/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/usr/local/bin/lite-sandbox", false); err != nil {
 		t.Fatalf("configureCodexMCPServer failed: %v", err)
 	}
 
@@ -19,6 +19,35 @@ func TestConfigureCodexMCPServerNewFile(t *testing.T) {
 	want := "[mcp_servers.lite-sandbox]\ncommand = \"/usr/local/bin/lite-sandbox\"\nargs = [\"serve-mcp\"]\ndefault_tools_approval_mode = \"approve\"\n"
 	if content != want {
 		t.Errorf("unexpected content:\n%q\nwant:\n%q", content, want)
+	}
+}
+
+// TestConfigureCodexMCPServerAlwaysLoad verifies that alwaysLoad=true writes
+// omit_tools_from = ["deferred"] (Codex's analog of Claude's alwaysLoad) and
+// that a later alwaysLoad=false run strips it, since the table is rewritten in
+// place.
+func TestConfigureCodexMCPServerAlwaysLoad(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	if err := configureCodexMCPServer(configPath, "/usr/local/bin/lite-sandbox", true); err != nil {
+		t.Fatalf("configureCodexMCPServer failed: %v", err)
+	}
+	content := readFile(t, configPath)
+	if !strings.Contains(content, `omit_tools_from = ["deferred"]`) {
+		t.Errorf("expected omit_tools_from when alwaysLoad=true:\n%s", content)
+	}
+
+	// Disabling rewrites the table body in place, dropping the stale key.
+	if err := configureCodexMCPServer(configPath, "/usr/local/bin/lite-sandbox", false); err != nil {
+		t.Fatalf("configureCodexMCPServer failed on disable: %v", err)
+	}
+	content = readFile(t, configPath)
+	if strings.Contains(content, "omit_tools_from") {
+		t.Errorf("expected omit_tools_from to be removed when alwaysLoad=false:\n%s", content)
+	}
+	if got := strings.Count(content, "[mcp_servers.lite-sandbox]"); got != 1 {
+		t.Errorf("expected one server table, got %d:\n%s", got, content)
 	}
 }
 
@@ -34,7 +63,7 @@ func TestConfigureCodexMCPServerUpgradesApprovalMode(t *testing.T) {
 		t.Fatalf("failed to write existing config: %v", err)
 	}
 
-	if err := configureCodexMCPServer(configPath, "/new"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/new", false); err != nil {
 		t.Fatalf("configureCodexMCPServer failed: %v", err)
 	}
 
@@ -59,7 +88,7 @@ func TestConfigureCodexMCPServerAppendsPreservingExisting(t *testing.T) {
 		t.Fatalf("failed to write existing config: %v", err)
 	}
 
-	if err := configureCodexMCPServer(configPath, "/opt/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/opt/lite-sandbox", false); err != nil {
 		t.Fatalf("configureCodexMCPServer failed: %v", err)
 	}
 
@@ -92,10 +121,10 @@ func TestConfigureCodexMCPServerIsIdempotent(t *testing.T) {
 		t.Fatalf("failed to write existing config: %v", err)
 	}
 
-	if err := configureCodexMCPServer(configPath, "/first/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/first/lite-sandbox", false); err != nil {
 		t.Fatalf("first configureCodexMCPServer failed: %v", err)
 	}
-	if err := configureCodexMCPServer(configPath, "/second/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/second/lite-sandbox", false); err != nil {
 		t.Fatalf("second configureCodexMCPServer failed: %v", err)
 	}
 
@@ -125,7 +154,7 @@ func TestConfigureCodexMCPServerReplacesInPlacePreservingSurrounding(t *testing.
 		t.Fatalf("failed to write existing config: %v", err)
 	}
 
-	if err := configureCodexMCPServer(configPath, "/new"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/new", false); err != nil {
 		t.Fatalf("configureCodexMCPServer failed: %v", err)
 	}
 
@@ -164,7 +193,7 @@ func TestConfigureCodexMCPServerPreservesFollowingContent(t *testing.T) {
 		t.Fatalf("failed to write existing config: %v", err)
 	}
 
-	if err := configureCodexMCPServer(configPath, "/new"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/new", false); err != nil {
 		t.Fatalf("configureCodexMCPServer failed: %v", err)
 	}
 
@@ -217,14 +246,14 @@ func TestConfigureCodexMCPServerDetectsBlockAcrossReinstalls(t *testing.T) {
 	// that documents the managed hook block.
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
-	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox", false); err != nil {
 		t.Fatalf("configureCodexMCPServer: %v", err)
 	}
 	if err := reconcileCodexHook(configPath, "/bin/lite-sandbox", "/bin/lite-sandbox hook", bashValidateMatcher); err != nil {
 		t.Fatalf("reconcileCodexHook: %v", err)
 	}
 	before := readFile(t, configPath)
-	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox-v2"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox-v2", false); err != nil {
 		t.Fatalf("configureCodexMCPServer (2nd): %v", err)
 	}
 	after := readFile(t, configPath)
@@ -366,7 +395,7 @@ func TestConfigureCodexMCPAndHookCoexist(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.toml")
 
 	// Simulate a full default install: MCP table, then hook block.
-	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox", false); err != nil {
 		t.Fatalf("configureCodexMCPServer: %v", err)
 	}
 	if err := reconcileCodexHook(configPath, "/bin/lite-sandbox", "/bin/lite-sandbox hook", bashValidateMatcher); err != nil {
@@ -374,7 +403,7 @@ func TestConfigureCodexMCPAndHookCoexist(t *testing.T) {
 	}
 
 	// Re-run the MCP step (as a second install would): the hook block must remain.
-	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox-v2"); err != nil {
+	if err := configureCodexMCPServer(configPath, "/bin/lite-sandbox-v2", false); err != nil {
 		t.Fatalf("configureCodexMCPServer (2nd): %v", err)
 	}
 	content := readFile(t, configPath)
