@@ -525,6 +525,13 @@ type Config struct {
 	Docker                *DockerConfig               `yaml:"docker,omitempty"`
 	LocalBinaryExecution  *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox             *bool                       `yaml:"os_sandbox,omitempty"`
+	// RejectRedundantCd, when enabled (the default), rejects a command that
+	// begins by cd-ing into the working directory it already runs in — the
+	// `cd /abs/path/to/repo && ...` prefix agents habitually emit even though the
+	// sandbox is already anchored there. Only a leading, literal, absolute-path cd
+	// whose target resolves exactly to the working directory is rejected; a cd into
+	// a subdirectory is legitimate and left alone. Set to false to allow it.
+	RejectRedundantCd *bool `yaml:"reject_redundant_cd,omitempty"`
 	// Overrides change parts of the configuration for specific working
 	// directories. Each entry pairs a path with a subset of config sections that
 	// replace the base for commands run at or under that path; the most specific
@@ -600,6 +607,15 @@ func expandPaths(paths []string) []string {
 		result = append(result, abs)
 	}
 	return result
+}
+
+// RejectsRedundantCd returns whether a leading redundant `cd` into the working
+// directory should be rejected (default: true). See the RejectRedundantCd field.
+func (c *Config) RejectsRedundantCd() bool {
+	if c == nil || c.RejectRedundantCd == nil {
+		return true
+	}
+	return *c.RejectRedundantCd
 }
 
 // OSSandboxEnabled returns whether OS-level sandboxing with bwrap is enabled (default: false).

@@ -116,6 +116,31 @@ the sandbox's `/tmp` overlay on Linux. Manage these with
 `lite-sandbox config internal-readable-paths add <path>` /
 `internal-writable-paths add <path>`.
 
+## Redundant `cd` rejection
+
+Agents habitually prefix a command with `cd /abs/path/to/repo && ...` even though
+the sandbox already runs in that directory. By default the sandbox rejects this
+noise so the agent drops it:
+
+```
+unneeded cd: cwd is already /abs/path/to/repo (drop the leading "cd /abs/path/to/repo")
+```
+
+The match is deliberately narrow: only a **leading `cd` with a single literal,
+absolute-path argument that resolves exactly to the working directory** is
+rejected. A `cd` into a subdirectory, a relative `cd`, `cd .`, a dynamic target
+like `cd "$PWD"`, or a `cd` carrying flags are all left alone — those are either
+legitimate or not the redundant prefix agents emit.
+
+Disable it (allowing the redundant `cd`) with:
+
+```yaml
+reject_redundant_cd: false
+```
+
+Manage it with `lite-sandbox config redundant-cd enable|disable|show`. Like every
+section it can be flipped per directory via the overrides below.
+
 ## Per-directory overrides
 
 Any part of the configuration can be changed for specific working directories via
