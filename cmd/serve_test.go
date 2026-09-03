@@ -509,3 +509,42 @@ func TestSandboxPaths_InternalPathsExcluded(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemTempPath verifies the per-user system temp dir ($TMPDIR, e.g.
+// macOS's /var/folders/.../T) is granted while world-shared temp dirs (/tmp,
+// /var/tmp) are withheld so the AST/file-tool boundary is never widened to a
+// directory every user on the host can write.
+func TestSystemTempPath(t *testing.T) {
+	t.Run("per-user temp is granted", func(t *testing.T) {
+		t.Setenv("TMPDIR", "/var/folders/xn/abc/T")
+		if got := systemTempPath(); got != "/var/folders/xn/abc/T" {
+			t.Fatalf("expected per-user temp to be granted, got %q", got)
+		}
+	})
+	for _, shared := range []string{"/tmp", "/tmp/", "/var/tmp", "/private/tmp", "/private/var/tmp"} {
+		t.Run("shared "+shared+" withheld", func(t *testing.T) {
+			t.Setenv("TMPDIR", shared)
+			if got := systemTempPath(); got != "" {
+				t.Fatalf("expected shared temp %q to be withheld, got %q", shared, got)
+			}
+		})
+	}
+}
+
+// TestSandboxPaths_SystemTempIncluded verifies the per-user temp dir flows into
+// both the read and write sets via sandboxPaths, so the bash tool and the
+// PreToolUse file-tool hook both permit it.
+func TestSandboxPaths_SystemTempIncluded(t *testing.T) {
+	t.Setenv("TMPDIR", "/var/folders/xn/abc/T")
+	sb := bash_sandboxed.NewSandbox()
+	defer sb.Close()
+
+	readPaths, writePaths := sandboxPaths(sb, "/work")
+
+	if !slices.Contains(readPaths, "/var/folders/xn/abc/T") {
+		t.Fatalf("expected per-user temp in readPaths, got %v", readPaths)
+	}
+	if !slices.Contains(writePaths, "/var/folders/xn/abc/T") {
+		t.Fatalf("expected per-user temp in writePaths, got %v", writePaths)
+	}
+}
