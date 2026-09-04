@@ -9,10 +9,10 @@ go install github.com/gartnera/lite-sandbox@latest  # Install the lite-sandbox b
 lite-sandbox install                                 # Configure every detected agent CLI, then restart them
 ```
 
-`install` autodetects which supported agent CLIs — **Claude Code**, **OpenAI Codex CLI**, and **opencode** — are installed on the host (binary on `PATH` or config directory present) and configures each one: it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a usage directive so the agent routes shell commands through the sandbox. Name agents explicitly to configure just those:
+`install` autodetects which supported agent CLIs — **Claude Code**, **OpenAI Codex CLI**, **opencode**, and **Crush** — are installed on the host (binary on `PATH` or config directory present) and configures each one: it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a usage directive so the agent routes shell commands through the sandbox. Name agents explicitly to configure just those:
 
 ```bash
-lite-sandbox install                       # autodetect claude / codex / opencode
+lite-sandbox install                       # autodetect claude / codex / opencode / crush
 lite-sandbox install codex                 # configure only Codex
 lite-sandbox install claude opencode       # configure exactly these
 lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths

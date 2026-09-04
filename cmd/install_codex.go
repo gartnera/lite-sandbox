@@ -195,7 +195,7 @@ func configureCodexMCPServer(configTomlPath, binPath string, alwaysLoad bool) er
 	}
 
 	if start == -1 {
-		return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
+		return os.WriteFile(configTomlPath, []byte(appendConfigBlock(content, block)), 0644)
 	}
 
 	// Present: replace only our contiguous table body in place. Our table is a
@@ -246,19 +246,26 @@ func reconcileCodexHook(configTomlPath, binPath, command, matcher string) error 
 		"command = " + tomlString(command) + "\n" +
 		codexHookBlockEnd + "\n"
 
-	return os.WriteFile(configTomlPath, []byte(appendTOMLBlock(content, block)), 0644)
+	return os.WriteFile(configTomlPath, []byte(appendConfigBlock(content, block)), 0644)
 }
 
 // stripCodexHookBlock removes every managed hook block (markers inclusive) from
 // content, so re-running (or switching modes) converges to a single block after
 // the fresh one is appended. Content without a block is returned unchanged.
+func stripCodexHookBlock(content string) string {
+	return stripManagedBlock(content, codexHookBlockStart, codexHookBlockEnd)
+}
+
+// stripManagedBlock removes every block delimited by the startMarker and
+// endMarker lines (markers inclusive) from content. Content without a block is
+// returned unchanged.
 //
 // If a start marker has no matching end marker (a user hand-deleted the end
 // marker), only the start-marker line is removed rather than everything to EOF,
 // so user content below an orphaned marker is never destroyed.
-func stripCodexHookBlock(content string) string {
+func stripManagedBlock(content, startMarker, endMarker string) string {
 	for {
-		start := strings.Index(content, codexHookBlockStart)
+		start := strings.Index(content, startMarker)
 		if start == -1 {
 			return content
 		}
@@ -266,10 +273,10 @@ func stripCodexHookBlock(content string) string {
 		lineStart := strings.LastIndex(content[:start], "\n") + 1
 
 		var cut int
-		if rel := strings.Index(content[start:], codexHookBlockEnd); rel != -1 {
+		if rel := strings.Index(content[start:], endMarker); rel != -1 {
 			// Remove through the end of the end-marker's line.
-			endMarker := start + rel + len(codexHookBlockEnd)
-			cut = lineEnd(content, endMarker)
+			endIdx := start + rel + len(endMarker)
+			cut = lineEnd(content, endIdx)
 		} else {
 			// Malformed (no end marker): remove only the start-marker line.
 			cut = lineEnd(content, start)
@@ -287,9 +294,9 @@ func lineEnd(s string, idx int) int {
 	return len(s)
 }
 
-// appendTOMLBlock appends block (which ends in a newline) to content, ensuring
-// exactly one blank line separates it from any existing content.
-func appendTOMLBlock(content, block string) string {
+// appendConfigBlock appends block (which ends in a newline) to content,
+// ensuring exactly one blank line separates it from any existing content.
+func appendConfigBlock(content, block string) string {
 	if content == "" {
 		return block
 	}
