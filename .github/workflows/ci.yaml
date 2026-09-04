@@ -32,19 +32,32 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Install crush
-        run: |
-          os=$(uname -s)   # Linux / Darwin
-          arch=$(uname -m) # x86_64 / arm64
-          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
-          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/crush_${CRUSH_VERSION}_${os}_${arch}" >> "$GITHUB_PATH"
       - name: Build
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+      - name: Cache crush
+        id: crush-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/crush
+          key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install crush
+        if: steps.crush-cache.outputs.cache-hit != 'true'
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/crush"
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$RUNNER_TEMP/crush"
+      - name: Crush end-to-end test
+        run: |
+          export PATH="$RUNNER_TEMP/crush:$PATH"
+          crush --version
+          go test ./cmd/ -run TestCrushEndToEnd -v
+        env:
           CRUSH_E2E_TESTS: "1"
 
   test-macos:
@@ -55,17 +68,30 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install crush
-        run: |
-          os=$(uname -s)   # Linux / Darwin
-          arch=$(uname -m) # x86_64 / arm64
-          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
-          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/crush_${CRUSH_VERSION}_${os}_${arch}" >> "$GITHUB_PATH"
       - name: Build
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+      - name: Cache crush
+        id: crush-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/crush
+          key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install crush
+        if: steps.crush-cache.outputs.cache-hit != 'true'
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/crush"
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$RUNNER_TEMP/crush"
+      - name: Crush end-to-end test
+        run: |
+          export PATH="$RUNNER_TEMP/crush:$PATH"
+          crush --version
+          go test ./cmd/ -run TestCrushEndToEnd -v
+        env:
           CRUSH_E2E_TESTS: "1"
