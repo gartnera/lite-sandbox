@@ -22,9 +22,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.go.outputs.version }}
       - name: Install bubblewrap
         run: |
           # The runner image ships a recent apt index, so try installing from it
@@ -74,9 +80,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.go.outputs.version }}
       - name: Build
         run: go build -o lite-sandbox
       - name: Test
