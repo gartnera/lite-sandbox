@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  # Pinned Crush release for the installer end-to-end test (TestCrushEndToEnd).
+  CRUSH_VERSION: 0.92.0
+
 on:
   push:
     branches: [main]
@@ -34,6 +38,27 @@ jobs:
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+      - name: Cache crush
+        id: crush-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/crush
+          key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install crush
+        if: steps.crush-cache.outputs.cache-hit != 'true'
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/crush"
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$RUNNER_TEMP/crush"
+      - name: Crush end-to-end test
+        run: |
+          export PATH="$RUNNER_TEMP/crush:$PATH"
+          crush --version
+          go test ./cmd/ -run TestCrushEndToEnd -v
+        env:
+          CRUSH_E2E_TESTS: "1"
 
   test-macos:
     runs-on: macos-latest
@@ -49,3 +74,24 @@ jobs:
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+      - name: Cache crush
+        id: crush-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/crush
+          key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install crush
+        if: steps.crush-cache.outputs.cache-hit != 'true'
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/crush"
+          curl -fsSL "$url" | tar -xz --strip-components=1 -C "$RUNNER_TEMP/crush"
+      - name: Crush end-to-end test
+        run: |
+          export PATH="$RUNNER_TEMP/crush:$PATH"
+          crush --version
+          go test ./cmd/ -run TestCrushEndToEnd -v
+        env:
+          CRUSH_E2E_TESTS: "1"

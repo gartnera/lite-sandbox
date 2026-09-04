@@ -8,15 +8,15 @@ The easiest way to configure your coding agents is the built-in install command:
 lite-sandbox install
 ```
 
-With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), and [opencode](#opencode) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`). To configure an explicit set instead, name the agents:
+With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), and [Crush](#crush) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`). To configure an explicit set instead, name the agents:
 
 ```bash
-lite-sandbox install                  # autodetect claude / codex / opencode
+lite-sandbox install                  # autodetect claude / codex / opencode / crush
 lite-sandbox install codex            # configure only Codex
 lite-sandbox install claude opencode  # configure exactly these
 ```
 
-The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol, so `--with-tool-hook` is a no-op for it and `--bash-ast-hook-mode` skips it.
+The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol and Crush's built-in tools aren't governed by lite-sandbox's hook, so `--with-tool-hook` is a no-op for those two and `--bash-ast-hook-mode` skips them.
 
 ## Claude Code
 
@@ -70,7 +70,7 @@ This is the default. To opt out and let the sandbox tools be deferred like any o
 lite-sandbox install claude --always-load=false
 ```
 
-Codex has the same behavior. Newer Codex models defer MCP tools behind Codex's own `tool_search` by default, so `install codex` sets the equivalent key on its server table — `omit_tools_from = ["deferred"]` — which removes the "deferred" tool-exposure surface and keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag is a no-op only for opencode, and in `--bash-ast-hook-mode` (which doesn't configure the MCP server at all).
+Codex has the same behavior. Newer Codex models defer MCP tools behind Codex's own `tool_search` by default, so `install codex` sets the equivalent key on its server table — `omit_tools_from = ["deferred"]` — which removes the "deferred" tool-exposure surface and keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag is a no-op only for opencode and Crush, and in `--bash-ast-hook-mode` (which doesn't configure the MCP server at all).
 
 Restart the agent after running the install command.
 
@@ -183,6 +183,68 @@ ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell 
 ```
 
 Restart opencode after making these changes.
+
+## Crush
+
+To configure [Crush](https://github.com/charmbracelet/crush), run the install (autodetected, or named explicitly):
+
+```bash
+lite-sandbox install crush
+```
+
+This automatically edits Crush's **global** config in its config directory (`~/.config/crush`, honoring `$XDG_CONFIG_HOME` and `$CRUSH_GLOBAL_CONFIG`):
+
+1. Registers the MCP server as `lite-sandbox` (stdio, `lite-sandbox serve-mcp`). Crush exposes MCP tools as `mcp_<server>_<tool>`, so the sandbox's shell surfaces as `mcp_lite-sandbox_bash`.
+2. Hides the built-in `bash` tool from the agent via `permissions deny bash` (Crush's `options.disabled_tools`) — the analogue of the Claude installer's `Bash` permission deny; the tool is removed from the model's tool list entirely — and auto-allows the sandbox's tools (`mcp_lite-sandbox_bash`, `mcp_lite-sandbox_bash_output`, `mcp_lite-sandbox_kill_shell`, `mcp_lite-sandbox_list_shells`) via `permissions allow` (`permissions.allowed_tools`) so they never prompt
+3. Adds a usage directive to `CRUSH.md`, the global context file Crush loads into every session
+
+Crush reads two global config files and merges them, with the Bash-based `crushrc` (Crush's current format, introduced in v0.88.0) taking precedence over the legacy `crush.json` (still loaded, but deprecated). The installer edits **whichever exists** — `crushrc` when both do — and when neither exists creates a `crushrc`, unless `crush --version` reports a release older than v0.88.0, in which case it creates a `crush.json` so the install still takes effect. In a `crushrc` the settings live in a clearly-marked managed block appended to the end of the file (so `mcp add` overrides any earlier definition of the same server); in `crush.json` the `mcp.lite-sandbox`, `options.disabled_tools`, and `permissions.allowed_tools` entries are edited in place. All other content is preserved and re-running is idempotent.
+
+Crush's [hooks](https://github.com/charmbracelet/crush/tree/main/docs/hooks) are Claude Code-compatible in protocol, but its built-in tools are named differently (`bash`, `view`, `edit`, …) from the ones `lite-sandbox hook` governs, so the hook-based modes don't apply: `--with-tool-hook` is a no-op for Crush and `--bash-ast-hook-mode` skips it. Hiding the built-in `bash` tool is a stronger block than a hook anyway — the model never sees it. Reads and writes made *through the sandboxed shell* are confined at runtime like on every other agent.
+
+### Manual Crush setup
+
+Add this to `~/.config/crush/crushrc` (replace the path with your built binary):
+
+```bash
+mcp add lite-sandbox --type stdio --command /path/to/lite-sandbox --args serve-mcp
+permissions deny bash
+permissions allow mcp_lite-sandbox_bash mcp_lite-sandbox_bash_output mcp_lite-sandbox_kill_shell mcp_lite-sandbox_list_shells
+```
+
+Or, for the legacy JSON config (`~/.config/crush/crush.json`, required on Crush releases before v0.88.0):
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "lite-sandbox": {
+      "type": "stdio",
+      "command": "/path/to/lite-sandbox",
+      "args": ["serve-mcp"]
+    }
+  },
+  "options": {
+    "disabled_tools": ["bash"]
+  },
+  "permissions": {
+    "allowed_tools": [
+      "mcp_lite-sandbox_bash",
+      "mcp_lite-sandbox_bash_output",
+      "mcp_lite-sandbox_kill_shell",
+      "mcp_lite-sandbox_list_shells"
+    ]
+  }
+}
+```
+
+Then add a directive to `~/.config/crush/CRUSH.md` (global) or a project-level `CRUSH.md`:
+
+```markdown
+ALWAYS use the `mcp_lite-sandbox_bash` tool for running shell commands. The built-in `bash` tool is disabled and not available. The sandboxed tool is pre-approved and requires no permission prompts; it runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+```
+
+Restart Crush after making these changes.
 
 ## Manual Claude Code setup
 
