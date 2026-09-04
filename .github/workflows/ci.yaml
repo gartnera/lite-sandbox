@@ -10,6 +10,12 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs of the same PR; pushes to main are keyed by sha so
+# they never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,8 +27,11 @@ jobs:
           go-version-file: go.mod
       - name: Install bubblewrap
         run: |
+          # The runner image ships a recent apt index, so try installing from it
+          # first and only refresh the index if that fails (saves ~5s per run).
+          timeout 120 sudo apt-get install -y --no-install-recommends bubblewrap && exit 0
           for i in 1 2 3; do
-            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y bubblewrap && exit 0
+            timeout 120 sudo apt-get update && timeout 120 sudo apt-get install -y --no-install-recommends bubblewrap && exit 0
             echo "apt attempt $i timed out or failed, retrying..."
             sleep 5
           done
@@ -40,7 +49,7 @@ jobs:
           OS_SANDBOX_TESTS: "1"
       - name: Cache crush
         id: crush-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/crush
           key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -76,7 +85,7 @@ jobs:
           OS_SANDBOX_TESTS: "1"
       - name: Cache crush
         id: crush-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/crush
           key: crush-${{ env.CRUSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
