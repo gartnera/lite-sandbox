@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  # Pinned Crush release for the installer end-to-end test (TestCrushEndToEnd).
+  CRUSH_VERSION: 0.92.0
+
 on:
   push:
     branches: [main]
@@ -28,12 +32,20 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install crush
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/crush_${CRUSH_VERSION}_${os}_${arch}" >> "$GITHUB_PATH"
       - name: Build
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+          CRUSH_E2E_TESTS: "1"
 
   test-macos:
     runs-on: macos-latest
@@ -43,9 +55,17 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Install crush
+        run: |
+          os=$(uname -s)   # Linux / Darwin
+          arch=$(uname -m) # x86_64 / arm64
+          url="https://github.com/charmbracelet/crush/releases/download/v${CRUSH_VERSION}/crush_${CRUSH_VERSION}_${os}_${arch}.tar.gz"
+          curl -fsSL "$url" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/crush_${CRUSH_VERSION}_${os}_${arch}" >> "$GITHUB_PATH"
       - name: Build
         run: go build -o lite-sandbox
       - name: Test
         run: go test ./...
         env:
           OS_SANDBOX_TESTS: "1"
+          CRUSH_E2E_TESTS: "1"
