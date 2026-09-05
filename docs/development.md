@@ -32,7 +32,18 @@ The semver bump comes from the `release:*` labels on the pull requests merged si
 | `release:patch` | patch | fixes and chores — **the default** for an unlabeled PR or a direct push |
 | `release:skip` | none | changes that need no release (docs, CI) |
 
-When several PRs are released together (a red run on one commit means its changes ride along with the next green one), the highest bump wins; a release is skipped only when every PR is `release:skip`. The `PR labels` workflow creates these labels in the repository if they are missing and fails a PR that carries more than one.
+When several PRs are released together (a red run on one commit means its changes ride along with the next green one), the highest bump wins; a release is skipped only when every PR is `release:skip`. The `PR labels` workflow fails a PR that carries more than one of them.
+
+The labels are created once by hand (they are plain repository labels; the names are what matters):
+
+```bash
+gh label create release:major --color b60205 --description "Breaking change: bump the major version (minor while the project is on 0.x)"
+gh label create release:minor --color 0e8a16 --description "New feature: bump the minor version"
+gh label create release:patch --color 1d76db --description "Fix or chore: bump the patch version (the default when unlabeled)"
+gh label create release:skip  --color e4e669 --description "Do not cut a release for this change"
+```
+
+(Or *Issues → Labels → New label* in the GitHub UI.) A label that doesn't exist yet simply can't be applied; the release workflow treats such PRs as unlabeled, i.e. a patch bump.
 
 **The project stays on 0.x for now**: `RELEASE_ALLOW_MAJOR` in `release.yaml` is `"false"`, so a `release:major` label bumps the minor version instead (with a note in the run log). To graduate to 1.0, set it to `"true"` and merge a `release:major` PR — or push a `v1.0.0` tag by hand and re-run the workflow, since the script picks up from the highest existing `v*` tag.
 

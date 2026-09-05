@@ -1,36 +1,22 @@
 name: PR labels
 
-# Keeps the release:* labels usable: creates them in the repository if they are
-# missing, and fails when a pull request carries more than one, since the
+# Fails a pull request that carries more than one release:* label, since the
 # Release workflow would otherwise silently take the highest. An unlabeled PR
-# is fine — it releases as a patch bump.
+# is fine — it releases as a patch bump. The labels themselves are created by
+# hand once; see docs/development.md#version-bumps-via-pr-labels.
 
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
-permissions:
-  contents: read
-  issues: write # `gh label create`
+permissions: {}
 
 jobs:
   release-label:
-    runs-on: ubuntu-latest
+    # Only reads the event payload, so the 1-vCPU slim runner is plenty.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Ensure the release labels exist
-        # A fork's PR only gets a read-only token; the labels are created by the
-        # first same-repo PR event instead.
-        if: github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          gh label create release:major --force --color b60205 --description "Breaking change: bump the major version (minor while the project is on 0.x)"
-          gh label create release:minor --force --color 0e8a16 --description "New feature: bump the minor version"
-          gh label create release:patch --force --color 1d76db --description "Fix or chore: bump the patch version (the default when unlabeled)"
-          gh label create release:skip  --force --color e4e669 --description "Do not cut a release for this change"
-
       - name: At most one release label
         env:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
