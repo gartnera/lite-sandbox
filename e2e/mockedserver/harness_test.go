@@ -1,4 +1,4 @@
-package e2e
+package mockedserver
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gartnera/lite-sandbox/e2e/mockmodel"
+	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
 )
 
 // The scenario every agent runs. The mock model asks the agent to run a

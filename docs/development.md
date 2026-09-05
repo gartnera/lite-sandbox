@@ -19,18 +19,18 @@ go test -v ./tool/...      # Run tool package tests with verbose output
 
 ## E2E Testing
 
-Two complementary suites live under `e2e/`: the Go agent suite (below) drives the real agent binaries against a mock model, so it needs no API key and checks that each installer's configuration works end to end; `e2e/claude` uses a real model to check that Claude actually *chooses* the sandbox tool.
+Two complementary suites live under `e2e/`: `e2e/mockedserver` (below) drives the real agent binaries against a mocked model server, so it needs no API key and checks that each installer's configuration works end to end; `e2e/claude` uses a real model to check that Claude actually *chooses* the sandbox tool.
 
-### Agent e2e (mock model)
+### `e2e/mockedserver` — agents against a mocked model server
 
-The e2e suite (`e2e/`) drives the **real agent binaries** — [Crush](https://github.com/charmbracelet/crush), [Codex](https://developers.openai.com/codex), and [Claude Code](https://code.claude.com) — through `lite-sandbox install <agent>` and a non-interactive run, and checks that each agent loaded the generated config, launched `lite-sandbox serve-mcp`, offered the sandbox tools (and stopped offering, or had blocked, its built-in shell), and fed the sandbox's results back to the model. No API key is needed: `e2e/mockmodel` stands in for the LLM.
+The mocked suite (`e2e/mockedserver`) drives the **real agent binaries** — [Crush](https://github.com/charmbracelet/crush), [Codex](https://developers.openai.com/codex), and [Claude Code](https://code.claude.com) — through `lite-sandbox install <agent>` and a non-interactive run, and checks that each agent loaded the generated config, launched `lite-sandbox serve-mcp`, offered the sandbox tools (and stopped offering, or had blocked, its built-in shell), and fed the sandbox's results back to the model. No API key is needed: `e2e/mockedserver/mockmodel` stands in for the LLM.
 
 ```bash
-LITE_SANDBOX_E2E=1 go test ./e2e/ -v                 # all agents
-LITE_SANDBOX_E2E=1 go test ./e2e/ -v -run TestCodex  # one agent
+LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v                 # all agents
+LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run TestCodex  # one agent
 ```
 
-`TestMain` provisions everything the suite needs into `e2e/.bin` (override with `E2E_BIN_DIR`) before any test runs, regardless of `-run`: it builds `lite-sandbox`, downloads the pinned Crush release, and `npm install`s the pinned Codex and Claude Code into private prefixes (so `npm` must be on `PATH` even for a Crush-only run). Versions are pinned in `e2e/versions.go`, and each agent is installed once into its own versioned directory (`e2e/.bin/agents/<agent>/<version>`), so switching versions never re-downloads one that is already there. To try a different version for a single run without editing the file, set `E2E_CRUSH_VERSION`, `E2E_CODEX_VERSION`, or `E2E_CLAUDE_CODE_VERSION`. Without `LITE_SANDBOX_E2E` every test skips, so `go test ./...` stays offline. The `E2E` GitHub workflow runs the same command on Linux and macOS, caching `e2e/.bin/agents` keyed on `versions.go`, so a CI run is exactly a local run.
+`TestMain` provisions everything the suite needs into `e2e/mockedserver/.bin` (override with `E2E_BIN_DIR`) before any test runs, regardless of `-run`: it builds `lite-sandbox`, downloads the pinned Crush release, and `npm install`s the pinned Codex and Claude Code into private prefixes (so `npm` must be on `PATH` even for a Crush-only run). Versions are pinned in `e2e/mockedserver/versions.go`, and each agent is installed once into its own versioned directory (`e2e/mockedserver/.bin/agents/<agent>/<version>`), so switching versions never re-downloads one that is already there. To try a different version for a single run without editing the file, set `E2E_CRUSH_VERSION`, `E2E_CODEX_VERSION`, or `E2E_CLAUDE_CODE_VERSION`. Without `LITE_SANDBOX_E2E` every test skips, so `go test ./...` stays offline. The `E2E` GitHub workflow runs the same command on Linux and macOS, caching `e2e/mockedserver/.bin/agents` keyed on `versions.go`, so a CI run is exactly a local run.
 
 The runs themselves are offline: the model is the mock, each agent's update and telemetry calls are switched off where it offers a switch (`DISABLE_AUTOUPDATER` for Claude Code, `check_for_update_on_startup = false` for Codex; Crush's background version check has no switch), and the harness points `HTTPS_PROXY` at a closed loopback port so any remaining outbound https call fails fast and identically on every machine (`NO_PROXY` keeps the loopback mock off the proxy).
 
@@ -46,7 +46,7 @@ The shared scenario asks each agent to run a blocked command (`curl`, not whitel
 - **Codex** — default (the hook redirects the built-in shell, then the MCP tool runs the scenario) and `--bash-ast-hook-mode`. `codex exec` is run with `--dangerously-bypass-hook-trust`, since Codex otherwise skips hooks the user has not trusted via `/hooks`.
 - **Crush** — both config formats the installer edits (`crushrc` and the legacy `crush.json`); Crush has no hook integration.
 
-### Claude Agent SDK e2e (real model)
+### `e2e/claude` — Claude Agent SDK against a real model
 
 `e2e/claude` verifies real-world usage via the Claude Agent SDK: it sends real prompts and checks that Claude uses the sandboxed MCP tool without falling back to built-in Bash. It needs an Anthropic API key and is run on demand rather than in CI:
 

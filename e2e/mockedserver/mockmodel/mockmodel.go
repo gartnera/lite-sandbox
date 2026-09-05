@@ -154,16 +154,29 @@ type reply struct {
 	text      string
 }
 
-// protocol is one wire-format adapter.
+// parsed is what an adapter extracts from a request body: the normalized Turn
+// fields plus what respond needs to answer in kind.
+type parsed struct {
+	tools   map[string]bool
+	results []string
+	text    string
+	// stream reports whether the client asked for a streamed reply.
+	stream bool
+	// namespaces maps an offered function name to its namespace, for protocols
+	// that group tools (Responses); "" for top-level functions.
+	namespaces map[string]string
+}
+
+// protocol is one wire-format adapter. Each decodes its request into typed
+// structs (see chat.go, responses.go, messages.go) and encodes typed responses.
 type protocol interface {
 	// name identifies the protocol in Turn.Protocol.
 	name() string
-	// parse extracts the offered tools, the tool results, and all text shown to
-	// the model from a request.
-	parse(req map[string]any) (tools map[string]bool, results []string, text string)
-	// respond writes r in this protocol's response format, streaming if the
-	// request asked for it.
-	respond(w http.ResponseWriter, req map[string]any, r reply, modelID string) error
+	// parse decodes a request body.
+	parse(body []byte) (parsed, error)
+	// respond writes r in this protocol's response format, streaming if req
+	// asked for it.
+	respond(w http.ResponseWriter, req parsed, r reply, modelID string) error
 }
 
 // protocolFor picks the adapter for a request path, or nil when the path is not
@@ -192,14 +205,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	req, err := p.parse(body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("mock: bad %s request: %v", p.name(), err), http.StatusBadRequest)
 		return
 	}
-
-	tools, results, text := p.parse(req)
-	turn := Turn{Protocol: p.name(), Tools: tools, ToolResults: results, Text: text}
+	turn := Turn{Protocol: p.name(), Tools: req.tools, ToolResults: req.results, Text: req.text}
+	results := req.results
 
 	var rep reply
 	switch {
@@ -264,10 +276,38 @@ func marshalArgs(call *ToolCall) (string, error) {
 	return string(args), nil
 }
 
-// wantsStream reports whether the request asked for a streamed response.
-func wantsStream(req map[string]any) bool {
-	stream, _ := req["stream"].(bool)
-	return stream
+// text is a content field that the wire may carry either as a plain string or
+// as an array of typed parts — {"type":"text"|"input_text"|"output_text",
+// "text":...} (OpenAI) or {"type":"text","text":...} (Anthropic) — and that
+// the mock only ever needs as text. It decodes to the parts' text joined with
+// newlines; parts without text (images, nested tool_use blocks, ...) are
+// skipped.
+type text string
+
+func (t *text) UnmarshalJSON(b []byte) error {
+	var str string
+	if err := json.Unmarshal(b, &str); err == nil {
+		*t = text(str)
+		return nil
+	}
+	if string(b) == "null" {
+		*t = ""
+		return nil
+	}
+	var parts []struct {
+		Text *string `json:"text"`
+	}
+	if err := json.Unmarshal(b, &parts); err != nil {
+		return fmt.Errorf("content is neither a string nor an array of parts: %w", err)
+	}
+	var texts []string
+	for _, p := range parts {
+		if p.Text != nil {
+			texts = append(texts, *p.Text)
+		}
+	}
+	*t = text(strings.Join(texts, "\n"))
+	return nil
 }
 
 // sseWriter emits server-sent events.
@@ -308,37 +348,4 @@ func (s sseWriter) flush() {
 func writeJSON(w http.ResponseWriter, v any) error {
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(v)
-}
-
-// textOf renders a content field — a plain string or an array of parts with a
-// "text" key (OpenAI {"type":"text"|"input_text"|"output_text"}, Anthropic
-// {"type":"text"}) — as text.
-func textOf(v any) string {
-	switch c := v.(type) {
-	case string:
-		return c
-	case []any:
-		var parts []string
-		for _, p := range c {
-			if pm, ok := p.(map[string]any); ok {
-				if s, ok := pm["text"].(string); ok {
-					parts = append(parts, s)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
-}
-
-// asMaps returns the elements of a JSON array that are objects.
-func asMaps(v any) []map[string]any {
-	arr, _ := v.([]any)
-	var out []map[string]any
-	for _, raw := range arr {
-		if m, ok := raw.(map[string]any); ok {
-			out = append(out, m)
-		}
-	}
-	return out
 }

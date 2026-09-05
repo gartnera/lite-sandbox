@@ -1,4 +1,4 @@
-package e2e
+package mockedserver
 
 import (
 	"archive/tar"
@@ -48,7 +48,7 @@ func requireE2E(t *testing.T) {
 }
 
 // provision builds lite-sandbox and installs the pinned agents. Everything
-// lives under e2e/.bin (override with E2E_BIN_DIR): lite-sandbox is rebuilt
+// lives under e2e/mockedserver/.bin (override with E2E_BIN_DIR): lite-sandbox is rebuilt
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
 // setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION for
@@ -68,7 +68,7 @@ func provision() error {
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		return err
 	}
-	if out, err := exec.Command("go", "build", "-o", bins.sandbox, "..").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-o", bins.sandbox, "../..").CombinedOutput(); err != nil {
 		return fmt.Errorf("go build lite-sandbox: %v\n%s", err, out)
 	}
 

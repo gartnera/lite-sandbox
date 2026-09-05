@@ -1,9 +1,9 @@
-package e2e
+package mockedserver
 
 import (
 	"testing"
 
-	"github.com/gartnera/lite-sandbox/e2e/mockmodel"
+	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
 )
 
 // claudeSandboxTool is the sandbox bash tool under Claude Code's

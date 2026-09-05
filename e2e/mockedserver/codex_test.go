@@ -1,10 +1,10 @@
-package e2e
+package mockedserver
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gartnera/lite-sandbox/e2e/mockmodel"
+	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
 	"github.com/pelletier/go-toml/v2"
 )
 
