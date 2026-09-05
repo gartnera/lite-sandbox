@@ -24,7 +24,7 @@ go build -o mybinary
 
 The `go generate` subcommand requires explicit opt-in since it can execute arbitrary code specified in source files.
 
-See `e2e/claude/test_go_runtime_e2e.py` for a complete example demonstrating a Go development workflow (module init, testing, git workflow) using only the sandboxed tool.
+With this enabled, an agent can run a complete Go development workflow (module init, `go test`, a git commit) through the sandboxed tool alone.
 
 ## pnpm Runtime Support
 

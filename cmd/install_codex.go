@@ -128,8 +128,11 @@ func runInstallCodex(binPath string) error {
 	if installBashASTHookMode {
 		fmt.Println("(--bash-ast-hook-mode: MCP server not configured)")
 	}
-	fmt.Println("\nCodex hooks are enabled by default; if you have set [features] hooks = false in")
-	fmt.Println("config.toml, re-enable it or the hook will not run. Restart Codex to apply changes.")
+	fmt.Println("\nCodex skips hooks it has not been told to trust: open Codex, run /hooks, and trust")
+	fmt.Println("the lite-sandbox hook (re-trust it after reinstalling with a different mode or binary")
+	fmt.Println("path, since trust is recorded against the hook's exact definition). Non-interactive")
+	fmt.Println("runs can pass --dangerously-bypass-hook-trust instead. Hooks also require")
+	fmt.Println("[features] hooks to be enabled (the default). Restart Codex to apply changes.")
 	if !governFS {
 		fmt.Println("\nTip: add --with-tool-hook to also confine reads/writes (including apply_patch)")
 		fmt.Println("to the sandbox's paths — the same config that governs Claude Code.")

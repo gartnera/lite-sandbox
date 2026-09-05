@@ -1,0 +1,51 @@
+name: E2E
+
+# Drives the real agent binaries (Crush, Codex, Claude Code) through
+# `lite-sandbox install` and a non-interactive run against the in-process mock
+# model — see e2e/. The versions are pinned in e2e/versions.go; TestMain
+# downloads them into e2e/.bin/agents, which is cached here keyed on that file,
+# so a run here does exactly what `LITE_SANDBOX_E2E=1 go test ./e2e/` does
+# locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      # Codex and Claude Code are installed from npm into e2e/.bin/agents.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache agent binaries
+        uses: actions/cache@v5
+        with:
+          path: e2e/.bin/agents
+          key: e2e-agents-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/versions.go') }}
+      - name: End-to-end tests
+        run: go test ./e2e/ -v -count=1
+        env:
+          LITE_SANDBOX_E2E: "1"

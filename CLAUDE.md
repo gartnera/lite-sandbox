@@ -10,8 +10,7 @@ go test ./...                    # Run default suite (OS-sandbox-runtime tests s
 go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool/... # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
-cd e2e/claude && uv run pytest -v # Run e2e tests (Claude Agent SDK)
-CRUSH_E2E_TESTS=1 CRUSH_BIN=/path/to/crush go test ./cmd/ -run TestCrushEndToEnd -v # Drive a real crush binary through the installer (mock model, no API key)
+LITE_SANDBOX_E2E=1 go test ./e2e/ -v  # Agent e2e: drives real Crush/Codex/Claude Code binaries (pinned, auto-downloaded to e2e/.bin) through the installer against a mock model; no API key
 
 # Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)
 # always compile but only run when OS_SANDBOX_TESTS is set (CI sets it). To run
@@ -42,11 +41,14 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 
 ## Testing
 
-After making complex changes (new commands, validation logic, security rules), run the e2e tests in addition to unit tests. These send real prompts to Claude via the Agent SDK and verify the sandbox tool works end-to-end:
+After making complex changes (new commands, validation logic, security rules, installer changes), run the e2e suite in addition to unit tests. It drives the real Crush, Codex, and Claude Code binaries through `lite-sandbox install` and a non-interactive run, with `e2e/mockmodel` (one server speaking the OpenAI chat-completions, OpenAI Responses, and Anthropic Messages APIs) standing in for the LLM — so it needs no API key and behaves identically locally and in CI:
 
 ```bash
-cd e2e/claude && uv run pytest -v
+LITE_SANDBOX_E2E=1 go test ./e2e/ -v            # all agents
+LITE_SANDBOX_E2E=1 go test ./e2e/ -v -run TestCodex
 ```
+
+The agent versions are pinned in `e2e/versions.go`; `TestMain` downloads them into `e2e/.bin` on first run (needs `npm` on PATH for Codex and Claude Code). Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
 
 ## Notes
 
