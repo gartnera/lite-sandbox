@@ -1,0 +1,31 @@
+name: PR labels
+
+# Fails a pull request that carries more than one release:* label, since the
+# Release workflow would otherwise silently take the highest. An unlabeled PR
+# is fine — it releases as a patch bump.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  release-label:
+    # Only reads the event payload, so the 1-vCPU slim runner is plenty.
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: At most one release label
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          found=()
+          for l in $LABELS; do
+            case "$l" in release:major|release:minor|release:patch|release:skip) found+=("$l") ;; esac
+          done
+          case "${#found[@]}" in
+            0) echo "No release label: this PR will be released as a patch bump." ;;
+            1) echo "Release label: ${found[0]}" ;;
+            *) echo "::error::Pick one release label; found: ${found[*]}"; exit 1 ;;
+          esac

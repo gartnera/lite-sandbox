@@ -17,6 +17,41 @@ go test ./...              # Run all tests
 go test -v ./tool/...      # Run tool package tests with verbose output
 ```
 
+## Releasing
+
+Releases are cut automatically: **every push to `main` is tagged and released** by `.github/workflows/release.yaml`, which builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). There is nothing to do by hand.
+
+### Version bumps via PR labels
+
+The semver bump comes from the `release:*` labels on the pull requests merged since the last release (`.github/scripts/next-version.sh` resolves each first-parent commit in `<last tag>..HEAD` to its merged PR through the GitHub API):
+
+| Label | Bump | Use for |
+|---|---|---|
+| `release:major` | major (minor while on 0.x, see below) | breaking changes |
+| `release:minor` | minor | new features |
+| `release:patch` | patch | fixes and chores — **the default** for an unlabeled PR or a direct push |
+| `release:skip` | none | changes that need no release (docs, CI) |
+
+When several PRs are released together (a red run on one commit means its changes ride along with the next green one), the highest bump wins; a release is skipped only when every PR is `release:skip`. The `PR labels` workflow fails a PR that carries more than one of them.
+
+**The project stays on 0.x for now**: `RELEASE_ALLOW_MAJOR` in `release.yaml` is `"false"`, so a `release:major` label bumps the minor version instead (with a note in the run log). To graduate to 1.0, set it to `"true"` and merge a `release:major` PR — or push a `v1.0.0` tag by hand and re-run the workflow, since the script picks up from the highest existing `v*` tag.
+
+### How the workflow runs
+
+- It runs on every push to `main`. `CI` and `E2E` are not gates — they are expected to have passed on the pull request; enable a merge queue if that ever needs enforcing. Runs are serialized (`concurrency: release`) so two merges never race on the version.
+- The tag is created by the workflow through the GitHub API (a lightweight tag on the released commit), then GoReleaser builds against it. If the upload fails after the tag exists, re-running the workflow completes that release (`release.mode: keep-existing` + `replace_existing_artifacts`) instead of computing a new version — as long as `main` hasn't moved on; once it has, the next release starts from the orphaned tag and that tag stays without a release.
+- The version script fails the run loudly on a GitHub API error rather than guessing: a red `Release` run means "look at it", never "nothing to release". GitHub keeps at most one run pending per concurrency group, so a burst of merges can drop a pending run — the next release then covers everything since the last tag, so a commit's release is delayed, not lost.
+- **Manual release**: *Actions → Release → Run workflow* on `main`; the `bump` input overrides the labels.
+- The binaries embed the tag, short commit, and commit date (RFC 3339) via `-ldflags -X` into `internal/version` — `lite-sandbox version` prints them (`lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)`). Other builds fall back to the Go build info: a `go install`ed binary reports its module version, a `go build` in a checkout reports the tag at HEAD or a pseudo-version for an untagged commit (so a local build of a tagged commit is "already up to date" to `lite-sandbox update`), and only a build without any version information reports `dev`.
+
+`lite-sandbox update` (`internal/selfupdate`, on top of the shared GitHub-release downloader in `internal/ghrelease` that the e2e suite also uses) relies on the asset names GoReleaser produces — `lite-sandbox_<version>_<os>_<arch>.tar.gz` and `checksums.txt` — so change `.goreleaser.yaml` and `selfupdate.AssetName`/`ChecksumsFile` together.
+
+To dry-run the release build locally without a tag or token:
+
+```bash
+go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean   # artifacts land in dist/
+```
+
 ## E2E Testing
 
 Two complementary suites live under `e2e/`: `e2e/mockedserver` (below) drives the real agent binaries against a mocked model server, so it needs no API key and checks that each installer's configuration works end to end; `e2e/claude` uses a real model to check that Claude actually *chooses* the sandbox tool.
@@ -30,7 +65,7 @@ LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v                 # all agents
 LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run TestCodex  # one agent
 ```
 
-`TestMain` provisions everything the suite needs into `e2e/mockedserver/.bin` (override with `E2E_BIN_DIR`) before any test runs, regardless of `-run`: it builds `lite-sandbox` and downloads the pinned Crush, Codex, and opencode GitHub releases and the pinned Claude Code native binary (from the distribution `claude.ai/install.sh` uses, verified against its manifest checksum) — no Node or npm involved. The GitHub downloads go through the authenticated REST API when `GITHUB_TOKEN` (or `GH_TOKEN`) is set — the workflow passes the Actions token — so they are not subject to the per-IP rate limit; without a token they use the public download URLs. Versions are pinned in `e2e/mockedserver/versions.go`, and each agent is installed once into its own versioned directory (`e2e/mockedserver/.bin/agents/<agent>/<version>`), so switching versions never re-downloads one that is already there. To try a different version for a single run without editing the file, set `E2E_CRUSH_VERSION`, `E2E_CODEX_VERSION`, `E2E_CLAUDE_CODE_VERSION`, or `E2E_OPENCODE_VERSION`. Without `LITE_SANDBOX_E2E` every test skips, so `go test ./...` stays offline. The `E2E` GitHub workflow runs the same command on Linux and macOS, caching `e2e/mockedserver/.bin/agents` keyed on `versions.go`, so a CI run is exactly a local run.
+`TestMain` provisions everything the suite needs into `e2e/mockedserver/.bin` (override with `E2E_BIN_DIR`) before any test runs, regardless of `-run`: it builds `lite-sandbox` and downloads the pinned Crush, Codex, and opencode GitHub releases and the pinned Claude Code native binary (from the distribution `claude.ai/install.sh` uses, verified against its manifest checksum) — no Node or npm involved. The GitHub downloads go through the authenticated REST API when `GITHUB_TOKEN` (or `GH_TOKEN`) is set — the workflow passes the Actions token — so they are not subject to the per-IP rate limit; without a token they use the public download URLs. Versions are pinned in `e2e/mockedserver/versions.go`, and each agent is installed once into its own versioned directory (`e2e/mockedserver/.bin/agents/<agent>/<version>`), so switching versions never re-downloads one that is already there. To try a different version for a single run without editing the file, set `E2E_CRUSH_VERSION`, `E2E_CODEX_VERSION`, `E2E_CLAUDE_CODE_VERSION`, or `E2E_OPENCODE_VERSION`. Without `LITE_SANDBOX_E2E` every test skips, so `go test ./...` stays offline. The `E2E` GitHub workflow runs the same command on Linux and macOS, caching `e2e/mockedserver/.bin/agents` keyed on `versions.go` and `main_test.go`, so a CI run is exactly a local run.
 
 The runs themselves are offline: the model is the mock, each agent's update and telemetry calls are switched off where it offers a switch (`DISABLE_AUTOUPDATER` for Claude Code, `check_for_update_on_startup = false` for Codex; Crush's background version check has no switch), and the harness points `HTTPS_PROXY` at a closed loopback port so any remaining outbound https call fails fast and identically on every machine (`NO_PROXY` keeps the loopback mock off the proxy).
 

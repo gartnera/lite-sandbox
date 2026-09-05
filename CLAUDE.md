@@ -10,7 +10,7 @@ go test ./...                    # Run default suite (OS-sandbox-runtime tests s
 go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool/... # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
-LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode binaries (pinned, auto-downloaded to e2e/.bin) through the installer against a mock model; no API key
+LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode binaries (pinned, auto-downloaded to e2e/mockedserver/.bin) through the installer against a mock model; no API key
 cd e2e/claude && uv run pytest -v # Real-model e2e (Claude Agent SDK; needs an API key)
 
 # Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)
@@ -39,6 +39,11 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 - `os_sandbox/` — sandboxed worker process and pool (bwrap/sandbox-exec, gob protocol)
 - `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`)
 - `internal/hook` — hook event/decision types; `internal/imds` — IMDS credential server; `internal/dockerproxy` — Docker socket filtering proxy
+- `internal/version` — build version (set by GoReleaser ldflags; `lite-sandbox version`); `internal/ghrelease` — GitHub release download client shared by `lite-sandbox update` (`internal/selfupdate`) and the e2e agent provisioning
+
+**Releases:** every push to `main` is tagged and released by `.github/workflows/release.yaml` (GoReleaser, `.goreleaser.yaml`). The semver bump comes from `release:major|minor|patch|skip` labels on the merged PRs (`.github/scripts/next-version.sh`; unlabeled = patch, major is capped to minor while `RELEASE_ALLOW_MAJOR` is false). Asset names (`lite-sandbox_<version>_<os>_<arch>.tar.gz`, `checksums.txt`) are relied on by `internal/selfupdate` — change them together. See `docs/development.md`.
+
+**Label every PR you open with exactly one `release:*` label** (add it when creating the PR, or right after): `release:minor` for a new feature or command, `release:patch` for a fix or refactor with no new behavior, `release:skip` for changes that ship nothing to users (docs, CI, tests only), `release:major` for a breaking change (a removed/renamed command or flag, a config-format change). Every merge to `main` is released, so an unlabeled PR silently becomes a patch release; if a PR grows to include a bigger change, upgrade its label. The `PR labels` workflow fails a PR with more than one.
 
 ## Testing
 

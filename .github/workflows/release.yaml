@@ -1,0 +1,103 @@
+name: Release
+
+# Every push to main is released automatically: the release:* labels on the
+# pull requests merged since the last release decide the semver bump
+# (.github/scripts/next-version.sh — patch when unlabeled, no release when
+# every PR is release:skip), the commit is tagged, and GoReleaser
+# (.goreleaser.yaml) builds the Linux/macOS binaries and uploads them to a
+# GitHub release.
+#
+# CI and E2E are expected to have passed on the pull request; a merge queue is
+# the place to enforce that if it ever becomes a problem. To force a specific
+# bump, use "Run workflow" on the main branch.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto = decide from the PR labels)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: write # create the tag and the release
+  pull-requests: read # read the merged PRs' labels
+
+# Never run two releases at once: the version is computed from the tags that
+# exist when a run starts. A queued run that finds HEAD already released exits
+# at the version step. (GitHub keeps at most one run pending per group, so a
+# burst of pushes can drop a run; the next one releases everything since the
+# last tag, so a commit is delayed rather than lost.)
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Keep the project on 0.x for now: a release:major label bumps the minor
+  # version instead. Set to "true" (or push a v1.0.0 tag by hand) to graduate.
+  RELEASE_ALLOW_MAJOR: "false"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # all history and tags: needed to find the last release
+
+      - name: Compute the next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          tag=$(.github/scripts/next-version.sh --bump "$BUMP")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "::notice::Nothing to release for $RELEASE_SHA"
+          else
+            echo "Releasing $tag"
+          fi
+
+      - name: Tag
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists; completing its release"
+            exit 0
+          fi
+          # Create the tag server-side (a lightweight tag on the released
+          # commit) and fetch it: GoReleaser reads the current tag from the
+          # checkout.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$RELEASE_SHA"
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        if: steps.version.outputs.tag != ''
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        if: steps.version.outputs.tag != ''
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+
+      - name: Build and publish the release
+        if: steps.version.outputs.tag != ''
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
