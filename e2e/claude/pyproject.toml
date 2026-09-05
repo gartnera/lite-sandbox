@@ -1,0 +1,14 @@
+[project]
+name = "lite-sandbox-mcp-e2e"
+version = "0.1.0"
+description = "E2E tests for lite-sandbox-mcp using Claude Agent SDK"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-x"

@@ -76,8 +76,12 @@ func runCodex(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string) 
 
 	// Codex skips hooks it has not been told to trust (normally done in the TUI
 	// via /hooks, which records the hook's hash); the bypass flag runs the
-	// configured hooks for this invocation without that step.
+	// configured hooks for this invocation without that step. Codex's own
+	// sandbox for the built-in shell is turned off: lite-sandbox's hook is what
+	// is under test here, and Codex's Linux sandbox (bubblewrap) needs
+	// unprivileged user namespaces that CI runners may not grant.
 	output := runAgent(t, project, environ, bins.codex, "exec",
-		"--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "-C", project, prompt)
+		"--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--sandbox", "danger-full-access",
+		"--json", "-C", project, prompt)
 	return agentRun{model, output}
 }

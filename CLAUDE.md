@@ -11,6 +11,7 @@ go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool/... # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
 LITE_SANDBOX_E2E=1 go test ./e2e/ -v  # Agent e2e: drives real Crush/Codex/Claude Code binaries (pinned, auto-downloaded to e2e/.bin) through the installer against a mock model; no API key
+cd e2e/claude && uv run pytest -v # Real-model e2e (Claude Agent SDK; needs an API key)
 
 # Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)
 # always compile but only run when OS_SANDBOX_TESTS is set (CI sets it). To run
@@ -49,6 +50,12 @@ LITE_SANDBOX_E2E=1 go test ./e2e/ -v -run TestCodex
 ```
 
 The agent versions are pinned in `e2e/versions.go`; `TestMain` downloads all three into `e2e/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests (needs `npm` on PATH for Codex and Claude Code), and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
+
+`e2e/claude` is the complementary real-model suite: it sends real prompts to Claude via the Agent SDK (API key required) and checks Claude actually chooses the sandbox tool over built-in Bash — behavior the mock cannot exercise:
+
+```bash
+cd e2e/claude && uv run pytest -v
+```
 
 ## Notes
 

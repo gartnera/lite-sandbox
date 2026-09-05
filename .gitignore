@@ -1,4 +1,7 @@
 .claude
 lite-sandbox
+__pycache__/
+.venv/
+.pytest_cache/
 plans
 alexwork/

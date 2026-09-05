@@ -19,6 +19,10 @@ go test -v ./tool/...      # Run tool package tests with verbose output
 
 ## E2E Testing
 
+Two complementary suites live under `e2e/`: the Go agent suite (below) drives the real agent binaries against a mock model, so it needs no API key and checks that each installer's configuration works end to end; `e2e/claude` uses a real model to check that Claude actually *chooses* the sandbox tool.
+
+### Agent e2e (mock model)
+
 The e2e suite (`e2e/`) drives the **real agent binaries** — [Crush](https://github.com/charmbracelet/crush), [Codex](https://developers.openai.com/codex), and [Claude Code](https://code.claude.com) — through `lite-sandbox install <agent>` and a non-interactive run, and checks that each agent loaded the generated config, launched `lite-sandbox serve-mcp`, offered the sandbox tools (and stopped offering, or had blocked, its built-in shell), and fed the sandbox's results back to the model. No API key is needed: `e2e/mockmodel` stands in for the LLM.
 
 ```bash
@@ -32,7 +36,7 @@ The runs themselves are offline: the model is the mock, each agent's update and 
 
 Each test isolates its agent in per-test temp directories through the agent's own config-dir variable — `CRUSH_GLOBAL_CONFIG`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` — which the installers honor too, so nothing on the developer's machine is read or written.
 
-### The mock model
+#### The mock model
 
 The three agents speak three different wire protocols — Crush the OpenAI chat-completions API, Codex only the OpenAI Responses API, Claude Code the Anthropic Messages API — so, like Ollama, `mockmodel` is one server with three endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, streaming and not). The protocol is hidden from the tests: every request is normalized into a `Turn` (the tool names offered, the tool results fed back so far), and the scripted behavior is the same everywhere — issue the next scripted tool call, or the final answer once every call has a result. Codex-specific detail: it exposes MCP tools under a namespace (`mcp__lite_sandbox` with functions `bash`, …), which the mock records under Codex's canonical `mcp__lite_sandbox__bash` name and calls back with the namespace-qualified form.
 
@@ -41,3 +45,15 @@ The shared scenario asks each agent to run a blocked command (`curl`, not whitel
 - **Claude Code** — default (built-in `Bash` denied and gone from the tool list), `--with-tool-hook` (`Bash` stays but the hook blocks it with a redirect, and a `Write` outside the writable paths is denied), and `--bash-ast-hook-mode` (no MCP server; the hook rejects `curl` and lets `echo` run).
 - **Codex** — default (the hook redirects the built-in shell, then the MCP tool runs the scenario) and `--bash-ast-hook-mode`. `codex exec` is run with `--dangerously-bypass-hook-trust`, since Codex otherwise skips hooks the user has not trusted via `/hooks`.
 - **Crush** — both config formats the installer edits (`crushrc` and the legacy `crush.json`); Crush has no hook integration.
+
+### Claude Agent SDK e2e (real model)
+
+`e2e/claude` verifies real-world usage via the Claude Agent SDK: it sends real prompts and checks that Claude uses the sandboxed MCP tool without falling back to built-in Bash. It needs an Anthropic API key and is run on demand rather than in CI:
+
+```bash
+cd e2e/claude
+uv run pytest -v          # Run all e2e tests
+uv run pytest -v -k test_go_project_workflow  # Run specific test
+```
+
+**Showcase test**: `e2e/claude/test_go_runtime_e2e.py` demonstrates a complete Go development workflow — module initialization, writing code and tests, running `go test`, and creating a git commit — all using only the `bash` MCP tool with no built-in Bash calls. This test shows how the sandbox enables safe, autonomous development workflows for AI coding agents.
