@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockmodel"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // codexSandboxTool is the sandbox bash tool under Codex's MCP tool naming.
@@ -33,21 +34,20 @@ func TestCodex(t *testing.T) {
 		"CODEX_HOME="+codexHome,
 		"MOCK_API_KEY=dummy",
 	)
-	writeFile(t, filepath.Join(codexHome, "config.toml"), strings.Join([]string{
-		`model = "` + model.ModelID + `"`,
-		`model_provider = "mock"`,
-		`check_for_update_on_startup = false`,
-		``,
-		`[analytics]`,
-		`enabled = false`,
-		``,
-		`[model_providers.mock]`,
-		`name = "Mock"`,
-		`base_url = "` + model.BaseURL + `"`,
-		`env_key = "MOCK_API_KEY"`,
-		`wire_api = "responses"`,
-		``,
-	}, "\n"))
+	cfg := map[string]any{
+		"model":                       model.ModelID,
+		"model_provider":              "mock",
+		"check_for_update_on_startup": false,
+		"analytics":                   map[string]any{"enabled": false},
+		"model_providers": map[string]any{
+			"mock": map[string]any{"name": "Mock", "base_url": model.BaseURL, "env_key": "MOCK_API_KEY", "wire_api": "responses"},
+		},
+	}
+	b, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(codexHome, "config.toml"), string(b))
 
 	installSandbox(t, "codex", environ)
 

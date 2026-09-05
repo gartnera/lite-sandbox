@@ -55,9 +55,18 @@ func startModel(t *testing.T, calls []mockmodel.ToolCall) *mockmodel.Server {
 // env builds the environment for a subprocess: a minimal base (so nothing from
 // the developer's real agent setups leaks in) plus extra KEY=VALUE pairs. PATH
 // starts with the provisioned binaries.
+//
+// Nothing in these runs should reach the network: the model is the local mock
+// and each agent's update/telemetry calls are switched off where it offers a
+// switch (Crush's version check has none). HTTPS_PROXY points every remaining
+// https request at a closed loopback port so it fails fast and identically on
+// every machine instead of depending on connectivity. The mock is plain http
+// on loopback, which NO_PROXY keeps off the proxy (Claude Code would otherwise
+// send it there too).
 func env(home string, extra ...string) []string {
 	path := strings.Join(bins.pathDirs, string(os.PathListSeparator)) + string(os.PathListSeparator) + os.Getenv("PATH")
-	base := []string{"PATH=" + path, "HOME=" + home, "NO_COLOR=1", "TERM=dumb"}
+	base := []string{"PATH=" + path, "HOME=" + home, "NO_COLOR=1", "TERM=dumb",
+		"HTTPS_PROXY=http://127.0.0.1:9", "NO_PROXY=127.0.0.1,localhost"}
 	for _, k := range []string{"TMPDIR", "LANG", "LC_ALL"} {
 		if v := os.Getenv(k); v != "" {
 			base = append(base, k+"="+v)
