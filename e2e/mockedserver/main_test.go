@@ -163,16 +163,83 @@ type githubRelease struct {
 	member string // base name of the binary inside the archive
 }
 
+// githubAPI is the REST API base; a test points it at a local server.
+var githubAPI = "https://api.github.com"
+
+// githubToken returns the token to authenticate GitHub requests with, from
+// GITHUB_TOKEN (what GitHub Actions provides) or GH_TOKEN (the gh CLI's).
+func githubToken() string {
+	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
+		return t
+	}
+	return os.Getenv("GH_TOKEN")
+}
+
 // install downloads the asset and writes its member to dest as an executable.
 func (r githubRelease) install(dest string) error {
-	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", r.repo, r.tag, r.asset)
+	body, err := r.open()
+	if err != nil {
+		return err
+	}
+	defer body.Close()
 	switch {
 	case strings.HasSuffix(r.asset, ".tar.gz"):
-		return downloadTarMember(url, r.member, dest)
+		return extractTarMember(body, r.member, dest)
 	case strings.HasSuffix(r.asset, ".zip"):
-		return downloadZipMember(url, r.member, dest)
+		return extractZipMember(body, r.member, dest)
 	}
 	return fmt.Errorf("%s: unsupported archive type", r.asset)
+}
+
+// open returns the asset's bytes. With a GitHub token it goes through the
+// authenticated REST API — the release's asset list, then the asset itself as
+// application/octet-stream — so downloads count against the token's generous
+// rate limit rather than the per-IP one shared by every job on a CI runner.
+// Without a token, or if the API path fails (a token without access to the
+// repository, an API outage), it falls back to the public browser download URL,
+// which needs no authentication.
+func (r githubRelease) open() (io.ReadCloser, error) {
+	if token := githubToken(); token != "" {
+		body, err := r.openViaAPI(token)
+		if err == nil {
+			return body, nil
+		}
+		fmt.Fprintf(os.Stderr, "e2e: %s: GitHub API download failed (%v); falling back to the public download URL\n", r.asset, err)
+	}
+	return fetch(fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", r.repo, r.tag, r.asset))
+}
+
+// openViaAPI fetches the asset through the REST API with token.
+func (r githubRelease) openViaAPI(token string) (io.ReadCloser, error) {
+	auth := map[string]string{
+		"Authorization":        "Bearer " + token,
+		"X-GitHub-Api-Version": "2022-11-28",
+		"Accept":               "application/vnd.github+json",
+	}
+	body, err := fetchWithHeaders(fmt.Sprintf("%s/repos/%s/releases/tags/%s", githubAPI, r.repo, r.tag), auth)
+	if err != nil {
+		return nil, err
+	}
+	var release struct {
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		} `json:"assets"`
+	}
+	err = json.NewDecoder(body).Decode(&release)
+	body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("decoding release %s: %w", r.tag, err)
+	}
+	for _, a := range release.Assets {
+		if a.Name == r.asset {
+			// The asset endpoint redirects to a pre-signed storage URL; Go's client
+			// drops the Authorization header on that cross-host redirect, as it must.
+			auth["Accept"] = "application/octet-stream"
+			return fetchWithHeaders(a.URL, auth)
+		}
+	}
+	return nil, fmt.Errorf("release %s has no asset %s", r.tag, r.asset)
 }
 
 // installCrush installs the Crush release for version and this OS/arch into dir.
@@ -290,8 +357,19 @@ func isMusl() bool {
 }
 
 // fetch GETs url and returns the body, failing on a non-200 status.
-func fetch(url string) (io.ReadCloser, error) {
-	resp, err := http.Get(url)
+func fetch(url string) (io.ReadCloser, error) { return fetchWithHeaders(url, nil) }
+
+// fetchWithHeaders GETs url with the given request headers and returns the
+// body, failing on a non-200 status.
+func fetchWithHeaders(url string, headers map[string]string) (io.ReadCloser, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -302,15 +380,10 @@ func fetch(url string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-// downloadTarMember fetches a .tar.gz from url and writes the regular file
-// whose base name is member to dest as an executable.
-func downloadTarMember(url, member, dest string) error {
-	body, err := fetch(url)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-	gz, err := gzip.NewReader(body)
+// extractTarMember reads a .tar.gz stream and writes the regular file whose
+// base name is member to dest as an executable.
+func extractTarMember(archive io.Reader, member, dest string) error {
+	gz, err := gzip.NewReader(archive)
 	if err != nil {
 		return err
 	}
@@ -318,7 +391,7 @@ func downloadTarMember(url, member, dest string) error {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("%s: no %s in archive", url, member)
+			return fmt.Errorf("no %s in archive", member)
 		}
 		if err != nil {
 			return err
@@ -329,22 +402,17 @@ func downloadTarMember(url, member, dest string) error {
 	}
 }
 
-// downloadZipMember fetches a .zip from url and writes the file whose base name
-// is member to dest as an executable. Zip needs random access, so the archive
-// is spooled to a temp file first.
-func downloadZipMember(url, member, dest string) error {
-	body, err := fetch(url)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
+// extractZipMember reads a .zip stream and writes the file whose base name is
+// member to dest as an executable. Zip needs random access, so the archive is
+// spooled to a temp file first.
+func extractZipMember(archive io.Reader, member, dest string) error {
 	tmp, err := os.CreateTemp("", "e2e-*.zip")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	if _, err := io.Copy(tmp, body); err != nil {
+	if _, err := io.Copy(tmp, archive); err != nil {
 		return err
 	}
 	zr, err := zip.OpenReader(tmp.Name())
@@ -363,7 +431,7 @@ func downloadZipMember(url, member, dest string) error {
 		defer rc.Close()
 		return writeExecutable(dest, rc)
 	}
-	return fmt.Errorf("%s: no %s in archive", url, member)
+	return fmt.Errorf("no %s in archive", member)
 }
 
 // writeExecutable writes r to path with mode 0755.

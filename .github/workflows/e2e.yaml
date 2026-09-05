@@ -50,6 +50,10 @@ jobs:
         run: go test ./e2e/mockedserver/ -v -count=1 -timeout 15m
         env:
           LITE_SANDBOX_E2E: "1"
+          # Release downloads go through the authenticated GitHub API when a
+          # token is present, so they are not subject to the per-IP rate limit
+          # shared by every job on a runner.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Save agent binaries
         if: always() && steps.agents-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
