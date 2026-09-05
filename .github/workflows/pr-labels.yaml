@@ -2,8 +2,7 @@ name: PR labels
 
 # Fails a pull request that carries more than one release:* label, since the
 # Release workflow would otherwise silently take the highest. An unlabeled PR
-# is fine — it releases as a patch bump. The labels themselves are created by
-# hand once; see docs/development.md#version-bumps-via-pr-labels.
+# is fine — it releases as a patch bump.
 
 on:
   pull_request:
