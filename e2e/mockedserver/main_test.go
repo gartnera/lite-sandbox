@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sync/errgroup"
@@ -154,21 +155,42 @@ func ensureInstalled(binary, what string, install func() error) error {
 	return os.WriteFile(marker, nil, 0644)
 }
 
-// installCrush downloads the Crush GitHub release tarball for version and this
-// OS/arch and extracts the crush binary into dir.
+// githubRelease locates one agent's release asset for this host on GitHub.
+type githubRelease struct {
+	repo   string // owner/name
+	tag    string // release tag, e.g. "v0.92.0" or "rust-v0.153.4"
+	asset  string // attached archive file name (.tar.gz or .zip)
+	member string // base name of the binary inside the archive
+}
+
+// install downloads the asset and writes its member to dest as an executable.
+func (r githubRelease) install(dest string) error {
+	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", r.repo, r.tag, r.asset)
+	switch {
+	case strings.HasSuffix(r.asset, ".tar.gz"):
+		return downloadTarMember(url, r.member, dest)
+	case strings.HasSuffix(r.asset, ".zip"):
+		return downloadZipMember(url, r.member, dest)
+	}
+	return fmt.Errorf("%s: unsupported archive type", r.asset)
+}
+
+// installCrush installs the Crush release for version and this OS/arch into dir.
 func installCrush(dir, version string) error {
 	goos := map[string]string{"linux": "Linux", "darwin": "Darwin"}[runtime.GOOS]
 	arch := map[string]string{"amd64": "x86_64", "arm64": "arm64"}[runtime.GOARCH]
 	if goos == "" || arch == "" {
 		return fmt.Errorf("no crush release for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	url := fmt.Sprintf("https://github.com/charmbracelet/crush/releases/download/v%s/crush_%s_%s_%s.tar.gz",
-		version, version, goos, arch)
-	return downloadTarMember(url, "crush", filepath.Join(dir, "crush"))
+	return githubRelease{
+		repo: "charmbracelet/crush", tag: "v" + version,
+		asset:  fmt.Sprintf("crush_%s_%s_%s.tar.gz", version, goos, arch),
+		member: "crush",
+	}.install(filepath.Join(dir, "crush"))
 }
 
-// installCodex downloads the Codex GitHub release tarball for version and this
-// OS/arch (a single native binary named after the Rust target triple) into dir.
+// installCodex installs the Codex release for version and this OS/arch into
+// dir: a single native binary named after the Rust target triple.
 func installCodex(dir, version string) error {
 	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	sys := map[string]string{"linux": "unknown-linux-musl", "darwin": "apple-darwin"}[runtime.GOOS]
@@ -176,8 +198,32 @@ func installCodex(dir, version string) error {
 		return fmt.Errorf("no codex release for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	triple := arch + "-" + sys
-	url := fmt.Sprintf("https://github.com/openai/codex/releases/download/rust-v%s/codex-%s.tar.gz", version, triple)
-	return downloadTarMember(url, "codex-"+triple, filepath.Join(dir, "codex"))
+	return githubRelease{
+		repo: "openai/codex", tag: "rust-v" + version,
+		asset:  "codex-" + triple + ".tar.gz",
+		member: "codex-" + triple,
+	}.install(filepath.Join(dir, "codex"))
+}
+
+// installOpencode installs the opencode release for version and this OS/arch
+// into dir: a .tar.gz on Linux, a .zip on macOS. This follows
+// https://opencode.ai/install, minus its "-baseline" (no-AVX2) variant, which
+// no supported CI runner or developer machine needs.
+func installOpencode(dir, version string) error {
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	if arch == "" || (runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		return fmt.Errorf("no opencode release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	target := runtime.GOOS + "-" + arch
+	if runtime.GOOS == "linux" && isMusl() {
+		target += "-musl"
+	}
+	ext := map[string]string{"linux": ".tar.gz", "darwin": ".zip"}[runtime.GOOS]
+	return githubRelease{
+		repo: "anomalyco/opencode", tag: "v" + version,
+		asset:  "opencode-" + target + ext,
+		member: "opencode",
+	}.install(filepath.Join(dir, "opencode"))
 }
 
 // claudeCodeReleases is the download base of Claude Code's native (non-npm)
@@ -230,28 +276,6 @@ func installClaudeCode(dir, version string) error {
 		return fmt.Errorf("claude-code %s/%s checksum mismatch: got %s, manifest says %s", version, platform, got, want)
 	}
 	return nil
-}
-
-// installOpencode downloads the opencode GitHub release archive for version and
-// this OS/arch into dir: a .tar.gz on Linux, a .zip on macOS, each holding the
-// single `opencode` binary. This follows https://opencode.ai/install, minus its
-// "-baseline" (no-AVX2) variant, which no supported CI runner or developer
-// machine needs.
-func installOpencode(dir, version string) error {
-	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
-	if arch == "" || (runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
-		return fmt.Errorf("no opencode release for %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	target := runtime.GOOS + "-" + arch
-	if runtime.GOOS == "linux" && isMusl() {
-		target += "-musl"
-	}
-	base := fmt.Sprintf("https://github.com/anomalyco/opencode/releases/download/v%s/opencode-%s", version, target)
-	dest := filepath.Join(dir, "opencode")
-	if runtime.GOOS == "linux" {
-		return downloadTarMember(base+".tar.gz", "opencode", dest)
-	}
-	return downloadZipMember(base+".zip", "opencode", dest)
 }
 
 // isMusl reports whether this Linux host uses musl rather than glibc, the way
