@@ -55,6 +55,26 @@ level_of_label() {
 }
 level_name() { case "$1" in 3) echo major ;; 2) echo minor ;; 1) echo patch ;; *) echo skip ;; esac; }
 
+# release_published succeeds when tag has a *published* GitHub release. A
+# failed run leaves a draft behind, which the tags endpoint does not return
+# (unlike `gh release view`), so a draft counts as unpublished and the re-run
+# replaces it. Only a 404 means "not published": re-emitting a tag whose
+# release exists would fail the run (an immutable release cannot be updated),
+# so any other error is retried once and then fatal.
+release_published() {
+  local tag=$1 out
+  for attempt in 1 2; do
+    if out=$(gh api "repos/$repo/releases/tags/$tag" 2>&1); then
+      return 0
+    fi
+    case "$out" in *"HTTP 404"*) return 1 ;; esac
+    log "gh api releases/tags/$tag failed (attempt $attempt): $out"
+    sleep 2
+  done
+  log "cannot tell whether $tag has a published release; refusing to guess"
+  exit 1
+}
+
 head=$(git rev-parse HEAD)
 latest=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
 
@@ -62,10 +82,8 @@ if [ -n "$latest" ]; then
   if git merge-base --is-ancestor "$head" "$latest"; then
     # Nothing new. The one exception: HEAD is the last tag itself but the
     # release never made it out (the run failed after tagging) — re-emit the
-    # tag so the workflow can redo it. Only a published release counts: a
-    # failed run leaves a draft behind, which the tags endpoint does not
-    # return (unlike `gh release view`), and the re-run replaces it.
-    if [ "$(git rev-parse "$latest^{commit}")" = "$head" ] && ! gh api "repos/$repo/releases/tags/$latest" >/dev/null 2>&1; then
+    # tag so the workflow can redo it.
+    if [ "$(git rev-parse "$latest^{commit}")" = "$head" ] && ! release_published "$latest"; then
       log "$latest is tagged at HEAD but has no published GitHub release yet; releasing it"
       echo "$latest"
     else

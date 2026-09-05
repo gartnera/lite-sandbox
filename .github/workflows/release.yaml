@@ -132,6 +132,8 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-          if [ "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .immutable)" != true ]; then
+          if ! immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .immutable); then
+            echo "::warning::Could not check whether $TAG is immutable."
+          elif [ "$immutable" != true ]; then
             echo "::warning::$TAG was published as a mutable release. Enable release immutability for the repository (Settings > General > Releases); see docs/development.md."
           fi
