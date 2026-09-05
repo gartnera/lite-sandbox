@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // messagesProtocol is the Anthropic Messages API wire format (POST /v1/messages),
@@ -13,7 +14,7 @@ type messagesProtocol struct{}
 
 func (messagesProtocol) name() string { return "messages" }
 
-func (messagesProtocol) parse(req map[string]any) (map[string]bool, []string) {
+func (messagesProtocol) parse(req map[string]any) (map[string]bool, []string, string) {
 	tools := map[string]bool{}
 	for _, tool := range asMaps(req["tools"]) {
 		if name, ok := tool["name"].(string); ok {
@@ -21,17 +22,28 @@ func (messagesProtocol) parse(req map[string]any) (map[string]bool, []string) {
 		}
 	}
 	var results []string
+	text := []string{textOf(req["system"])}
 	for _, msg := range asMaps(req["messages"]) {
-		if msg["role"] != "user" {
+		if str, ok := msg["content"].(string); ok {
+			text = append(text, str)
 			continue
 		}
 		for _, block := range asMaps(msg["content"]) {
-			if block["type"] == "tool_result" {
-				results = append(results, textOf(block["content"]))
+			switch block["type"] {
+			case "tool_result":
+				content := textOf(block["content"])
+				text = append(text, content)
+				if msg["role"] == "user" {
+					results = append(results, content)
+				}
+			default:
+				if str, ok := block["text"].(string); ok {
+					text = append(text, str)
+				}
 			}
 		}
 	}
-	return tools, results
+	return tools, results, strings.Join(text, "\n")
 }
 
 func (messagesProtocol) respond(w http.ResponseWriter, req map[string]any, r reply, modelID string) error {

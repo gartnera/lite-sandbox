@@ -28,19 +28,31 @@ type responsesProtocol struct{}
 
 func (responsesProtocol) name() string { return "responses" }
 
-func (responsesProtocol) parse(req map[string]any) (map[string]bool, []string) {
+func (responsesProtocol) parse(req map[string]any) (map[string]bool, []string, string) {
 	tools := map[string]bool{}
 	for name := range responsesTools(req) {
 		tools[name] = true
 	}
 
-	var results []string
+	var results, text []string
+	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
+		text = append(text, instructions)
+	}
 	for _, item := range asMaps(req["input"]) {
-		if item["type"] == "function_call_output" {
-			results = append(results, textOf(item["output"]))
+		typ, _ := item["type"].(string)
+		if typ == "" && item["role"] != nil {
+			typ = "message" // the API lets plain {"role","content"} messages omit type
+		}
+		switch typ {
+		case "function_call_output":
+			output := textOf(item["output"])
+			results = append(results, output)
+			text = append(text, output)
+		case "message":
+			text = append(text, textOf(item["content"]))
 		}
 	}
-	return tools, results
+	return tools, results, strings.Join(text, "\n")
 }
 
 func (responsesProtocol) respond(w http.ResponseWriter, req map[string]any, r reply, modelID string) error {

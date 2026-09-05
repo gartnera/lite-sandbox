@@ -3,6 +3,7 @@ package mockmodel
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // chatProtocol is the OpenAI chat-completions wire format
@@ -12,7 +13,7 @@ type chatProtocol struct{}
 
 func (chatProtocol) name() string { return "chat" }
 
-func (chatProtocol) parse(req map[string]any) (map[string]bool, []string) {
+func (chatProtocol) parse(req map[string]any) (map[string]bool, []string, string) {
 	tools := map[string]bool{}
 	for _, tool := range asMaps(req["tools"]) {
 		fn, _ := tool["function"].(map[string]any)
@@ -20,13 +21,15 @@ func (chatProtocol) parse(req map[string]any) (map[string]bool, []string) {
 			tools[name] = true
 		}
 	}
-	var results []string
+	var results, text []string
 	for _, msg := range asMaps(req["messages"]) {
+		content := textOf(msg["content"])
+		text = append(text, content)
 		if msg["role"] == "tool" {
-			results = append(results, textOf(msg["content"]))
+			results = append(results, content)
 		}
 	}
-	return tools, results
+	return tools, results, strings.Join(text, "\n")
 }
 
 func (chatProtocol) respond(w http.ResponseWriter, req map[string]any, r reply, modelID string) error {

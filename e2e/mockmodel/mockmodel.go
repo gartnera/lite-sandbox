@@ -74,9 +74,15 @@ type Turn struct {
 	// ToolResults holds the tool results present in the transcript, in order —
 	// i.e. what the harness fed back for each tool call so far.
 	ToolResults []string
-	// Raw is the decoded request body, for protocol-specific assertions and
-	// debugging.
-	Raw map[string]any
+	// Text is all the text the model was shown on this request — system or
+	// developer instructions, every message, and tool results — so tests can
+	// check that something reached the model (e.g. the installer's directive
+	// from CLAUDE.md / AGENTS.md / CRUSH.md) without knowing where the harness
+	// put it.
+	Text string
+	// Final reports that the mock answered this turn with FinalText, i.e. every
+	// scripted call had a result in the transcript.
+	Final bool
 }
 
 // IsAgentTurn reports whether the request offered tools, i.e. was the agent's
@@ -152,8 +158,9 @@ type reply struct {
 type protocol interface {
 	// name identifies the protocol in Turn.Protocol.
 	name() string
-	// parse extracts the offered tools and the tool results from a request.
-	parse(req map[string]any) (tools map[string]bool, results []string)
+	// parse extracts the offered tools, the tool results, and all text shown to
+	// the model from a request.
+	parse(req map[string]any) (tools map[string]bool, results []string, text string)
 	// respond writes r in this protocol's response format, streaming if the
 	// request asked for it.
 	respond(w http.ResponseWriter, req map[string]any, r reply, modelID string) error
@@ -191,25 +198,60 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tools, results := p.parse(req)
-	turn := Turn{Protocol: p.name(), Tools: tools, ToolResults: results, Raw: req}
-	s.mu.Lock()
-	s.turns = append(s.turns, turn)
-	s.mu.Unlock()
+	tools, results, text := p.parse(req)
+	turn := Turn{Protocol: p.name(), Tools: tools, ToolResults: results, Text: text}
 
 	var rep reply
 	switch {
 	case !turn.IsAgentTurn():
 		rep.text = s.script.SideText
-	case len(results) < len(s.script.ToolCalls):
+	case len(results) < len(s.script.ToolCalls) && s.agentTurnCount() < s.maxAgentTurns():
 		rep.call = &s.script.ToolCalls[len(results)]
 		rep.callIndex = len(results)
+	case len(results) < len(s.script.ToolCalls):
+		// The harness keeps asking without ever feeding back a result for the
+		// pending call (its result shape may be one parse() does not recognize).
+		// Answer with a self-describing text so the run ends now and the test
+		// fails on its assertions, instead of looping until a timeout.
+		rep.text = fmt.Sprintf("mock: giving up after %d agent turns: the harness never returned a result for scripted call %d (%s); results so far: %q",
+			s.agentTurnCount(), len(results)+1, s.script.ToolCalls[len(results)].Name, results)
 	default:
 		rep.text = s.script.FinalText(results)
+		turn.Final = true
 	}
+
+	s.mu.Lock()
+	s.turns = append(s.turns, turn)
+	s.mu.Unlock()
+
+	// respond only fails before writing anything (bad scripted arguments), so a
+	// plain error response is still possible here.
 	if err := p.respond(w, req, rep, s.ModelID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// agentTurnCount is the number of agent turns recorded so far.
+func (s *Server) agentTurnCount() int { return len(s.AgentTurns()) }
+
+// maxAgentTurns bounds a conversation: a few retries per scripted call plus
+// slack for the answer. Beyond it the mock stops issuing calls (see ServeHTTP).
+func (s *Server) maxAgentTurns() int { return 3*len(s.script.ToolCalls) + 5 }
+
+// AnswerTurn returns the agent turn the mock answered with FinalText — the
+// request carrying the complete transcript — or the last agent turn if it
+// never answered.
+func (s *Server) AnswerTurn() (Turn, bool) {
+	turns := s.AgentTurns()
+	for i := len(turns) - 1; i >= 0; i-- {
+		if turns[i].Final {
+			return turns[i], true
+		}
+	}
+	if len(turns) == 0 {
+		return Turn{}, false
+	}
+	return turns[len(turns)-1], false
 }
 
 // marshalArgs renders a scripted call's arguments as the JSON string every
@@ -237,19 +279,29 @@ func newSSE(w http.ResponseWriter) sseWriter {
 	return sseWriter{w}
 }
 
-// event writes one event. name may be empty for data-only events (the chat
-// completions style); v is JSON-encoded as the data payload.
+// event writes one event and flushes it, so clients see events arrive
+// incrementally as they would from a real streaming endpoint. name may be
+// empty for data-only events (the chat completions style); v is JSON-encoded
+// as the data payload.
 func (s sseWriter) event(name string, v any) {
 	b, _ := json.Marshal(v)
 	if name != "" {
 		fmt.Fprintf(s.w, "event: %s\n", name)
 	}
 	fmt.Fprintf(s.w, "data: %s\n\n", b)
+	s.flush()
 }
 
-// raw writes a literal data line (e.g. "[DONE]").
+// raw writes a literal data line (e.g. "[DONE]") and flushes it.
 func (s sseWriter) raw(data string) {
 	fmt.Fprintf(s.w, "data: %s\n\n", data)
+	s.flush()
+}
+
+func (s sseWriter) flush() {
+	if f, ok := s.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // writeJSON writes v as an application/json response.

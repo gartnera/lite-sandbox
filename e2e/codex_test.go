@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockmodel"
@@ -13,15 +12,39 @@ import (
 const codexSandboxTool = "mcp__lite_sandbox__bash"
 
 // TestCodex drives Codex through `lite-sandbox install codex` and a
-// non-interactive `codex exec`. Codex keeps its built-in shell tool, so the
-// installer's PreToolUse hook is what redirects it: the mock first asks for a
-// built-in shell command and the test checks the hook's denial came back, then
-// the usual sandbox scenario runs through the MCP tool.
+// non-interactive `codex exec`, in each install mode:
+//
+//   - default: Codex keeps its built-in shell tool, so the installer's
+//     PreToolUse hook is what redirects it. The mock first asks for a built-in
+//     shell command and the test checks the hook's denial came back; then the
+//     usual sandbox scenario runs through the MCP tool, and the AGENTS.md
+//     directive must have reached the model;
+//   - --bash-ast-hook-mode: no MCP server; the hook validates shell commands in
+//     place, rejecting curl and letting echo run.
 func TestCodex(t *testing.T) {
 	requireE2E(t)
+	shell := func(command string) mockmodel.ToolCall {
+		return mockmodel.ToolCall{Name: "exec_command", Arguments: map[string]any{"cmd": command}}
+	}
+	t.Run("default", func(t *testing.T) {
+		calls := append([]mockmodel.ToolCall{shell("echo built-in-shell")}, sandboxCalls(codexSandboxTool)...)
+		model := runCodex(t, calls)
+		assertConversation(t, model.output, model.Server, calls, codexSandboxTool, true)
+		assertResult(t, lastResults(t, model.Server), 0, hookBlockedShell)
+		assertDirective(t, model.Server, "`lite-sandbox` MCP server")
+	})
+	t.Run("bash-ast-hook-mode", func(t *testing.T) {
+		calls := []mockmodel.ToolCall{shell(blockedCommand), shell(allowedCommand)}
+		model := runCodex(t, calls, "--bash-ast-hook-mode")
+		assertConversation(t, model.output, model.Server, calls, codexSandboxTool, false)
+		assertResult(t, lastResults(t, model.Server), 0, hookRejectedCommand)
+	})
+}
 
-	hookCall := mockmodel.ToolCall{Name: "exec_command", Arguments: map[string]any{"cmd": "echo built-in-shell"}}
-	calls := append([]mockmodel.ToolCall{hookCall}, sandboxCalls(codexSandboxTool)...)
+// runCodex installs lite-sandbox for Codex with installFlags into an isolated
+// CODEX_HOME and runs `codex exec` once against a mock scripted with calls.
+func runCodex(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string) agentRun {
+	t.Helper()
 	model := startModel(t, calls)
 
 	// CODEX_HOME isolates Codex's config, auth, sessions, and logs. The
@@ -49,17 +72,12 @@ func TestCodex(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(codexHome, "config.toml"), string(b))
 
-	installSandbox(t, "codex", environ)
+	installSandbox(t, "codex", environ, installFlags...)
 
 	// Codex skips hooks it has not been told to trust (normally done in the TUI
 	// via /hooks, which records the hook's hash); the bypass flag runs the
 	// configured hooks for this invocation without that step.
 	output := runAgent(t, project, environ, bins.codex, "exec",
 		"--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "-C", project, prompt)
-
-	assertConversation(t, output, model, calls, codexSandboxTool)
-	results := model.AgentTurns()[len(model.AgentTurns())-1].ToolResults
-	if !strings.Contains(results[0], "Blocked by lite-sandbox") {
-		t.Errorf("hook did not block the built-in shell: %q", results[0])
-	}
+	return agentRun{model, output}
 }

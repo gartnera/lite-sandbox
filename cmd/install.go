@@ -148,29 +148,24 @@ func detectClaude() bool {
 // claudeConfigDir returns Claude Code's configuration directory: $CLAUDE_CONFIG_DIR
 // when set, otherwise ~/.claude. This mirrors how Claude Code itself resolves it.
 func claudeConfigDir() (string, error) {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(home, ".claude"), nil
+	dir, _, err := claudePaths()
+	return dir, err
 }
 
-// claudeUserConfigPath returns the path of Claude Code's user config file
-// (mcpServers, sign-in state, ...). Claude Code keeps it at ~/.claude.json, but
-// when CLAUDE_CONFIG_DIR is set it moves into that directory as
-// $CLAUDE_CONFIG_DIR/.claude.json, alongside settings.json.
-func claudeUserConfigPath(claudeDir string) (string, error) {
-	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
-		return filepath.Join(claudeDir, ".claude.json"), nil
+// claudePaths resolves Claude Code's configuration directory and the path of
+// its user config file (mcpServers, sign-in state, ...). Claude Code keeps the
+// latter at ~/.claude.json, but when CLAUDE_CONFIG_DIR is set it moves into
+// that directory as $CLAUDE_CONFIG_DIR/.claude.json, alongside settings.json —
+// both decisions follow from the one environment lookup here.
+func claudePaths() (claudeDir, userConfigPath string, err error) {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return d, filepath.Join(d, ".claude.json"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-	return filepath.Join(home, ".claude.json"), nil
+	return filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"), nil
 }
 
 func detectCodex() bool {
@@ -271,19 +266,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 // runInstallClaude configures Claude Code: MCP server in ~/.claude.json,
 // permissions + optional PreToolUse hook in ~/.claude/settings.json, and a
 // usage directive in ~/.claude/CLAUDE.md. All paths honor CLAUDE_CONFIG_DIR
-// the way Claude Code does (see claudeConfigDir / claudeUserConfigPath).
+// the way Claude Code does (see claudePaths).
 func runInstallClaude(binPath string) error {
-	claudeDir, err := claudeConfigDir()
+	claudeDir, claudeJsonPath, err := claudePaths()
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", claudeDir, err)
-	}
-
-	claudeJsonPath, err := claudeUserConfigPath(claudeDir)
-	if err != nil {
-		return err
 	}
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
@@ -301,7 +291,8 @@ func runInstallClaude(binPath string) error {
 	wantHook := installWithToolHook || installBashASTHookMode
 	configMCP := !installBashASTHookMode
 
-	// 1. Configure MCP server in ~/.claude.json (user-scoped)
+	// 1. Configure MCP server in the user config (~/.claude.json, or its
+	// CLAUDE_CONFIG_DIR equivalent)
 	if configMCP {
 		if err := configureMCPServer(claudeJsonPath, binPath, installAlwaysLoad); err != nil {
 			return fmt.Errorf("failed to configure MCP server: %w", err)
@@ -378,11 +369,12 @@ type mcpServerConfig struct {
 }
 
 // configureMCPServer adds (or updates) the lite-sandbox MCP server entry in
-// ~/.claude.json. alwaysLoad sets Claude Code's alwaysLoad flag so the sandbox
+// Claude Code's user config at claudeJsonPath (~/.claude.json, or
+// $CLAUDE_CONFIG_DIR/.claude.json). alwaysLoad sets Claude Code's alwaysLoad flag so the sandbox
 // tools are never deferred behind Tool Search — the built-in Bash tool is
 // denied, so the sandbox bash tool is needed on essentially every turn.
 func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
-	// Read existing ~/.claude.json (preserving all other keys)
+	// Read the existing user config (preserving all other keys)
 	var cfg map[string]json.RawMessage
 	data, err := os.ReadFile(claudeJsonPath)
 	if err != nil {
@@ -393,7 +385,7 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 		cfg = make(map[string]json.RawMessage)
 	} else {
 		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("failed to parse existing ~/.claude.json: %w", err)
+			return fmt.Errorf("failed to parse existing %s: %w", claudeJsonPath, err)
 		}
 	}
 
@@ -401,7 +393,7 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 	mcpServers := make(map[string]mcpServerConfig)
 	if raw, ok := cfg["mcpServers"]; ok {
 		if err := json.Unmarshal(raw, &mcpServers); err != nil {
-			return fmt.Errorf("failed to parse mcpServers in ~/.claude.json: %w", err)
+			return fmt.Errorf("failed to parse mcpServers in %s: %w", claudeJsonPath, err)
 		}
 	}
 

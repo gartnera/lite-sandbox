@@ -508,6 +508,7 @@ func TestRunInstallClaudeHonorsConfigDir(t *testing.T) {
 	configDir := filepath.Join(t.TempDir(), "claude-config")
 	t.Setenv("HOME", homeDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("PATH", t.TempDir()) // so detectClaude cannot short-circuit on a real claude binary
 
 	if err := runInstallClaude("/usr/local/bin/lite-sandbox"); err != nil {
 		t.Fatalf("runInstallClaude failed: %v", err)

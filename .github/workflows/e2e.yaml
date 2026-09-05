@@ -37,15 +37,25 @@ jobs:
         with:
           go-version: ${{ steps.go.outputs.version }}
       # Codex and Claude Code are installed from npm into e2e/.bin/agents.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Cache agent binaries
-        uses: actions/cache@v5
+      # The agents are provisioned by TestMain before any test runs, so the
+      # cache is worth saving even when the tests fail — restore and save are
+      # split so the save is not skipped on a red job.
+      - name: Restore agent binaries
+        id: agents-cache
+        uses: actions/cache/restore@v5
         with:
           path: e2e/.bin/agents
           key: e2e-agents-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/versions.go') }}
       - name: End-to-end tests
-        run: go test ./e2e/ -v -count=1
+        run: go test ./e2e/ -v -count=1 -timeout 15m
         env:
           LITE_SANDBOX_E2E: "1"
+      - name: Save agent binaries
+        if: always() && steps.agents-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: e2e/.bin/agents
+          key: ${{ steps.agents-cache.outputs.cache-primary-key }}

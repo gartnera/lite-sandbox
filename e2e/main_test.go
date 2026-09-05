@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // e2eEnv gates the suite: the tests download and run third-party agent
@@ -70,25 +72,28 @@ func provision() error {
 		return fmt.Errorf("go build lite-sandbox: %v\n%s", err, out)
 	}
 
+	// The three installs are independent downloads; run them concurrently.
 	crushVersion := versionFromEnv("E2E_CRUSH_VERSION", CrushVersion)
+	codexVersion := versionFromEnv("E2E_CODEX_VERSION", CodexVersion)
+	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
 	crushDir := filepath.Join(agentsDir, "crush", crushVersion)
-	if err := ensureInstalled(crushDir, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) }); err != nil {
+	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
+	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
+	var g errgroup.Group
+	g.Go(func() error {
+		return ensureInstalled(crushDir, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
+	})
+	g.Go(func() error {
+		return ensureInstalled(codexDir, "codex "+codexVersion, func() error { return installNPM(codexDir, "@openai/codex@"+codexVersion) })
+	})
+	g.Go(func() error {
+		return ensureInstalled(claudeDir, "claude-code "+claudeVersion, func() error { return installNPM(claudeDir, "@anthropic-ai/claude-code@"+claudeVersion) })
+	})
+	if err := g.Wait(); err != nil {
 		return err
 	}
 	bins.crush = filepath.Join(crushDir, "crush")
-
-	codexVersion := versionFromEnv("E2E_CODEX_VERSION", CodexVersion)
-	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
-	if err := ensureInstalled(codexDir, "codex "+codexVersion, func() error { return installNPM(codexDir, "@openai/codex@"+codexVersion) }); err != nil {
-		return err
-	}
 	bins.codex = filepath.Join(codexDir, "node_modules", ".bin", "codex")
-
-	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
-	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
-	if err := ensureInstalled(claudeDir, "claude-code "+claudeVersion, func() error { return installNPM(claudeDir, "@anthropic-ai/claude-code@"+claudeVersion) }); err != nil {
-		return err
-	}
 	bins.claude = filepath.Join(claudeDir, "node_modules", ".bin", "claude")
 
 	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude)}

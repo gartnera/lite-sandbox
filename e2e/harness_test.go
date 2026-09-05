@@ -25,7 +25,24 @@ const (
 	prompt         = "Run the command echo hello-from-sandbox and tell me what it printed."
 	finalPrefix    = "The sandbox printed: "
 	// curlRejected is the sandbox's whitelist rejection, as fed back to the model.
+	// The same text appears whether the MCP tool or the AST-validating hook did
+	// the rejecting.
 	curlRejected = `command "curl" is not allowed`
+)
+
+// Fragments of the PreToolUse hook's deny reasons (see cmd/hook.go), as the
+// agents feed them back to the model.
+const (
+	// hookBlockedShell is the redirect the hook issues for the built-in shell
+	// when it is not validating it in place.
+	hookBlockedShell = "the built-in Bash tool is disabled"
+	// hookRejectedCommand is the AST-validating hook's denial (--bash-ast-hook-mode).
+	hookRejectedCommand = "did not pass sandbox validation"
+	// hookOutsideWritable is the path-boundary denial for a file write.
+	hookOutsideWritable = "outside the sandbox's writable paths"
+	// outsidePath is a write target no default config allows (the denial means
+	// nothing is written).
+	outsidePath = "/etc/lite-sandbox-e2e-denied.txt"
 )
 
 // sandboxCalls scripts the two sandbox commands as calls to the agent's name
@@ -75,18 +92,25 @@ func env(home string, extra ...string) []string {
 	return append(base, extra...)
 }
 
-// installSandbox runs `lite-sandbox install <agent>` under environ and fails
-// the test if it does not succeed.
-func installSandbox(t *testing.T, agent string, environ []string) {
+// installSandbox runs `lite-sandbox install <agent> [flags...]` under environ
+// and fails the test if it does not succeed.
+func installSandbox(t *testing.T, agent string, environ []string, flags ...string) {
 	t.Helper()
-	cmd := exec.Command(bins.sandbox, "install", agent)
+	args := append([]string{"install", agent}, flags...)
+	cmd := exec.Command(bins.sandbox, args...)
 	cmd.Env = environ
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("lite-sandbox install %s failed: %v\n%s", agent, err, out)
+		t.Fatalf("lite-sandbox %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	t.Logf("lite-sandbox install %s:\n%s", agent, out)
+	t.Logf("lite-sandbox %s:\n%s", strings.Join(args, " "), out)
 }
+
+// agentTimeout bounds one agent invocation. A healthy run takes about a
+// second; the budget only matters when something is wrong, and it is kept
+// well inside `go test`'s default 10-minute binary timeout even if every
+// invocation in the suite hits it.
+const agentTimeout = 2 * time.Minute
 
 // runAgent runs one non-interactive agent invocation in dir and returns its
 // combined output. stdin is /dev/null (Codex otherwise waits for more input).
@@ -94,48 +118,53 @@ func installSandbox(t *testing.T, agent string, environ []string) {
 // mock protocol hiccup and the output is what explains it.
 func runAgent(t *testing.T, dir string, environ []string, name string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = environ
+	// The agents spawn `lite-sandbox serve-mcp`, which inherits the output pipe;
+	// without WaitDelay a timed-out agent whose child kept the pipe open would
+	// block CombinedOutput indefinitely.
+	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 	t.Logf("%s %s:\n%s", filepath.Base(name), strings.Join(args, " "), output)
-	if err != nil {
+	switch {
+	case ctx.Err() != nil:
+		t.Errorf("%s did not finish within %s", filepath.Base(name), agentTimeout)
+	case err != nil:
 		t.Errorf("%s exited with error: %v", filepath.Base(name), err)
 	}
 	return output
 }
 
-// newProject creates an empty working directory for the agent to run in, with
-// a git repo so agents that insist on one (Codex) are happy.
+// newProject creates an empty working directory for the agent to run in.
 func newProject(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	return dir
+	return t.TempDir()
 }
 
 // assertConversation checks what every agent must have done, independent of
 // the wire protocol it used:
 //
-//   - its output contains the mock's final answer quoting the sandbox output;
-//   - it took at least one agent turn per scripted call plus the answer;
-//   - the first agent turn offered the sandbox tool;
-//   - the tool results it fed back end with curl rejected by the whitelist and
-//     the allowed command's output — i.e. the sandbox, not a built-in shell,
-//     ran the commands. A tool result the sandbox refused (curl) must not be
-//     mistaken for the built-in shell having run it, so it is matched on the
-//     sandbox's own rejection text.
+//   - its output contains the mock's final answer quoting the command output;
+//   - it took at least one agent turn per scripted call plus the answer, and
+//     the mock actually reached its answer;
+//   - the sandbox tool was offered on the first agent turn — or, when
+//     wantSandboxTool is false (--bash-ast-hook-mode configures no MCP
+//     server), was not;
+//   - the tool results it fed back end with curl rejected and the allowed
+//     command's output — i.e. lite-sandbox (the MCP tool, or the validating
+//     hook) decided what ran. A result the sandbox refused (curl) must not be
+//     mistaken for the shell having run it, so it is matched on the sandbox's
+//     own rejection text.
 //
 // It returns the tools offered on the first turn for agent-specific checks.
-func assertConversation(t *testing.T, output string, model *mockmodel.Server, calls []mockmodel.ToolCall, sandboxTool string) map[string]bool {
+func assertConversation(t *testing.T, output string, model *mockmodel.Server, calls []mockmodel.ToolCall, sandboxTool string, wantSandboxTool bool) map[string]bool {
 	t.Helper()
 	if _, answer, ok := strings.Cut(output, finalPrefix); !ok || !strings.Contains(answer, allowedOutput) {
-		t.Errorf("final answer missing the sandboxed command's output")
+		t.Errorf("final answer missing the command's output")
 	}
 	turns := model.AgentTurns()
 	if want := len(calls) + 1; len(turns) < want {
@@ -143,24 +172,52 @@ func assertConversation(t *testing.T, output string, model *mockmodel.Server, ca
 	}
 	tools := turns[0].Tools
 	t.Logf("tools offered on the first agent turn (%s): %v", turns[0].Protocol, slices.Sorted(maps.Keys(tools)))
-	if !tools[sandboxTool] {
-		t.Errorf("sandbox tool %s not offered to the model", sandboxTool)
+	if tools[sandboxTool] != wantSandboxTool {
+		t.Errorf("sandbox tool %s offered: %v, want %v", sandboxTool, tools[sandboxTool], wantSandboxTool)
 	}
 
-	results := turns[len(turns)-1].ToolResults
+	results := lastResults(t, model)
 	t.Logf("tool results fed back: %q", results)
 	if len(results) != len(calls) {
 		t.Fatalf("expected %d tool results, got %d", len(calls), len(results))
 	}
-	if got := results[len(results)-2]; !strings.Contains(got, curlRejected) {
-		t.Errorf("sandbox did not reject curl: %q", got)
-	}
+	assertResult(t, results, len(results)-2, curlRejected)
 	// Agents may wrap results in their own framing (Codex adds timing lines),
 	// so look for the output rather than requiring it verbatim.
-	if got := results[len(results)-1]; !strings.Contains(got, allowedOutput) {
-		t.Errorf("tool result is not the sandbox's output: %q", got)
-	}
+	assertResult(t, results, len(results)-1, allowedOutput)
 	return tools
+}
+
+// assertResult checks that the i-th tool result fed back contains want.
+func assertResult(t *testing.T, results []string, i int, want string) {
+	t.Helper()
+	if !strings.Contains(results[i], want) {
+		t.Errorf("tool result %d does not contain %q: %q", i, want, results[i])
+	}
+}
+
+// lastResults returns the tool results in the transcript of the turn the mock
+// answered (falling back to the last agent turn), i.e. everything the agent
+// fed back for the scripted calls.
+func lastResults(t *testing.T, model *mockmodel.Server) []string {
+	t.Helper()
+	turn, answered := model.AnswerTurn()
+	if !answered {
+		t.Errorf("the mock never reached its final answer (protocols: %v)", protocols(model))
+	}
+	return turn.ToolResults
+}
+
+// assertDirective checks the installer's usage directive (from CLAUDE.md,
+// AGENTS.md, or CRUSH.md) reached the model on the first agent turn. Where an
+// agent puts it (system prompt, developer message, first user turn) is its
+// business, so this looks at all the text the model saw.
+func assertDirective(t *testing.T, model *mockmodel.Server, snippet string) {
+	t.Helper()
+	turns := model.AgentTurns()
+	if len(turns) == 0 || !strings.Contains(turns[0].Text, snippet) {
+		t.Errorf("usage directive %q not found in the text sent to the model", snippet)
+	}
 }
 
 func protocols(model *mockmodel.Server) []string {

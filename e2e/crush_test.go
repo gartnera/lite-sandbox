@@ -39,7 +39,6 @@ func runCrush(t *testing.T, format string) {
 		"CRUSH_GLOBAL_CONFIG="+configDir,
 		"CRUSH_GLOBAL_DATA="+dataDir,
 		"XDG_DATA_HOME="+dataDir,
-		"XDG_CONFIG_HOME=",
 	)
 
 	// The provider/model half of the config is what a user would already have.
@@ -83,11 +82,12 @@ func runCrush(t *testing.T, format string) {
 
 	output := runAgent(t, project, environ, bins.crush, "run", "--quiet", "--verbose", "--cwd", project, prompt)
 
-	tools := assertConversation(t, output, model, calls, crushSandboxTool)
+	tools := assertConversation(t, output, model, calls, crushSandboxTool, true)
 	if tools["bash"] {
 		t.Errorf("built-in bash tool still offered to the model")
 	}
 	if !tools["view"] {
 		t.Errorf("unrelated built-in tools were hidden too")
 	}
+	assertDirective(t, model, crushSandboxTool)
 }

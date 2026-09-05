@@ -44,7 +44,7 @@ var clients = map[string]client{
 			return map[string]any{"type": "function", "function": map[string]any{"name": name, "parameters": map[string]any{}}}
 		},
 		request: func(stream bool, tools []any, transcript []any) map[string]any {
-			req := map[string]any{"stream": stream, "messages": transcript}
+			req := map[string]any{"stream": stream, "messages": append([]any{map[string]any{"role": "system", "content": "SYS"}}, transcript...)}
 			if tools != nil {
 				req["tools"] = tools
 			}
@@ -67,7 +67,7 @@ var clients = map[string]client{
 			return map[string]any{"type": "function", "name": name, "parameters": map[string]any{}}
 		},
 		request: func(stream bool, tools []any, transcript []any) map[string]any {
-			req := map[string]any{"stream": stream, "input": transcript, "store": false}
+			req := map[string]any{"stream": stream, "input": transcript, "store": false, "instructions": "SYS"}
 			if tools != nil {
 				req["tools"] = tools
 			}
@@ -90,7 +90,8 @@ var clients = map[string]client{
 			return map[string]any{"name": name, "input_schema": map[string]any{"type": "object"}}
 		},
 		request: func(stream bool, tools []any, transcript []any) map[string]any {
-			req := map[string]any{"stream": stream, "messages": transcript, "max_tokens": 100}
+			req := map[string]any{"stream": stream, "messages": transcript, "max_tokens": 100,
+				"system": []any{map[string]any{"type": "text", "text": "SYS"}}}
 			if tools != nil {
 				req["tools"] = tools
 			}
@@ -182,6 +183,12 @@ func TestScriptedConversation(t *testing.T) {
 				if !agent[0].Tools["x_bash"] {
 					t.Errorf("Tools missing offered tool: %v", agent[0].Tools)
 				}
+				if !strings.Contains(agent[0].Text, "SYS") || !strings.Contains(agent[0].Text, "go") {
+					t.Errorf("Text should carry the system prompt and the user message: %q", agent[0].Text)
+				}
+				if answer, ok := srv.AnswerTurn(); !ok || !answer.Final || len(answer.ToolResults) != 2 {
+					t.Errorf("AnswerTurn = %+v, %v; want the final turn with 2 results", answer, ok)
+				}
 				if got := agent[2].ToolResults; strings.Join(got, ",") != "error,hi" {
 					t.Errorf("ToolResults = %v", got)
 				}
@@ -229,5 +236,23 @@ func TestUnknownPathIs404(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("%s %s: expected 404, got %d", req.method, req.path, resp.StatusCode)
 		}
+	}
+}
+
+// TestGivesUpWithoutResults checks a harness that never feeds a tool result
+// back gets a self-describing final answer instead of an endless loop.
+func TestGivesUpWithoutResults(t *testing.T) {
+	srv := Start(Script{ToolCalls: []ToolCall{{Name: "x", Arguments: map[string]any{}}}})
+	defer srv.Close()
+	c := clients["chat"]
+	var body string
+	for i := 0; i < srv.maxAgentTurns()+1; i++ {
+		body = post(t, srv.BaseURL+c.path, c.request(false, []any{c.tool("x")}, []any{}))
+	}
+	if !strings.Contains(body, "mock: giving up") || strings.Contains(body, `"tool_calls":[`) {
+		t.Errorf("expected the mock to give up: %s", body)
+	}
+	if _, ok := srv.AnswerTurn(); ok {
+		t.Error("giving up must not count as the answer turn")
 	}
 }
