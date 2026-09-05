@@ -9,7 +9,15 @@ import (
 )
 
 func TestBuildReport(t *testing.T) {
-	dir := t.TempDir()
+	// The boundary subjects live under a fake home: on macOS t.TempDir() is
+	// under /var/folders, which the report treats as a system root unless the
+	// path is inside the home directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, "repo")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	recs := []Record{
 		{Rule: "command_whitelist", Subject: "npm", Command: "npm test", Fix: "lite-sandbox config extra-commands add npm", WouldBlockIn: []string{"allowlist"}},
 		{Rule: "command_whitelist", Subject: "npm", Command: "npm run build", Fix: "lite-sandbox config extra-commands add npm", WouldBlockIn: []string{"allowlist"}},
@@ -104,6 +112,20 @@ func TestBuildReport_ProtectedPathsNotSuggested(t *testing.T) {
 	}
 }
 
+func TestIsProtected_SystemRootsButNotHome(t *testing.T) {
+	home := "/var/folders/xy/T/home" // a home under a system root, as on macOS runners
+	t.Setenv("HOME", home)
+	if !isProtected("/var/log/syslog", nil) || !isProtected("/etc/passwd", nil) || !isProtected("/", nil) {
+		t.Error("system roots must be protected")
+	}
+	if isProtected(home+"/repo/x.go", nil) {
+		t.Error("a path inside the home directory is never a system path")
+	}
+	if !isProtected(home, nil) {
+		t.Error("the home directory itself is protected")
+	}
+}
+
 func TestBuildReport_CWDFilter(t *testing.T) {
 	recs := []Record{
 		{CWD: "/work/a", Rule: "command_whitelist", Subject: "npm", WouldBlockIn: []string{"allowlist"}},
@@ -141,5 +163,4 @@ func TestSanitize(t *testing.T) {
 	if Sanitize("plain ./path-ok") != "plain ./path-ok" {
 		t.Error("plain text must pass through")
 	}
-	_ = os.Getenv // keep os imported for parity with other tests
 }

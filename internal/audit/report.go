@@ -235,6 +235,11 @@ func isProtected(path string, protected []string) bool {
 			return true
 		}
 	}
+	// A path inside the home directory is never a system path, wherever the
+	// home happens to live (a macOS temp-dir home sits under /var/folders).
+	if home != "" && underDir(path, home) {
+		return false
+	}
 	for _, root := range systemRoots {
 		if underDir(path, root) {
 			return true

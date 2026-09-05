@@ -266,8 +266,10 @@ func TestOpenMode_EverythingRunsAndIsAudited(t *testing.T) {
 		switch r.Rule {
 		case string(rulePathBoundary):
 			sawBoundary = true
-			if r.Subject != filepath.Join(outside, "secret") {
-				t.Errorf("boundary subject = %q", r.Subject)
+			// Subjects are symlink-resolved (macOS: /var -> /private/var).
+			want, _ := filepath.EvalSymlinks(filepath.Join(outside, "secret"))
+			if r.Subject != want {
+				t.Errorf("boundary subject = %q, want %q", r.Subject, want)
 			}
 			if !slices.Equal(r.WouldBlockIn, []string{"denylist", "allowlist"}) {
 				t.Errorf("boundary would_block_in = %v", r.WouldBlockIn)
