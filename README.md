@@ -9,7 +9,7 @@ go install github.com/gartnera/lite-sandbox@latest  # Install the lite-sandbox b
 lite-sandbox install                                 # Configure every detected agent CLI, then restart them
 ```
 
-Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHub release](https://github.com/gartnera/lite-sandbox/releases); once installed, `lite-sandbox update` upgrades the binary in place to the latest release (`lite-sandbox version` shows the current one). Every merge to `main` is released automatically — see [docs/development.md](docs/development.md#releasing).
+Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHub release](https://github.com/gartnera/lite-sandbox/releases); once installed, `lite-sandbox update` upgrades the binary in place to the latest release (`lite-sandbox version` shows the current one).
 
 `install` autodetects which supported agent CLIs — **Claude Code**, **OpenAI Codex CLI**, **opencode**, and **Crush** — are installed on the host (binary on `PATH` or config directory present) and configures each one: it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a usage directive so the agent routes shell commands through the sandbox. Name agents explicitly to configure just those:
 
