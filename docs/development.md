@@ -17,6 +17,40 @@ go test ./...              # Run all tests
 go test -v ./tool/...      # Run tool package tests with verbose output
 ```
 
+## Releasing
+
+Releases are cut automatically: **every push to `main` that passes the `CI` and `E2E` workflows is tagged and released** by `.github/workflows/release.yaml`, which builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). There is nothing to do by hand.
+
+### Version bumps via PR labels
+
+The semver bump comes from the `release:*` labels on the pull requests merged since the last release (`.github/scripts/next-version.sh` resolves each first-parent commit in `<last tag>..HEAD` to its merged PR through the GitHub API):
+
+| Label | Bump | Use for |
+|---|---|---|
+| `release:major` | major (minor while on 0.x, see below) | breaking changes |
+| `release:minor` | minor | new features |
+| `release:patch` | patch | fixes and chores — **the default** for an unlabeled PR or a direct push |
+| `release:skip` | none | changes that need no release (docs, CI) |
+
+When several PRs are released together (a red run on one commit means its changes ride along with the next green one), the highest bump wins; a release is skipped only when every PR is `release:skip`. The `PR labels` workflow creates these labels in the repository if they are missing and fails a PR that carries more than one.
+
+**The project stays on 0.x for now**: `RELEASE_ALLOW_MAJOR` in `release.yaml` is `"false"`, so a `release:major` label bumps the minor version instead (with a note in the run log). To graduate to 1.0, set it to `"true"` and merge a `release:major` PR — or push a `v1.0.0` tag by hand and re-run the workflow, since the script picks up from the highest existing `v*` tag.
+
+### How the workflow runs
+
+- It is triggered by the *completion* of `CI` and `E2E` on `main` (`workflow_run`). Each completion starts a run; the run that finds both workflows green on the commit releases, the other exits at the gate. Runs are serialized (`concurrency: release`) so two merges never race on the version.
+- The tag is created and pushed by the workflow (`github-actions[bot]`), then GoReleaser builds against it. If the upload fails after the tag exists, re-running the workflow completes that release (`release.mode: keep-existing` + `replace_existing_artifacts`) instead of computing a new version.
+- **Manual release**: *Actions → Release → Run workflow* on `main`. A dispatched run skips the CI/E2E gate (useful after a flaky `E2E` run) and its `bump` input overrides the labels.
+- The binaries embed the tag, commit, and commit date via `-ldflags -X` into `internal/version` — `lite-sandbox version` prints them; `go install`ed builds report their module version from the Go build info instead, and plain `go build`s report `dev`.
+
+`lite-sandbox update` (`internal/selfupdate`, on top of the shared GitHub-release downloader in `internal/ghrelease` that the e2e suite also uses) relies on the asset names GoReleaser produces — `lite-sandbox_<version>_<os>_<arch>.tar.gz` and `checksums.txt` — so change `.goreleaser.yaml` and `selfupdate.AssetName`/`ChecksumsFile` together.
+
+To dry-run the release build locally without a tag or token:
+
+```bash
+go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean   # artifacts land in dist/
+```
+
 ## E2E Testing
 
 Two complementary suites live under `e2e/`: `e2e/mockedserver` (below) drives the real agent binaries against a mocked model server, so it needs no API key and checks that each installer's configuration works end to end; `e2e/claude` uses a real model to check that Claude actually *chooses* the sandbox tool.

@@ -39,6 +39,9 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 - `os_sandbox/` — sandboxed worker process and pool (bwrap/sandbox-exec, gob protocol)
 - `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`)
 - `internal/hook` — hook event/decision types; `internal/imds` — IMDS credential server; `internal/dockerproxy` — Docker socket filtering proxy
+- `internal/version` — build version (set by GoReleaser ldflags; `lite-sandbox version`); `internal/ghrelease` — GitHub release download client shared by `lite-sandbox update` (`internal/selfupdate`) and the e2e agent provisioning
+
+**Releases:** every push to `main` that passes CI and E2E is tagged and released by `.github/workflows/release.yaml` (GoReleaser, `.goreleaser.yaml`). The semver bump comes from `release:major|minor|patch|skip` labels on the merged PRs (`.github/scripts/next-version.sh`; unlabeled = patch, major is capped to minor while `RELEASE_ALLOW_MAJOR` is false). Asset names (`lite-sandbox_<version>_<os>_<arch>.tar.gz`, `checksums.txt`) are relied on by `internal/selfupdate` — change them together. See `docs/development.md`.
 
 ## Testing
 

@@ -1,0 +1,76 @@
+# GoReleaser configuration — https://goreleaser.com
+#
+# Run by .github/workflows/release.yaml after it tags a commit on main. Builds
+# the lite-sandbox binary for Linux and macOS (amd64/arm64), packs each into
+# lite-sandbox_<version>_<os>_<arch>.tar.gz, writes checksums.txt, and uploads
+# everything to the GitHub release for the tag with GitHub-generated notes.
+#
+# `lite-sandbox update` (internal/selfupdate) relies on the archive and
+# checksum file names below — change them together.
+#
+# Local dry run (no tag or token needed):  goreleaser release --snapshot --clean
+version: 2
+
+project_name: lite-sandbox
+
+builds:
+  - id: lite-sandbox
+    main: .
+    binary: lite-sandbox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Embed the tag, commit, and commit date (see internal/version).
+    ldflags:
+      - -s -w
+      - -X github.com/gartnera/lite-sandbox/internal/version.version={{ .Tag }}
+      - -X github.com/gartnera/lite-sandbox/internal/version.commit={{ .ShortCommit }}
+      - -X github.com/gartnera/lite-sandbox/internal/version.date={{ .CommitDate }}
+    # Reproducible builds: stamp the binary with the commit time, not the build time.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    # Keep in sync with selfupdate.AssetName.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  # Keep in sync with selfupdate.ChecksumsFile.
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  # GitHub's own release-notes generator: one line per merged pull request,
+  # with authors, and a compare link to the previous release.
+  use: github-native
+
+release:
+  github:
+    owner: gartnera
+    name: lite-sandbox
+  # The release for a tag is created (or, if the workflow is re-run after a
+  # failed upload, completed) rather than duplicated.
+  mode: keep-existing
+  replace_existing_artifacts: true
+  # A tag like v1.0.0-rc1 is published as a pre-release; plain tags are full releases.
+  prerelease: auto
+  header: |
+    ## Install
+
+    ```bash
+    lite-sandbox update            # already installed: switch to this release
+    ```
+
+    Or download the archive for your platform below, verify it against
+    `checksums.txt`, and put the `lite-sandbox` binary on your `PATH`. Then run
+    `lite-sandbox install` (a first install) or restart your agent (an upgrade).

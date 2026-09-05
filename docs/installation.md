@@ -1,5 +1,27 @@
 # Installing & Configuring
 
+## Getting the binary
+
+Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. Either download the archive for your platform and put the `lite-sandbox` binary on your `PATH`, or build from source:
+
+```bash
+go install github.com/gartnera/lite-sandbox@latest   # latest release, into $GOPATH/bin
+lite-sandbox version                                 # e.g. "lite-sandbox v0.4.0 (1a2b3c4d5e6f, 2026-09-05)"
+```
+
+### Updating
+
+`lite-sandbox update` replaces the running binary with the latest release, wherever it is installed (it follows symlinks to the real file, so a `go install`ed binary in `$GOPATH/bin` updates too):
+
+```bash
+lite-sandbox update                   # install the latest release
+lite-sandbox update --check           # only report whether one is available
+lite-sandbox update --version v0.4.0  # install (or roll back to) a specific release
+lite-sandbox update --force           # reinstall even if already on the target version
+```
+
+It downloads the release archive for this OS/arch, verifies it against the release's `checksums.txt`, and swaps it into place atomically (a temp file next to the binary, renamed over it), so a failure never leaves a half-written binary and MCP servers already running keep working on the old build. **Restart your agent afterwards** so its `lite-sandbox serve-mcp` picks up the new version. If the binary lives in a directory you can't write to, run the same command with `sudo`. Downloads are anonymous by default; set `GITHUB_TOKEN` (or `GH_TOKEN`) to go through the authenticated GitHub API if you hit the anonymous rate limit.
+
 ## Automatic Installation
 
 The easiest way to configure your coding agents is the built-in install command:

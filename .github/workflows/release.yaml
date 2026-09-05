@@ -1,0 +1,128 @@
+name: Release
+
+# Every push to main that passes CI and E2E is released automatically: the
+# release:* labels on the pull requests merged since the last release decide
+# the semver bump (.github/scripts/next-version.sh — patch when unlabeled, no
+# release when every PR is release:skip), the commit is tagged, and GoReleaser
+# (.goreleaser.yaml) builds the Linux/macOS binaries and uploads them to a
+# GitHub release.
+#
+# Both CI and E2E must be green on the commit. Each of them triggers this
+# workflow when it completes; the run started by whichever finishes last finds
+# both green and releases, the earlier one exits at the gate. A red workflow
+# means no release for that commit — the next green one on main releases its
+# changes too. To release by hand (e.g. after a flaky E2E run, or to force a
+# specific bump) use "Run workflow" on the main branch: a dispatched run skips
+# the gate.
+
+on:
+  workflow_run:
+    workflows: [CI, E2E]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto = decide from the PR labels)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: write # push the tag, create the release
+  pull-requests: read # read the merged PRs' labels
+
+# Never run two releases at once: the version is computed from the tags that
+# exist when a run starts. Queued runs are not cancelled — they find HEAD
+# already released and exit at the version step.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Keep the project on 0.x for now: a release:major label bumps the minor
+  # version instead. Set to "true" (or push a v1.0.0 tag by hand) to graduate.
+  RELEASE_ALLOW_MAJOR: "false"
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The commit to release: the one the triggering workflow ran on, or the
+      # branch head for a manual run.
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Require CI and E2E to be green on this commit
+        id: gate
+        if: github.event_name == 'workflow_run'
+        run: |
+          ready=true
+          for wf in CI E2E; do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_SHA&event=push&per_page=100" \
+              --jq ".workflow_runs[] | select(.name == \"$wf\") | .conclusion" | head -n1)
+            echo "$wf: ${conclusion:-not run yet}"
+            if [ "$conclusion" != success ]; then ready=false; fi
+          done
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          if [ "$ready" != true ]; then
+            echo "::notice::Not every required workflow is green on $RELEASE_SHA yet; the run started by the last one to finish will release."
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.ready != 'false'
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0 # all history and tags: needed to find the last release
+
+      - name: Compute the next version
+        id: version
+        if: steps.gate.outputs.ready != 'false'
+        run: |
+          tag=$(.github/scripts/next-version.sh --bump "${{ inputs.bump || 'auto' }}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
+            echo "::notice::Nothing to release for $RELEASE_SHA"
+          else
+            echo "Releasing $tag"
+          fi
+
+      - name: Tag
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists; completing its release"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        if: steps.version.outputs.tag != ''
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        if: steps.version.outputs.tag != ''
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+
+      - name: Build and publish the release
+        if: steps.version.outputs.tag != ''
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
