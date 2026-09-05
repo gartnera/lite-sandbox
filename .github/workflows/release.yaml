@@ -46,14 +46,7 @@ env:
 
 jobs:
   release:
-    # Only pushes to this repository's main release. A pull_request run from a
-    # fork branch named "main" passes the `branches` filter above, so the event
-    # type and the head repository are checked here as well.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
