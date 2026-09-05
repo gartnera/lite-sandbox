@@ -19,7 +19,7 @@ go test -v ./tool/...      # Run tool package tests with verbose output
 
 ## Releasing
 
-Releases are cut automatically: **every push to `main` that passes the `CI` and `E2E` workflows is tagged and released** by `.github/workflows/release.yaml`, which builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). There is nothing to do by hand.
+Releases are cut automatically: **every push to `main` whose `CI` run succeeds is tagged and released** by `.github/workflows/release.yaml`, which builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). There is nothing to do by hand.
 
 ### Version bumps via PR labels
 
@@ -38,10 +38,10 @@ When several PRs are released together (a red run on one commit means its change
 
 ### How the workflow runs
 
-- It is triggered by the *completion* of `CI` and `E2E` on `main` (`workflow_run`). Each completion starts a run; the run that finds both workflows green on the commit releases, the other exits at the gate. Runs are serialized (`concurrency: release`) so two merges never race on the version.
+- It is triggered by a successful `CI` run on `main` (`workflow_run`); a red `CI` means no release for that commit, and the next green one releases its changes too. `E2E` is not a gate — it is expected to have passed on the pull request; enable a merge queue if that ever needs enforcing. Runs are serialized (`concurrency: release`) so two merges never race on the version.
 - The tag is created by the workflow through the GitHub API (a lightweight tag on the released commit), then GoReleaser builds against it. If the upload fails after the tag exists, re-running the workflow completes that release (`release.mode: keep-existing` + `replace_existing_artifacts`) instead of computing a new version — as long as `main` hasn't moved on; once it has, the next release starts from the orphaned tag and that tag stays without a release.
-- The gate and the version script fail the run loudly on a GitHub API error rather than guessing: a red `Release` run means "look at it", never "nothing to release". Runs are serialized (`concurrency: release`); GitHub keeps at most one run pending per group, so a burst of completions can drop a pending run — the next release then covers everything since the last tag, so a commit's release is delayed, not lost.
-- **Manual release**: *Actions → Release → Run workflow* on `main`. A dispatched run skips the CI/E2E gate (useful after a flaky `E2E` run) and its `bump` input overrides the labels.
+- The version script fails the run loudly on a GitHub API error rather than guessing: a red `Release` run means "look at it", never "nothing to release". GitHub keeps at most one run pending per concurrency group, so a burst of merges can drop a pending run — the next release then covers everything since the last tag, so a commit's release is delayed, not lost.
+- **Manual release**: *Actions → Release → Run workflow* on `main`. A dispatched run releases the branch head regardless of CI, and its `bump` input overrides the labels.
 - The binaries embed the tag, short commit, and commit date (RFC 3339) via `-ldflags -X` into `internal/version` — `lite-sandbox version` prints them (`lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)`). Other builds fall back to the Go build info: a `go install`ed binary reports its module version, a `go build` in a checkout reports the tag at HEAD or a pseudo-version for an untagged commit (so a local build of a tagged commit is "already up to date" to `lite-sandbox update`), and only a build without any version information reports `dev`.
 
 `lite-sandbox update` (`internal/selfupdate`, on top of the shared GitHub-release downloader in `internal/ghrelease` that the e2e suite also uses) relies on the asset names GoReleaser produces — `lite-sandbox_<version>_<os>_<arch>.tar.gz` and `checksums.txt` — so change `.goreleaser.yaml` and `selfupdate.AssetName`/`ChecksumsFile` together.

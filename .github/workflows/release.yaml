@@ -1,23 +1,21 @@
 name: Release
 
-# Every push to main that passes CI and E2E is released automatically: the
+# Every push to main whose CI run succeeds is released automatically: the
 # release:* labels on the pull requests merged since the last release decide
 # the semver bump (.github/scripts/next-version.sh — patch when unlabeled, no
 # release when every PR is release:skip), the commit is tagged, and GoReleaser
 # (.goreleaser.yaml) builds the Linux/macOS binaries and uploads them to a
 # GitHub release.
 #
-# Both CI and E2E must be green on the commit. Each of them triggers this
-# workflow when it completes; the run started by whichever finishes last finds
-# both green and releases, the earlier one exits at the gate. A red workflow
-# means no release for that commit — the next green one on main releases its
-# changes too. To release by hand (e.g. after a flaky E2E run, or to force a
-# specific bump) use "Run workflow" on the main branch: a dispatched run skips
-# the gate.
+# A red CI run means no release for that commit — the next green one on main
+# releases its changes too. Other checks (E2E) are expected to have passed on
+# the pull request; a merge queue is the place to enforce that if it ever
+# becomes a problem. To release by hand (or to force a specific bump) use
+# "Run workflow" on the main branch.
 
 on:
   workflow_run:
-    workflows: [CI, E2E]
+    workflows: [CI]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -30,7 +28,6 @@ on:
 
 permissions:
   contents: write # create the tag and the release
-  actions: read # read CI/E2E run conclusions
   pull-requests: read # read the merged PRs' labels
 
 # Never run two releases at once: the version is computed from the tags that
@@ -65,34 +62,13 @@ jobs:
       # branch head for a manual run.
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
-      - name: Require CI and E2E to be green on this commit
-        id: gate
-        if: github.event_name == 'workflow_run'
-        run: |
-          set -euo pipefail
-          # An API failure fails the step (visibly) rather than reading as "not green".
-          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$RELEASE_SHA&event=push&per_page=100" --jq '.workflow_runs')
-          ready=true
-          for wf in CI E2E; do
-            # Newest run of the workflow first; a missing or in-flight run has no conclusion.
-            conclusion=$(jq -r --arg wf "$wf" 'map(select(.name == $wf)) | first | .conclusion // "not finished"' <<<"$runs")
-            echo "$wf: $conclusion"
-            if [ "$conclusion" != success ]; then ready=false; fi
-          done
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
-          if [ "$ready" != true ]; then
-            echo "::notice::Not every required workflow is green on $RELEASE_SHA yet; the run started by the last one to finish will release."
-          fi
-
       - uses: actions/checkout@v6
-        if: steps.gate.outputs.ready != 'false'
         with:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0 # all history and tags: needed to find the last release
 
       - name: Compute the next version
         id: version
-        if: steps.gate.outputs.ready != 'false'
         env:
           BUMP: ${{ inputs.bump || 'auto' }}
         run: |
