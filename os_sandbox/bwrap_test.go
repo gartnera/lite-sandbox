@@ -45,15 +45,15 @@ func TestBuildBwrapArgs_MasksAfterBinds(t *testing.T) {
 	awsDir := home + "/.aws"
 	dockerSock := "/var/run/docker.sock"
 
-	args := buildBwrapArgs(
-		"/usr/bin/lite-sandbox",
-		workDir,
-		[]string{home}, // writable_paths: ["~"] binds $HOME writable
-		[]string{home}, // internal_readable_paths: ["~"] also overlaps every mask
-		[]string{sshKey},
-		[]string{dockerSock},
-		awsDir,
-	)
+	args := buildBwrapArgs(bwrapPlan{
+		self:        "/usr/bin/lite-sandbox",
+		workDir:     workDir,
+		binds:       []string{home}, // writable_paths: ["~"] binds $HOME writable
+		roBinds:     []string{home}, // internal_readable_paths: ["~"] also overlaps every mask
+		sshKeyPaths: []string{sshKey},
+		maskPaths:   []string{dockerSock},
+		awsTmpfsDir: awsDir,
+	})
 
 	workDirIdx := bindTargetIndex(t, args, workDir)
 	if workDirIdx < 0 {
@@ -76,7 +76,7 @@ func TestBuildBwrapArgs_MasksAfterBinds(t *testing.T) {
 // are present and correctly ordered.
 func TestBuildBwrapArgs_Structure(t *testing.T) {
 	self := "/usr/bin/lite-sandbox"
-	args := buildBwrapArgs(self, "/work", nil, []string{"/data/cache"}, nil, nil, "")
+	args := buildBwrapArgs(bwrapPlan{self: self, workDir: "/work", roBinds: []string{"/data/cache"}})
 
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
@@ -114,7 +114,7 @@ func TestBuildBwrapArgs_Structure(t *testing.T) {
 // TestBuildBwrapArgs_NoAWSWhenEmpty verifies an empty awsTmpfsDir emits no
 // ~/.aws tmpfs (the caller passes "" when blocking is off or the dir is absent).
 func TestBuildBwrapArgs_NoAWSWhenEmpty(t *testing.T) {
-	args := buildBwrapArgs("/usr/bin/lite-sandbox", "/work", nil, nil, nil, nil, "")
+	args := buildBwrapArgs(bwrapPlan{self: "/usr/bin/lite-sandbox", workDir: "/work"})
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--tmpfs" && strings.HasSuffix(args[i+1], "/.aws") {
 			t.Fatalf("did not expect a ~/.aws tmpfs with empty awsTmpfsDir, args: %v", args)

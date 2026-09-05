@@ -80,6 +80,17 @@ confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
 governs only Bash. Applies to claude and codex; opencode and crush are skipped
 in this mode since the check requires a hook over their built-in shell.
 
+The sandbox's own config (lite-sandbox config path) is left strict by default:
+a first install creates it with only audit: true, so the mode stays at its
+allowlist default and validation findings are logged for "lite-sandbox audit
+report". To adopt incrementally, opt into a looser mode explicitly with
+--mode denylist (any program may run, but paths stay inside the project and
+git push / publish stay blocked; the OS sandbox is enabled when bubblewrap or
+sandbox-exec passes a preflight check, since it is what masks credentials from
+the programs commands start) or --mode open (nothing enforced, audit only).
+An existing config is left untouched unless --mode is given. See
+docs/adoption.md for the workflow.
+
 --always-load (on by default) exempts the sandbox MCP tools from tool-search
 deferral so they are present in the model's initial tool list rather than loaded
 on demand — the built-in shell is denied/redirected, so the sandbox bash tool is
@@ -99,6 +110,8 @@ func init() {
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	installCmd.Flags().BoolVar(&installAlwaysLoad, "always-load", true,
 		"exempt the sandbox MCP tools from tool-search deferral so they load at session start (claude: alwaysLoad; codex: omit_tools_from=[\"deferred\"]); --always-load=false to defer them")
+	installCmd.Flags().StringVar(&installMode, "mode", "",
+		"enforcement mode to write into the sandbox config: open, denylist, or allowlist (default: leave the config's mode alone, i.e. allowlist for a new config)")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
 		"configure OpenAI Codex CLI")
 	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")
@@ -259,6 +272,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := t.run(binPath); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", t.name, err))
 		}
+	}
+
+	// The sandbox's own config: a first-time install lands on the recommended
+	// posture (denylist, audit on, OS sandbox where it works); an existing config
+	// is left as is unless --mode was given.
+	res, err := configureSandboxConfig(cmd.Context(), osSandboxPreflight)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("sandbox config: %w", err))
+	} else {
+		printInstallConfig(res)
 	}
 	return errors.Join(errs...)
 }

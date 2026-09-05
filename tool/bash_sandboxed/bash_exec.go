@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
+
+	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -36,6 +39,59 @@ type sandboxPaths struct {
 // "script.sh" are NOT treated as script paths (use "bash script.sh" for those).
 func isScriptPath(name string) bool {
 	return strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/")
+}
+
+// scriptInterpreter returns the interpreter named by a script's shebang line
+// ("python3" for "#!/usr/bin/env python3", "bash" for "#!/bin/bash"), or ""
+// when the script has no shebang.
+func scriptInterpreter(script string) string {
+	if !strings.HasPrefix(script, "#!") {
+		return ""
+	}
+	line := script[2:]
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	name := filepath.Base(fields[0])
+	// "#!/usr/bin/env python3": the interpreter is env's first non-flag argument.
+	if name == "env" {
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
+				continue
+			}
+			return filepath.Base(f)
+		}
+		return ""
+	}
+	return name
+}
+
+// scriptInterpreterOf reads the first line of the file at path and returns its
+// shebang interpreter (see scriptInterpreter); "" on any error.
+func scriptInterpreterOf(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 256)
+	n, _ := f.Read(buf)
+	return scriptInterpreter(string(buf[:n]))
+}
+
+// isShellInterpreter reports whether a shebang interpreter is one the sandbox
+// runs through its own shell interpreter (so the script body is validated)
+// rather than exec'ing as an opaque program.
+func isShellInterpreter(name string) bool {
+	switch name {
+	case "bash", "sh", "dash", "zsh":
+		return true
+	}
+	return false
 }
 
 // isBinaryExecutable checks if the file at path is a compiled binary
@@ -365,7 +421,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	// Validate through the sandbox. Use the workDir-aware variant so functions
 	// the script declares (or picks up via `source`) count as allowed commands,
 	// matching how the top-level command string is validated.
-	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFileCtx(ctx, f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("%s: validation failed: %w", cmdName, err)
 	}
 
@@ -411,7 +467,7 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("script %s: %w", args[0], err)
 	}
-	if err := s.validateFile(f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
+	if err := s.validateFileCtx(ctx, f, hc.Dir, paths.readAllowedPaths, paths.writeAllowedPaths); err != nil {
 		return fmt.Errorf("script %s: validation failed: %w", args[0], err)
 	}
 
@@ -503,15 +559,19 @@ var runtimeValidatorSkip = map[string]bool{
 // dedicated executors that re-validate their contents instead. extra is the
 // caller's already-read extra-commands snapshot, so both checks in a handler
 // see one consistent view of the config.
-func (s *Sandbox) runtimeArgValidator(name string, args []string, extra map[string]bool) error {
+func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string, extra map[string]bool) error {
 	if extra[name] || runtimeValidatorSkip[name] {
 		return nil
+	}
+	// Runtime enable gate (allowlist-only) before the command's own validator.
+	if err := s.report(ctx, layerRuntime, ruleRuntimeDisabled, s.runtimeDisabledError(name)); err != nil {
+		return err
 	}
 	validator, ok := commandArgValidators[name]
 	if !ok {
 		return nil
 	}
-	return validator(s, literalWords(args))
+	return s.report(ctx, layerRuntime, ruleArgValidator, validator(s, literalWords(args)))
 }
 
 // buildSecurityHandlers returns the common CallHandler, OpenHandler, and
@@ -528,7 +588,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 	return []interp.RunnerOption{
 		interp.CallHandler(func(ctx context.Context, args []string) ([]string, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateExpandedPaths(args, hc.Dir, sets); err != nil {
+			if err := s.report(ctx, layerRuntime, rulePathBoundary, validateExpandedPaths(args, hc.Dir, sets)); err != nil {
 				return nil, err
 			}
 			// The CallHandler runs for every command — functions, builtins, and
@@ -551,9 +611,11 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 				extra := s.getExtraCommands()
 				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
 				if !allowedCommands[name] && !extra[name] && !osOnly {
-					return nil, fmt.Errorf("command %q is not allowed", name)
+					if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(name)); err != nil {
+						return nil, err
+					}
 				}
-				if err := s.runtimeArgValidator(name, args, extra); err != nil {
+				if err := s.runtimeArgValidator(ctx, name, args, extra); err != nil {
 					return nil, err
 				}
 			}
@@ -561,7 +623,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 		}),
 		interp.OpenHandler(func(ctx context.Context, path string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
 			hc := interp.HandlerCtx(ctx)
-			if err := validateOpenPath(path, flag, hc.Dir, sets); err != nil {
+			if err := s.report(ctx, layerRuntime, rulePathBoundary, validateOpenPath(path, flag, hc.Dir, sets)); err != nil {
 				return nil, err
 			}
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)
@@ -584,31 +646,43 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			// the OS sandbox is active, where they are contained.
 			osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
 			if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
-				if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
-					return fmt.Errorf("command %q is not allowed", cmdName)
+				// Whitelist and local-binary gates are allowlist-only rules: in
+				// denylist/open mode the finding is audited and the command runs.
+				var gateErr error
+				if isScriptPath(cmdName) {
+					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
+						gateErr = directExecutionNotAllowed(cmdName)
+					}
+				} else {
+					gateErr = commandNotAllowed(cmdName)
+				}
+				if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, gateErr); err != nil {
+					return err
 				}
 			}
 			// Runtime per-command argument validation on the fully expanded
 			// argv (bash/sh/awk are skipped: they are dispatched to dedicated
 			// executors below that re-validate their contents).
-			if err := s.runtimeArgValidator(cmdName, args, extra); err != nil {
+			if err := s.runtimeArgValidator(ctx, cmdName, args, extra); err != nil {
 				return err
 			}
 			// Configure deno's permission flags to mirror the sandbox policy.
 			// The runtime gate (deno enabled) is enforced earlier by the AST
-			// validator, so by here deno is known to be allowed. Network and
-			// import denials are applied independent of auto_sandbox so the
-			// policy holds even when filesystem auto-scoping is off.
+			// validator in allowlist mode; in denylist mode deno may run without
+			// a configured section, in which case the DenoConfig defaults apply
+			// (auto-sandbox on, network denied). Network and import denials are
+			// applied independent of auto_sandbox so the policy holds even when
+			// filesystem auto-scoping is off.
 			if cmdName == "deno" {
-				cfg := s.getConfig()
-				if cfg.Runtimes != nil && cfg.Runtimes.Deno != nil {
-					d := cfg.Runtimes.Deno
-					// Deno needs real directories for --allow-read/-write, so strip
-					// any descendants-only "/*" markers down to their base subtree.
-					denoRead := stripNestedOnlyMarkers(readAllowedPaths)
-					denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
-					args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
+				var d *config.DenoConfig
+				if cfg := s.getConfig(); cfg.Runtimes != nil {
+					d = cfg.Runtimes.Deno
 				}
+				// Deno needs real directories for --allow-read/-write, so strip
+				// any descendants-only "/*" markers down to their base subtree.
+				denoRead := stripNestedOnlyMarkers(readAllowedPaths)
+				denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
+				args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
 			}
 			switch cmdName {
 			case "awk":
@@ -631,11 +705,24 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 				if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
 					return s.dispatchExec(ctx, args, useOSSandbox)
 				}
-				if !s.getConfig().LocalBinaryExecution.IsEnabled() {
-					return fmt.Errorf("direct execution of %q is not allowed", cmdName)
-				}
+				// The local-binary gate was already applied above; from here on
+				// the question is only how to run the file.
 				// Check if file is a compiled binary (ELF/Mach-O)
 				if isBinaryExecutable(path) {
+					return s.dispatchExec(ctx, args, useOSSandbox)
+				}
+				// A script for another interpreter (#!/usr/bin/env python3) cannot
+				// run through the shell interpreter. Gate the interpreter it names
+				// exactly as if it had been invoked directly, then exec the file.
+				if interpName := scriptInterpreterOf(path); interpName != "" && !isShellInterpreter(interpName) {
+					if !allowedCommands[interpName] && !extra[interpName] {
+						if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(interpName)); err != nil {
+							return err
+						}
+					}
+					if err := s.runtimeArgValidator(ctx, interpName, append([]string{interpName}, args...), extra); err != nil {
+						return err
+					}
 					return s.dispatchExec(ctx, args, useOSSandbox)
 				}
 				return s.executeScript(ctx, args)

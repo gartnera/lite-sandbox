@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/audit"
 	"github.com/gartnera/lite-sandbox/internal/hook"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -250,12 +251,16 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bo
 	// Writes into .git are blocked outright (matching the bash sandbox), so an
 	// agent cannot plant a hook or rewrite git internals to escape the sandbox.
 	if write && bash_sandboxed.IsGitInternalPath(resolved) {
-		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+		reason := fmt.Sprintf(
 			"Blocked by lite-sandbox: %s\n"+
 				"%q resolves to %q, which is inside a .git directory.\n"+
 				"Writing git internals directly is not allowed; use git commands instead.",
 			what, path, resolved,
-		))
+		)
+		if !auditHookFinding(cwd, what, resolved, reason) {
+			return nil
+		}
+		return hook.NewDecision(hook.DecisionDeny, reason)
 	}
 
 	// Cheap boundary first: cwd plus the user-configured paths cover the vast
@@ -292,7 +297,39 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bo
 		boundary, strings.Join(allowed, ", "),
 		cwd, boundary,
 	)
+	// The file-tool boundary is a path_boundary finding: enforced in denylist
+	// and allowlist mode, advisory (audited, then deferred to Claude Code's
+	// normal flow) in open mode.
+	if !auditHookFinding(cwd, what, resolved, reason) {
+		return nil
+	}
 	return hook.NewDecision(hook.DecisionDeny, reason)
+}
+
+// auditHookFinding records a hook path-boundary finding to the audit log when
+// auditing is on and reports whether the current mode enforces it. In open mode
+// nothing is enforced, so the caller defers instead of denying.
+func auditHookFinding(cwd, tool, resolved, reason string) bool {
+	cfg, _ := config.LoadForDirectory(cwd)
+	mode := cfg.EffectiveMode()
+	blocked := mode != config.ModeOpen
+	if cfg.AuditEnabled() {
+		if p, err := audit.DefaultPath(); err == nil {
+			_ = audit.New(p, 0).Write(audit.Record{
+				CWD:          cwd,
+				Mode:         string(mode),
+				Source:       "hook",
+				Tool:         tool,
+				Layer:        "hook",
+				Rule:         "path_boundary",
+				Message:      reason,
+				Subject:      resolved,
+				Blocked:      blocked,
+				WouldBlockIn: []string{string(config.ModeDenylist), string(config.ModeAllowlist)},
+			})
+		}
+	}
+	return blocked
 }
 
 // fsTarget reports the filesystem path a tool call targets, whether the access

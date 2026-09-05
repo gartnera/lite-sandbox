@@ -218,14 +218,27 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	cmdName := args[0].Lit()
 	if cmdName == "" {
-		return fmt.Errorf("dynamic command names are not allowed")
+		return tagRule(ruleStructural, "", fmt.Errorf("dynamic command names are not allowed"))
 	}
 	if subCommandDenylist[cmdName] {
-		return fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName)
+		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName))
 	}
 	extra := s.getExtraCommands()
+	// The whitelist and runtime gates are allowlist-only rules. A wrapped
+	// command that fails them is returned tagged so the reporting site can
+	// treat it as advisory in denylist/open mode; its own validator is then
+	// skipped, but the wrapper's path arguments are still boundary-checked by
+	// the generic path pass.
 	if !allowedCommands[cmdName] && !extra[cmdName] {
-		return fmt.Errorf("command %q is not allowed", cmdName)
+		if s.enforcesAllowlist() {
+			return commandNotAllowed(cmdName)
+		}
+		return nil
+	}
+	if err := s.runtimeDisabledError(cmdName); err != nil {
+		if s.enforcesAllowlist() {
+			return err
+		}
 	}
 	if validator, ok := s.argValidators[cmdName]; ok {
 		if err := validator(s, args); err != nil {
