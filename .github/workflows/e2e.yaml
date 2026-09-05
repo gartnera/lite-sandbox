@@ -36,10 +36,6 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ steps.go.outputs.version }}
-      # Codex and Claude Code are installed from npm into e2e/mockedserver/.bin/agents.
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
       # The agents are provisioned by TestMain before any test runs, so the
       # cache is worth saving even when the tests fail — restore and save are
       # split so the save is not skipped on a red job.

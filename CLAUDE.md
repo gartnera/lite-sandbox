@@ -49,7 +49,7 @@ LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v            # all agents
 LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run TestCodex
 ```
 
-The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` downloads all three into `e2e/mockedserver/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests (needs `npm` on PATH for Codex and Claude Code), and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
+The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` downloads all three into `e2e/mockedserver/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests, and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
 
 `e2e/claude` is the complementary real-model suite: it sends real prompts to Claude via the Agent SDK (API key required) and checks Claude actually chooses the sandbox tool over built-in Bash — behavior the mock cannot exercise:
 

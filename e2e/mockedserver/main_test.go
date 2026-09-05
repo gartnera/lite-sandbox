@@ -3,6 +3,9 @@ package mockedserver
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +50,8 @@ func requireE2E(t *testing.T) {
 	}
 }
 
-// provision builds lite-sandbox and installs the pinned agents. Everything
+// provision builds lite-sandbox and installs the pinned agents — all as native
+// release binaries, so nothing beyond Go is needed on the host. Everything
 // lives under e2e/mockedserver/.bin (override with E2E_BIN_DIR): lite-sandbox is rebuilt
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
@@ -84,17 +88,17 @@ func provision() error {
 		return ensureInstalled(crushDir, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
 	})
 	g.Go(func() error {
-		return ensureInstalled(codexDir, "codex "+codexVersion, func() error { return installNPM(codexDir, "@openai/codex@"+codexVersion) })
+		return ensureInstalled(codexDir, "codex "+codexVersion, func() error { return installCodex(codexDir, codexVersion) })
 	})
 	g.Go(func() error {
-		return ensureInstalled(claudeDir, "claude-code "+claudeVersion, func() error { return installNPM(claudeDir, "@anthropic-ai/claude-code@"+claudeVersion) })
+		return ensureInstalled(claudeDir, "claude-code "+claudeVersion, func() error { return installClaudeCode(claudeDir, claudeVersion) })
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 	bins.crush = filepath.Join(crushDir, "crush")
-	bins.codex = filepath.Join(codexDir, "node_modules", ".bin", "codex")
-	bins.claude = filepath.Join(claudeDir, "node_modules", ".bin", "claude")
+	bins.codex = filepath.Join(codexDir, "codex")
+	bins.claude = filepath.Join(claudeDir, "claude")
 
 	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude)}
 	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude} {
@@ -136,7 +140,7 @@ func ensureInstalled(dir, what string, install func() error) error {
 	return os.WriteFile(marker, nil, 0644)
 }
 
-// installCrush downloads the Crush release tarball for version and this
+// installCrush downloads the Crush GitHub release tarball for version and this
 // OS/arch and extracts the crush binary into dir.
 func installCrush(dir, version string) error {
 	goos := map[string]string{"linux": "Linux", "darwin": "Darwin"}[runtime.GOOS]
@@ -146,15 +150,107 @@ func installCrush(dir, version string) error {
 	}
 	url := fmt.Sprintf("https://github.com/charmbracelet/crush/releases/download/v%s/crush_%s_%s_%s.tar.gz",
 		version, version, goos, arch)
-	resp, err := http.Get(url)
+	return downloadTarMember(url, "crush", filepath.Join(dir, "crush"))
+}
+
+// installCodex downloads the Codex GitHub release tarball for version and this
+// OS/arch (a single native binary named after the Rust target triple) into dir.
+func installCodex(dir, version string) error {
+	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
+	sys := map[string]string{"linux": "unknown-linux-musl", "darwin": "apple-darwin"}[runtime.GOOS]
+	if arch == "" || sys == "" {
+		return fmt.Errorf("no codex release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	triple := arch + "-" + sys
+	url := fmt.Sprintf("https://github.com/openai/codex/releases/download/rust-v%s/codex-%s.tar.gz", version, triple)
+	return downloadTarMember(url, "codex-"+triple, filepath.Join(dir, "codex"))
+}
+
+// claudeCodeReleases is the download base of Claude Code's native (non-npm)
+// distribution — the one https://claude.ai/install.sh uses. Each version
+// publishes a manifest.json with a SHA-256 per platform, and the binary at
+// <version>/<platform>/claude.
+const claudeCodeReleases = "https://downloads.claude.ai/claude-code-releases"
+
+// installClaudeCode downloads the native Claude Code binary for version and
+// this OS/arch into dir, verifying it against the release manifest.
+func installClaudeCode(dir, version string) error {
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	if arch == "" || (runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		return fmt.Errorf("no claude-code release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	platform := runtime.GOOS + "-" + arch
+	if runtime.GOOS == "linux" && isMusl() {
+		platform += "-musl"
+	}
+
+	var manifest struct {
+		Platforms map[string]struct {
+			Checksum string `json:"checksum"`
+		} `json:"platforms"`
+	}
+	body, err := fetch(claudeCodeReleases + "/" + version + "/manifest.json")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
+	err = json.NewDecoder(body).Decode(&manifest)
+	body.Close()
+	if err != nil {
+		return fmt.Errorf("decoding claude-code manifest: %w", err)
 	}
-	gz, err := gzip.NewReader(resp.Body)
+	want := manifest.Platforms[platform].Checksum
+	if want == "" {
+		return fmt.Errorf("claude-code %s has no build for %s", version, platform)
+	}
+
+	body, err = fetch(claudeCodeReleases + "/" + version + "/" + platform + "/claude")
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	sum := sha256.New()
+	if err := writeExecutable(filepath.Join(dir, "claude"), io.TeeReader(body, sum)); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+		return fmt.Errorf("claude-code %s/%s checksum mismatch: got %s, manifest says %s", version, platform, got, want)
+	}
+	return nil
+}
+
+// isMusl reports whether this Linux host uses musl rather than glibc, the way
+// Claude Code's installer detects it.
+func isMusl() bool {
+	for _, lib := range []string{"/lib/libc.musl-x86_64.so.1", "/lib/libc.musl-aarch64.so.1"} {
+		if _, err := os.Stat(lib); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fetch GETs url and returns the body, failing on a non-200 status.
+func fetch(url string) (io.ReadCloser, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return resp.Body, nil
+}
+
+// downloadTarMember fetches a .tar.gz from url and writes the regular file
+// whose base name is member to dest as an executable.
+func downloadTarMember(url, member, dest string) error {
+	body, err := fetch(url)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	gz, err := gzip.NewReader(body)
 	if err != nil {
 		return err
 	}
@@ -162,33 +258,23 @@ func installCrush(dir, version string) error {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("%s: no crush binary in archive", url)
+			return fmt.Errorf("%s: no %s in archive", url, member)
 		}
 		if err != nil {
 			return err
 		}
-		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != "crush" {
-			continue
+		if hdr.Typeflag == tar.TypeReg && filepath.Base(hdr.Name) == member {
+			return writeExecutable(dest, tr)
 		}
-		f, err := os.OpenFile(filepath.Join(dir, "crush"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(f, tr)
-		return errors.Join(err, f.Close())
 	}
 }
 
-// installNPM installs one package@version spec into a private npm prefix, so
-// the pinned Codex and Claude Code never touch the host's global npm tree. The
-// launcher ends up in dir/node_modules/.bin.
-func installNPM(dir, spec string) error {
-	npm, err := exec.LookPath("npm")
+// writeExecutable writes r to path with mode 0755.
+func writeExecutable(path string, r io.Reader) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		return fmt.Errorf("npm is required to install Codex and Claude Code: %w", err)
+		return err
 	}
-	cmd := exec.Command(npm, "install", "--prefix", dir, "--no-audit", "--no-fund", "--no-package-lock", "--loglevel=error", spec)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	_, err = io.Copy(f, r)
+	return errors.Join(err, f.Close())
 }

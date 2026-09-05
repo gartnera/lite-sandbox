@@ -11,8 +11,9 @@ package mockedserver
 const (
 	// CrushVersion is a charmbracelet/crush GitHub release (without the "v").
 	CrushVersion = "0.92.0"
-	// CodexVersion is the @openai/codex npm package version.
+	// CodexVersion is an openai/codex GitHub release (tag rust-v<version>).
 	CodexVersion = "0.153.4"
-	// ClaudeCodeVersion is the @anthropic-ai/claude-code npm package version.
+	// ClaudeCodeVersion is a Claude Code release, fetched from the native
+	// distribution that https://claude.ai/install.sh uses.
 	ClaudeCodeVersion = "2.1.261"
 )
