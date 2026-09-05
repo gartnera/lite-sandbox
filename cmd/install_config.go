@@ -138,9 +138,7 @@ func printInstallConfig(res *installConfigResult) {
 		fmt.Printf("  os_sandbox: %v\n", res.OSSandbox)
 	}
 	if res.Mode == config.ModeAllowlist && !res.ModeSet {
-		fmt.Println("  This is the strict default. To adopt incrementally, opt into a looser mode first:")
-		fmt.Println("    lite-sandbox config mode set denylist   # any program runs; paths stay in the project")
-		fmt.Println("  and tighten later with the audit report. See docs/adoption.md.")
+		fmt.Println("  This is the strict default; see docs/adoption.md for other options.")
 	}
 }
 

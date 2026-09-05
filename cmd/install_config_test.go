@@ -37,7 +37,7 @@ func TestConfigureSandboxConfig_FirstTimeStaysStrict(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() { printInstallConfig(res) })
-	for _, want := range []string{"Created", "mode: allowlist", "audit: true", "strict default", "mode set denylist", "docs/adoption.md"} {
+	for _, want := range []string{"Created", "mode: allowlist", "audit: true", "strict default", "docs/adoption.md"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
