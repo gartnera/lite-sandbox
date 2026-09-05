@@ -61,10 +61,12 @@ latest=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9
 if [ -n "$latest" ]; then
   if git merge-base --is-ancestor "$head" "$latest"; then
     # Nothing new. The one exception: HEAD is the last tag itself but the
-    # release never made it out (a failed upload) — re-emit the tag so
-    # GoReleaser can complete it.
-    if [ "$(git rev-parse "$latest^{commit}")" = "$head" ] && ! gh release view "$latest" --repo "$repo" >/dev/null 2>&1; then
-      log "$latest is tagged at HEAD but has no GitHub release yet; releasing it"
+    # release never made it out (the run failed after tagging) — re-emit the
+    # tag so the workflow can redo it. Only a published release counts: a
+    # failed run leaves a draft behind, which the tags endpoint does not
+    # return (unlike `gh release view`), and the re-run replaces it.
+    if [ "$(git rev-parse "$latest^{commit}")" = "$head" ] && ! gh api "repos/$repo/releases/tags/$latest" >/dev/null 2>&1; then
+      log "$latest is tagged at HEAD but has no published GitHub release yet; releasing it"
       echo "$latest"
     else
       log "HEAD ($head) is already included in $latest; nothing to release"

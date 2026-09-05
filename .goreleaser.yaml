@@ -3,7 +3,8 @@
 # Run by .github/workflows/release.yaml after it tags a commit on main. Builds
 # the lite-sandbox binary for Linux and macOS (amd64/arm64), packs each into
 # lite-sandbox_<version>_<os>_<arch>.tar.gz, writes checksums.txt, and uploads
-# everything to the GitHub release for the tag with GitHub-generated notes.
+# everything to a draft GitHub release for the tag with GitHub-generated notes.
+# The workflow then attests the assets and publishes the draft.
 #
 # `lite-sandbox update` (internal/selfupdate) relies on the archive and
 # checksum file names below — change them together.
@@ -58,10 +59,14 @@ release:
   github:
     owner: gartnera
     name: lite-sandbox
-  # The release for a tag is created (or, if the workflow is re-run after a
-  # failed upload, completed) rather than duplicated.
-  mode: keep-existing
-  replace_existing_artifacts: true
+  # Leave the release as a draft: the workflow attests the assets and then
+  # publishes it. Releases are immutable once published (a repository setting),
+  # so nothing may be uploaded after that point.
+  draft: true
+  # A run that failed after creating the draft leaves it behind; the next run
+  # starts over from a fresh one instead of adding to a half-uploaded release.
+  # (GoReleaser matches drafts by release name, which is the tag here.)
+  replace_existing_draft: true
   # A tag like v1.0.0-rc1 is published as a pre-release; plain tags are full releases.
   prerelease: auto
   header: |
@@ -74,3 +79,10 @@ release:
     Or download the archive for your platform below, verify it against
     `checksums.txt`, and put the `lite-sandbox` binary on your `PATH`. Then run
     `lite-sandbox install` (a first install) or restart your agent (an upgrade).
+
+    Every asset carries a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+    tying it to this repository and the workflow run that built it:
+
+    ```bash
+    gh attestation verify {{ .ProjectName }}_{{ .Version }}_<os>_<arch>.tar.gz -R gartnera/lite-sandbox
+    ```
