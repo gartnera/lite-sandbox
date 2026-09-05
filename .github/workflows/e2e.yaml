@@ -1,6 +1,6 @@
 name: E2E
 
-# Drives the real agent binaries (Crush, Codex, Claude Code) through
+# Drives the real agent binaries (Crush, Codex, Claude Code, opencode) through
 # `lite-sandbox install` and a non-interactive run against the in-process mocked
 # model server — see e2e/mockedserver. The versions are pinned in
 # e2e/mockedserver/versions.go; TestMain downloads them into e2e/mockedserver/.bin/agents,

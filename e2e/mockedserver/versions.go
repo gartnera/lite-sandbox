@@ -1,4 +1,5 @@
-// Package mockedserver drives real agent binaries (Crush, Codex, Claude Code) through
+// Package mockedserver drives real agent binaries (Crush, Codex, Claude Code,
+// opencode) through
 // `lite-sandbox install` and a non-interactive run against a mocked model
 // server (the mockmodel package), so it needs no API key. The sibling
 // e2e/claude suite uses a real model instead. See the *_test.go files; this file pins the agent
@@ -16,4 +17,6 @@ const (
 	// ClaudeCodeVersion is a Claude Code release, fetched from the native
 	// distribution that https://claude.ai/install.sh uses.
 	ClaudeCodeVersion = "2.1.261"
+	// OpencodeVersion is an anomalyco/opencode GitHub release (without the "v").
+	OpencodeVersion = "1.18.29"
 )

@@ -2,6 +2,7 @@ package mockedserver
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,8 +29,8 @@ const e2eEnv = "LITE_SANDBOX_E2E"
 // for every subprocess so `lite-sandbox install` autodetection and the agents'
 // own PATH lookups (e.g. `crush --version`) find them.
 var bins struct {
-	sandbox, crush, codex, claude string
-	pathDirs                      []string
+	sandbox, crush, codex, claude, opencode string
+	pathDirs                                []string
 }
 
 func TestMain(m *testing.M) {
@@ -55,8 +56,9 @@ func requireE2E(t *testing.T) {
 // lives under e2e/mockedserver/.bin (override with E2E_BIN_DIR): lite-sandbox is rebuilt
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
-// setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION for
-// one run — never re-downloads a version that is already there.
+// setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION /
+// E2E_OPENCODE_VERSION for one run — never re-downloads a version that is
+// already there.
 func provision() error {
 	binDir := os.Getenv("E2E_BIN_DIR")
 	if binDir == "" {
@@ -80,13 +82,16 @@ func provision() error {
 	crushVersion := versionFromEnv("E2E_CRUSH_VERSION", CrushVersion)
 	codexVersion := versionFromEnv("E2E_CODEX_VERSION", CodexVersion)
 	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
+	opencodeVersion := versionFromEnv("E2E_OPENCODE_VERSION", OpencodeVersion)
 	crushDir := filepath.Join(agentsDir, "crush", crushVersion)
 	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
 	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
+	opencodeDir := filepath.Join(agentsDir, "opencode", opencodeVersion)
 	var g errgroup.Group
 	bins.crush = filepath.Join(crushDir, "crush")
 	bins.codex = filepath.Join(codexDir, "codex")
 	bins.claude = filepath.Join(claudeDir, "claude")
+	bins.opencode = filepath.Join(opencodeDir, "opencode")
 	g.Go(func() error {
 		return ensureInstalled(bins.crush, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
 	})
@@ -96,17 +101,20 @@ func provision() error {
 	g.Go(func() error {
 		return ensureInstalled(bins.claude, "claude-code "+claudeVersion, func() error { return installClaudeCode(claudeDir, claudeVersion) })
 	})
+	g.Go(func() error {
+		return ensureInstalled(bins.opencode, "opencode "+opencodeVersion, func() error { return installOpencode(opencodeDir, opencodeVersion) })
+	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
-	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude)}
-	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude} {
+	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode)}
+	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode} {
 		if _, err := os.Stat(b); err != nil {
 			return fmt.Errorf("provisioned binary missing: %w", err)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s\n", crushVersion, codexVersion, claudeVersion)
+	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion)
 	return nil
 }
 
@@ -224,6 +232,28 @@ func installClaudeCode(dir, version string) error {
 	return nil
 }
 
+// installOpencode downloads the opencode GitHub release archive for version and
+// this OS/arch into dir: a .tar.gz on Linux, a .zip on macOS, each holding the
+// single `opencode` binary. This follows https://opencode.ai/install, minus its
+// "-baseline" (no-AVX2) variant, which no supported CI runner or developer
+// machine needs.
+func installOpencode(dir, version string) error {
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	if arch == "" || (runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		return fmt.Errorf("no opencode release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	target := runtime.GOOS + "-" + arch
+	if runtime.GOOS == "linux" && isMusl() {
+		target += "-musl"
+	}
+	base := fmt.Sprintf("https://github.com/anomalyco/opencode/releases/download/v%s/opencode-%s", version, target)
+	dest := filepath.Join(dir, "opencode")
+	if runtime.GOOS == "linux" {
+		return downloadTarMember(base+".tar.gz", "opencode", dest)
+	}
+	return downloadZipMember(base+".zip", "opencode", dest)
+}
+
 // isMusl reports whether this Linux host uses musl rather than glibc, the way
 // Claude Code's installer detects it.
 func isMusl() bool {
@@ -273,6 +303,43 @@ func downloadTarMember(url, member, dest string) error {
 			return writeExecutable(dest, tr)
 		}
 	}
+}
+
+// downloadZipMember fetches a .zip from url and writes the file whose base name
+// is member to dest as an executable. Zip needs random access, so the archive
+// is spooled to a temp file first.
+func downloadZipMember(url, member, dest string) error {
+	body, err := fetch(url)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	tmp, err := os.CreateTemp("", "e2e-*.zip")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if _, err := io.Copy(tmp, body); err != nil {
+		return err
+	}
+	zr, err := zip.OpenReader(tmp.Name())
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() || filepath.Base(f.Name) != member {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		return writeExecutable(dest, rc)
+	}
+	return fmt.Errorf("%s: no %s in archive", url, member)
 }
 
 // writeExecutable writes r to path with mode 0755.
