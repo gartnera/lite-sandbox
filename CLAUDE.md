@@ -43,6 +43,8 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 
 **Releases:** every push to `main` that passes CI and E2E is tagged and released by `.github/workflows/release.yaml` (GoReleaser, `.goreleaser.yaml`). The semver bump comes from `release:major|minor|patch|skip` labels on the merged PRs (`.github/scripts/next-version.sh`; unlabeled = patch, major is capped to minor while `RELEASE_ALLOW_MAJOR` is false). Asset names (`lite-sandbox_<version>_<os>_<arch>.tar.gz`, `checksums.txt`) are relied on by `internal/selfupdate` — change them together. See `docs/development.md`.
 
+**Label every PR you open with exactly one `release:*` label** (add it when creating the PR, or right after): `release:minor` for a new feature or command, `release:patch` for a fix or refactor with no new behavior, `release:skip` for changes that ship nothing to users (docs, CI, tests only), `release:major` for a breaking change (a removed/renamed command or flag, a config-format change). Every merge to `main` is released, so an unlabeled PR silently becomes a patch release; if a PR grows to include a bigger change, upgrade its label. The `PR labels` workflow fails a PR with more than one.
+
 ## Testing
 
 After making complex changes (new commands, validation logic, security rules, installer changes), run the e2e suite in addition to unit tests. It drives the real Crush, Codex, Claude Code, and opencode binaries through `lite-sandbox install` and a non-interactive run, with `e2e/mockedserver/mockmodel` (one server speaking the OpenAI chat-completions, OpenAI Responses, and Anthropic Messages APIs) standing in for the LLM — so it needs no API key and behaves identically locally and in CI:
