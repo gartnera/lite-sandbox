@@ -46,7 +46,8 @@ Per agent:
              ~/.claude/settings.json, registers a PreToolUse hook that
              pre-approves those tools inside subagents and skills (which do
              not inherit permissions.allow — anthropics/claude-code#18950),
-             and adds a usage directive to ~/.claude/CLAUDE.md
+             and adds a usage directive to ~/.claude/CLAUDE.md (all honoring
+             CLAUDE_CONFIG_DIR, under which .claude.json also lives)
   codex    — registers the MCP server and a PreToolUse hook in
              ~/.codex/config.toml (honoring CODEX_HOME) and adds a usage
              directive to ~/.codex/AGENTS.md; Codex has no permission deny, so
@@ -140,8 +141,31 @@ func detectClaude() bool {
 	if cliOnPath("claude") {
 		return true
 	}
+	dir, err := claudeConfigDir()
+	return err == nil && dirExists(dir)
+}
+
+// claudeConfigDir returns Claude Code's configuration directory: $CLAUDE_CONFIG_DIR
+// when set, otherwise ~/.claude. This mirrors how Claude Code itself resolves it.
+func claudeConfigDir() (string, error) {
+	dir, _, err := claudePaths()
+	return dir, err
+}
+
+// claudePaths resolves Claude Code's configuration directory and the path of
+// its user config file (mcpServers, sign-in state, ...). Claude Code keeps the
+// latter at ~/.claude.json, but when CLAUDE_CONFIG_DIR is set it moves into
+// that directory as $CLAUDE_CONFIG_DIR/.claude.json, alongside settings.json —
+// both decisions follow from the one environment lookup here.
+func claudePaths() (claudeDir, userConfigPath string, err error) {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return d, filepath.Join(d, ".claude.json"), nil
+	}
 	home, err := os.UserHomeDir()
-	return err == nil && dirExists(filepath.Join(home, ".claude"))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"), nil
 }
 
 func detectCodex() bool {
@@ -194,7 +218,7 @@ func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
 		}
 	}
 	if len(detected) == 0 {
-		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, opencode, or crush binary on PATH and no ~/.claude, ~/.codex, ~/.config/opencode, or ~/.config/crush directory) — name one explicitly, e.g. `lite-sandbox install claude`")
+		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, opencode, or crush binary on PATH and no ~/.claude (or $CLAUDE_CONFIG_DIR), ~/.codex, ~/.config/opencode, or ~/.config/crush directory) — name one explicitly, e.g. `lite-sandbox install claude`")
 	}
 	return detected, true, nil
 }
@@ -241,19 +265,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 // runInstallClaude configures Claude Code: MCP server in ~/.claude.json,
 // permissions + optional PreToolUse hook in ~/.claude/settings.json, and a
-// usage directive in ~/.claude/CLAUDE.md.
+// usage directive in ~/.claude/CLAUDE.md. All paths honor CLAUDE_CONFIG_DIR
+// the way Claude Code does (see claudePaths).
 func runInstallClaude(binPath string) error {
-	homeDir, err := os.UserHomeDir()
+	claudeDir, claudeJsonPath, err := claudePaths()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
+		return err
 	}
-
-	claudeDir := filepath.Join(homeDir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
-		return fmt.Errorf("failed to create ~/.claude directory: %w", err)
+		return fmt.Errorf("failed to create %s: %w", claudeDir, err)
 	}
-
-	claudeJsonPath := filepath.Join(homeDir, ".claude.json")
+	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	// Resolve the install mode from the (composable) flags:
 	//   wantHook    — register a PreToolUse hook at all.
@@ -269,15 +291,16 @@ func runInstallClaude(binPath string) error {
 	wantHook := installWithToolHook || installBashASTHookMode
 	configMCP := !installBashASTHookMode
 
-	// 1. Configure MCP server in ~/.claude.json (user-scoped)
+	// 1. Configure MCP server in the user config (~/.claude.json, or its
+	// CLAUDE_CONFIG_DIR equivalent)
 	if configMCP {
 		if err := configureMCPServer(claudeJsonPath, binPath, installAlwaysLoad); err != nil {
 			return fmt.Errorf("failed to configure MCP server: %w", err)
 		}
 		if installAlwaysLoad {
-			fmt.Println("✓ Added MCP server to ~/.claude.json (alwaysLoad: tools skip Tool Search deferral)")
+			fmt.Printf("✓ Added MCP server to %s (alwaysLoad: tools skip Tool Search deferral)\n", claudeJsonPath)
 		} else {
-			fmt.Println("✓ Added MCP server to ~/.claude.json")
+			fmt.Printf("✓ Added MCP server to %s\n", claudeJsonPath)
 		}
 	}
 
@@ -290,11 +313,11 @@ func runInstallClaude(binPath string) error {
 	}
 	switch {
 	case denyBash:
-		fmt.Println("✓ Allowed lite-sandbox MCP tools and denied built-in Bash in ~/.claude/settings.json")
+		fmt.Printf("✓ Allowed lite-sandbox MCP tools and denied built-in Bash in %s\n", settingsPath)
 	case configMCP:
-		fmt.Println("✓ Allowed lite-sandbox MCP tools in ~/.claude/settings.json (built-in Bash governed by the tool hook)")
+		fmt.Printf("✓ Allowed lite-sandbox MCP tools in %s (built-in Bash governed by the tool hook)\n", settingsPath)
 	default:
-		fmt.Println("✓ Ensured built-in Bash is not denied in ~/.claude/settings.json (governed by the validating hook)")
+		fmt.Printf("✓ Ensured built-in Bash is not denied in %s (governed by the validating hook)\n", settingsPath)
 	}
 
 	// 3. Configure CLAUDE.md (only meaningful when the MCP tool exists for the
@@ -303,7 +326,7 @@ func runInstallClaude(binPath string) error {
 		if err := configureCLAUDEMD(claudeDir); err != nil {
 			return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
 		}
-		fmt.Println("✓ Added usage directive to ~/.claude/CLAUDE.md")
+		fmt.Printf("✓ Added usage directive to %s\n", filepath.Join(claudeDir, "CLAUDE.md"))
 	}
 
 	// 4. Reconcile the PreToolUse hook (register the right one for the chosen
@@ -319,13 +342,13 @@ func runInstallClaude(binPath string) error {
 	}
 	switch {
 	case governFS && validateBash:
-		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) and confine reads/writes to sandbox paths in ~/.claude/settings.json")
+		fmt.Printf("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) and confine reads/writes to sandbox paths in %s\n", settingsPath)
 	case governFS:
-		fmt.Println("✓ Registered PreToolUse hook to redirect built-in Bash, confine reads/writes to sandbox paths, and pre-approve the sandbox tools in subagents in ~/.claude/settings.json")
+		fmt.Printf("✓ Registered PreToolUse hook to redirect built-in Bash, confine reads/writes to sandbox paths, and pre-approve the sandbox tools in subagents in %s\n", settingsPath)
 	case validateBash:
-		fmt.Println("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in ~/.claude/settings.json")
+		fmt.Printf("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in %s\n", settingsPath)
 	case configMCP:
-		fmt.Println("✓ Registered PreToolUse hook to pre-approve the sandbox tools in subagents and skills in ~/.claude/settings.json")
+		fmt.Printf("✓ Registered PreToolUse hook to pre-approve the sandbox tools in subagents and skills in %s\n", settingsPath)
 	}
 
 	fmt.Println("\n✓ Claude Code installation complete!")
@@ -346,11 +369,12 @@ type mcpServerConfig struct {
 }
 
 // configureMCPServer adds (or updates) the lite-sandbox MCP server entry in
-// ~/.claude.json. alwaysLoad sets Claude Code's alwaysLoad flag so the sandbox
+// Claude Code's user config at claudeJsonPath (~/.claude.json, or
+// $CLAUDE_CONFIG_DIR/.claude.json). alwaysLoad sets Claude Code's alwaysLoad flag so the sandbox
 // tools are never deferred behind Tool Search — the built-in Bash tool is
 // denied, so the sandbox bash tool is needed on essentially every turn.
 func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
-	// Read existing ~/.claude.json (preserving all other keys)
+	// Read the existing user config (preserving all other keys)
 	var cfg map[string]json.RawMessage
 	data, err := os.ReadFile(claudeJsonPath)
 	if err != nil {
@@ -361,7 +385,7 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 		cfg = make(map[string]json.RawMessage)
 	} else {
 		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("failed to parse existing ~/.claude.json: %w", err)
+			return fmt.Errorf("failed to parse existing %s: %w", claudeJsonPath, err)
 		}
 	}
 
@@ -369,7 +393,7 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 	mcpServers := make(map[string]mcpServerConfig)
 	if raw, ok := cfg["mcpServers"]; ok {
 		if err := json.Unmarshal(raw, &mcpServers); err != nil {
-			return fmt.Errorf("failed to parse mcpServers in ~/.claude.json: %w", err)
+			return fmt.Errorf("failed to parse mcpServers in %s: %w", claudeJsonPath, err)
 		}
 	}
 

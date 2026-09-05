@@ -8,7 +8,7 @@ The easiest way to configure your coding agents is the built-in install command:
 lite-sandbox install
 ```
 
-With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), and [Crush](#crush) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`) or its config directory exists (`~/.claude`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`). To configure an explicit set instead, name the agents:
+With no arguments, `install` **autodetects which supported agent CLIs are installed on the host** — [Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), and [Crush](#crush) — and configures every detected one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`). To configure an explicit set instead, name the agents:
 
 ```bash
 lite-sandbox install                  # autodetect claude / codex / opencode / crush
@@ -25,6 +25,8 @@ For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`) autom
 2. Adds auto-allow permissions for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools outright — subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow.
 4. Adds usage directive to `~/.claude/CLAUDE.md`
+
+All of these honor `CLAUDE_CONFIG_DIR` the way Claude Code does: when it is set, `settings.json` and `CLAUDE.md` are written under that directory, and so is `.claude.json` (Claude Code keeps its user config at `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json` in that case).
 
 Denying the built-in `Bash` tool forces Claude Code through the sandbox: there is no unvalidated shell escape hatch, so every command runs through the AST validation and (optionally) the OS sandbox.
 
@@ -88,6 +90,8 @@ This automatically:
 1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `~/.codex/config.toml`, with `default_tools_approval_mode = "approve"` so Codex auto-approves the sandboxed tools (the mirror of the Claude installer's `mcp__lite-sandbox__*` allow entries — lite-sandbox is itself the boundary, so a per-call Codex prompt is redundant) and `omit_tools_from = ["deferred"]` (Codex's equivalent of Claude's `alwaysLoad`; see [`--always-load`](#always-load)). Only this server's tools are affected. Requires a Codex build new enough to honor the keys; older versions ignore them harmlessly.
 2. Adds a usage directive to `~/.codex/AGENTS.md` steering Codex to the sandboxed `bash` tool
 3. Registers a `PreToolUse` hook (`[[hooks.PreToolUse]]`) that blocks Codex's built-in shell and redirects it to the sandboxed MCP tool
+
+> **Trust the hook.** Codex skips hooks it has not been told to trust: it records trust against the hook's exact definition, so a new (or changed) hook is inert until you open Codex, run `/hooks`, and trust the lite-sandbox entry — do this again after reinstalling with a different mode or binary path. Non-interactive runs (`codex exec`) can pass `--dangerously-bypass-hook-trust` instead. Until then the built-in shell is *not* blocked; the MCP server and `AGENTS.md` directive still work. Hooks also require `[features] hooks` to be enabled, which is the default.
 
 Both paths honor `CODEX_HOME` (they use `$CODEX_HOME` when set, otherwise `~/.codex`). Everything is edited as text — your existing tables, ordering, and comments are preserved. The `[mcp_servers.lite-sandbox]` table is rewritten in place, and the hook lives in a clearly-marked managed block, so re-running (and switching modes) is idempotent.
 

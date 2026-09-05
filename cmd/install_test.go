@@ -390,15 +390,17 @@ func TestClaudeHookPlan(t *testing.T) {
 	}
 }
 
-// setupDetectionEnv points every detection input (PATH, HOME, CODEX_HOME,
-// CRUSH_GLOBAL_CONFIG, XDG_CONFIG_HOME) at empty temp directories so no real CLI on the test host
-// leaks into the result. It returns the fake home and PATH directories.
+// setupDetectionEnv points every detection input (PATH, HOME, CLAUDE_CONFIG_DIR,
+// CODEX_HOME, CRUSH_GLOBAL_CONFIG, XDG_CONFIG_HOME) at empty temp directories so
+// no real CLI on the test host leaks into the result. It returns the fake home
+// and PATH directories.
 func setupDetectionEnv(t *testing.T) (homeDir, pathDir string) {
 	t.Helper()
 	homeDir = t.TempDir()
 	pathDir = t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("PATH", pathDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CRUSH_GLOBAL_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -496,4 +498,35 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestRunInstallClaudeHonorsConfigDir checks that the Claude installer writes
+// every file under $CLAUDE_CONFIG_DIR when it is set — including .claude.json,
+// which Claude Code moves into that directory — and touches nothing in HOME.
+func TestRunInstallClaudeHonorsConfigDir(t *testing.T) {
+	homeDir := t.TempDir()
+	configDir := filepath.Join(t.TempDir(), "claude-config")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("PATH", t.TempDir()) // so detectClaude cannot short-circuit on a real claude binary
+
+	if err := runInstallClaude("/usr/local/bin/lite-sandbox"); err != nil {
+		t.Fatalf("runInstallClaude failed: %v", err)
+	}
+
+	for _, name := range []string{".claude.json", "settings.json", "CLAUDE.md"} {
+		if _, err := os.Stat(filepath.Join(configDir, name)); err != nil {
+			t.Errorf("expected %s under CLAUDE_CONFIG_DIR: %v", name, err)
+		}
+	}
+	entries, err := os.ReadDir(homeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("installer wrote into HOME despite CLAUDE_CONFIG_DIR: %v", entries)
+	}
+	if !detectClaude() {
+		t.Error("detectClaude should see the CLAUDE_CONFIG_DIR directory")
+	}
 }

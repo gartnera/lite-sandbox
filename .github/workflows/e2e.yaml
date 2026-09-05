@@ -1,0 +1,62 @@
+name: E2E
+
+# Drives the real agent binaries (Crush, Codex, Claude Code, opencode) through
+# `lite-sandbox install` and a non-interactive run against the in-process mocked
+# model server — see e2e/mockedserver. The versions are pinned in
+# e2e/mockedserver/versions.go; TestMain downloads them into e2e/mockedserver/.bin/agents,
+# which is cached here keyed on that file and on the provisioning code (so a
+# change in how agents are laid out never meets a stale cache), so a run here does exactly what
+# `LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/` does locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
+      # as an exact match and downloads on every run. Ask for the latest 1.26.x
+      # instead so the runner image's preinstalled toolchain is used.
+      - name: Resolve Go version
+        id: go
+        run: echo "version=$(sed -nE 's/^go ([0-9]+\.[0-9]+).*/\1.x/p' go.mod)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      # The agents are provisioned by TestMain before any test runs, so the
+      # cache is worth saving even when the tests fail — restore and save are
+      # split so the save is not skipped on a red job.
+      - name: Restore agent binaries
+        id: agents-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: e2e/mockedserver/.bin/agents
+          key: e2e-agents-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/mockedserver/versions.go', 'e2e/mockedserver/main_test.go') }}
+      - name: End-to-end tests
+        run: go test ./e2e/mockedserver/ -v -count=1 -timeout 15m
+        env:
+          LITE_SANDBOX_E2E: "1"
+          # Release downloads go through the authenticated GitHub API when a
+          # token is present, so they are not subject to the per-IP rate limit
+          # shared by every job on a runner.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Save agent binaries
+        if: always() && steps.agents-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: e2e/mockedserver/.bin/agents
+          key: ${{ steps.agents-cache.outputs.cache-primary-key }}
