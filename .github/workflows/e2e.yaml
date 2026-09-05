@@ -4,7 +4,8 @@ name: E2E
 # `lite-sandbox install` and a non-interactive run against the in-process mocked
 # model server — see e2e/mockedserver. The versions are pinned in
 # e2e/mockedserver/versions.go; TestMain downloads them into e2e/mockedserver/.bin/agents,
-# which is cached here keyed on that file, so a run here does exactly what
+# which is cached here keyed on that file and on the provisioning code (so a
+# change in how agents are laid out never meets a stale cache), so a run here does exactly what
 # `LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/` does locally.
 
 on:
@@ -44,7 +45,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: e2e/mockedserver/.bin/agents
-          key: e2e-agents-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/mockedserver/versions.go') }}
+          key: e2e-agents-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e/mockedserver/versions.go', 'e2e/mockedserver/main_test.go') }}
       - name: End-to-end tests
         run: go test ./e2e/mockedserver/ -v -count=1 -timeout 15m
         env:

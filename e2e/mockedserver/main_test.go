@@ -84,21 +84,21 @@ func provision() error {
 	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
 	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
 	var g errgroup.Group
+	bins.crush = filepath.Join(crushDir, "crush")
+	bins.codex = filepath.Join(codexDir, "codex")
+	bins.claude = filepath.Join(claudeDir, "claude")
 	g.Go(func() error {
-		return ensureInstalled(crushDir, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
+		return ensureInstalled(bins.crush, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
 	})
 	g.Go(func() error {
-		return ensureInstalled(codexDir, "codex "+codexVersion, func() error { return installCodex(codexDir, codexVersion) })
+		return ensureInstalled(bins.codex, "codex "+codexVersion, func() error { return installCodex(codexDir, codexVersion) })
 	})
 	g.Go(func() error {
-		return ensureInstalled(claudeDir, "claude-code "+claudeVersion, func() error { return installClaudeCode(claudeDir, claudeVersion) })
+		return ensureInstalled(bins.claude, "claude-code "+claudeVersion, func() error { return installClaudeCode(claudeDir, claudeVersion) })
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	bins.crush = filepath.Join(crushDir, "crush")
-	bins.codex = filepath.Join(codexDir, "codex")
-	bins.claude = filepath.Join(claudeDir, "claude")
 
 	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude)}
 	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude} {
@@ -119,13 +119,19 @@ func versionFromEnv(name, pinned string) string {
 	return pinned
 }
 
-// ensureInstalled runs install into dir unless dir/.complete already exists.
-// The marker is written last, so a failed or interrupted install is retried
-// (from a clean directory) next time.
-func ensureInstalled(dir, what string, install func() error) error {
+// ensureInstalled runs install to produce binary (into its directory) unless
+// that directory already holds both the binary and a .complete marker. The
+// marker is written last, so a failed or interrupted install is retried (from
+// a clean directory) next time; checking the binary too means a directory laid
+// out by an older provisioning scheme (e.g. restored from a CI cache) is
+// rebuilt rather than trusted.
+func ensureInstalled(binary, what string, install func() error) error {
+	dir := filepath.Dir(binary)
 	marker := filepath.Join(dir, ".complete")
 	if _, err := os.Stat(marker); err == nil {
-		return nil
+		if _, err := os.Stat(binary); err == nil {
+			return nil
+		}
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return err
