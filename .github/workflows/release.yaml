@@ -100,10 +100,11 @@ jobs:
             echo "$TAG already exists; completing its release"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "refs/tags/$TAG"
+          # Create the tag server-side (a lightweight tag on the released
+          # commit) and fetch it: GoReleaser reads the current tag from the
+          # checkout.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$RELEASE_SHA"
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
 
       # go.mod pins an exact patch release (`go 1.26.0`), which setup-go treats
       # as an exact match and downloads on every run. Ask for the latest 1.26.x

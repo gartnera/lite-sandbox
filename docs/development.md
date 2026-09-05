@@ -39,7 +39,7 @@ When several PRs are released together (a red run on one commit means its change
 ### How the workflow runs
 
 - It is triggered by the *completion* of `CI` and `E2E` on `main` (`workflow_run`). Each completion starts a run; the run that finds both workflows green on the commit releases, the other exits at the gate. Runs are serialized (`concurrency: release`) so two merges never race on the version.
-- The tag is created and pushed by the workflow (`github-actions[bot]`), then GoReleaser builds against it. If the upload fails after the tag exists, re-running the workflow completes that release (`release.mode: keep-existing` + `replace_existing_artifacts`) instead of computing a new version.
+- The tag is created by the workflow through the GitHub API (a lightweight tag on the released commit), then GoReleaser builds against it. If the upload fails after the tag exists, re-running the workflow completes that release (`release.mode: keep-existing` + `replace_existing_artifacts`) instead of computing a new version.
 - **Manual release**: *Actions → Release → Run workflow* on `main`. A dispatched run skips the CI/E2E gate (useful after a flaky `E2E` run) and its `bump` input overrides the labels.
 - The binaries embed the tag, commit, and commit date via `-ldflags -X` into `internal/version` — `lite-sandbox version` prints them; `go install`ed builds report their module version from the Go build info instead, and plain `go build`s report `dev`.
 
