@@ -5,7 +5,11 @@ name: Release
 # (.github/scripts/next-version.sh — patch when unlabeled, no release when
 # every PR is release:skip), the commit is tagged, and GoReleaser
 # (.goreleaser.yaml) builds the Linux/macOS binaries and uploads them to a
-# GitHub release.
+# draft GitHub release, a build-provenance attestation is signed for every
+# asset, and only then is the draft published. Releases are meant to be
+# immutable (a repository setting, see docs/development.md): once published,
+# neither the assets nor the tag can change, so anything that touches them has
+# to happen while the release is still a draft.
 #
 # CI and E2E are expected to have passed on the pull request; a merge queue is
 # the place to enforce that if it ever becomes a problem. To force a specific
@@ -25,6 +29,8 @@ on:
 permissions:
   contents: write # create the tag and the release
   pull-requests: read # read the merged PRs' labels
+  id-token: write # sign the attestation with Sigstore (actions/attest)
+  attestations: write # store the attestation on the repository
 
 # Never run two releases at once: the version is computed from the tags that
 # exist when a run starts. A queued run that finds HEAD already released exits
@@ -92,7 +98,10 @@ jobs:
         with:
           go-version: ${{ steps.go.outputs.version }}
 
-      - name: Build and publish the release
+      # Builds into dist/ and uploads everything to a *draft* release
+      # (release.draft in .goreleaser.yaml); a leftover draft from a failed run
+      # is replaced.
+      - name: Build and upload to a draft release
         if: steps.version.outputs.tag != ''
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -101,3 +110,30 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      # Sign a SLSA build-provenance attestation for every archive and for
+      # checksums.txt (which `lite-sandbox update` trusts). Attestations live in
+      # the repository's attestation store, not on the release, so this can run
+      # against the draft. Anyone can check an asset with
+      #   gh attestation verify <asset> -R gartnera/lite-sandbox
+      - name: Attest build provenance
+        if: steps.version.outputs.tag != ''
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+      # Everything is in place: publish the draft. From here on, an immutable
+      # release cannot be changed, which is why this is the last step.
+      - name: Publish the release
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          if ! immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .immutable); then
+            echo "::warning::Could not check whether $TAG is immutable."
+          elif [ "$immutable" != true ]; then
+            echo "::warning::$TAG was published as a mutable release. Enable release immutability for the repository (Settings > General > Releases); see docs/development.md."
+          fi

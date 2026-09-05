@@ -2,7 +2,7 @@
 
 ## Getting the binary
 
-Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. Either download the archive for your platform and put the `lite-sandbox` binary on your `PATH`, or build from source:
+Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. Releases are immutable, and each asset carries a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) that proves it was built from this repository by the release workflow — check one with `gh attestation verify lite-sandbox_<version>_<os>_<arch>.tar.gz -R gartnera/lite-sandbox`. Either download the archive for your platform and put the `lite-sandbox` binary on your `PATH`, or build from source:
 
 ```bash
 go install github.com/gartnera/lite-sandbox@latest   # latest release, into $GOPATH/bin
