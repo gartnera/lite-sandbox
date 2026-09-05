@@ -1,22 +1,18 @@
 name: Release
 
-# Every push to main whose CI run succeeds is released automatically: the
-# release:* labels on the pull requests merged since the last release decide
-# the semver bump (.github/scripts/next-version.sh — patch when unlabeled, no
-# release when every PR is release:skip), the commit is tagged, and GoReleaser
+# Every push to main is released automatically: the release:* labels on the
+# pull requests merged since the last release decide the semver bump
+# (.github/scripts/next-version.sh — patch when unlabeled, no release when
+# every PR is release:skip), the commit is tagged, and GoReleaser
 # (.goreleaser.yaml) builds the Linux/macOS binaries and uploads them to a
 # GitHub release.
 #
-# A red CI run means no release for that commit — the next green one on main
-# releases its changes too. Other checks (E2E) are expected to have passed on
-# the pull request; a merge queue is the place to enforce that if it ever
-# becomes a problem. To release by hand (or to force a specific bump) use
-# "Run workflow" on the main branch.
+# CI and E2E are expected to have passed on the pull request; a merge queue is
+# the place to enforce that if it ever becomes a problem. To force a specific
+# bump, use "Run workflow" on the main branch.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -33,8 +29,8 @@ permissions:
 # Never run two releases at once: the version is computed from the tags that
 # exist when a run starts. A queued run that finds HEAD already released exits
 # at the version step. (GitHub keeps at most one run pending per group, so a
-# burst of completions can drop a run; the next one releases everything since
-# the last tag, so a commit is delayed rather than lost.)
+# burst of pushes can drop a run; the next one releases everything since the
+# last tag, so a commit is delayed rather than lost.)
 concurrency:
   group: release
   cancel-in-progress: false
@@ -46,18 +42,14 @@ env:
 
 jobs:
   release:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
-      # The commit to release: the one the triggering workflow ran on, or the
-      # branch head for a manual run.
-      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      RELEASE_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0 # all history and tags: needed to find the last release
 
       - name: Compute the next version
