@@ -40,7 +40,7 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 - `tool/bash_sandboxed/` — parsing, validation (static + runtime), execution, background process management
 - `os_sandbox/` — sandboxed worker process and pool (bwrap/sandbox-exec, gob protocol)
 - `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`); `mode.go` holds the mode enum and the built-in deny lists
-- `internal/audit` — JSONL audit log of validation findings (written by the MCP server and the hook; `lite-sandbox audit report` in `cmd/audit.go`)
+- `internal/audit` — JSONL audit log of validation findings (written by the MCP server and the hook) and the report aggregation behind `lite-sandbox audit report` (`cmd/audit.go` is only flags and printing)
 - `internal/hook` — hook event/decision types; `internal/imds` — IMDS credential server; `internal/dockerproxy` — Docker socket filtering proxy
 - `internal/version` — build version (set by GoReleaser ldflags; `lite-sandbox version`); `internal/ghrelease` — GitHub release download client shared by `lite-sandbox update` (`internal/selfupdate`) and the e2e agent provisioning
 

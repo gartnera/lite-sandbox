@@ -89,3 +89,34 @@ func TestConfigModeSet_OpenWithoutAuditWarns(t *testing.T) {
 		t.Errorf("expected a warning for open mode without audit, got %q", out)
 	}
 }
+
+func TestConfigModeSet_Dir(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { modeOverrideDir = "" })
+	orig := osSandboxPreflight
+	osSandboxPreflight = func(context.Context) error { t.Fatal("preflight must not run for --dir"); return nil }
+	t.Cleanup(func() { osSandboxPreflight = orig })
+
+	modeOverrideDir = "/work/untrusted"
+	out := captureStdout(t, func() {
+		if err := configModeSetCmd.RunE(configModeSetCmd, []string{"denylist"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "for /work/untrusted") || !strings.Contains(out, "base mode stays allowlist") {
+		t.Errorf("output = %q", out)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EffectiveMode() != config.ModeAllowlist {
+		t.Errorf("base mode changed: %s", cfg.EffectiveMode())
+	}
+	if got := cfg.ForDirectory("/work/untrusted/sub").EffectiveMode(); got != config.ModeDenylist {
+		t.Errorf("override mode = %s", got)
+	}
+	if cfg.OSSandbox != nil {
+		t.Error("--dir must not touch os_sandbox")
+	}
+}

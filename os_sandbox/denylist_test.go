@@ -126,10 +126,17 @@ func TestGenerateSBPLProfile_Denylist(t *testing.T) {
 	catchAll := `(deny file-write* (subpath "/"))`
 	fileDeny := `(deny file-write* (literal "` + denyFile + `"))`
 	dirDeny := `(deny file-read* (subpath "` + denyDir + `"))`
-	for _, want := range []string{homeAllow, catchAll, fileDeny, dirDeny} {
+	// A read-denied path must also be unwritable, and that deny must follow
+	// the home allow, or a command could plant a credential_process in
+	// ~/.aws/config for the host user to run later.
+	dirWriteDeny := `(deny file-write* (subpath "` + denyDir + `"))`
+	for _, want := range []string{homeAllow, catchAll, fileDeny, dirDeny, dirWriteDeny} {
 		if !strings.Contains(profile, want) {
 			t.Errorf("profile missing %q\n%s", want, profile)
 		}
+	}
+	if strings.Index(profile, homeAllow) > strings.Index(profile, dirWriteDeny) {
+		t.Error("read-denied write deny must follow the home allow so it wins")
 	}
 	if strings.Index(profile, catchAll) > strings.Index(profile, homeAllow) {
 		t.Error("home allow must follow the catch-all write deny")
@@ -142,5 +149,64 @@ func TestGenerateSBPLProfile_Denylist(t *testing.T) {
 	plain := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, nil, sbplDenylist{})
 	if strings.Contains(plain, homeAllow) {
 		t.Errorf("allowlist profile must not make home writable:\n%s", plain)
+	}
+}
+
+// TestGenerateSBPLProfile_MaskPathsUnwritableWithHome checks that broker
+// socket masks under $HOME stay unwritable when the home directory is bound
+// writable (Docker Desktop / Colima sockets live under ~).
+func TestGenerateSBPLProfile_MaskPathsUnwritableWithHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	sock := filepath.Join(home, ".docker", "run", "docker.sock")
+	profile := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, []string{sock}, sbplDenylist{homeWritable: true})
+	homeAllow := `(allow file-write* (subpath "` + home + `"))`
+	sockDeny := `(deny file-write* (literal "` + sock + `"))`
+	if strings.LastIndex(profile, sockDeny) < strings.Index(profile, homeAllow) {
+		t.Errorf("socket write deny must follow the home allow\n%s", profile)
+	}
+}
+
+// TestPrepareDenyPaths checks the missing-path policy: missing directories are
+// created so they can be masked, missing files are reported and skipped, and
+// existing entries are classified by what is actually on disk.
+func TestPrepareDenyPaths(t *testing.T) {
+	tmp := t.TempDir()
+	existingDir := filepath.Join(tmp, "d")
+	existingFile := filepath.Join(tmp, "f")
+	missingDir := filepath.Join(tmp, "nested", "newdir")
+	missingFile := filepath.Join(tmp, ".zshrc")
+	if err := os.Mkdir(existingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirs, files, missing := prepareDenyPaths([]DenyPath{
+		{Path: existingDir, Dir: true},
+		{Path: existingFile},
+		{Path: missingDir, Dir: true},
+		{Path: missingFile},
+		{Path: existingFile, Dir: true}, // wrong kind hint: disk wins
+	})
+	if len(dirs) != 2 || dirs[0] != existingDir || dirs[1] != missingDir {
+		t.Errorf("dirs = %v", dirs)
+	}
+	if fi, err := os.Stat(missingDir); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Errorf("missing dir should be created 0700: %v %v", fi, err)
+	}
+	if len(files) != 2 || files[0] != existingFile || files[1] != existingFile {
+		t.Errorf("files = %v", files)
+	}
+	if len(missing) != 1 || missing[0] != missingFile {
+		t.Errorf("missing = %v", missing)
+	}
+	if _, err := os.Stat(missingFile); !os.IsNotExist(err) {
+		t.Error("a missing file entry must never be created on the host")
+	}
+	if got := MissingDenyFiles([]DenyPath{{Path: missingFile}, {Path: existingFile}, {Path: missingDir, Dir: true}}); len(got) != 1 || got[0] != missingFile {
+		t.Errorf("MissingDenyFiles = %v", got)
 	}
 }

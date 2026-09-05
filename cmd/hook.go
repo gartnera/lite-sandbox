@@ -176,6 +176,15 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 		)
 		return hook.NewDecision(hook.DecisionDeny, reason)
 	}
+	// A pass auto-approves (skipping the permission prompt) only in allowlist
+	// mode, where "passed" means the full whitelist held. In denylist and open
+	// mode the whitelist is advisory, so a pass says nothing about what the
+	// command runs — and the built-in Bash tool has no runtime layer and no OS
+	// sandbox worker behind it. Defer to Claude Code's normal permission flow
+	// instead: the static checks that did apply were still enforced above.
+	if cfg, _ := config.LoadForDirectory(cwd); cfg.EffectiveMode() != config.ModeAllowlist {
+		return nil
+	}
 	return hook.NewDecision(hook.DecisionAllow, "Validated by lite-sandbox: command passed the sandbox AST whitelist and path boundaries.")
 }
 

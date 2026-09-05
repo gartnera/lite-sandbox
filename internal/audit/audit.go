@@ -47,6 +47,11 @@ type Record struct {
 	// command name for whitelist findings, the resolved path for boundary
 	// findings — so reports can aggregate without parsing messages.
 	Subject string `json:"subject,omitempty"`
+	// Fix is the exact config command that would permit what the rule
+	// rejected, when the layer that raised it knows one (an extra-commands
+	// add, a runtime enable). Empty for findings whose remedy depends on
+	// context, such as path-boundary findings.
+	Fix string `json:"fix,omitempty"`
 	// Blocked reports whether the finding was enforced in the current mode.
 	Blocked bool `json:"blocked"`
 	// WouldBlockIn lists the modes in which this rule is enforced.

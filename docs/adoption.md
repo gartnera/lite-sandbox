@@ -109,6 +109,13 @@ Findings are silent to the agent. Telling the agent "this would have been
 blocked" changes its behavior and you would be auditing the nudged agent
 rather than the baseline; if you want the nudge, that is what `denylist` is.
 
+The suggestions are derived from what the agent attempted, which means the
+agent also decides what ranks highest. Treat them as proposals to review. The
+report never proposes privilege, network, or shell commands for
+`extra-commands add`, never proposes widening the boundary to your home
+directory, a deny-listed path, or a system directory, and notes that a bare
+`extra_commands` entry skips validation entirely.
+
 The log is written by the MCP server and the PreToolUse hook, never by
 sandboxed commands, and is created `0600`, since command strings can carry
 inline secrets. It is capped in size (oldest records dropped) and
@@ -143,7 +150,9 @@ inline secrets. It is capped in size (oldest records dropped) and
    ```
 
    Or do it per directory, keeping strict where it matters most while a new
-   repo is still being learned:
+   repo is still being learned (`lite-sandbox config mode set denylist --dir
+   ~/work/new-repo` writes the override; `lite-sandbox audit report --cwd
+   ~/work/new-repo` reads only that repo's findings):
 
    ```yaml
    mode: allowlist

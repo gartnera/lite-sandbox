@@ -2068,8 +2068,8 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	// original cwd-confined layout.
 	if s.cfg.EffectiveMode() == config.ModeDenylist {
 		opts.HomeWritable = true
-		opts.DeniedReadPaths = s.cfg.EffectiveDeniedReadPaths()
-		opts.DeniedWritePaths = s.cfg.EffectiveDeniedWritePaths()
+		opts.DeniedReadPaths = denyPaths(s.cfg.EffectiveDeniedReadEntries())
+		opts.DeniedWritePaths = denyPaths(s.cfg.EffectiveDeniedWriteEntries())
 	}
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", blockAWS, "mode", s.cfg.EffectiveMode())
 	w, err := os_sandbox.StartWorker(context.Background(), opts)
@@ -2078,4 +2078,13 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 	s.worker = w
 	return w, nil
+}
+
+// denyPaths converts config deny-list entries to the worker's type.
+func denyPaths(entries []config.DeniedPath) []os_sandbox.DenyPath {
+	out := make([]os_sandbox.DenyPath, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, os_sandbox.DenyPath{Path: e.Path, Dir: e.Dir})
+	}
+	return out
 }

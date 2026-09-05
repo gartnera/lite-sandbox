@@ -633,3 +633,47 @@ func TestConfigurePreToolUseHookPreservesExisting(t *testing.T) {
 		t.Fatalf("expected existing + new PreToolUse group (2), got %d", len(pre))
 	}
 }
+
+// TestValidateBuiltinBash_LooserModesDefer pins the fix for auto-approving
+// built-in Bash in denylist/open mode: a pass there says nothing about what
+// runs (the whitelist is advisory and the built-in tool has no sandbox), so the
+// hook must defer to the normal permission flow rather than allow.
+func TestValidateBuiltinBash_LooserModesDefer(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	cwd := t.TempDir()
+	for _, mode := range []string{"denylist", "open"} {
+		t.Run(mode, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
+			if err := os.WriteFile(cfgPath, []byte("mode: "+mode+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Unlisted command that would have been denied in allowlist mode.
+			ev := &hook.Event{ToolName: hook.ToolBash, CWD: cwd, ToolInput: &hook.BashInput{Command: "curl http://x -o fetched.sh"}}
+			if d := validateBuiltinBash(ev); d != nil {
+				t.Errorf("%s: expected defer (nil), got %+v", mode, d)
+			}
+			// A whitelisted, in-bounds command also defers: no auto-approval
+			// outside allowlist mode.
+			ev = &hook.Event{ToolName: hook.ToolBash, CWD: cwd, ToolInput: &hook.BashInput{Command: "ls -la"}}
+			if d := validateBuiltinBash(ev); d != nil {
+				t.Errorf("%s: expected defer for ls, got %+v", mode, d)
+			}
+			if mode == "denylist" {
+				// Rules denylist enforces still deny outright.
+				ev = &hook.Event{ToolName: hook.ToolBash, CWD: cwd, ToolInput: &hook.BashInput{Command: "cat /etc/passwd"}}
+				if d := validateBuiltinBash(ev); d == nil || d.HookSpecificOutput.PermissionDecision != hook.DecisionDeny {
+					t.Errorf("denylist: expected deny for out-of-boundary read, got %+v", d)
+				}
+			}
+		})
+	}
+
+	// Allowlist keeps auto-approving a clean command.
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
+	ev := &hook.Event{ToolName: hook.ToolBash, CWD: cwd, ToolInput: &hook.BashInput{Command: "ls -la"}}
+	if d := validateBuiltinBash(ev); d == nil || d.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+		t.Errorf("allowlist: expected allow, got %+v", d)
+	}
+}

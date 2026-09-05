@@ -38,14 +38,17 @@ the modes that would block it — to `lite-sandbox audit path`, for
 ```bash
 lite-sandbox config mode show                 # effective mode, audit, deny lists
 lite-sandbox config mode set denylist
+lite-sandbox config mode set denylist --dir ~/work/new-repo   # one directory only
 lite-sandbox config audit enable|disable|show
-lite-sandbox audit report [--since 7d] [--json]
+lite-sandbox audit report [--since 7d] [--cwd ~/work/new-repo] [--json]
 lite-sandbox audit clear
 ```
 
 Like every section, `mode` and `audit` can be flipped per directory via
 [overrides](#per-directory-overrides), so one repo can run `allowlist` while
-the rest of the machine runs `denylist`.
+the rest of the machine runs `denylist`; `mode set --dir` writes such an
+override, and `audit report --cwd` narrows the report to sessions launched in
+that directory.
 
 ## Extra commands
 
@@ -159,12 +162,21 @@ and instead masks a built-in deny list. Two lists, because the reasons differ:
   (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). SSH
   private keys are always masked, detected by content.
 - **Write-denied** paths stay readable but cannot be modified: shell startup
-  files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, …), `~/.gitconfig`, `~/.ssh`,
-  `~/.npmrc`, `~/.docker/config.json`, user systemd units and LaunchAgents,
-  and — so a command cannot loosen the policy that governs it — lite-sandbox's
-  own config file and the agent settings files (`~/.claude/settings.json`,
-  `~/.codex/config.toml`, opencode's and Crush's configs and their global
-  instruction files).
+  files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.config/fish/config.fish`, …),
+  `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.npmrc`,
+  `~/.docker/config.json`, persistence locations (`~/.local/bin`, user systemd
+  units, `~/.config/autostart`, `~/.config/environment.d`, LaunchAgents), and —
+  so a command cannot loosen the policy that governs it or erase the evidence —
+  lite-sandbox's own config file, audit log, and mask cache, plus the settings
+  and instruction files of each *installed* agent (`~/.claude/settings.json`,
+  `~/.claude/{skills,agents,commands,plugins}`, `~/.codex/config.toml`,
+  `~/.codex/prompts`, opencode's and Crush's configs). Agent entries are listed
+  only when that agent's config directory exists.
+
+On Linux a missing deny-listed directory is created (mode 0700) so it can be
+masked; a missing deny-listed file cannot be masked without creating an empty
+file on the host, so it is skipped until it exists. `config mode show` marks
+such entries. See [Security](security.md#os-level-sandboxing-optional).
 
 Extend either list; `~` is expanded and missing paths are skipped:
 

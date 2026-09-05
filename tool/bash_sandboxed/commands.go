@@ -368,13 +368,14 @@ func (s *Sandbox) runtimeDisabledError(name string) error {
 		return nil
 	}
 	// runtimes.<x>.enabled -> `lite-sandbox config runtimes <x> enable`
-	cli := ""
+	fix, hint := "", ""
 	if k, ok := strings.CutPrefix(info.configKey, "runtimes."); ok {
 		if rt, ok := strings.CutSuffix(k, ".enabled"); ok {
-			cli = fmt.Sprintf("; enable it with `lite-sandbox config runtimes %s enable`", rt)
+			fix = fmt.Sprintf("lite-sandbox config runtimes %s enable", rt)
+			hint = fmt.Sprintf("; the user can enable it with `%s`", fix)
 		}
 	}
-	return tagRule(ruleRuntimeDisabled, name, fmt.Errorf("command %q is not allowed (%s is disabled)%s", name, info.configKey, cli))
+	return tagRuleFix(ruleRuntimeDisabled, name, fix, fmt.Errorf("command %q is not allowed (%s is disabled)%s", name, info.configKey, hint))
 }
 
 // Runtime enable accessors and argument-validation adapters used by runtimeGate.

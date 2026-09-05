@@ -89,44 +89,74 @@ func (c *Config) validateModes() error {
 	return nil
 }
 
+// DeniedPath is one deny-list entry. Dir records whether the entry names a
+// directory, which the OS sandbox needs to know for a path that does not exist
+// yet: a missing directory can be created (harmlessly, and then masked) so the
+// protection holds, while a missing file cannot be masked without creating an
+// empty file on the host — which for a shell startup file would change the
+// user's shell — so missing files are skipped and reported by `config mode
+// show`. Built-in entries carry the right kind; user-added entries are
+// classified by what exists on disk.
+type DeniedPath struct {
+	Path string
+	Dir  bool
+}
+
+// Paths returns just the path strings of entries.
+func deniedPathStrings(entries []DeniedPath) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Path)
+	}
+	return out
+}
+
 // DefaultDeniedReadPaths returns the built-in set of paths whose contents are
 // hidden from sandboxed commands in denylist mode: credential stores and the
-// agents' own auth files. Paths are absolute; missing ones are harmless (the OS
-// sandbox skips what does not exist). SSH private keys are handled separately
-// by the worker, which detects them by content rather than name.
+// agents' own auth files. Paths are absolute. SSH private keys are handled
+// separately by the worker, which detects them by content rather than name.
 //
 // The list is deliberately limited to secrets that developer tooling rarely
 // needs: a masked ~/.npmrc or ~/.docker/config.json would break private
 // registry access, so those are write-denied instead (see
-// DefaultDeniedWritePaths).
-func DefaultDeniedReadPaths() []string {
+// DefaultDeniedWritePaths). Agent-specific entries are included only when that
+// agent's config directory exists, so no empty agent directories are created
+// on hosts that never installed it.
+func DefaultDeniedReadPaths() []DeniedPath {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 	claudeDir, claudeUserConfig := claudeConfigPaths(home)
 	xdg := xdgConfigHome(home)
-	return []string{
-		filepath.Join(home, ".aws"),
-		filepath.Join(home, ".gnupg"),
-		filepath.Join(home, ".netrc"),
-		filepath.Join(home, ".kube"),
-		filepath.Join(home, ".pypirc"),
-		filepath.Join(xdg, "gh"),
-		filepath.Join(home, "Library", "Keychains"),
-		// The agents' own credentials.
-		claudeUserConfig,
-		filepath.Join(claudeDir, ".credentials.json"),
-		filepath.Join(codexHome(home), "auth.json"),
+	dir := func(p string) DeniedPath { return DeniedPath{Path: p, Dir: true} }
+	file := func(p string) DeniedPath { return DeniedPath{Path: p} }
+	out := []DeniedPath{
+		dir(filepath.Join(home, ".aws")),
+		dir(filepath.Join(home, ".gnupg")),
+		file(filepath.Join(home, ".netrc")),
+		dir(filepath.Join(home, ".kube")),
+		file(filepath.Join(home, ".pypirc")),
+		dir(filepath.Join(xdg, "gh")),
+		dir(filepath.Join(home, "Library", "Keychains")),
 	}
+	// The agents' own credentials.
+	if dirExists(claudeDir) {
+		out = append(out, file(claudeUserConfig), file(filepath.Join(claudeDir, ".credentials.json")))
+	}
+	if codex := codexHome(home); dirExists(codex) {
+		out = append(out, file(filepath.Join(codex, "auth.json")))
+	}
+	return out
 }
 
 // DefaultDeniedWritePaths returns the built-in set of paths sandboxed commands
 // may read but not modify in denylist mode: shell startup files and other
 // persistence vectors, plus the sandbox's and the agents' own configuration so
 // a command cannot loosen the policy that governs it (the config file is
-// hot-reloaded, and the agent settings hold the built-in Bash deny).
-func DefaultDeniedWritePaths() []string {
+// hot-reloaded, the agent settings hold the built-in Bash deny, and the audit
+// log is the evidence the report is built on).
+func DefaultDeniedWritePaths() []DeniedPath {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -134,68 +164,133 @@ func DefaultDeniedWritePaths() []string {
 	claudeDir, _ := claudeConfigPaths(home)
 	codex := codexHome(home)
 	xdg := xdgConfigHome(home)
-	paths := []string{
+	dir := func(p string) DeniedPath { return DeniedPath{Path: p, Dir: true} }
+	file := func(p string) DeniedPath { return DeniedPath{Path: p} }
+	out := []DeniedPath{
 		// Shell startup and identity files: readable so tools behave, not writable.
-		filepath.Join(home, ".bashrc"),
-		filepath.Join(home, ".bash_profile"),
-		filepath.Join(home, ".bash_login"),
-		filepath.Join(home, ".profile"),
-		filepath.Join(home, ".zshrc"),
-		filepath.Join(home, ".zshenv"),
-		filepath.Join(home, ".zprofile"),
-		filepath.Join(home, ".gitconfig"),
-		filepath.Join(home, ".ssh"),
-		filepath.Join(home, ".npmrc"),
-		filepath.Join(home, ".docker", "config.json"),
-		// Persistence vectors.
-		filepath.Join(xdg, "systemd", "user"),
-		filepath.Join(home, "Library", "LaunchAgents"),
-		// Self-protection: the sandbox's own config and the agents' settings.
-		filepath.Join(claudeDir, "settings.json"),
-		filepath.Join(claudeDir, "settings.local.json"),
-		filepath.Join(claudeDir, "CLAUDE.md"),
-		filepath.Join(codex, "config.toml"),
-		filepath.Join(codex, "AGENTS.md"),
-		filepath.Join(xdg, "opencode", "opencode.json"),
-		filepath.Join(xdg, "opencode", "opencode.jsonc"),
-		filepath.Join(xdg, "opencode", "AGENTS.md"),
-		filepath.Join(xdg, "crush", "crushrc"),
-		filepath.Join(xdg, "crush", "crush.json"),
-		filepath.Join(xdg, "crush", "CRUSH.md"),
+		file(filepath.Join(home, ".bashrc")),
+		file(filepath.Join(home, ".bash_profile")),
+		file(filepath.Join(home, ".bash_login")),
+		file(filepath.Join(home, ".bash_aliases")),
+		file(filepath.Join(home, ".bash_logout")),
+		file(filepath.Join(home, ".profile")),
+		file(filepath.Join(home, ".zshrc")),
+		file(filepath.Join(home, ".zshenv")),
+		file(filepath.Join(home, ".zprofile")),
+		file(filepath.Join(home, ".zlogin")),
+		file(filepath.Join(xdg, "fish", "config.fish")),
+		file(filepath.Join(home, ".gitconfig")),
+		file(filepath.Join(xdg, "git", "config")),
+		dir(filepath.Join(home, ".ssh")),
+		file(filepath.Join(home, ".npmrc")),
+		file(filepath.Join(home, ".docker", "config.json")),
+		// Persistence vectors: things the host runs or puts on PATH later.
+		dir(filepath.Join(home, ".local", "bin")),
+		dir(filepath.Join(xdg, "systemd", "user")),
+		dir(filepath.Join(xdg, "autostart")),
+		dir(filepath.Join(xdg, "environment.d")),
+		dir(filepath.Join(home, "Library", "LaunchAgents")),
 	}
+	// Self-protection: the sandbox's own config, audit log, and mask file.
 	if p, err := Path(); err == nil {
-		paths = append(paths, p)
+		out = append(out, file(p))
 	}
-	return paths
+	if cache, err := os.UserCacheDir(); err == nil {
+		out = append(out, dir(filepath.Join(cache, appName)))
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil {
+		out = append(out, file(filepath.Join(cfgDir, appName, "audit.jsonl")))
+	}
+	if p := os.Getenv("LITE_SANDBOX_AUDIT_LOG"); p != "" {
+		out = append(out, file(p))
+	}
+	// The agents' settings and instruction files, only for installed agents.
+	if dirExists(claudeDir) {
+		out = append(out,
+			file(filepath.Join(claudeDir, "settings.json")),
+			file(filepath.Join(claudeDir, "settings.local.json")),
+			file(filepath.Join(claudeDir, "CLAUDE.md")),
+			dir(filepath.Join(claudeDir, "skills")),
+			dir(filepath.Join(claudeDir, "agents")),
+			dir(filepath.Join(claudeDir, "commands")),
+			dir(filepath.Join(claudeDir, "plugins")),
+		)
+	}
+	if dirExists(codex) {
+		out = append(out,
+			file(filepath.Join(codex, "config.toml")),
+			file(filepath.Join(codex, "AGENTS.md")),
+			dir(filepath.Join(codex, "prompts")),
+		)
+	}
+	if oc := filepath.Join(xdg, "opencode"); dirExists(oc) {
+		out = append(out,
+			file(filepath.Join(oc, "opencode.json")),
+			file(filepath.Join(oc, "opencode.jsonc")),
+			file(filepath.Join(oc, "AGENTS.md")),
+		)
+	}
+	if cr := filepath.Join(xdg, "crush"); dirExists(cr) {
+		out = append(out,
+			file(filepath.Join(cr, "crushrc")),
+			file(filepath.Join(cr, "crush.json")),
+			file(filepath.Join(cr, "CRUSH.md")),
+		)
+	}
+	return out
 }
 
-// EffectiveDeniedReadPaths returns the read-denied paths in effect: the
-// built-in defaults plus the config's denied_read_paths (with ~ expanded). When
-// AWS is configured to use raw credentials, ~/.aws is dropped from the defaults
-// since the CLI must read it.
-func (c *Config) EffectiveDeniedReadPaths() []string {
+// EffectiveDeniedReadEntries returns the read-denied entries in effect: the
+// built-in defaults plus the config's denied_read_paths (with ~ expanded,
+// classified by what exists on disk). When AWS is configured to use raw
+// credentials, ~/.aws is dropped from the defaults since the CLI must read it.
+func (c *Config) EffectiveDeniedReadEntries() []DeniedPath {
 	defaults := DefaultDeniedReadPaths()
 	if c != nil && c.AWS.AllowsRawCredentials() {
 		if home, err := os.UserHomeDir(); err == nil {
-			aws := filepath.Join(home, ".aws")
-			defaults = deleteString(defaults, aws)
+			defaults = deleteDeniedPath(defaults, filepath.Join(home, ".aws"))
 		}
 	}
 	var extra []string
 	if c != nil {
-		extra = expandPaths(c.DeniedReadPaths)
+		extra = c.DeniedReadPaths
 	}
-	return uniqueStrings(append(defaults, extra...))
+	return uniqueDeniedPaths(append(defaults, userDeniedPaths(extra)...))
 }
 
-// EffectiveDeniedWritePaths returns the write-denied paths in effect: the
-// built-in defaults plus the config's denied_write_paths (with ~ expanded).
-func (c *Config) EffectiveDeniedWritePaths() []string {
+// EffectiveDeniedWriteEntries returns the write-denied entries in effect: the
+// built-in defaults plus the config's denied_write_paths.
+func (c *Config) EffectiveDeniedWriteEntries() []DeniedPath {
 	var extra []string
 	if c != nil {
-		extra = expandPaths(c.DeniedWritePaths)
+		extra = c.DeniedWritePaths
 	}
-	return uniqueStrings(append(DefaultDeniedWritePaths(), extra...))
+	return uniqueDeniedPaths(append(DefaultDeniedWritePaths(), userDeniedPaths(extra)...))
+}
+
+// EffectiveDeniedReadPaths is EffectiveDeniedReadEntries as plain paths.
+func (c *Config) EffectiveDeniedReadPaths() []string {
+	return deniedPathStrings(c.EffectiveDeniedReadEntries())
+}
+
+// EffectiveDeniedWritePaths is EffectiveDeniedWriteEntries as plain paths.
+func (c *Config) EffectiveDeniedWritePaths() []string {
+	return deniedPathStrings(c.EffectiveDeniedWriteEntries())
+}
+
+// userDeniedPaths expands user-added entries and classifies each by what is
+// on disk; a missing user path is recorded as a file, so it is never created.
+func userDeniedPaths(paths []string) []DeniedPath {
+	var out []DeniedPath
+	for _, p := range expandPaths(paths) {
+		out = append(out, DeniedPath{Path: p, Dir: dirExists(p)})
+	}
+	return out
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 // claudeConfigPaths mirrors Claude Code's own resolution: $CLAUDE_CONFIG_DIR
@@ -222,24 +317,24 @@ func xdgConfigHome(home string) string {
 	return filepath.Join(home, ".config")
 }
 
-func deleteString(list []string, s string) []string {
+func deleteDeniedPath(list []DeniedPath, path string) []DeniedPath {
 	out := list[:0:0]
 	for _, v := range list {
-		if v != s {
+		if v.Path != path {
 			out = append(out, v)
 		}
 	}
 	return out
 }
 
-func uniqueStrings(list []string) []string {
+func uniqueDeniedPaths(list []DeniedPath) []DeniedPath {
 	seen := make(map[string]bool, len(list))
-	out := make([]string, 0, len(list))
+	out := make([]DeniedPath, 0, len(list))
 	for _, v := range list {
-		if v == "" || seen[v] {
+		if v.Path == "" || seen[v.Path] {
 			continue
 		}
-		seen[v] = true
+		seen[v.Path] = true
 		out = append(out, v)
 	}
 	return out

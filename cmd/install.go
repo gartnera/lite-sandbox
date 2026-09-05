@@ -274,9 +274,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// The sandbox's own config: a first-time install lands on the recommended
-	// posture (denylist, audit on, OS sandbox where it works); an existing config
-	// is left as is unless --mode was given.
+	// The sandbox's own config: a first-time install creates it with audit on
+	// and the strict allowlist default; an existing config is left as is. --mode
+	// opts into a looser posture explicitly (see configureSandboxConfig).
 	res, err := configureSandboxConfig(cmd.Context(), osSandboxPreflight)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("sandbox config: %w", err))

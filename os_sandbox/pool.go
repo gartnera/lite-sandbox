@@ -197,11 +197,65 @@ type WorkerOptions struct {
 	// DeniedReadPaths are hidden entirely: a directory becomes an empty,
 	// unreadable (mode 000) tmpfs; a file is replaced by an empty mode-000 file.
 	// Non-root processes get EACCES, which is a legible, classifiable signal;
-	// root sees empty content. Missing paths are skipped.
-	DeniedReadPaths []string
+	// root sees empty content. On Linux a missing directory entry is created
+	// (mode 0700) so it can be masked; a missing file entry is skipped, since
+	// bwrap would otherwise create an empty file on the host (see DenyPath).
+	DeniedReadPaths []DenyPath
 	// DeniedWritePaths stay readable but are mounted read-only over themselves
-	// (bwrap) or denied file-write* (SBPL). Missing paths are skipped.
-	DeniedWritePaths []string
+	// (bwrap) or denied file-write* (SBPL). Same missing-path handling.
+	DeniedWritePaths []DenyPath
+}
+
+// DenyPath is one deny-list entry with its expected kind, which decides what
+// happens when the path does not exist at worker start: bubblewrap can only
+// overlay an existing mount point and creates a missing one on the host, so a
+// missing directory is created up front (harmless, then masked) while a
+// missing file is left alone — an empty ~/.bash_profile appearing on the host
+// would change the user's shell. sandbox-exec needs neither: its deny rules
+// apply to paths whether or not they exist.
+type DenyPath struct {
+	Path string
+	Dir  bool
+}
+
+// prepareDenyPaths sorts entries into the existing directories and files that
+// can be overlaid, creating missing directories, and returns the missing
+// files that cannot be protected on this backend.
+func prepareDenyPaths(entries []DenyPath) (dirs, files, missing []string) {
+	for _, e := range entries {
+		fi, err := os.Stat(e.Path)
+		switch {
+		case err == nil && fi.IsDir():
+			dirs = append(dirs, e.Path)
+		case err == nil:
+			files = append(files, e.Path)
+		case e.Dir:
+			if err := os.MkdirAll(e.Path, 0o700); err != nil {
+				missing = append(missing, e.Path)
+				continue
+			}
+			dirs = append(dirs, e.Path)
+		default:
+			missing = append(missing, e.Path)
+		}
+	}
+	return dirs, files, missing
+}
+
+// MissingDenyFiles reports which file entries in the deny lists do not exist and
+// so cannot be masked by the Linux backend until they do. Used by `config mode
+// show` to make the gap visible.
+func MissingDenyFiles(entries []DenyPath) []string {
+	var out []string
+	for _, e := range entries {
+		if e.Dir {
+			continue
+		}
+		if _, err := os.Stat(e.Path); err != nil {
+			out = append(out, e.Path)
+		}
+	}
+	return out
 }
 
 // StartWorker starts a new sandbox worker process.
@@ -319,24 +373,20 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 				}
 			}
 		}
-		// Deny lists: only paths that exist can be overlaid, and a directory and
-		// a file are masked differently (see WorkerOptions).
-		for _, p := range opts.DeniedReadPaths {
-			switch fi, err := os.Stat(p); {
-			case err != nil:
-				continue
-			case fi.IsDir():
-				if p != awsTmpfsDir { // already masked
-					plan.deniedReadDirs = append(plan.deniedReadDirs, p)
-				}
-			default:
-				plan.deniedReadFiles = append(plan.deniedReadFiles, p)
+		// Deny lists: a directory and a file are masked differently, and only an
+		// existing path can be overlaid (see DenyPath for what happens to a
+		// missing one).
+		readDirs, readFiles, missingRead := prepareDenyPaths(opts.DeniedReadPaths)
+		for _, d := range readDirs {
+			if d != awsTmpfsDir { // already masked
+				plan.deniedReadDirs = append(plan.deniedReadDirs, d)
 			}
 		}
-		for _, p := range opts.DeniedWritePaths {
-			if _, err := os.Stat(p); err == nil {
-				plan.deniedWritePaths = append(plan.deniedWritePaths, p)
-			}
+		plan.deniedReadFiles = readFiles
+		writeDirs, writeFiles, missingWrite := prepareDenyPaths(opts.DeniedWritePaths)
+		plan.deniedWritePaths = append(writeDirs, writeFiles...)
+		if n := len(missingRead) + len(missingWrite); n > 0 {
+			slog.WarnContext(ctx, "deny-list files that do not exist are not masked until created", "read", missingRead, "write", missingWrite)
 		}
 		args := buildBwrapArgs(plan)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
@@ -348,8 +398,8 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		// permits reads everywhere except the credential/socket masks.
 		profile := generateSBPLProfile(realWorkDir, extraBinds, masks, maskPaths, sbplDenylist{
 			homeWritable:     opts.HomeWritable,
-			deniedReadPaths:  opts.DeniedReadPaths,
-			deniedWritePaths: opts.DeniedWritePaths,
+			deniedReadPaths:  denyPathStrings(opts.DeniedReadPaths),
+			deniedWritePaths: denyPathStrings(opts.DeniedWritePaths),
 		})
 
 		// sandbox-exec -p <profile> <binary> <args>
@@ -539,7 +589,9 @@ func maskSourceFile() string {
 		return "/dev/null"
 	}
 	path := filepath.Join(dir, "lite-sandbox", "mask-empty")
-	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() && fi.Size() == 0 && fi.Mode().Perm() == 0 {
+	// Lstat: the cache directory is write-denied in denylist mode, but never
+	// follow a symlink here regardless — the mask must be a file we created.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() == 0 && fi.Mode().Perm() == 0 {
 		return path
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -664,6 +716,20 @@ func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMa
 			sb.WriteString(fmt.Sprintf("(deny file-write* (%s \"%s\"))\n", sbplScope(rp), rp))
 		}
 	}
+	// A hidden path must not be writable either: the host user would read a
+	// planted ~/.aws/config or ~/.claude.json later even though nothing inside
+	// the sandbox can. Likewise the broker sockets, which may live under $HOME
+	// (Docker Desktop, Colima) and were only denied before the home allow.
+	for _, p := range dl.deniedReadPaths {
+		for _, rp := range withResolved(p) {
+			sb.WriteString(fmt.Sprintf("(deny file-write* (%s \"%s\"))\n", sbplScope(rp), rp))
+		}
+	}
+	if dl.homeWritable {
+		for _, p := range maskPaths {
+			sb.WriteString(fmt.Sprintf("(deny file-write* (literal \"%s\"))\n", p))
+		}
+	}
 
 	// Allow process execution
 	sb.WriteString("(allow process-exec (subpath \"/\"))\n")
@@ -686,6 +752,14 @@ func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMa
 	sb.WriteString("(allow sysctl-read)\n")
 
 	return sb.String()
+}
+
+func denyPathStrings(entries []DenyPath) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Path)
+	}
+	return out
 }
 
 // sbplScope returns the SBPL path filter for p: "subpath" for a directory (or

@@ -76,7 +76,11 @@ func (r rule) modes() []string {
 type ruleError struct {
 	rule    rule
 	subject string
-	err     error
+	// fix is the exact config command that would permit what the rule
+	// rejected, when there is one; it is recorded in the audit log so the
+	// report can aggregate remedies without re-deriving them.
+	fix string
+	err error
 }
 
 func (e *ruleError) Error() string { return e.err.Error() }
@@ -90,14 +94,23 @@ func tagRule(r rule, subject string, err error) error {
 	return &ruleError{rule: r, subject: subject, err: err}
 }
 
-// ruleOf returns the rule and subject err was tagged with, or fallback and ""
-// when it carries no tag. Wrapped tags (fmt.Errorf("...: %w", tagged)) are found.
-func ruleOf(err error, fallback rule) (rule, string) {
+// tagRuleFix is tagRule with the remedying config command attached.
+func tagRuleFix(r rule, subject, fix string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ruleError{rule: r, subject: subject, fix: fix, err: err}
+}
+
+// ruleOf returns the rule, subject, and fix err was tagged with, or fallback
+// and empty strings when it carries no tag. Wrapped tags
+// (fmt.Errorf("...: %w", tagged)) are found.
+func ruleOf(err error, fallback rule) (r rule, subject, fix string) {
 	var re *ruleError
 	if errors.As(err, &re) {
-		return re.rule, re.subject
+		return re.rule, re.subject, re.fix
 	}
-	return fallback, ""
+	return fallback, "", ""
 }
 
 // Validation layers, as recorded in the audit log.
@@ -148,7 +161,7 @@ func (s *Sandbox) report(ctx context.Context, layer string, fallback rule, err e
 		return nil
 	}
 	mode := s.getConfig().EffectiveMode()
-	r, subject := ruleOf(err, fallback)
+	r, subject, fix := ruleOf(err, fallback)
 	blocked := r.blockedIn(mode)
 
 	if logger := s.auditLogger(); logger != nil {
@@ -159,6 +172,7 @@ func (s *Sandbox) report(ctx context.Context, layer string, fallback rule, err e
 			Rule:         string(r),
 			Message:      err.Error(),
 			Subject:      subject,
+			Fix:          fix,
 			Blocked:      blocked,
 			WouldBlockIn: r.modes(),
 		}
@@ -196,14 +210,16 @@ func (s *Sandbox) enforcesAllowlist() bool {
 
 // commandNotAllowed builds the tagged whitelist error for name, with a hint
 // naming the config change that would permit it. The hint is what the agent
-// relays to the user, so it should be exact.
+// relays to the user, so it names only the narrow remedy — never a mode
+// change, which is the user's decision to make from the audit report.
 func commandNotAllowed(name string) error {
-	hint := fmt.Sprintf("allow it with `lite-sandbox config extra-commands add %s`, or run in denylist mode (`lite-sandbox config mode set denylist`)", name)
-	return tagRule(ruleCommandWhitelist, name, fmt.Errorf("command %q is not allowed; %s", name, hint))
+	fix := fmt.Sprintf("lite-sandbox config extra-commands add %s", name)
+	return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed; the user can allow it with `%s`", name, fix))
 }
 
 // directExecutionNotAllowed builds the tagged error for running a path
 // (./script, /path/bin) while local_binary_execution is off.
 func directExecutionNotAllowed(name string) error {
-	return tagRule(ruleLocalBinary, name, fmt.Errorf("direct execution of %q is not allowed; enable it with `lite-sandbox config local-binary-execution enable`, or run in denylist mode (`lite-sandbox config mode set denylist`)", name))
+	const fix = "lite-sandbox config local-binary-execution enable"
+	return tagRuleFix(ruleLocalBinary, name, fix, fmt.Errorf("direct execution of %q is not allowed; the user can enable it with `%s`", name, fix))
 }

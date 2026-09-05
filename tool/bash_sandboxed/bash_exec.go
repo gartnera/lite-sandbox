@@ -41,12 +41,30 @@ func isScriptPath(name string) bool {
 	return strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/")
 }
 
-// scriptInterpreter returns the interpreter named by a script's shebang line
-// ("python3" for "#!/usr/bin/env python3", "bash" for "#!/bin/bash"), or ""
-// when the script has no shebang.
-func scriptInterpreter(script string) string {
+// scriptShebangArgv returns the argv a kernel would prepend when executing a
+// script with the given shebang line — the interpreter (as a bare command name,
+// so it resolves through PATH and the whitelist like a typed command) followed
+// by its flags — or nil when the script has no shebang. "#!/usr/bin/env X ..."
+// is unwrapped to X: env's -S/--split-string and VAR=value assignments are
+// dropped, so the result is what actually runs.
+//
+//	#!/bin/bash                 -> [bash]
+//	#!/usr/bin/env python3 -u   -> [python3 -u]
+//	#!/usr/bin/awk -f           -> [awk -f]
+func scriptShebangArgv(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return shebangArgv(string(buf[:n]))
+}
+
+func shebangArgv(script string) []string {
 	if !strings.HasPrefix(script, "#!") {
-		return ""
+		return nil
 	}
 	line := script[2:]
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
@@ -54,33 +72,29 @@ func scriptInterpreter(script string) string {
 	}
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
-		return ""
+		return nil
 	}
-	name := filepath.Base(fields[0])
-	// "#!/usr/bin/env python3": the interpreter is env's first non-flag argument.
-	if name == "env" {
-		for _, f := range fields[1:] {
-			if strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
-				continue
-			}
-			return filepath.Base(f)
+	if filepath.Base(fields[0]) == "env" {
+		rest := fields[1:]
+		for len(rest) > 0 && (strings.HasPrefix(rest[0], "-") || strings.Contains(rest[0], "=")) {
+			rest = rest[1:]
 		}
-		return ""
+		if len(rest) == 0 {
+			return nil
+		}
+		fields = rest
 	}
-	return name
+	out := append([]string{filepath.Base(fields[0])}, fields[1:]...)
+	return out
 }
 
-// scriptInterpreterOf reads the first line of the file at path and returns its
-// shebang interpreter (see scriptInterpreter); "" on any error.
-func scriptInterpreterOf(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
+// scriptInterpreter returns just the interpreter name from a shebang (see
+// shebangArgv), or "" when there is none.
+func scriptInterpreter(script string) string {
+	if argv := shebangArgv(script); len(argv) > 0 {
+		return argv[0]
 	}
-	defer f.Close()
-	buf := make([]byte, 256)
-	n, _ := f.Read(buf)
-	return scriptInterpreter(string(buf[:n]))
+	return ""
 }
 
 // isShellInterpreter reports whether a shebang interpreter is one the sandbox
@@ -536,6 +550,120 @@ func literalWords(args []string) []*syntax.Word {
 	return words
 }
 
+// execArgvMaxDepth bounds the shebang re-dispatch below: a script whose
+// interpreter is itself resolved to another script must terminate.
+const execArgvMaxDepth = 4
+
+// execArgv is the body of the interpreter's ExecHandler: it gates and runs one
+// external command with its fully expanded argv. depth counts shebang
+// re-dispatches (see the script branch).
+func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+	// Intercept `aws configure list-profiles` in brokered IMDS mode so an
+	// agent can discover the profiles it may select via AWS_PROFILE (the
+	// real command would read the masked ~/.aws and return nothing).
+	if handled, err := s.maybeListProfiles(ctx, args); handled || err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return s.dispatchExec(ctx, args, useOSSandbox)
+	}
+	extra := s.getExtraCommands()
+	cmdName := args[0]
+	// Runtime command whitelist check — catches blocked commands
+	// introduced via source/. or other dynamic execution paths.
+	// Process-control commands (kill, pkill) are permitted only when
+	// the OS sandbox is active, where they are contained.
+	osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
+	if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
+		// Whitelist and local-binary gates are allowlist-only rules: in
+		// denylist/open mode the finding is audited and the command runs.
+		var gateErr error
+		if isScriptPath(cmdName) {
+			if !s.getConfig().LocalBinaryExecution.IsEnabled() {
+				gateErr = directExecutionNotAllowed(cmdName)
+			}
+		} else {
+			gateErr = commandNotAllowed(cmdName)
+		}
+		if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, gateErr); err != nil {
+			return err
+		}
+	}
+	// Runtime per-command argument validation on the fully expanded
+	// argv (bash/sh/awk are skipped: they are dispatched to dedicated
+	// executors below that re-validate their contents).
+	if err := s.runtimeArgValidator(ctx, cmdName, args, extra); err != nil {
+		return err
+	}
+	// Configure deno's permission flags to mirror the sandbox policy.
+	// The runtime gate (deno enabled) is enforced earlier by the AST
+	// validator in allowlist mode; in denylist mode deno may run without
+	// a configured section, in which case the DenoConfig defaults apply
+	// (auto-sandbox on, network denied). Network and import denials are
+	// applied independent of auto_sandbox so the policy holds even when
+	// filesystem auto-scoping is off.
+	if cmdName == "deno" {
+		var d *config.DenoConfig
+		if cfg := s.getConfig(); cfg.Runtimes != nil {
+			d = cfg.Runtimes.Deno
+		}
+		// Deno needs real directories for --allow-read/-write, so strip
+		// any descendants-only "/*" markers down to their base subtree.
+		denoRead := stripNestedOnlyMarkers(readAllowedPaths)
+		denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
+		args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
+	}
+	switch cmdName {
+	case "awk":
+		return executeAwk(ctx, args)
+	case "bash", "sh":
+		return s.executeBash(ctx, args)
+	}
+	if isScriptPath(cmdName) {
+		hc := interp.HandlerCtx(ctx)
+		path := absPath(cmdName, hc.Dir)
+		// Bare extra_commands entries are explicitly opted in by the
+		// user — run them directly without reading/validating script
+		// contents. Match either by the literal invocation string
+		// (e.g. the entry was registered as `./my-script.sh` and is
+		// invoked the same way) or by the script's absolute path,
+		// which lets the same script registered as e.g.
+		// `./web/foo/build.sh` still match when invoked as
+		// `./build.sh` from inside `web/foo`. interp tracks cwd in
+		// HandlerContext, so the resolution sees the post-`cd` dir.
+		if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
+			return s.dispatchExec(ctx, args, useOSSandbox)
+		}
+		// A subcommand-restricted extra_commands entry (e.g. "./gradlew build")
+		// allows the invocation but, unlike a bare entry, is not an opt-out of
+		// the local-binary gate, which the whitelist branch above skipped
+		// because extra[cmdName] was true.
+		if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
+			if err := s.report(ctx, layerRuntime, ruleLocalBinary, directExecutionNotAllowed(cmdName)); err != nil {
+				return err
+			}
+		}
+		// Check if file is a compiled binary (ELF/Mach-O)
+		if isBinaryExecutable(path) {
+			return s.dispatchExec(ctx, args, useOSSandbox)
+		}
+		// A script for another interpreter (#!/usr/bin/env python3 -u) is run
+		// exactly as if the agent had typed the interpreter invocation the
+		// kernel would perform — "python3 -u ./x args" — so the interpreter
+		// goes through the same whitelist gate, argument validator, and
+		// dedicated executor (awk's, bash's) as a direct call would.
+		if shebang := scriptShebangArgv(path); len(shebang) > 0 && !isShellInterpreter(shebang[0]) {
+			if depth >= execArgvMaxDepth {
+				return fmt.Errorf("script %q: interpreter nesting too deep", cmdName)
+			}
+			full := append(append(shebang, path), args[1:]...)
+			return s.execArgv(ctx, full, useOSSandbox, readAllowedPaths, writeAllowedPaths, depth+1)
+		}
+		return s.executeScript(ctx, args)
+	}
+	return s.dispatchExec(ctx, args, useOSSandbox)
+}
+
 // runtimeValidatorSkip lists commands whose per-command validator must NOT be
 // re-run by the runtime Call/Exec handlers. bash/sh/awk are dispatched to
 // dedicated executors (executeBash/executeAwk) that re-parse and re-validate
@@ -629,105 +757,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)
 		}),
 		interp.ExecHandler(func(ctx context.Context, args []string) error {
-			// Intercept `aws configure list-profiles` in brokered IMDS mode so an
-			// agent can discover the profiles it may select via AWS_PROFILE (the
-			// real command would read the masked ~/.aws and return nothing).
-			if handled, err := s.maybeListProfiles(ctx, args); handled || err != nil {
-				return err
-			}
-			if len(args) == 0 {
-				return s.dispatchExec(ctx, args, useOSSandbox)
-			}
-			extra := s.getExtraCommands()
-			cmdName := args[0]
-			// Runtime command whitelist check — catches blocked commands
-			// introduced via source/. or other dynamic execution paths.
-			// Process-control commands (kill, pkill) are permitted only when
-			// the OS sandbox is active, where they are contained.
-			osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-			if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
-				// Whitelist and local-binary gates are allowlist-only rules: in
-				// denylist/open mode the finding is audited and the command runs.
-				var gateErr error
-				if isScriptPath(cmdName) {
-					if !s.getConfig().LocalBinaryExecution.IsEnabled() {
-						gateErr = directExecutionNotAllowed(cmdName)
-					}
-				} else {
-					gateErr = commandNotAllowed(cmdName)
-				}
-				if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, gateErr); err != nil {
-					return err
-				}
-			}
-			// Runtime per-command argument validation on the fully expanded
-			// argv (bash/sh/awk are skipped: they are dispatched to dedicated
-			// executors below that re-validate their contents).
-			if err := s.runtimeArgValidator(ctx, cmdName, args, extra); err != nil {
-				return err
-			}
-			// Configure deno's permission flags to mirror the sandbox policy.
-			// The runtime gate (deno enabled) is enforced earlier by the AST
-			// validator in allowlist mode; in denylist mode deno may run without
-			// a configured section, in which case the DenoConfig defaults apply
-			// (auto-sandbox on, network denied). Network and import denials are
-			// applied independent of auto_sandbox so the policy holds even when
-			// filesystem auto-scoping is off.
-			if cmdName == "deno" {
-				var d *config.DenoConfig
-				if cfg := s.getConfig(); cfg.Runtimes != nil {
-					d = cfg.Runtimes.Deno
-				}
-				// Deno needs real directories for --allow-read/-write, so strip
-				// any descendants-only "/*" markers down to their base subtree.
-				denoRead := stripNestedOnlyMarkers(readAllowedPaths)
-				denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
-				args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
-			}
-			switch cmdName {
-			case "awk":
-				return executeAwk(ctx, args)
-			case "bash", "sh":
-				return s.executeBash(ctx, args)
-			}
-			if isScriptPath(cmdName) {
-				hc := interp.HandlerCtx(ctx)
-				path := absPath(cmdName, hc.Dir)
-				// Bare extra_commands entries are explicitly opted in by the
-				// user — run them directly without reading/validating script
-				// contents. Match either by the literal invocation string
-				// (e.g. the entry was registered as `./my-script.sh` and is
-				// invoked the same way) or by the script's absolute path,
-				// which lets the same script registered as e.g.
-				// `./web/foo/build.sh` still match when invoked as
-				// `./build.sh` from inside `web/foo`. interp tracks cwd in
-				// HandlerContext, so the resolution sees the post-`cd` dir.
-				if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
-					return s.dispatchExec(ctx, args, useOSSandbox)
-				}
-				// The local-binary gate was already applied above; from here on
-				// the question is only how to run the file.
-				// Check if file is a compiled binary (ELF/Mach-O)
-				if isBinaryExecutable(path) {
-					return s.dispatchExec(ctx, args, useOSSandbox)
-				}
-				// A script for another interpreter (#!/usr/bin/env python3) cannot
-				// run through the shell interpreter. Gate the interpreter it names
-				// exactly as if it had been invoked directly, then exec the file.
-				if interpName := scriptInterpreterOf(path); interpName != "" && !isShellInterpreter(interpName) {
-					if !allowedCommands[interpName] && !extra[interpName] {
-						if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(interpName)); err != nil {
-							return err
-						}
-					}
-					if err := s.runtimeArgValidator(ctx, interpName, append([]string{interpName}, args...), extra); err != nil {
-						return err
-					}
-					return s.dispatchExec(ctx, args, useOSSandbox)
-				}
-				return s.executeScript(ctx, args)
-			}
-			return s.dispatchExec(ctx, args, useOSSandbox)
+			return s.execArgv(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, 0)
 		}),
 	}
 }

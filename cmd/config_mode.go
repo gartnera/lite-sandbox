@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,14 +47,8 @@ var configModeShowCmd = &cobra.Command{
 		fmt.Printf("Audit: %v\n", cfg.AuditEnabled())
 		fmt.Printf("OS sandbox: %v\n", cfg.OSSandboxEnabled())
 		if cfg.EffectiveMode() == config.ModeDenylist {
-			fmt.Println("\nRead-denied paths (hidden from sandboxed commands under the OS sandbox):")
-			for _, p := range cfg.EffectiveDeniedReadPaths() {
-				fmt.Printf("  %s\n", p)
-			}
-			fmt.Println("\nWrite-denied paths (readable, not modifiable, under the OS sandbox):")
-			for _, p := range cfg.EffectiveDeniedWritePaths() {
-				fmt.Printf("  %s\n", p)
-			}
+			printDenyList("Read-denied paths (hidden from sandboxed commands under the OS sandbox):", cfg.EffectiveDeniedReadEntries())
+			printDenyList("Write-denied paths (readable, not modifiable, under the OS sandbox):", cfg.EffectiveDeniedWriteEntries())
 			if !cfg.OSSandboxEnabled() {
 				fmt.Println("\nNote: os_sandbox is off, so the deny lists are not enforced against child processes.")
 			}
@@ -62,9 +57,13 @@ var configModeShowCmd = &cobra.Command{
 	},
 }
 
+// modeOverrideDir is the --dir flag for `config mode set`: edit the mode of
+// the directory override for that path instead of the base config.
+var modeOverrideDir string
+
 var configModeSetCmd = &cobra.Command{
 	Use:       "set <open|denylist|allowlist>",
-	Short:     "Set the enforcement mode",
+	Short:     "Set the enforcement mode (globally, or for one directory with --dir)",
 	Args:      cobra.ExactArgs(1),
 	ValidArgs: []string{"open", "denylist", "allowlist"},
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -75,6 +74,20 @@ var configModeSetCmd = &cobra.Command{
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
+		}
+		if modeOverrideDir != "" {
+			// Per-directory: only the override's mode changes. The OS sandbox
+			// toggle is a base-config decision and is left alone.
+			o := overridePtr(cfg, modeOverrideDir)
+			o.Mode = string(mode)
+			if err := saveConfig(cfg); err != nil {
+				return err
+			}
+			fmt.Printf("mode set to %s for %s (base mode stays %s)\n", mode, o.Path, cfg.EffectiveMode())
+			if mode == config.ModeDenylist && !cfg.ForDirectory(o.Path).OSSandboxEnabled() {
+				fmt.Println("note: os_sandbox is off for this directory, so the deny lists are not enforced against programs commands start")
+			}
+			return nil
 		}
 		cfg.Mode = string(mode)
 		// Denylist relies on the OS sandbox to hold its deny lists against child
@@ -168,7 +181,25 @@ var configAuditDisableCmd = &cobra.Command{
 	},
 }
 
+// printDenyList prints deny-list entries, marking file entries that do not
+// exist: on Linux those cannot be masked until they are created (see
+// os_sandbox.DenyPath), so the gap is made visible rather than implied closed.
+func printDenyList(title string, entries []config.DeniedPath) {
+	fmt.Println()
+	fmt.Println(title)
+	for _, e := range entries {
+		note := ""
+		if !e.Dir {
+			if _, err := os.Stat(e.Path); err != nil {
+				note = "   (does not exist; on Linux not masked until created)"
+			}
+		}
+		fmt.Printf("  %s%s\n", e.Path, note)
+	}
+}
+
 func init() {
+	configModeSetCmd.Flags().StringVar(&modeOverrideDir, "dir", "", "set the mode for this directory (a per-directory override) instead of globally")
 	configCmd.AddCommand(configModeCmd)
 	configModeCmd.AddCommand(configModeShowCmd)
 	configModeCmd.AddCommand(configModeSetCmd)

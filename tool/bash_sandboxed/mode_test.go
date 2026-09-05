@@ -216,10 +216,13 @@ func TestAllowlistMode_UnchangedAndHinted(t *testing.T) {
 	if err == nil {
 		t.Fatal("npm should be blocked in allowlist mode")
 	}
-	for _, want := range []string{`command "npm" is not allowed`, "extra-commands add npm", "mode set denylist"} {
+	for _, want := range []string{`command "npm" is not allowed`, "extra-commands add npm"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks hint %q", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "mode set") {
+		t.Errorf("agent-facing denial must not advertise a mode change: %q", err)
 	}
 	_, err = s.Execute(context.Background(), "go test ./...", workDir, paths, paths)
 	if err == nil || !strings.Contains(err.Error(), "runtimes go enable") {
@@ -304,20 +307,71 @@ func TestAudit_OffWritesNothing(t *testing.T) {
 	}
 }
 
-func TestScriptInterpreter(t *testing.T) {
-	cases := map[string]string{
-		"":                                   "",
-		"echo hi\n":                          "",
-		"#!/bin/bash\necho":                  "bash",
-		"#!/usr/bin/env python3\nimport os":  "python3",
-		"#!/usr/bin/env -S node --harmony\n": "node",
-		"#!/usr/bin/env FOO=1 ruby\n":        "ruby",
-		"#!/usr/local/bin/node":              "node",
-		"#! /bin/sh -e\n":                    "sh",
+func TestShebangArgv(t *testing.T) {
+	cases := map[string][]string{
+		"":                                   nil,
+		"echo hi\n":                          nil,
+		"#!/bin/bash\necho":                  {"bash"},
+		"#!/usr/bin/env python3\nimport os":  {"python3"},
+		"#!/usr/bin/env -S node --harmony\n": {"node", "--harmony"},
+		"#!/usr/bin/env FOO=1 ruby -w\n":     {"ruby", "-w"},
+		"#!/usr/local/bin/node":              {"node"},
+		"#! /bin/sh -e\n":                    {"sh", "-e"},
+		"#!/usr/bin/awk -f\n":                {"awk", "-f"},
+		"#!/usr/bin/env\n":                   nil,
 	}
 	for in, want := range cases {
-		if got := scriptInterpreter(in); got != want {
-			t.Errorf("scriptInterpreter(%q) = %q, want %q", in, got, want)
+		if got := shebangArgv(in); !slices.Equal(got, want) {
+			t.Errorf("shebangArgv(%q) = %q, want %q", in, got, want)
 		}
+	}
+	if scriptInterpreter("#!/usr/bin/env python3\n") != "python3" || scriptInterpreter("x") != "" {
+		t.Error("scriptInterpreter should return the argv head")
+	}
+}
+
+// TestAllowlistMode_ShebangGate checks that a script for another interpreter is
+// gated exactly like a direct invocation of that interpreter: unlisted ones
+// are blocked even with local_binary_execution on, and whitelisted ones with
+// dedicated executors (awk) go through them rather than the system binary.
+func TestAllowlistMode_ShebangGate(t *testing.T) {
+	workDir := t.TempDir()
+	s, _ := newModeSandbox(t, config.ModeAllowlist, workDir)
+	on := true
+	s.UpdateConfig(&config.Config{Mode: "allowlist", Audit: &on, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &on}}, workDir)
+	paths := []string{workDir}
+
+	perl := filepath.Join(workDir, "run.pl")
+	if err := os.WriteFile(perl, []byte("#!/usr/bin/env perl\nprint \"ran\\n\";\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Execute(context.Background(), "./run.pl", workDir, paths, paths)
+	if err == nil || !strings.Contains(err.Error(), `command "perl" is not allowed`) {
+		t.Fatalf("perl-shebang script must be gated on perl in allowlist mode, got %v", err)
+	}
+
+	// awk -f via shebang runs through the sandbox's awk executor (goawk with
+	// system() disabled), so a system() call in the script fails rather than
+	// executing on the host.
+	awk := filepath.Join(workDir, "run.awk")
+	if err := os.WriteFile(awk, []byte("#!/usr/bin/awk -f\nBEGIN { system(\"touch "+filepath.Join(workDir, "pwned")+"\") }\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = s.Execute(context.Background(), "./run.awk", workDir, paths, paths)
+	if _, err := os.Stat(filepath.Join(workDir, "pwned")); err == nil {
+		t.Fatal("awk shebang script reached the system awk: system() executed")
+	}
+
+	// A subcommand-restricted extra_commands entry allows the invocation but is
+	// not an opt-out of the local-binary gate.
+	off := false
+	s.UpdateConfig(&config.Config{Mode: "allowlist", Audit: &on, ExtraCommands: []string{"./gradlew build"}, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &off}}, workDir)
+	gradlew := filepath.Join(workDir, "gradlew")
+	if err := os.WriteFile(gradlew, []byte("#!/bin/sh\necho built\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Execute(context.Background(), "./gradlew build", workDir, paths, paths)
+	if err == nil || !strings.Contains(err.Error(), "direct execution") {
+		t.Fatalf("restricted extra entry must still hit the local-binary gate, got %v", err)
 	}
 }
