@@ -1,9 +1,12 @@
 // Package version reports the build's release version.
 //
 // Release builds set version, commit, and date through the linker (see
-// .goreleaser.yaml). Builds installed with `go install module@version` carry
-// the module version in their build info instead, and plain `go build`s of a
-// checkout report "dev".
+// .goreleaser.yaml). Other builds fall back to the Go build info: `go install
+// module@version` records the module version, and a `go build` inside a
+// checkout records the tag at HEAD or a pseudo-version derived from the commit
+// (Go stamps the main module's VCS version). Only a build with no version
+// information at all (e.g. -buildvcs=false outside a module cache) reports
+// "dev".
 package version
 
 import (
@@ -24,10 +27,10 @@ var (
 // Dev is the version reported by a build that carries no version information.
 const Dev = "dev"
 
-// Version returns the release version, e.g. "v0.3.0". A `go install
-// module@version` build reports its module version (a pseudo-version such as
-// "v0.0.0-20260101000000-abcdef123456" when it was not a tag); anything else
-// reports Dev.
+// Version returns the release version, e.g. "v0.3.0", or the build info's
+// module version (a pseudo-version such as "v0.0.0-20260101000000-abcdef123456"
+// for an untagged commit, possibly with a "+dirty" suffix); Dev when neither is
+// known.
 func Version() string {
 	if version != "" {
 		return version

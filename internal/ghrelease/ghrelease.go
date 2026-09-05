@@ -251,18 +251,33 @@ func IsNotFound(err error) bool {
 }
 
 // Install downloads asset from the release of repo tagged tag and writes the
-// archive member whose base name is member to dest as an executable.
+// archive member whose base name is member to dest as an executable. The member
+// is extracted to a temp file next to dest and renamed into place, so a failed
+// download never leaves a truncated dest behind.
 func (c *Client) Install(ctx context.Context, repo, tag, asset, member, dest string) error {
 	body, err := c.Open(ctx, repo, tag, asset)
 	if err != nil {
 		return err
 	}
 	defer body.Close()
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".partial-*")
 	if err != nil {
 		return err
 	}
-	return errors.Join(ExtractMember(body, asset, member, f), f.Close())
+	tmpName := tmp.Name()
+	if err := errors.Join(ExtractMember(body, asset, member, tmp), tmp.Close()); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, 0755); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // ExtractMember reads the archive named asset (a .tar.gz or a .zip, decided by

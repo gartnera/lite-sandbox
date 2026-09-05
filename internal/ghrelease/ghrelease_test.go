@@ -218,3 +218,28 @@ func TestExtractMember(t *testing.T) {
 		t.Error("expected an error for an unsupported archive type")
 	}
 }
+
+// TestInstallFailureLeavesDestIntact checks that a download that fails midway
+// (here: an archive without the member) does not truncate an existing dest.
+func TestInstallFailureLeavesDestIntact(t *testing.T) {
+	dl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(tarGz(t, "other", []byte("x")))
+	}))
+	defer dl.Close()
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	c := &Client{DownloadBase: dl.URL}
+	dest := filepath.Join(t.TempDir(), "tool")
+	if err := os.WriteFile(dest, []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Install(context.Background(), "acme/tool", "v1", "tool.tar.gz", "tool", dest); err == nil {
+		t.Fatal("expected an error")
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "old" {
+		t.Errorf("dest = %q, want the old content untouched", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(dest)); len(entries) != 1 {
+		t.Errorf("temp files left behind: %v", entries)
+	}
+}

@@ -10,7 +10,7 @@ go test ./...                    # Run default suite (OS-sandbox-runtime tests s
 go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool/... # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
-LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode binaries (pinned, auto-downloaded to e2e/.bin) through the installer against a mock model; no API key
+LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode binaries (pinned, auto-downloaded to e2e/mockedserver/.bin) through the installer against a mock model; no API key
 cd e2e/claude && uv run pytest -v # Real-model e2e (Claude Agent SDK; needs an API key)
 
 # Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)

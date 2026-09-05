@@ -6,7 +6,7 @@ Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/l
 
 ```bash
 go install github.com/gartnera/lite-sandbox@latest   # latest release, into $GOPATH/bin
-lite-sandbox version                                 # e.g. "lite-sandbox v0.4.0 (1a2b3c4d5e6f, 2026-09-05)"
+lite-sandbox version                                 # "lite-sandbox v0.4.0"; a release binary adds the commit and date
 ```
 
 ### Updating

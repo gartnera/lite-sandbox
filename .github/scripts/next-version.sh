@@ -33,7 +33,7 @@ set -euo pipefail
 bump_override=auto
 while [ $# -gt 0 ]; do
   case "$1" in
-    --bump) bump_override=$2; shift 2 ;;
+    --bump) bump_override=${2:?--bump needs a value}; shift 2 ;;
     *) echo "usage: $0 [--bump auto|patch|minor|major]" >&2; exit 2 ;;
   esac
 done
@@ -80,10 +80,26 @@ else
   log "no release tag found; starting from v$base"
 fi
 
+# pr_labels prints the release labels of the merged PR that introduced the
+# commit to the default branch (nothing for a commit pushed without a PR). An
+# API failure is retried once and then fatal: guessing here would publish a
+# wrong version, which cannot be taken back.
+pr_labels() {
+  local sha=$1 out
+  for attempt in 1 2; do
+    if out=$(gh api "repos/$repo/commits/$sha/pulls" --jq '.[] | select(.merged_at != null) | .labels[].name' 2>&1); then
+      echo "$out"
+      return 0
+    fi
+    log "gh api commits/$sha/pulls failed (attempt $attempt): $out"
+    sleep 2
+  done
+  return 1
+}
+
 level=0
 for sha in $(git rev-list --first-parent "$range"); do
-  # The merged PR that introduced the commit to the default branch, if any.
-  labels=$(gh api "repos/$repo/commits/$sha/pulls" --jq '.[] | select(.merged_at != null) | .labels[].name' 2>/dev/null || true)
+  labels=$(pr_labels "$sha") || { log "cannot resolve the pull request for $sha; refusing to guess the version"; exit 1; }
   commit_level=-1
   for l in $labels; do
     ll=$(level_of_label "$l")

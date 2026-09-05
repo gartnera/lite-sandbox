@@ -63,9 +63,15 @@ func runUpdate(ctx context.Context, cmd *cobra.Command) error {
 	current := version.Version()
 	fmt.Fprintf(out, "installed: %s\n%s: %s\n", current, targetLabel(), rel.Tag)
 
-	if cmp, ok := selfupdate.CompareVersions(current, rel.Tag); ok && cmp == 0 && !updateForce {
-		fmt.Fprintln(out, "already up to date")
-		return nil
+	if cmp, ok := selfupdate.CompareVersions(current, rel.Tag); ok && !updateForce {
+		switch {
+		case cmp == 0:
+			fmt.Fprintln(out, "already up to date")
+			return nil
+		case cmp > 0 && updateVersion == "":
+			fmt.Fprintln(out, "the installed version is newer than the latest release; pass --version to pick a release or --force to downgrade")
+			return nil
+		}
 	}
 	if updateCheck {
 		if current == version.Dev || !selfupdate.IsReleaseVersion(current) {

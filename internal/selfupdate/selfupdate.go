@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,10 @@ const Binary = "lite-sandbox"
 
 // ChecksumsFile is the release asset listing the SHA-256 of every archive.
 const ChecksumsFile = "checksums.txt"
+
+// maxArchiveSize bounds the archive download, which is buffered in memory. A
+// release archive is a few MB; anything near this is not one of ours.
+const maxArchiveSize = 256 << 20
 
 // Updater resolves and installs releases. The zero value uses the public
 // GitHub endpoints and this binary's platform.
@@ -105,8 +110,12 @@ func (u *Updater) Install(ctx context.Context, rel *ghrelease.Release, dest stri
 		goarch = runtimeGOARCH
 	}
 	asset := AssetName(rel.Tag, goos, goarch)
-	if rel.Asset(asset) == nil {
+	a := rel.Asset(asset)
+	if a == nil {
 		return fmt.Errorf("release %s has no build for %s/%s (no asset %s)", rel.Tag, goos, goarch, asset)
+	}
+	if a.Size > maxArchiveSize {
+		return fmt.Errorf("%s is %d bytes, larger than the %d-byte limit", asset, a.Size, maxArchiveSize)
 	}
 
 	sums, err := u.checksums(ctx, rel)
@@ -127,8 +136,12 @@ func (u *Updater) Install(ctx context.Context, rel *ghrelease.Release, dest stri
 	// before anything is extracted.
 	var archive bytes.Buffer
 	sum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(&archive, sum), body); err != nil {
+	n, err := io.Copy(io.MultiWriter(&archive, sum), io.LimitReader(body, maxArchiveSize+1))
+	if err != nil {
 		return fmt.Errorf("downloading %s: %w", asset, err)
+	}
+	if n > maxArchiveSize {
+		return fmt.Errorf("%s exceeds the %d-byte limit", asset, maxArchiveSize)
 	}
 	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
 		return fmt.Errorf("%s: checksum mismatch: got %s, %s says %s", asset, got, ChecksumsFile, want)
@@ -173,8 +186,8 @@ func ParseChecksums(r io.Reader) (map[string]string, error) {
 }
 
 // replaceExecutable writes the output of write to a temp file next to dest,
-// gives it dest's mode (0755 if dest does not exist or is not executable), and
-// renames it over dest.
+// syncs it to disk, gives it dest's mode (0755 if dest does not exist or is not
+// executable), and renames it over dest.
 func replaceExecutable(dest string, write func(io.Writer) error) error {
 	mode := os.FileMode(0755)
 	if fi, err := os.Stat(dest); err == nil && fi.Mode().Perm()&0111 != 0 {
@@ -192,7 +205,9 @@ func replaceExecutable(dest string, write func(io.Writer) error) error {
 		cleanup()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	// Flush the new binary before the rename makes it visible: without this a
+	// crash right after the update could leave an empty file under dest's name.
+	if err := errors.Join(tmp.Sync(), tmp.Close()); err != nil {
 		cleanup()
 		return err
 	}
@@ -203,6 +218,12 @@ func replaceExecutable(dest string, write func(io.Writer) error) error {
 	if err := os.Rename(tmpName, dest); err != nil {
 		cleanup()
 		return fmt.Errorf("replacing %s: %w", dest, err)
+	}
+	// Persist the rename itself; best effort, as not every filesystem
+	// supports syncing a directory.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	return nil
 }
