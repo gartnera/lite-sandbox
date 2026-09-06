@@ -43,12 +43,20 @@ type montyFS struct {
 	workDir string
 	sets    resolvedPathSets
 
-	mu    sync.Mutex
-	roots map[string]*os.Root
+	mu     sync.Mutex
+	roots  map[string]rootedDir
+	closed bool
+}
+
+// rootedDir is an open os.Root plus the directory it is anchored at, which is
+// not always the allowed entry itself (see rootFor).
+type rootedDir struct {
+	root *os.Root
+	dir  string
 }
 
 func newMontyFS(workDir string, sets resolvedPathSets) *montyFS {
-	return &montyFS{workDir: workDir, sets: sets, roots: map[string]*os.Root{}}
+	return &montyFS{workDir: workDir, sets: sets, roots: map[string]rootedDir{}}
 }
 
 // close releases every root opened during the run.
@@ -56,10 +64,17 @@ func (m *montyFS) close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range m.roots {
-		r.Close()
+		r.root.Close()
 	}
 	m.roots = nil
+	m.closed = true
 }
+
+// errPathMissing marks a path that is inside the boundary but does not exist.
+// It is a sentinel rather than a message match: authorizeAllowMissing has to
+// tell "missing, so the answer is False" apart from "denied", and deciding that
+// on error text would be one refactor away from turning a denial into an allow.
+var errPathMissing = errors.New("no such file or directory")
 
 // authorize checks path against the read or write set and returns a root
 // confined to the allowed directory that contains it, along with the path
@@ -85,20 +100,20 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 	base, ok := m.baseFor(resolved, allowed)
 	if !ok {
 		if !isWrite {
-			return nil, "", fmt.Errorf("%s: no such file or directory", path)
+			return nil, "", fmt.Errorf("%s: %w", path, errPathMissing)
 		}
 		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
 	}
 
-	root, err := m.rootFor(base)
+	rd, err := m.rootFor(base)
 	if err != nil {
 		return nil, "", err
 	}
-	rel, err := filepath.Rel(base, resolved)
-	if err != nil {
+	rel, err := filepath.Rel(rd.dir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
 	}
-	return root, rel, nil
+	return rd.root, rel, nil
 }
 
 // baseFor returns the allowed base directory containing resolved. The longest
@@ -120,18 +135,43 @@ func (m *montyFS) baseFor(resolved string, allowed []resolvedAllowedPath) (strin
 	return best, best != ""
 }
 
-func (m *montyFS) rootFor(base string) (*os.Root, error) {
+// rootFor opens the confinement root for an allowed base directory.
+//
+// os.OpenRoot needs a real directory, but an allowed entry need not be one:
+// it can name a single file (a file-granular grant) or a directory that does
+// not exist yet — bash handles both, so Python must too. In those cases the
+// root is anchored at the nearest existing ancestor directory instead, and the
+// returned dir says where. That is sound because checkPathBoundary has already
+// decided whether the path is inside the boundary; the root's job is only to
+// stop the kernel's path resolution from leaving the directory it is anchored
+// at, and it still cannot be escaped by a swapped symlink.
+func (m *montyFS) rootFor(base string) (rootedDir, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if r, ok := m.roots[base]; ok {
-		return r, nil
+	if m.closed {
+		return rootedDir{}, fmt.Errorf("python: filesystem access after the run ended")
 	}
-	r, err := os.OpenRoot(base)
+	if rd, ok := m.roots[base]; ok {
+		return rd, nil
+	}
+	dir := base
+	for {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return rootedDir{}, fmt.Errorf("cannot open allowed directory %s: no existing parent directory", base)
+		}
+		dir = parent
+	}
+	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open allowed directory %s: %w", base, err)
+		return rootedDir{}, fmt.Errorf("cannot open allowed directory %s: %w", dir, err)
 	}
-	m.roots[base] = r
-	return r, nil
+	rd := rootedDir{root: root, dir: dir}
+	m.roots[base] = rd
+	return rd, nil
 }
 
 // montyOsCall returns the OsCallFunc that services monty's OS calls.
@@ -233,7 +273,7 @@ func (s *Sandbox) montyOsCall(m *montyFS) montygo.OsCallFunc {
 // an error, but it must still be inside the boundary.
 func (m *montyFS) authorizeAllowMissing(path string, isWrite bool) (*os.Root, string, error) {
 	root, rel, err := m.authorize(path, isWrite)
-	if err != nil && strings.HasSuffix(err.Error(), "no such file or directory") {
+	if errors.Is(err, errPathMissing) {
 		return nil, "", nil
 	}
 	return root, rel, err
@@ -349,8 +389,9 @@ func (m *montyFS) iterdir(call *montygo.OsCall) (any, error) {
 	// onto the argument as written. They arrive in Python as plain strings —
 	// this monty build does not rebuild them into Path objects.
 	out := make([]any, 0, len(names))
+	resolvedDir := ResolvePath(path, m.workDir)
 	for _, name := range names {
-		if isGitInternalPath(filepath.Join(ResolvePath(path, m.workDir), name)) {
+		if isGitInternalPath(filepath.Join(resolvedDir, name)) {
 			continue
 		}
 		out = append(out, filepath.Join(path, name))
@@ -362,6 +403,9 @@ func (m *montyFS) writeText(call *montygo.OsCall) error {
 	path, err := pathArg(call, 0)
 	if err != nil {
 		return err
+	}
+	if len(call.Args) < 2 {
+		return fmt.Errorf("%s: missing content", call.Function)
 	}
 	text, ok := call.Args[1].(string)
 	if !ok {

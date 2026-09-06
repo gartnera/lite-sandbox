@@ -3,7 +3,9 @@ package bash_sandboxed
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -128,9 +130,12 @@ func TestPythonPathBoundary(t *testing.T) {
 			wantErr: "outside allowed directories",
 		},
 		{
-			name: "exists does not leak whether a file outside the boundary is there",
-			// A boundary error, not False: answering the question at all
-			// would turn exists() into a probe of the host filesystem.
+			// An existing file outside the boundary is a denial rather than
+			// False. A *non-existent* absolute path is not: checkPathBoundary
+			// lets those through on the read side, so exists() is the same
+			// one-bit oracle for host paths that bash already is. Matching
+			// bash exactly is the point; see TestPythonExistsMatchesBash.
+			name:    "exists on a file outside the boundary is denied",
 			program: `print(Path(OUTSIDE + '/secret.txt').exists())`,
 			wantErr: "outside allowed directories",
 		},
@@ -281,12 +286,14 @@ func TestParsePythonArgs(t *testing.T) {
 	readScript := func(path string) (string, error) { return "# " + path, nil }
 
 	tests := []struct {
-		name     string
-		args     []string
-		stdin    string
-		wantCode string
-		wantName string
-		wantErr  string
+		name            string
+		args            []string
+		stdin           string
+		wantCode        string
+		wantName        string
+		wantArgv        []string
+		wantSyntaxCheck []string
+		wantErr         string
 	}{
 		{
 			name:     "inline code",
@@ -316,17 +323,27 @@ func TestParsePythonArgs(t *testing.T) {
 		{
 			name:    "module execution",
 			args:    []string{"python3", "-m", "json.tool"},
-			wantErr: "-m is not supported",
+			wantErr: "is not supported",
 		},
 		{
-			name:    "arguments after a script",
-			args:    []string{"python3", "s.py", "arg"},
-			wantErr: "no sys.argv",
+			name:     "arguments after a script become sys.argv",
+			args:     []string{"python3", "s.py", "arg"},
+			wantCode: "# s.py",
+			wantName: "s.py",
+			wantArgv: []string{"s.py", "arg"},
 		},
 		{
-			name:    "arguments after inline code",
-			args:    []string{"python3", "-c", "print(1)", "arg"},
-			wantErr: "no sys.argv",
+			name:     "arguments after inline code become sys.argv",
+			args:     []string{"python3", "-c", "print(1)", "arg"},
+			wantCode: "print(1)",
+			wantName: "-c",
+			wantArgv: []string{"-c", "arg"},
+		},
+		{
+			name:            "py_compile is served as a syntax check",
+			args:            []string{"python3", "-m", "py_compile", "a.py", "b.py"},
+			wantName:        "py_compile",
+			wantSyntaxCheck: []string{"a.py", "b.py"},
 		},
 		{
 			name:    "missing code for -c",
@@ -366,6 +383,12 @@ func TestParsePythonArgs(t *testing.T) {
 			if inv.name != tt.wantName {
 				t.Errorf("name = %q, want %q", inv.name, tt.wantName)
 			}
+			if tt.wantArgv != nil && !slices.Equal(inv.argv, tt.wantArgv) {
+				t.Errorf("argv = %q, want %q", inv.argv, tt.wantArgv)
+			}
+			if !slices.Equal(inv.syntaxCheck, tt.wantSyntaxCheck) {
+				t.Errorf("syntaxCheck = %q, want %q", inv.syntaxCheck, tt.wantSyntaxCheck)
+			}
 		})
 	}
 }
@@ -390,20 +413,16 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 			command: `python3 -c "import numpy"`,
 			wantAll: []string{"ModuleNotFoundError", "monty", "not CPython", "uv run"},
 		},
-		{
-			name:    "module execution",
-			command: `python3 -m http.server`,
-			wantAll: []string{"-m is not supported", "monty", "uv run"},
-		},
+
 		{
 			name:    "open() has no file object",
 			command: `python3 -c "print(open('x.txt').read())"`,
 			wantAll: []string{"open() is not supported", "monty", "read_text"},
 		},
 		{
-			name:    "script arguments would be invisible",
-			command: `python3 -c "print(1)" extra`,
-			wantAll: []string{"sys.argv", "uv run"},
+			name:    "an unavailable module names the one that works",
+			command: `python3 -m http.server`,
+			wantAll: []string{"is not supported", "py_compile", "uv run"},
 		},
 	}
 
@@ -625,4 +644,333 @@ func TestPythonWithOSSandboxEnabled(t *testing.T) {
 		`python3 -c "from pathlib import Path; print(Path('`+outside+`/secret.txt').read_text())"`); err == nil {
 		t.Fatal("reading outside the boundary succeeded with the OS sandbox enabled")
 	}
+}
+
+// TestPythonNeverEscapesViaWrappers is a regression test for a real escape.
+// python/python3 are on the whitelist, but the dispatch to monty only happens
+// when the sandbox interpreter is the direct caller. A wrapper (xargs, env,
+// timeout, find -exec) spawns its child as a native process, which resolves the
+// *host* CPython from $PATH — arbitrary file access, subprocess and network,
+// outside every layer of this sandbox. subCommandDenylist is what stops it.
+func TestPythonNeverEscapesViaWrappers(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	steal := `python3 -c "print(open('` + secret + `').read())"`
+
+	for _, command := range []string{
+		"echo x | xargs " + steal,
+		"env " + steal,
+		"timeout 10 " + steal,
+		`find . -maxdepth 0 -exec ` + steal + ` \;`,
+		"echo x | xargs python " + filepath.Join(outside, "evil.py"),
+	} {
+		t.Run(command, func(t *testing.T) {
+			out, err := runPython(t, s, dir, command)
+			if err == nil {
+				t.Fatalf("a wrapper ran python outside the sandbox: %q", out)
+			}
+			if strings.Contains(out+err.Error(), "TOPSECRET") {
+				t.Fatalf("ESCAPE: host python read a file outside the boundary: %q / %v", out, err)
+			}
+		})
+	}
+}
+
+// TestPythonStdinWithoutInput covers `python3 -` with nothing piped in. The
+// interpreter leaves Stdin nil there, and reading it panicked on the
+// interpreter goroutine, which nothing recovers — taking the MCP server with it.
+func TestPythonStdinWithoutInput(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+
+	out, err := runPython(t, s, dir, "python3 -")
+	if err == nil {
+		t.Fatalf("expected an error, got %q", out)
+	}
+	if !strings.Contains(out+err.Error(), "nothing is piped in") {
+		t.Fatalf("expected an explanation of the missing stdin, got %v (output %q)", err, out)
+	}
+}
+
+// TestPythonExtraCommandsRunsRealPython covers the opt-out: naming python in
+// extra_commands (or unsandboxed_commands) is a deliberate request for the real
+// interpreter, since monty cannot import third-party packages.
+func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("no python3 on PATH to run as the real interpreter")
+	}
+	dir := t.TempDir()
+
+	// A program that only real CPython can run: monty has no sys.executable
+	// and cannot import a third-party-style module path.
+	realOnly := `python3 -c "import sys; print('real' if hasattr(sys, 'executable') else 'monty')"`
+
+	t.Run("without an extra_commands entry it runs on monty", func(t *testing.T) {
+		s := newTestSandbox()
+		defer s.Close()
+		out, err := runPython(t, s, dir, realOnly)
+		if err == nil && strings.Contains(out, "real") {
+			t.Fatalf("ran the host interpreter without being asked to: %q", out)
+		}
+	})
+
+	t.Run("a bare extra_commands entry runs the real interpreter", func(t *testing.T) {
+		s := NewSandbox()
+		defer s.Close()
+		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
+		out, err := runPython(t, s, dir, realOnly)
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "real") {
+			t.Fatalf("expected the host interpreter, got %q", out)
+		}
+	})
+
+	t.Run("a subcommand-restricted entry only covers matching invocations", func(t *testing.T) {
+		s := NewSandbox()
+		defer s.Close()
+		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
+
+		if err := os.WriteFile(filepath.Join(dir, "real.py"),
+			[]byte("import sys\nprint('real' if hasattr(sys, 'executable') else 'monty')\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runPython(t, s, dir, "python3 real.py")
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "real") {
+			t.Fatalf("the matching invocation should use the host interpreter, got %q", out)
+		}
+
+		// A non-matching invocation still goes to monty.
+		out, err = runPython(t, s, dir, `python3 -c "print('on-monty')"`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "on-monty") {
+			t.Fatalf("expected monty to run the non-matching invocation, got %q", out)
+		}
+	})
+}
+
+// TestPythonAllowedEntryThatIsNotADirectory covers allowed-path entries that
+// are not open-able directories: a file-granular grant, and a directory that
+// does not exist yet. bash handles both, so Python must not be stricter.
+func TestPythonAllowedEntryThatIsNotADirectory(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	workDir := t.TempDir()
+	other := t.TempDir()
+	refFile := filepath.Join(other, "ref.txt")
+	if err := os.WriteFile(refFile, []byte("REF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("a file-granular readable entry", func(t *testing.T) {
+		out, err := s.Execute(context.Background(),
+			`python3 -c "from pathlib import Path; print(Path('`+refFile+`').read_text())"`,
+			workDir, []string{workDir, refFile}, []string{workDir})
+		if err != nil {
+			t.Fatalf("reading a file-granular readable entry failed: %v (output %q)", err, out)
+		}
+		if out != "REF\n" {
+			t.Fatalf("got %q, want %q", out, "REF\n")
+		}
+		// The grant is still only that one file.
+		sibling := filepath.Join(other, "sibling.txt")
+		if err := os.WriteFile(sibling, []byte("NOPE"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := s.Execute(context.Background(),
+			`python3 -c "from pathlib import Path; print(Path('`+sibling+`').read_text())"`,
+			workDir, []string{workDir, refFile}, []string{workDir}); err == nil {
+			t.Fatalf("a file-granular grant leaked its whole directory: %q", out)
+		}
+	})
+
+	t.Run("a writable entry that does not exist yet", func(t *testing.T) {
+		scratch := filepath.Join(t.TempDir(), "scratch") // deliberately not created
+		out, err := s.Execute(context.Background(),
+			`python3 -c "from pathlib import Path; Path('`+scratch+`/sub').mkdir(parents=True); print(Path('`+scratch+`/sub').is_dir())"`,
+			workDir, []string{workDir, scratch}, []string{workDir, scratch})
+		if err != nil {
+			t.Fatalf("writing under a not-yet-created writable entry failed: %v (output %q)", err, out)
+		}
+		if out != "True\n" {
+			t.Fatalf("got %q, want %q", out, "True\n")
+		}
+	})
+}
+
+// TestPythonCodeIsNotAPath checks that the -c program is exempt from the
+// generic path checker. The code routinely contains "/" in a string literal,
+// which was enough to get the whole program resolved as a path and rejected.
+func TestPythonCodeIsNotAPath(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+
+	out, err := runPython(t, s, dir, `python3 -c "print('../../../../etc/passwd')"`)
+	if err != nil {
+		t.Fatalf("a program that merely mentions a path was rejected: %v (output %q)", err, out)
+	}
+	if out != "../../../../etc/passwd\n" {
+		t.Fatalf("got %q", out)
+	}
+
+	// Exempting the code must not exempt actually reading that path.
+	if out, err := runPython(t, s, dir,
+		`python3 -c "from pathlib import Path; print(Path('../../../../etc/passwd').read_text())"`); err == nil {
+		t.Fatalf("reading outside the boundary succeeded: %q", out)
+	}
+}
+
+// TestPythonExistsMatchesBash pins the one place Python's answer is a
+// disclosure: a non-existent absolute path outside the boundary reports False
+// rather than denying, because checkPathBoundary lets non-existent reads
+// through. That is bash's behavior too, and the two must not drift apart.
+func TestPythonExistsMatchesBash(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+
+	missing := "/definitely/not/here/at/all.txt"
+	out, err := runPython(t, s, dir, `python3 -c "from pathlib import Path; print(Path('`+missing+`').exists())"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if out != "False\n" {
+		t.Fatalf("got %q, want %q", out, "False\n")
+	}
+	// bash reaches the same conclusion for the same path.
+	if out, err := runPython(t, s, dir, "test -e "+missing+" && echo yes || echo no"); err != nil || out != "no\n" {
+		t.Fatalf("bash disagreed: %q %v", out, err)
+	}
+}
+
+// TestPythonPyCompile covers `python -m py_compile FILE...`, the idiom agents
+// use to check a file's syntax. monty compiles a whole module before running
+// any of it, which is what lets this be a real check rather than a run.
+func TestPythonPyCompile(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	write := func(t *testing.T, dir, name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("a file that compiles reports nothing and succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "good.py", "def f():\n    return 1\n")
+		out, err := runPython(t, s, dir, "python3 -m py_compile good.py && echo OK")
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if out != "OK\n" {
+			t.Fatalf("py_compile should be silent on success, got %q", out)
+		}
+	})
+
+	t.Run("tab-indented source is not mangled into a TabError", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "tabs.py", "def f():\n\treturn 1\n")
+		if out, err := runPython(t, s, dir, "python3 -m py_compile tabs.py"); err != nil {
+			t.Fatalf("tab-indented source failed to compile: %v (output %q)", err, out)
+		}
+	})
+
+	t.Run("a syntax error is reported with the file's own name and line", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "bad.py", "x = 1\nif True\n    pass\n")
+		out, err := runPython(t, s, dir, "python3 -m py_compile bad.py")
+		if err == nil {
+			t.Fatalf("expected a failure, got %q", out)
+		}
+		combined := out + err.Error()
+		for _, want := range []string{"SyntaxError", `File "bad.py"`, "line 2"} {
+			if !strings.Contains(combined, want) {
+				t.Errorf("error does not mention %q:\n%s", want, combined)
+			}
+		}
+		if strings.Contains(combined, syntaxOKMarker) {
+			t.Errorf("the syntax probe leaked into the message:\n%s", combined)
+		}
+	})
+
+	t.Run("the file is checked, never run", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "effect.py", "from pathlib import Path\nPath('SIDE_EFFECT.txt').write_text('x')\nprint('RAN')\n")
+		out, err := runPython(t, s, dir, "python3 -m py_compile effect.py")
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if strings.Contains(out, "RAN") {
+			t.Fatalf("py_compile executed the file: %q", out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "SIDE_EFFECT.txt")); err == nil {
+			t.Fatal("py_compile let the file write to disk")
+		}
+	})
+
+	t.Run("an unimportable module is not a syntax error", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "np.py", "import numpy\nx = numpy\n")
+		if out, err := runPython(t, s, dir, "python3 -m py_compile np.py"); err != nil {
+			t.Fatalf("a runtime-only failure was reported as a compile error: %v (output %q)", err, out)
+		}
+	})
+
+	t.Run("several files, the failure names the culprit", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "ok.py", "x = 1\n")
+		write(t, dir, "broken.py", "def (((\n")
+		out, err := runPython(t, s, dir, "python3 -m py_compile ok.py broken.py")
+		if err == nil {
+			t.Fatalf("expected a failure, got %q", out)
+		}
+		if !strings.Contains(out+err.Error(), `File "broken.py"`) {
+			t.Errorf("the failing file is not named:\n%s", out+err.Error())
+		}
+	})
+
+	t.Run("a file outside the boundary cannot be checked", func(t *testing.T) {
+		dir, outside := pythonTestDir(t)
+		if _, err := runPython(t, s, dir, "python3 -m py_compile "+filepath.Join(outside, "secret.txt")); err == nil {
+			t.Fatal("py_compile read a file outside the boundary")
+		}
+	})
+
+	t.Run("py_compile needs a file", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := runPython(t, s, dir, "python3 -m py_compile"); err == nil {
+			t.Fatal("expected an error when no file is given")
+		}
+	})
+
+	t.Run("other modules are still refused, and say what is served", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := runPython(t, s, dir, "python3 -m json.tool")
+		if err == nil {
+			t.Fatal("expected -m json.tool to be refused")
+		}
+		if !strings.Contains(err.Error(), "py_compile") {
+			t.Errorf("the refusal should point at the one module that works: %v", err)
+		}
+	})
 }

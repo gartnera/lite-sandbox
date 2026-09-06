@@ -39,21 +39,24 @@ func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
 			return nil
 		case arg == "-c":
 			// The code itself is not inspected here — it is not shell, and
-			// monty is what confines it. Anything past it would be sys.argv.
-			if i+2 < len(lits) {
-				return errNoScriptArgs()
-			}
+			// monty is what confines it. Anything past it is sys.argv.
 			return nil
 		case arg == "-m":
-			return fmt.Errorf("python -m is not supported by this Python interpreter (monty): " +
-				"it has no importable module path. Run the code directly with -c or a script file, " +
-				"or use `uv run` for real CPython")
-		case arg == "-", !strings.HasPrefix(arg, "-"):
-			// The program (stdin or a script file). Anything after it would be
-			// sys.argv, which monty does not provide.
-			if i+1 < len(lits) {
-				return errNoScriptArgs()
+			// py_compile is served as a syntax check (see checkPythonSyntax);
+			// no other module is importable. The file arguments after it are
+			// path-checked by the usual passes.
+			if i+1 < len(lits) && lits[i+1] == "py_compile" {
+				return nil
 			}
+			if i+1 < len(lits) && lits[i+1] == "" {
+				return nil // a non-literal module name; the runtime pass sees it
+			}
+			return fmt.Errorf("python -m is not supported by this Python interpreter (monty): " +
+				"it has no importable module path. Only `-m py_compile` is served (as a syntax " +
+				"check). Run the code directly with -c or a script file, or use `uv run` for real CPython")
+		case arg == "-", !strings.HasPrefix(arg, "-"):
+			// The program (stdin or a script file); everything after it is
+			// sys.argv, not something python itself interprets.
 			return nil
 		case pythonIgnoredFlags[arg]:
 		case arg == "-V", arg == "--version":
@@ -84,4 +87,30 @@ func wordOrDefault(args []*syntax.Word, i int, def string) string {
 		return lit
 	}
 	return def
+}
+
+// pythonNonPathArgIndices returns the argument indices that are Python source
+// rather than file paths, so the generic path checker skips them.
+//
+// The code after -c routinely contains "/" — in a string literal, a regex, a
+// comment — which is enough for looksLikePath to treat the whole program as a
+// path and reject it for resolving outside the allowed directories. The code is
+// not a path and monty is what confines it, so the only path argument python
+// ever has is the script file, which stays checked.
+//
+// This mirrors the same exemption sed and grep have for their script and
+// pattern arguments.
+func pythonNonPathArgIndices(args []string) map[int]bool {
+	skip := map[int]bool{}
+	for i := 1; i < len(args); i++ {
+		if args[i] == "-c" && i+1 < len(args) {
+			skip[i+1] = true
+			// Everything after the code belongs to the program, not to python.
+			for j := i + 2; j < len(args); j++ {
+				skip[j] = true
+			}
+			return skip
+		}
+	}
+	return skip
 }

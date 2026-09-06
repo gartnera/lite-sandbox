@@ -621,11 +621,20 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	case "bash", "sh":
 		return s.executeBash(ctx, args)
 	case "python", "python3":
-		// Dispatched to the embedded monty interpreter rather than any
-		// python on PATH. sets is the authorization input for its
-		// OS-call handler, which is what keeps Python file I/O inside
-		// the same boundary as bash. See python.go.
-		return s.executePython(ctx, args, sets)
+		// Normally dispatched to the embedded monty interpreter rather
+		// than any python on PATH. sets is the authorization input for
+		// its OS-call handler, which is what keeps Python file I/O
+		// inside the same boundary as bash. See python.go.
+		//
+		// An explicit extra_commands / unsandboxed_commands entry is
+		// the exception: naming python there is a deliberate request
+		// for the real interpreter (monty is a subset and cannot import
+		// third-party packages), so honour it and fall through to the
+		// normal exec path. Those entries already bypass validation by
+		// design — this only decides which interpreter runs.
+		if !s.pythonExplicitlyRequested(args) {
+			return s.executePython(ctx, args, sets)
+		}
 	}
 	if isScriptPath(cmdName) {
 		hc := interp.HandlerCtx(ctx)

@@ -159,9 +159,13 @@ func TestDenylistMode_RuntimeGatesAdvisory(t *testing.T) {
 	if err := s.ValidateCommand("pnpm publish", workDir, paths, paths); err == nil || !strings.Contains(err.Error(), "publish") {
 		t.Fatalf("pnpm publish should still be rejected in denylist mode, got %v", err)
 	}
-	// Wrapped unlisted commands are advisory too.
-	if err := s.ValidateCommand("xargs python3", workDir, paths, paths); err != nil {
-		t.Fatalf("xargs python3 should validate in denylist mode: %v", err)
+	// Wrapped unlisted commands are advisory too. (python3 is not a valid
+	// stand-in here: it is whitelisted and dispatched to the embedded monty
+	// interpreter, so wrapping it is refused by the structural
+	// subCommandDenylist — a wrapper would spawn the real CPython outside every
+	// sandbox layer — and structural rules are enforced in denylist mode.)
+	if err := s.ValidateCommand("xargs some-unlisted-tool", workDir, paths, paths); err != nil {
+		t.Fatalf("xargs some-unlisted-tool should validate in denylist mode: %v", err)
 	}
 
 	recs := readAudit(t, logPath)

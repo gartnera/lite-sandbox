@@ -134,6 +134,8 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 // patterns — so they are excluded from file-path security checks.
 func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 	switch cmdName {
+	case "python", "python3":
+		return pythonNonPathArgIndices(args)
 	case "git":
 		return gitGlobalPathArgIndices(args)
 	case "sed":

@@ -273,7 +273,8 @@ binary, running in-process.
 
 ```bash
 python3 -c "print('hello')"
-python3 script.py
+python3 script.py --flag input.csv     # arguments arrive as sys.argv
+python3 -m py_compile script.py        # syntax check
 echo "print(6*7)" | python3 -
 ```
 
@@ -332,14 +333,42 @@ Also unavailable:
 | Not supported | Use instead |
 | --- | --- |
 | `open()` file objects | `Path(...).read_text()` / `write_text()` |
-| `python -m module` | `-c` or a script file |
-| Arguments to the program (`sys.argv`) | Inline the values with `-c` |
+| `python -m module` (except `py_compile`) | `-c` or a script file |
 | `sys.exit`, `sys.stdout.write` | `print()`, and the shell for exit codes |
 | Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |
 | Generators, `match`, `del` | Lists and comprehensions |
 
 When a program hits one of these, the error names monty and says what to do
 instead, so it is not mistaken for a broken environment.
+
+### sys.argv
+
+monty has no `sys.argv` of its own — its `sys` module is built from a fixed
+attribute list, and Python cannot assign to it. lite-sandbox supplies it, so
+arguments reach programs the way they do under CPython:
+
+```bash
+python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']
+python3 -c "import sys; print(sys.argv)" a b   # ['-c', 'a', 'b']
+```
+
+`import sys`, `import sys as s`, and `from sys import argv` all work. This only
+happens for programs that mention `argv`; anything else is handed to monty
+exactly as written. Tracebacks are reported in your own line numbering either
+way.
+
+### Syntax checking
+
+`python -m py_compile FILE...` works and is a genuine check: monty compiles a
+whole module before executing any of it, so the file is parsed without a line of
+it running. It is silent and exits 0 when the files compile, and prints the
+compiler's error and exits 1 when one does not. No `.pyc` files are written.
+
+```bash
+python3 -m py_compile script.py && echo "syntax ok"
+```
+
+No other `-m` module is available.
 
 ### Escape hatch: real CPython
 

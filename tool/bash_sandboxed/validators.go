@@ -197,15 +197,22 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 //     inner command is walked and validated); as a real /usr/bin/time exec it
 //     is instead a command wrapper of its own (and -o can write files), so a
 //     wrapper reaching it would run its child command unvalidated.
+//   - python/python3: these never run a host interpreter when the sandbox
+//     interpreter calls them — the ExecHandler dispatches them to the embedded
+//     monty runtime instead (see python.go). A wrapper spawns the real CPython
+//     from $PATH, which has none of monty's isolation: arbitrary file access,
+//     subprocess, and network, outside every layer of this sandbox.
 //
 // When a wrapper spawns these as native processes, the interpreter's hooks are
 // bypassed entirely, so the -c / awk program / wrapped command would execute
 // unvalidated.
 var subCommandDenylist = map[string]bool{
-	"bash": true,
-	"sh":   true,
-	"awk":  true,
-	"time": true,
+	"bash":    true,
+	"sh":      true,
+	"awk":     true,
+	"time":    true,
+	"python":  true,
+	"python3": true,
 }
 
 // validateSubCommand validates a command name and its arguments against the

@@ -164,10 +164,27 @@ flag-parsing ambiguity, wrappers — do not apply to it, because there is no arg
 to misparse: the boundary is enforced at the point of each individual file
 operation, on the fully resolved path.
 
-Two details are worth knowing:
+`python`/`python3` are also refused in *wrapped* position — as the child of
+`xargs`, `env`, `timeout`, or `find -exec` — for the same reason `bash`, `sh`
+and `awk` are (see `subCommandDenylist`). The dispatch to monty only happens
+when the sandbox interpreter is the direct caller; a wrapper spawns its child as
+a native process, which would resolve the real CPython from `$PATH` and run it
+outside every layer of this sandbox.
+
+Naming `python`/`python3` in `extra_commands` or `unsandboxed_commands`
+deliberately opts back in to the real interpreter for matching invocations,
+with the loss of validation those lists always imply.
+
+Three details are worth knowing:
 
 - **A denial ends the run.** The host returns an error rather than a value, and
   Python cannot catch it. A script cannot retry in a loop to probe the boundary.
+- **A prologue is prepended when a program uses `sys.argv`,** since monty has
+  none. It defines a shim object holding the argument strings and rewrites the
+  statements that would rebind `sys` back to the real module. The rewrite only
+  ever adds an assignment to that shim, so it cannot widen what Python can
+  reach; every file operation still goes through the OS-call boundary. Programs
+  that never mention `argv` are passed through untouched.
 - **The host-side file operations are not covered by the OS sandbox.** monty
   runs in the MCP server process, not in the bwrap/sandbox-exec worker, so the
   reads and writes its OS calls trigger happen outside that worker. They are
