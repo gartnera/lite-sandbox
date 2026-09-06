@@ -29,7 +29,7 @@ Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hoo
 - **[Incremental adoption](docs/adoption.md)** — other enforcement modes, audit reports, and tightening over time.
 - **[Installation](docs/installation.md)** — getting the binary and keeping it updated, automatic and manual agent setup, built-in tool boundaries, and hook modes.
 - **[Configuration](docs/configuration.md)** — config file, CLI management, readable/writable paths, and git support.
-- **[Runtime support](docs/runtimes.md)** — enabling Go, pnpm, Rust, Deno, and uv.
+- **[Runtime support](docs/runtimes.md)** — the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, and uv.
 - **[AWS & Docker access](docs/aws-and-docker.md)** — brokered AWS credentials and the filtering Docker proxy.
 - **[Background processes](docs/background-processes.md)** — running and managing long-lived commands.
 - **[Security model](docs/security.md)** — validation layers, the optional OS sandbox, and known limitations.

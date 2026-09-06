@@ -189,6 +189,12 @@ var allowedCommands = map[string]bool{
 	"uv":      true,
 	"uvx":     true,
 
+	// Python, served by the embedded monty interpreter rather than any python
+	// on PATH (dispatched in ExecHandler, see python.go). Unlike the runtimes
+	// above this one is on by default; runtimes.python.enabled turns it off.
+	"python":  true,
+	"python3": true,
+
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
 
@@ -305,6 +311,8 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	// subcommand, so beyond the runtime check there is nothing to gate —
 	// running the tool is confined by the OS sandbox like `uv run`.
 	"uvx":     runtimeGate("uvx", "runtimes.uv.enabled", uvRuntimeEnabled, nil),
+	"python":  validatePythonArgs,
+	"python3": validatePythonArgs,
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
 	"xargs":   validateXargsArgs,

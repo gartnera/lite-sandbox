@@ -492,6 +492,27 @@ func (u *UvConfig) UvPublish() bool {
 	return *u.Publish
 }
 
+// PythonConfig controls the embedded Python (monty) runtime.
+//
+// Unlike the other runtimes this one is enabled by default. There is nothing to
+// install or detect — the interpreter is a WebAssembly blob compiled into the
+// lite-sandbox binary — and it is more contained than the commands already on
+// the whitelist: no network, no environment, no ambient filesystem access, and
+// every file it touches is checked against the same readable/writable paths
+// that bound bash. Set enabled: false to turn it off, after which python and
+// python3 are rejected like any other command that is not allowed.
+type PythonConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// PythonEnabled returns whether python/python3 are allowed (default: true).
+func (p *PythonConfig) PythonEnabled() bool {
+	if p == nil || p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
 	Go      *GoConfig      `yaml:"go,omitempty"`
@@ -500,6 +521,7 @@ type RuntimesConfig struct {
 	Deno    *DenoConfig    `yaml:"deno,omitempty"`
 	Flutter *FlutterConfig `yaml:"flutter,omitempty"`
 	Uv      *UvConfig      `yaml:"uv,omitempty"`
+	Python  *PythonConfig  `yaml:"python,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;

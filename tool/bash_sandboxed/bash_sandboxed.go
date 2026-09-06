@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	montygo "github.com/fugue-labs/monty-go"
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/audit"
 	"github.com/gartnera/lite-sandbox/os_sandbox"
@@ -120,6 +121,13 @@ type Sandbox struct {
 	// audit receives every validation finding (see Sandbox.report) while the
 	// config's audit flag is on; nil otherwise. Managed by UpdateConfig.
 	audit *audit.Logger
+	// monty is the compiled Python (monty) wasm runtime backing `python`/
+	// `python3`, built on first use and shared across invocations — compiling
+	// it costs ~2s, so a sandbox that never runs Python never pays for it.
+	// It has its own mutex so that one-off compile does not hold the config
+	// lock every other handler reads through. See python.go.
+	montyMu sync.Mutex
+	monty   *montygo.Runner
 }
 
 // NewSandbox creates a Sandbox with no extra commands.
@@ -571,6 +579,15 @@ func (s *Sandbox) Close() error {
 	if s.bg != nil {
 		s.bg.killAll()
 	}
+
+	// The monty runtime has its own lock (see python.go), so release it
+	// independently of the config lock taken below.
+	s.montyMu.Lock()
+	if s.monty != nil {
+		s.monty.Close()
+		s.monty = nil
+	}
+	s.montyMu.Unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

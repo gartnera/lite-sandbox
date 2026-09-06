@@ -48,6 +48,7 @@ Commands are executed via the [mvdan.cc/sh/v3](https://pkg.go.dev/mvdan.cc/sh/v3
 5. **Expanded path validation** — A `CallHandler` intercepts every command after variable and command substitution expansion, validating that all resolved path arguments stay within allowed directories. This catches bypasses like `cat $HOME/secret` that static analysis cannot resolve.
 6. **Redirect path validation** — An `OpenHandler` intercepts all file opens from redirections (e.g., `< $FILE`, `> $OUTPUT`), validating expanded paths before any I/O occurs.
 7. **Expanded command validation** — The whitelist and per-command argument validators are re-enforced on the fully expanded argv. The `CallHandler` runs for every command *before* the interpreter resolves whether it is a builtin, function, or external, so it enforces the whitelist for builtins (an external is left for the `ExecHandler`); the `ExecHandler` runs only for external commands and there re-runs both the whitelist check and the per-command argument validator. This is the layer that safely handles a dynamically-named command (e.g. `$CMD push` resolving to `git`), whose real name and arguments are only concrete at runtime. `bash`/`sh`/`awk` are exempt from the re-run because they are dispatched to dedicated executors that re-parse and re-validate their contents through the interpreter.
+8. **Python OS-call validation** — `python`/`python3` are dispatched to an embedded Python interpreter (monty) rather than executed. It performs no I/O of its own: every filesystem operation suspends the interpreter and returns to the host as a typed OS call, which is checked against the same read/write path sets as bash before it is performed. See [Python](#python-monty) below.
 
 ## OS-level sandboxing (optional)
 
@@ -140,6 +141,46 @@ The OS sandbox provides defense-in-depth on top of the AST-level validation:
 - Disallowed commands are still blocked at the AST level (including any nested inside process substitutions or command substitutions) before reaching the OS sandbox
 - The OS sandbox does NOT replace AST validation — both layers work together
 
+## Python (monty)
+
+`python` and `python3` do not run any interpreter from the host. They are served
+by [monty](https://github.com/pydantic/monty) — a Python interpreter compiled to
+WebAssembly — embedded in the lite-sandbox binary and run in-process via wazero.
+
+**Python file I/O goes through the same path sets as bash.** monty has no
+filesystem access of its own; when Python touches a file the interpreter
+suspends and hands the host a typed OS call. The host checks the path against
+the readable set (reads) or the writable set (writes) using the same
+`checkPathBoundary` the bash `CallHandler` and `OpenHandler` use, including the
+`.git` exclusion, and only then performs it. There is deliberately not a second
+path policy for Python.
+
+**monty's own isolation is stronger than the AST-level boundary around it.**
+Inside the wasm sandbox there is no network, no environment (`os.environ` is
+always empty, so masked credentials cannot be read back), no ambient filesystem,
+no subprocess execution, and no way to reach a syscall except through the host
+callback described above. The AST layer's known weaknesses — glob expansion,
+flag-parsing ambiguity, wrappers — do not apply to it, because there is no argv
+to misparse: the boundary is enforced at the point of each individual file
+operation, on the fully resolved path.
+
+Two details are worth knowing:
+
+- **A denial ends the run.** The host returns an error rather than a value, and
+  Python cannot catch it. A script cannot retry in a loop to probe the boundary.
+- **The host-side file operations are not covered by the OS sandbox.** monty
+  runs in the MCP server process, not in the bwrap/sandbox-exec worker, so the
+  reads and writes its OS calls trigger happen outside that worker. They are
+  instead performed through `os.Root` (openat2-rooted on Linux), so the kernel
+  itself confines the resolution to the allowed directory — a symlink swapped
+  between the check and the open cannot move it. This is the same primitive
+  monty's own upstream mount implementation relies on.
+
+Each run is additionally bounded by the command timeout, a memory cap, a
+recursion limit, and a cap on host calls per run (which backstops a script that
+loops on filesystem operations, since time spent in host calls does not advance
+the interpreter's own duration accounting).
+
 ## Known Limitations
 
 This is a lightweight, best-effort sandbox based on static analysis. It is **not** a security boundary equivalent to containers, VMs, or seccomp. Known bypasses and limitations:
@@ -154,6 +195,7 @@ This is a lightweight, best-effort sandbox based on static analysis. It is **not
 - **Per-command argument validation**: Some whitelisted commands have dangerous flags that are blocked via argument validators. For `find`, the flags `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, and `-fprintf` are all blocked. Other commands like `xxd` can write files with `-r` when combined with redirections (though redirections are blocked).
 - **Command wrappers**: Commands that run another program as a child process — `xargs`, `find -exec`, `env`, and `timeout` — are validated recursively: the wrapped command name and its arguments are checked against the whitelist (and its own argument validator) just as if it had been invoked directly. This prevents using a wrapper as a prefix to smuggle a blocked command past validation (e.g. `env curl …`, `timeout 5 sh -c …`). `env -S`/`--split-string` is rejected outright because it constructs an argument vector from a single string. `bash`, `sh`, `awk`, and `time` are refused entirely in wrapped position, since their sandbox safety depends on the interpreter being their direct caller.
 - **No syscall-level enforcement**: AST validation happens before execution without runtime syscall filtering (no seccomp). If a command is allowed and passes AST validation, it executes with the permissions granted by the environment. The optional OS sandbox (bubblewrap on Linux, sandbox-exec on macOS) provides significant additional protection via filesystem isolation — even if a dangerous command bypasses AST validation, filesystem restrictions prevent writes outside the working directory.
+- **Python is a subset**: monty implements a subset of Python and cannot import third-party packages, so `python3` in the sandbox is not a drop-in for CPython. Real CPython is available via the uv runtime (`uv run`), where confinement comes from the OS sandbox rather than from monty.
 - **Bash builtins**: Some allowed builtins like `set`, `export`, and `trap` can modify shell state in ways that affect subsequent commands within the same invocation.
 
 ### General limitations

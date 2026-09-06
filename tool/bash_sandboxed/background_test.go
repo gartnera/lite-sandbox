@@ -165,8 +165,8 @@ func TestBackgroundValidationError(t *testing.T) {
 	s := newTestSandbox()
 	cwd := t.TempDir()
 
-	// python is not in the allowlist; validation should fail synchronously.
-	if _, err := s.ExecuteBackground("python evil.py", cwd, []string{cwd}, []string{cwd}); err == nil {
+	// perl is not in the allowlist; validation should fail synchronously.
+	if _, err := s.ExecuteBackground("perl evil.py", cwd, []string{cwd}, []string{cwd}); err == nil {
 		t.Fatal("expected validation error for disallowed command")
 	}
 }

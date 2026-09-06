@@ -273,11 +273,11 @@ func TestBashSandboxedTool_ValidationErrorNoFallbackHint(t *testing.T) {
 	c := setupClient(t)
 	ctx := context.Background()
 
-	// `python` is not in the allowed commands whitelist
+	// `perl` is not in the allowed commands whitelist
 	result, err := c.CallTool(ctx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name:      "bash",
-			Arguments: map[string]any{"command": "python evil.py"},
+			Arguments: map[string]any{"command": "perl evil.py"},
 		},
 	})
 	if err != nil {
@@ -399,7 +399,7 @@ func TestBashBackground_ValidationError(t *testing.T) {
 	c := setupClient(t)
 
 	text, isErr := callTextTool(t, c, "bash", map[string]any{
-		"command":           "python evil.py",
+		"command":           "perl evil.py",
 		"run_in_background": true,
 	})
 	if !isErr {

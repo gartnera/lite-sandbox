@@ -14,11 +14,18 @@ import (
 	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
 )
 
-// The scenario every agent runs. The mock model asks the agent to run a
-// command the sandbox must reject (curl is not whitelisted), then one it must
-// run, and finally reports what the second one printed. The prompt is only
-// there to look plausible; the mock never reads it.
+// The scenario every agent runs. The mock model asks the agent to rewrite a
+// file with Python (served by the embedded monty interpreter, so no python on
+// PATH is involved), then run a command the sandbox must reject (curl is not
+// whitelisted), then one it must run, and finally reports what the last one
+// printed. The prompt is only there to look plausible; the mock never reads it.
 const (
+	// pythonCommand exercises the Python dispatch end to end through a real
+	// agent: the write lands inside the working directory and is read back, so
+	// a result carrying pythonOutput means both halves of the OS-call
+	// authorization worked.
+	pythonCommand  = `python3 -c 'from pathlib import Path; Path("e2e-python.txt").write_text("rewritten-by-python"); print(Path("e2e-python.txt").read_text())'`
+	pythonOutput   = "rewritten-by-python"
 	blockedCommand = "curl http://example.com"
 	allowedCommand = "echo hello-from-sandbox"
 	allowedOutput  = "hello-from-sandbox"
@@ -45,12 +52,14 @@ const (
 	outsidePath = "/etc/lite-sandbox-e2e-denied.txt"
 )
 
-// sandboxCalls scripts the two sandbox commands as calls to the agent's name
+// sandboxCalls scripts the three sandbox commands as calls to the agent's name
 // for the sandbox bash tool. Callers may prepend agent-specific calls (e.g. a
 // call to the built-in shell that a hook must block).
 func sandboxCalls(sandboxTool string) []mockmodel.ToolCall {
 	var calls []mockmodel.ToolCall
-	for _, command := range []string{blockedCommand, allowedCommand} {
+	// pythonCommand comes first so the trailing two results keep their
+	// positions in assertConversation.
+	for _, command := range []string{pythonCommand, blockedCommand, allowedCommand} {
 		calls = append(calls, mockmodel.ToolCall{Name: sandboxTool, Arguments: map[string]string{"command": command}})
 	}
 	return calls
@@ -180,6 +189,11 @@ func assertConversation(t *testing.T, output string, model *mockmodel.Server, ca
 	t.Logf("tool results fed back: %q", results)
 	if len(results) != len(calls) {
 		t.Fatalf("expected %d tool results, got %d", len(calls), len(results))
+	}
+	// Only the sandbox-tool scenarios script pythonCommand; the AST-hook modes
+	// drive the agent's built-in shell with their own shorter list of calls.
+	if wantSandboxTool {
+		assertResult(t, results, len(results)-3, pythonOutput)
 	}
 	assertResult(t, results, len(results)-2, curlRejected)
 	// Agents may wrap results in their own framing (Codex adds timing lines),
