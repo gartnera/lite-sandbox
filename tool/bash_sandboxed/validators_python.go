@@ -24,8 +24,8 @@ import (
 // here to fail fast with a good message.
 func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
 	cfg := s.getConfig()
-	if cfg.Runtimes != nil && !cfg.Runtimes.Python.PythonEnabled() {
-		return fmt.Errorf("command %q is not allowed (runtimes.python.enabled is disabled)", wordOrDefault(args, 0, "python"))
+	if cfg.Runtimes != nil && !cfg.Runtimes.MontyPython.MontyPythonEnabled() {
+		return fmt.Errorf("command %q is not allowed (runtimes.montypython.enabled is disabled)", wordOrDefault(args, 0, "python"))
 	}
 
 	lits := wordLits(args)
@@ -51,9 +51,9 @@ func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
 			if i+1 < len(lits) && lits[i+1] == "" {
 				return nil // a non-literal module name; the runtime pass sees it
 			}
-			return fmt.Errorf("python -m is not supported by this Python interpreter (monty): " +
-				"it has no importable module path. Only `-m py_compile` is served (as a syntax " +
-				"check). Run the code directly with -c or a script file, or use `uv run` for real CPython")
+			return fmt.Errorf("python -m is not available: %s It has no importable module path, "+
+				"and only `-m py_compile` is served (as a syntax check). Run the code directly "+
+				"with -c or a script file, or:\n%s", pythonIsMontyNote, pythonEscapeHatches)
 		case arg == "-", !strings.HasPrefix(arg, "-"):
 			// The program (stdin or a script file); everything after it is
 			// sys.argv, not something python itself interprets.

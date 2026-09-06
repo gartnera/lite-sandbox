@@ -84,9 +84,9 @@ var runtimesShowCmd = &cobra.Command{
 			fmt.Printf("    enabled: %v\n", false)
 			fmt.Printf("    publish: %v\n", false)
 		}
-		if cfg.Runtimes.Python != nil {
+		if cfg.Runtimes.MontyPython != nil {
 			fmt.Println("  python:")
-			fmt.Printf("    enabled: %v\n", cfg.Runtimes.Python.PythonEnabled())
+			fmt.Printf("    enabled: %v\n", cfg.Runtimes.MontyPython.MontyPythonEnabled())
 		} else {
 			fmt.Println("  python: (defaults)")
 			fmt.Printf("    enabled: %v\n", true)
@@ -762,9 +762,9 @@ func init() {
 	uvRuntimeCmd.AddCommand(uvRuntimeEnableCmd)
 	uvRuntimeCmd.AddCommand(uvRuntimeDisableCmd)
 
-	pythonRuntimeCmd.AddCommand(pythonRuntimeShowCmd)
-	pythonRuntimeCmd.AddCommand(pythonRuntimeEnableCmd)
-	pythonRuntimeCmd.AddCommand(pythonRuntimeDisableCmd)
+	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeShowCmd)
+	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeEnableCmd)
+	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeDisableCmd)
 
 	// Add runtimes subcommands
 	runtimesCmd.AddCommand(runtimesShowCmd)
@@ -774,7 +774,7 @@ func init() {
 	runtimesCmd.AddCommand(denoRuntimeCmd)
 	runtimesCmd.AddCommand(flutterRuntimeCmd)
 	runtimesCmd.AddCommand(uvRuntimeCmd)
-	runtimesCmd.AddCommand(pythonRuntimeCmd)
+	runtimesCmd.AddCommand(montyPythonRuntimeCmd)
 
 	// Add runtimes to config
 	configCmd.AddCommand(runtimesCmd)

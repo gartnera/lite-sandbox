@@ -113,9 +113,9 @@ func parsePythonArgs(args []string, stdin io.Reader, readScript func(path string
 				}
 				return &pythonInvocation{name: "py_compile", syntaxCheck: files}, nil
 			}
-			return nil, fmt.Errorf("python: -m %s is not supported by this Python interpreter (monty): "+
-				"it has no importable module path. Only `-m py_compile` is served (as a syntax check). "+
-				"Run code directly with -c or a script file, or use `uv run` for real CPython", rest[i+1])
+			return nil, fmt.Errorf("python: -m %s is not available: %s It has no importable "+
+				"module path, and only `-m py_compile` is served (as a syntax check). Run code "+
+				"directly with -c or a script file, or:\n%s", rest[i+1], pythonIsMontyNote, pythonEscapeHatches)
 
 		case arg == "-":
 			// The interpreter leaves Stdin nil when nothing is piped or
@@ -289,6 +289,24 @@ func stripOsCallWrapper(msg string) string {
 	return msg
 }
 
+// pythonEscapeHatches is appended to every message that reports a monty
+// limitation. An agent that hits one of these needs to know two things it
+// cannot guess: that `python3` here is not CPython, and exactly how to get the
+// real one. Without the second half the next move is `pip install`, which
+// cannot work either.
+const pythonEscapeHatches = "To run the real python on this machine instead:\n" +
+	"  lite-sandbox config extra-commands add python3\n" +
+	"  (python then bypasses sandbox command validation, like any extra_commands entry)\n" +
+	"Or run real CPython under uv, which stays sandboxed:\n" +
+	"  lite-sandbox config runtimes uv enable   # then: uv run script.py\n" +
+	"To turn the built-in interpreter off entirely:\n" +
+	"  lite-sandbox config runtimes montypython disable"
+
+// pythonIsMontyNote names the interpreter. Kept separate from the escape
+// hatches so a message can lead with whichever half fits its failure.
+const pythonIsMontyNote = "note: `python` here is monty, a sandboxed Python interpreter built into " +
+	"lite-sandbox, not CPython."
+
 // pythonLimitationNote returns the explanation to append when a traceback is
 // really monty telling the agent it is not CPython. Without it the failure
 // reads as a broken environment and the next move is `pip install`, which
@@ -296,12 +314,10 @@ func stripOsCallWrapper(msg string) string {
 func pythonLimitationNote(traceback string) string {
 	switch {
 	case strings.Contains(traceback, "ModuleNotFoundError"), strings.Contains(traceback, "ImportError"):
-		return "\nnote: this is monty, a sandboxed Python interpreter embedded in lite-sandbox, " +
-			"not CPython. Third-party packages cannot be installed or imported — pip and venv are " +
-			"not available. The standard library is partial: os, pathlib, json, re, math, datetime, " +
-			"sys, typing, asyncio, dataclasses, collections, functools, itertools and base64 work.\n" +
-			"If you need a real interpreter or a third-party package, use `uv run` " +
-			"(enable it with `lite-sandbox config runtimes uv enable`)."
+		return "\n" + pythonIsMontyNote + " Third-party packages cannot be installed or " +
+			"imported — pip and venv do not exist here. The standard library is partial: os, " +
+			"pathlib, json, re, math, datetime, sys, typing, asyncio, dataclasses, collections, " +
+			"functools, itertools and base64 work.\n" + pythonEscapeHatches
 	case strings.Contains(traceback, "TimeoutError"):
 		return "\nnote: the sandbox stopped the program at the bash tool's command timeout. " +
 			"Long-running work belongs in a background command."
@@ -310,17 +326,16 @@ func pythonLimitationNote(traceback string) string {
 			"the sandbox's limit for one python run. Batch the work or split it across runs.",
 			montyMaxSuspensions)
 	case strings.Contains(traceback, "MemoryError"):
-		return "\nnote: the sandbox caps monty's heap. Process the data in chunks, " +
-			"or use `uv run` for real CPython."
+		return "\nnote: the sandbox caps the built-in interpreter's heap. Process the data in " +
+			"chunks, or:\n" + pythonEscapeHatches
 	case strings.Contains(traceback, "Internal error in monty"):
-		return "\nnote: monty (the sandboxed Python interpreter embedded in lite-sandbox) hit a " +
-			"limit of its own implementation rather than a bug in this program — it supports a " +
-			"subset of Python. Try a simpler formulation, or use `uv run` for real CPython."
+		return "\n" + pythonIsMontyNote + " It hit a limit of its own implementation rather " +
+			"than a bug in this program. Try a simpler formulation, or:\n" + pythonEscapeHatches
 	case isMontySyntaxLimitation(traceback):
-		return "\nnote: this is monty, a sandboxed Python interpreter embedded in lite-sandbox, " +
-			"not CPython, and it implements a subset of the language. Class inheritance, super(), " +
-			"@property/@classmethod/@staticmethod, generators, match statements and del are among " +
-			"the things it does not support. Rewrite without them, or use `uv run` for real CPython."
+		return "\n" + pythonIsMontyNote + " It implements a subset of the language: class " +
+			"inheritance, super(), @property/@classmethod/@staticmethod, generators, match " +
+			"statements and del are among the things it does not support. Rewrite without them, " +
+			"or:\n" + pythonEscapeHatches
 	}
 	return ""
 }
@@ -437,4 +452,23 @@ func (s *Sandbox) checkPythonSyntax(ctx context.Context, runner *montygo.Runner,
 		return interp.ExitStatus(1)
 	}
 	return nil
+}
+
+// pythonOptedOutToHost reports whether python is on the subCommandDenylist only
+// by default — i.e. the user has a bare extra_commands / unsandboxed_commands
+// entry for it, which is an explicit request for the host interpreter with no
+// validation.
+//
+// The denylist exists because a wrapper spawns its child as a native process,
+// so `xargs python3` would run the real CPython outside every sandbox layer.
+// That reasoning does not apply once the user has asked for exactly that: a
+// bare entry already lets `python3 anything` run unwrapped, so refusing the
+// wrapped form protects nothing. A subcommand-restricted entry is deliberately
+// not enough — its whole point is that only some invocations are trusted, and a
+// wrapper's argv is not checked against that restriction.
+func pythonOptedOutToHost(s *Sandbox, cmdName string) bool {
+	if cmdName != "python" && cmdName != "python3" {
+		return false
+	}
+	return s.getBareExtraCommands()[cmdName]
 }

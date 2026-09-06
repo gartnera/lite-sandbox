@@ -191,7 +191,7 @@ var allowedCommands = map[string]bool{
 
 	// Python, served by the embedded monty interpreter rather than any python
 	// on PATH (dispatched in ExecHandler, see python.go). Unlike the runtimes
-	// above this one is on by default; runtimes.python.enabled turns it off.
+	// above this one is on by default; runtimes.montypython.enabled turns it off.
 	"python":  true,
 	"python3": true,
 

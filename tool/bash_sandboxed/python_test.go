@@ -323,7 +323,7 @@ func TestParsePythonArgs(t *testing.T) {
 		{
 			name:    "module execution",
 			args:    []string{"python3", "-m", "json.tool"},
-			wantErr: "is not supported",
+			wantErr: "is not available",
 		},
 		{
 			name:     "arguments after a script become sys.argv",
@@ -411,18 +411,18 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 		{
 			name:    "third-party import",
 			command: `python3 -c "import numpy"`,
-			wantAll: []string{"ModuleNotFoundError", "monty", "not CPython", "uv run"},
+			wantAll: []string{"ModuleNotFoundError", "monty", "not CPython"},
 		},
 
 		{
 			name:    "open() has no file object",
 			command: `python3 -c "print(open('x.txt').read())"`,
-			wantAll: []string{"open() is not supported", "monty", "read_text"},
+			wantAll: []string{"open() is not available", "monty", "read_text"},
 		},
 		{
 			name:    "an unavailable module names the one that works",
 			command: `python3 -m http.server`,
-			wantAll: []string{"is not supported", "py_compile", "uv run"},
+			wantAll: []string{"is not available", "py_compile"},
 		},
 	}
 
@@ -436,6 +436,17 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 			for _, want := range tt.wantAll {
 				if !strings.Contains(combined, want) {
 					t.Errorf("message does not mention %q:\n%s", want, combined)
+				}
+			}
+			// Naming the limitation is only half of it: an agent that cannot
+			// see the way out will reach for pip next.
+			for _, wantHatch := range []string{
+				"extra-commands add python3",
+				"runtimes uv enable",
+				"runtimes montypython disable",
+			} {
+				if !strings.Contains(combined, wantHatch) {
+					t.Errorf("message does not offer the opt-out %q:\n%s", wantHatch, combined)
 				}
 			}
 		})
@@ -547,7 +558,7 @@ func TestPythonRuntimeToggle(t *testing.T) {
 
 	t.Run("disabled by config", func(t *testing.T) {
 		s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-			Python: &config.PythonConfig{Enabled: boolPtr(false)},
+			MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(false)},
 		})
 		defer s.Close()
 		for _, cmd := range []string{`python3 -c "print(1)"`, `python -c "print(1)"`} {
@@ -555,7 +566,7 @@ func TestPythonRuntimeToggle(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s should be rejected when the runtime is disabled", cmd)
 			}
-			if !strings.Contains(err.Error(), "runtimes.python.enabled is disabled") {
+			if !strings.Contains(err.Error(), "runtimes.montypython.enabled is disabled") {
 				t.Fatalf("expected the config key in the error, got %v", err)
 			}
 		}
@@ -563,7 +574,7 @@ func TestPythonRuntimeToggle(t *testing.T) {
 
 	t.Run("explicitly enabled", func(t *testing.T) {
 		s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-			Python: &config.PythonConfig{Enabled: boolPtr(true)},
+			MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(true)},
 		})
 		defer s.Close()
 		if out, err := runPython(t, s, dir, `python3 -c "print('on')"`); err != nil {
@@ -576,7 +587,7 @@ func TestPythonRuntimeToggle(t *testing.T) {
 // through the wrappers that run other commands.
 func TestPythonDeniedInsideWrappers(t *testing.T) {
 	s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-		Python: &config.PythonConfig{Enabled: boolPtr(false)},
+		MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(false)},
 	})
 	defer s.Close()
 	dir := t.TempDir()
@@ -732,6 +743,34 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 		}
 		if !strings.Contains(out, "real") {
 			t.Fatalf("expected the host interpreter, got %q", out)
+		}
+	})
+
+	t.Run("a bare entry also lifts the wrapped-subcommand refusal", func(t *testing.T) {
+		// The denylist exists so a wrapper cannot reach the host interpreter by
+		// accident. Once the user has asked for the host interpreter outright,
+		// refusing the wrapped form protects nothing — it already runs
+		// unwrapped.
+		s := NewSandbox()
+		defer s.Close()
+		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
+		out, err := runPython(t, s, dir, "echo x | xargs "+realOnly)
+		if err != nil {
+			t.Fatalf("unexpected error: %v (output %q)", err, out)
+		}
+		if !strings.Contains(out, "real") {
+			t.Fatalf("expected the host interpreter, got %q", out)
+		}
+	})
+
+	t.Run("a subcommand-restricted entry does not lift it", func(t *testing.T) {
+		// Only some invocations are trusted, and a wrapper's argv is never
+		// checked against that restriction.
+		s := NewSandbox()
+		defer s.Close()
+		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
+		if _, err := runPython(t, s, dir, "echo x | xargs python3 -c \"print(1)\""); err == nil {
+			t.Fatal("a restricted entry should not let a wrapper reach the host interpreter")
 		}
 	})
 

@@ -202,6 +202,10 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 //     monty runtime instead (see python.go). A wrapper spawns the real CPython
 //     from $PATH, which has none of monty's isolation: arbitrary file access,
 //     subprocess, and network, outside every layer of this sandbox.
+//     The exception is a user who has put python in extra_commands as a bare
+//     entry: that is an explicit request for the host interpreter with no
+//     validation, and it already runs unwrapped, so a wrapper adds nothing
+//     (see pythonOptedOutToHost).
 //
 // When a wrapper spawns these as native processes, the interpreter's hooks are
 // bypassed entirely, so the -c / awk program / wrapped command would execute
@@ -227,7 +231,7 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if cmdName == "" {
 		return tagRule(ruleStructural, "", fmt.Errorf("dynamic command names are not allowed"))
 	}
-	if subCommandDenylist[cmdName] {
+	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName))
 	}
 	extra := s.getExtraCommands()

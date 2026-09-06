@@ -14,8 +14,8 @@ import (
 // boundary as bash. So unlike `runtimes go enable`, this command exists mainly
 // for turning it off.
 
-var pythonRuntimeCmd = &cobra.Command{
-	Use:   "python",
+var montyPythonRuntimeCmd = &cobra.Command{
+	Use:   "montypython",
 	Short: "Manage the embedded Python (monty) runtime",
 	Long: "Manage the embedded Python runtime.\n\n" +
 		"python and python3 run on monty, a sandboxed Python interpreter compiled into\n" +
@@ -26,7 +26,7 @@ var pythonRuntimeCmd = &cobra.Command{
 		"For real CPython, enable the uv runtime and use `uv run`.",
 }
 
-var pythonRuntimeShowCmd = &cobra.Command{
+var montyPythonRuntimeShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show the embedded Python runtime setting",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,32 +34,32 @@ var pythonRuntimeShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		p := &config.PythonConfig{}
-		if cfg.Runtimes != nil && cfg.Runtimes.Python != nil {
-			p = cfg.Runtimes.Python
+		p := &config.MontyPythonConfig{}
+		if cfg.Runtimes != nil && cfg.Runtimes.MontyPython != nil {
+			p = cfg.Runtimes.MontyPython
 		}
-		fmt.Printf("enabled: %v\n", p.PythonEnabled())
+		fmt.Printf("enabled: %v\n", p.MontyPythonEnabled())
 		return nil
 	},
 }
 
-var pythonRuntimeEnableCmd = &cobra.Command{
+var montyPythonRuntimeEnableCmd = &cobra.Command{
 	Use:   "enable",
 	Short: "Enable python/python3 (the default)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return setPythonEnabled(true)
+		return setMontyPythonEnabled(true)
 	},
 }
 
-var pythonRuntimeDisableCmd = &cobra.Command{
+var montyPythonRuntimeDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Disable python/python3",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return setPythonEnabled(false)
+		return setMontyPythonEnabled(false)
 	},
 }
 
-func setPythonEnabled(enabled bool) error {
+func setMontyPythonEnabled(enabled bool) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -67,15 +67,15 @@ func setPythonEnabled(enabled bool) error {
 	if cfg.Runtimes == nil {
 		cfg.Runtimes = &config.RuntimesConfig{}
 	}
-	if cfg.Runtimes.Python == nil {
-		cfg.Runtimes.Python = &config.PythonConfig{}
+	if cfg.Runtimes.MontyPython == nil {
+		cfg.Runtimes.MontyPython = &config.MontyPythonConfig{}
 	}
-	cfg.Runtimes.Python.Enabled = &enabled
+	cfg.Runtimes.MontyPython.Enabled = &enabled
 
 	if err := saveConfig(cfg); err != nil {
 		return err
 	}
-	fmt.Printf("runtimes.python.enabled set to %v\n", enabled)
+	fmt.Printf("runtimes.montypython.enabled set to %v\n", enabled)
 	if !enabled {
 		fmt.Println("  python and python3 will be rejected like any other command that is not allowed")
 	}

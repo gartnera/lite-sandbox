@@ -570,8 +570,8 @@ func (m *montyFS) refuseOpen(call *montygo.OsCall) error {
 	if isWrite {
 		verb = "Path(...).write_text(...)"
 	}
-	return fmt.Errorf("open() is not supported by this Python interpreter (monty): "+
-		"it returns no file object. Use %s from pathlib instead", verb)
+	return fmt.Errorf("open() is not available: %s It returns no file object here. "+
+		"Use %s from pathlib instead, or:\n%s", pythonIsMontyNote, verb, pythonEscapeHatches)
 }
 
 // pathArg extracts the path at index i, rejecting anything that is not a

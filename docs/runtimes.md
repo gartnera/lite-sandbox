@@ -264,12 +264,13 @@ Security features:
 - `uv self update` is blocked — it downloads and overwrites the uv executable in
   place (an unsandboxable modification of the tool itself, like `deno upgrade`)
 
-## Python Runtime Support
+## Monty Python Runtime Support
 
 `python` and `python3` are **enabled by default** and do not run any Python on
 your `PATH`. They are served by [monty](https://github.com/pydantic/monty), a
 Python interpreter compiled to WebAssembly and embedded in the lite-sandbox
-binary, running in-process.
+binary, running in-process. The runtime is called `montypython` in config, to
+keep it distinct from the real thing.
 
 ```bash
 python3 -c "print('hello')"
@@ -285,13 +286,13 @@ access of its own. Turn it off with:
 
 ```yaml
 runtimes:
-  python:
+  montypython:
     enabled: false   # Reject python/python3 (default: true)
 ```
 
 ```bash
-lite-sandbox config runtimes python disable
-lite-sandbox config runtimes python show
+lite-sandbox config runtimes montypython disable
+lite-sandbox config runtimes montypython show
 ```
 
 ### How file access works
@@ -370,17 +371,45 @@ python3 -m py_compile script.py && echo "syntax ok"
 
 No other `-m` module is available.
 
-### Escape hatch: real CPython
+### Opting out: running the real python
 
-For a real interpreter or a third-party package, use the uv runtime:
+There are three ways out, and every monty limitation message names all of them
+so an agent that hits one is not left guessing.
+
+**1. Run the host interpreter for `python` itself.** Add it to
+`extra_commands`, and `python`/`python3` resolve from `$PATH` as usual:
+
+```bash
+lite-sandbox config extra-commands add python3
+```
+
+```yaml
+extra_commands:
+  - python3            # every invocation uses the host interpreter
+  - python3 manage.py  # or only matching ones; the rest stay on monty
+```
+
+Like any `extra_commands` entry this **bypasses sandbox command validation** for
+those invocations — the script runs as real CPython with subprocesses, network
+and no path boundary (the OS sandbox, if enabled, still confines it; use
+`unsandboxed_commands` to bypass that too). A bare entry also lifts the refusal
+to run python as a wrapped subcommand of `xargs`/`env`/`timeout`/`find -exec`,
+since it already runs unwrapped.
+
+**2. Run CPython under uv, which stays sandboxed.** `uv run` executes real
+CPython as a subprocess confined by the OS sandbox rather than by monty:
 
 ```bash
 lite-sandbox config runtimes uv enable
 uv run script.py
 ```
 
-Unlike monty, `uv run` executes real CPython as a subprocess, so it is confined
-by the OS sandbox (if enabled) rather than by monty's own isolation.
+**3. Turn the built-in interpreter off.** `python`/`python3` are then rejected
+like any other command that is not allowed:
+
+```bash
+lite-sandbox config runtimes montypython disable
+```
 
 ### Limits
 

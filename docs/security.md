@@ -173,7 +173,10 @@ outside every layer of this sandbox.
 
 Naming `python`/`python3` in `extra_commands` or `unsandboxed_commands`
 deliberately opts back in to the real interpreter for matching invocations,
-with the loss of validation those lists always imply.
+with the loss of validation those lists always imply. A *bare* entry also lifts
+the wrapped-subcommand refusal above: once the host interpreter runs unwrapped
+on request, refusing the wrapped form protects nothing. A subcommand-restricted
+entry does not, since a wrapper's argv is never checked against the restriction.
 
 Three details are worth knowing:
 
