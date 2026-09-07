@@ -765,6 +765,10 @@ func init() {
 	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeShowCmd)
 	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeEnableCmd)
 	montyPythonRuntimeCmd.AddCommand(montyPythonRuntimeDisableCmd)
+	montyPythonRuntimeEnableCmd.Flags().Bool("inline-only", false,
+		"Set inline_only: run only -c and stdin (heredoc/pipe) programs, refusing script files")
+	montyPythonRuntimeDisableCmd.Flags().Bool("inline-only", false,
+		"Clear inline_only instead of disabling python entirely")
 
 	// Add runtimes subcommands
 	runtimesCmd.AddCommand(runtimesShowCmd)

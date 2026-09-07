@@ -178,10 +178,21 @@ the wrapped-subcommand refusal above: once the host interpreter runs unwrapped
 on request, refusing the wrapped form protects nothing. A subcommand-restricted
 entry does not, since a wrapper's argv is never checked against the restriction.
 
-Three details are worth knowing:
+Four details are worth knowing:
 
 - **A denial ends the run.** The host returns an error rather than a value, and
   Python cannot catch it. A script cannot retry in a loop to probe the boundary.
+  The one host error a script *can* catch is a `FileNotFoundError` from
+  `open()` on a missing path inside the boundary, which is not a denial: the
+  path was allowed, and CPython reports the same thing.
+- **`open()` adds no reach.** monty implements real file objects but holds no
+  file descriptor: it builds one from a handle the host returns to the `open`
+  OS call, and every read or write behind that object arrives as one of the
+  ordinary OS calls checked above. The handler for `open` itself performs only
+  the open-time effect the mode implies -- truncate for `"w"`, create for
+  `"a"`, an existence check for `"r"` -- against the writable set for the
+  first two and the readable set for the last. So `open()` is bounded exactly
+  as `pathlib` is, with no second code path to keep in sync.
 - **A prologue is prepended when a program uses `sys.argv`,** since monty has
   none. It defines a shim object holding the argument strings and rewrites the
   statements that would rebind `sys` back to the real module. The rewrite only
@@ -215,7 +226,7 @@ This is a lightweight, best-effort sandbox based on static analysis. It is **not
 - **Per-command argument validation**: Some whitelisted commands have dangerous flags that are blocked via argument validators. For `find`, the flags `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, and `-fprintf` are all blocked. Other commands like `xxd` can write files with `-r` when combined with redirections (though redirections are blocked).
 - **Command wrappers**: Commands that run another program as a child process — `xargs`, `find -exec`, `env`, and `timeout` — are validated recursively: the wrapped command name and its arguments are checked against the whitelist (and its own argument validator) just as if it had been invoked directly. This prevents using a wrapper as a prefix to smuggle a blocked command past validation (e.g. `env curl …`, `timeout 5 sh -c …`). `env -S`/`--split-string` is rejected outright because it constructs an argument vector from a single string. `bash`, `sh`, `awk`, and `time` are refused entirely in wrapped position, since their sandbox safety depends on the interpreter being their direct caller.
 - **No syscall-level enforcement**: AST validation happens before execution without runtime syscall filtering (no seccomp). If a command is allowed and passes AST validation, it executes with the permissions granted by the environment. The optional OS sandbox (bubblewrap on Linux, sandbox-exec on macOS) provides significant additional protection via filesystem isolation — even if a dangerous command bypasses AST validation, filesystem restrictions prevent writes outside the working directory.
-- **Python is a subset**: monty implements a subset of Python and cannot import third-party packages, so `python3` in the sandbox is not a drop-in for CPython. Real CPython is available via the uv runtime (`uv run`), where confinement comes from the OS sandbox rather than from monty.
+- **Python is a subset**: monty implements a subset of Python and cannot import third-party packages, so `python3` in the sandbox is not a drop-in for CPython. Real CPython is available via the uv runtime (`uv run`), where confinement comes from the OS sandbox rather than from monty. Where the subset diverges silently, a program written for CPython can produce a plausible wrong answer rather than an error; `runtimes.montypython.inline_only` narrows monty to code the agent writes inline and refuses a project's own `.py` files for that reason.
 - **Bash builtins**: Some allowed builtins like `set`, `export`, and `trap` can modify shell state in ways that affect subsequent commands within the same invocation.
 
 ### General limitations

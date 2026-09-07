@@ -295,6 +295,34 @@ lite-sandbox config runtimes montypython disable
 lite-sandbox config runtimes montypython show
 ```
 
+### Restricting it to inline code
+
+`inline_only` keeps monty for programs the agent writes inline -- `-c`, or a
+heredoc -- and refuses a script *file*:
+
+```yaml
+runtimes:
+  montypython:
+    inline_only: true   # Only -c and stdin; refuse script files (default: false)
+```
+
+```bash
+lite-sandbox config runtimes montypython enable --inline-only
+lite-sandbox config runtimes montypython disable --inline-only   # clear it, python stays on
+```
+
+The two cases fail differently. A snippet an agent just composed is written
+against whatever the interpreter provides, and if it hits one of monty's walls
+the error says so. A project's own `.py` file was written for CPython: it
+imports packages monty does not have, and where monty's subset diverges it can
+produce a plausible wrong answer instead of an error. With `inline_only` set,
+the first case still works and the second says so up front.
+
+Nothing falls through to the host interpreter as a result -- refusing is the
+whole behavior. For real CPython, enable the [uv runtime](#uv-python) and use
+`uv run`. `python3 -m py_compile file.py` still works, since it answers a
+question about a file rather than running it.
+
 ### How file access works
 
 monty performs no I/O itself. When Python touches the filesystem the interpreter
@@ -317,6 +345,16 @@ python3 -c "from pathlib import Path; Path('out.txt').write_text('hi')"
 python3 -c "from pathlib import Path; print(Path('/etc/passwd').read_text())"
 ```
 
+The builtin `open()` works and is bounded the same way. monty holds no file
+descriptor: it builds its file object from a handle lite-sandbox returns, and
+every read or write behind that object comes back as one of the authorized OS
+calls above -- so `open()` is neither more nor less permissive than `pathlib`.
+`read()`, `read(n)`, `readline()`, `readlines()`, `write()`, `seek()`,
+`tell()`, `close()`, `with open(...) as f`, binary mode, and `.name` / `.mode`
+/ `.closed` all behave. The open-time effect happens when you open, as in
+CPython: `"w"` truncates, `"a"` creates, and `"r"` on a missing file raises a
+`FileNotFoundError` the script can catch.
+
 `os.getenv` and `os.environ` always report an empty environment. Re-exposing the
 host's would hand Python the credentials the rest of the sandbox masks.
 
@@ -333,7 +371,8 @@ Also unavailable:
 
 | Not supported | Use instead |
 | --- | --- |
-| `open()` file objects | `Path(...).read_text()` / `write_text()` |
+| Iterating a file (`for line in f`) | `f.readlines()` |
+| `open()` update modes (`r+`, `w+`, `a+`) | Read, then write separately |
 | `python -m module` (except `py_compile`) | `-c` or a script file |
 | `sys.exit`, `sys.stdout.write` | `print()`, and the shell for exit codes |
 | Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |

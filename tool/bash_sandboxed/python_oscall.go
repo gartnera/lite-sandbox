@@ -202,14 +202,11 @@ func (s *Sandbox) montyOsCall(m *montyFS) montygo.OsCallFunc {
 			if err != nil {
 				return nil, err
 			}
-			// monty represents bytes as a list of integers. A Go string would
-			// come back as a str and a []byte would be base64-encoded by the
-			// JSON bridge, so neither is usable here.
-			out := make([]any, len(data))
-			for i, b := range data {
-				out[i] = int(b)
-			}
-			return out, nil
+			// montygo.Bytes is what makes this arrive as Python `bytes`: a
+			// Go string would come back as a str, and a plain []byte as a
+			// base64 str. It is also what a binary-mode read requires — the
+			// interpreter rejects anything else there.
+			return montygo.Bytes(data), nil
 		case "Path.stat":
 			return m.stat(call)
 		case "Path.iterdir":
@@ -231,9 +228,9 @@ func (s *Sandbox) montyOsCall(m *montyFS) montygo.OsCallFunc {
 
 		// --- write side ------------------------------------------------
 		case "Path.write_text", "Path.append_text":
-			return nil, m.writeText(call)
+			return m.writeText(call)
 		case "Path.write_bytes", "Path.append_bytes":
-			return nil, m.writeBytes(call)
+			return m.writeBytes(call)
 		case "Path.mkdir":
 			return nil, m.mkdir(call)
 		case "Path.unlink":
@@ -245,7 +242,7 @@ func (s *Sandbox) montyOsCall(m *montyFS) montygo.OsCallFunc {
 
 		// --- open ------------------------------------------------------
 		case "open":
-			return nil, m.refuseOpen(call)
+			return m.openFile(call)
 
 		// --- non-filesystem --------------------------------------------
 		case "os.getenv":
@@ -399,42 +396,51 @@ func (m *montyFS) iterdir(call *montygo.OsCall) (any, error) {
 	return out, nil
 }
 
-func (m *montyFS) writeText(call *montygo.OsCall) error {
+// writeText serves Path.write_text / Path.append_text, and every text-mode
+// f.write() behind an open() handle.
+//
+// It returns the number of *characters* written, which both callers need:
+// CPython's write_text and file.write report that count, and the interpreter
+// adds it to the file's position — a char offset in text mode. Returning
+// nothing left f.write() raising "'NoneType' object cannot be interpreted as
+// an integer".
+func (m *montyFS) writeText(call *montygo.OsCall) (any, error) {
 	path, err := pathArg(call, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(call.Args) < 2 {
-		return fmt.Errorf("%s: missing content", call.Function)
+		return nil, fmt.Errorf("%s: missing content", call.Function)
 	}
 	text, ok := call.Args[1].(string)
 	if !ok {
-		return fmt.Errorf("%s: expected string content", call.Function)
+		return nil, fmt.Errorf("%s: expected string content", call.Function)
 	}
-	return m.write(call.Function, path, []byte(text), strings.HasPrefix(call.Function, "Path.append"))
+	if err := m.write(call.Function, path, []byte(text), strings.HasPrefix(call.Function, "Path.append")); err != nil {
+		return nil, err
+	}
+	return len([]rune(text)), nil
 }
 
-func (m *montyFS) writeBytes(call *montygo.OsCall) error {
+// writeBytes serves Path.write_bytes / Path.append_bytes and every
+// binary-mode f.write(). Like writeText it returns the count written — bytes
+// here, since a binary file's position is a byte offset.
+func (m *montyFS) writeBytes(call *montygo.OsCall) (any, error) {
 	path, err := pathArg(call, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(call.Args) < 2 {
-		return fmt.Errorf("%s: missing content", call.Function)
+		return nil, fmt.Errorf("%s: missing content", call.Function)
 	}
-	raw, ok := call.Args[1].([]any)
+	data, ok := call.Args[1].(montygo.Bytes)
 	if !ok {
-		return fmt.Errorf("%s: expected bytes content", call.Function)
+		return nil, fmt.Errorf("%s: expected bytes content", call.Function)
 	}
-	data := make([]byte, len(raw))
-	for i, v := range raw {
-		n, ok := v.(float64)
-		if !ok || n < 0 || n > 255 {
-			return fmt.Errorf("%s: invalid byte value at index %d", call.Function, i)
-		}
-		data[i] = byte(n)
+	if err := m.write(call.Function, path, data, strings.HasPrefix(call.Function, "Path.append")); err != nil {
+		return nil, err
 	}
-	return m.write(call.Function, path, data, strings.HasPrefix(call.Function, "Path.append"))
+	return len(data), nil
 }
 
 func (m *montyFS) write(fn, path string, data []byte, appendMode bool) error {
@@ -541,20 +547,29 @@ func (m *montyFS) rename(call *montygo.OsCall) error {
 	return nil
 }
 
-// refuseOpen rejects the builtin open(). monty forwards open() to the host and
-// then uses whatever comes back as the file object itself — there is no read,
-// write, iteration or context-manager protocol behind it — so nothing this
-// handler returns produces a working file. Say so, and name the calls that do
-// work, rather than handing back a value that fails one line later with
-// "'str' object has no attribute 'read'".
+// openFile implements the builtin open().
 //
-// The path is still authorized first, so a script probing outside the boundary
-// with open() is told it is outside the boundary rather than being handed the
-// more inviting "use pathlib instead".
-func (m *montyFS) refuseOpen(call *montygo.OsCall) error {
+// monty holds no file descriptor: it builds its own file object
+// (_io.TextIOWrapper and friends) from the handle returned here, and every
+// later read or write on that object arrives as an ordinary one-shot
+// Path.read_text / Path.write_text OS call — already authorized by the
+// handlers above. So all this has to do is the open-time effect the mode
+// implies, against the same path boundary as everything else:
+//
+//   - "r"  the file must already exist, and be readable
+//   - "w"  truncate it, creating it if missing (a write)
+//   - "a"  create it if missing, preserving content (a write)
+//
+// Doing the effect here rather than lazily is what makes `open(p, "w")`
+// truncate even if the script never writes, matching CPython.
+//
+// Update modes ("r+" and friends) never reach this point: monty rejects them
+// while parsing the mode, because it has no read-position tracking to make a
+// write-after-read safe.
+func (m *montyFS) openFile(call *montygo.OsCall) (any, error) {
 	path, err := pathArg(call, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mode := "r"
 	if len(call.Args) > 1 {
@@ -562,16 +577,61 @@ func (m *montyFS) refuseOpen(call *montygo.OsCall) error {
 			mode = s
 		}
 	}
+
 	isWrite := strings.ContainsAny(mode, "wax+")
-	if _, _, err := m.authorizeAllowMissing(path, isWrite); err != nil {
-		return err
+	root, rel, err := m.authorize(path, isWrite)
+	if err != nil {
+		// A missing file inside the boundary is not a denial — it is what
+		// CPython reports as FileNotFoundError, and a script is entitled to
+		// catch it. A boundary violation stays a hard failure.
+		if errors.Is(err, errPathMissing) {
+			return nil, &montygo.PyError{
+				Type:    "FileNotFoundError",
+				Message: fmt.Sprintf("[Errno 2] No such file or directory: %q", path),
+				Err:     err,
+			}
+		}
+		return nil, err
 	}
-	verb := "Path(...).read_text()"
-	if isWrite {
-		verb = "Path(...).write_text(...)"
+
+	switch {
+	case strings.ContainsAny(mode, "w"):
+		f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
+	case strings.ContainsAny(mode, "a"):
+		f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
+	default:
+		// Read mode: confirm the file is there and readable now, so the
+		// failure lands on the open() call as CPython's does rather than on
+		// the first read.
+		f, err := root.OpenFile(rel, os.O_RDONLY, 0)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, &montygo.PyError{
+					Type:    "FileNotFoundError",
+					Message: fmt.Sprintf("[Errno 2] No such file or directory: %q", path),
+					Err:     err,
+				}
+			}
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("open: %w", cleanFSError(err, path))
+		}
 	}
-	return fmt.Errorf("open() is not available: %s It returns no file object here. "+
-		"Use %s from pathlib instead, or:\n%s", pythonIsMontyNote, verb, pythonEscapeHatches)
+
+	return montygo.FileHandle{Path: path, Mode: mode}, nil
 }
 
 // pathArg extracts the path at index i, rejecting anything that is not a

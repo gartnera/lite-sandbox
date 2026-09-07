@@ -46,4 +46,4 @@ require (
 	golang.org/x/term v0.45.0 // indirect
 )
 
-replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20260906205321-eba86209d9f2
+replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20260907185606-adadf215b5e6

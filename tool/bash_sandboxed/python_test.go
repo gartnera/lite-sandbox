@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -286,9 +287,14 @@ func TestParsePythonArgs(t *testing.T) {
 	readScript := func(path string) (string, error) { return "# " + path, nil }
 
 	tests := []struct {
-		name            string
-		args            []string
+		name string
+		args []string
+		// stdin is the piped-in program. noStdin models the case where
+		// nothing was redirected at all, which the interpreter signals with a
+		// nil reader and which parsePythonArgs must not read.
 		stdin           string
+		noStdin         bool
+		inlineOnly      bool
 		wantCode        string
 		wantName        string
 		wantArgv        []string
@@ -356,15 +362,60 @@ func TestParsePythonArgs(t *testing.T) {
 			wantErr: `flag "-X" is not supported`,
 		},
 		{
-			name:    "no program starts no REPL",
+			name:    "no program and no stdin starts no REPL",
 			args:    []string{"python3"},
+			noStdin: true,
 			wantErr: "interactive interpreter is not available",
+		},
+		{
+			// `python3 <<'PY' ... PY`: CPython reads the program from stdin
+			// when one is redirected, with an empty argv[0].
+			name:     "no program reads a redirected stdin",
+			args:     []string{"python3"},
+			stdin:    "print(3)",
+			wantCode: "print(3)",
+			wantName: "<stdin>",
+			wantArgv: []string{""},
+		},
+		{
+			name:       "inline_only allows -c",
+			args:       []string{"python3", "-c", "print(1)"},
+			inlineOnly: true,
+			wantCode:   "print(1)",
+			wantName:   "-c",
+		},
+		{
+			name:       "inline_only allows a heredoc",
+			args:       []string{"python3", "-"},
+			stdin:      "print(2)",
+			inlineOnly: true,
+			wantCode:   "print(2)",
+			wantName:   "<stdin>",
+		},
+		{
+			name:       "inline_only refuses a script file",
+			args:       []string{"python3", "s.py"},
+			inlineOnly: true,
+			wantErr:    "inline_only",
+		},
+		{
+			// A syntax check answers a question about a file rather than
+			// running it, so inline_only leaves it alone.
+			name:            "inline_only still allows py_compile",
+			args:            []string{"python3", "-m", "py_compile", "s.py"},
+			inlineOnly:      true,
+			wantName:        "py_compile",
+			wantSyntaxCheck: []string{"s.py"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inv, err := parsePythonArgs(tt.args, strings.NewReader(tt.stdin), readScript)
+			var stdin io.Reader
+			if !tt.noStdin {
+				stdin = strings.NewReader(tt.stdin)
+			}
+			inv, err := parsePythonArgs(tt.args, stdin, tt.inlineOnly, readScript)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got %+v", tt.wantErr, inv)
@@ -414,11 +465,6 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 			wantAll: []string{"ModuleNotFoundError", "monty", "not CPython"},
 		},
 
-		{
-			name:    "open() has no file object",
-			command: `python3 -c "print(open('x.txt').read())"`,
-			wantAll: []string{"open() is not available", "monty", "read_text"},
-		},
 		{
 			name:    "an unavailable module names the one that works",
 			command: `python3 -m http.server`,
@@ -1010,6 +1056,369 @@ func TestPythonPyCompile(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "py_compile") {
 			t.Errorf("the refusal should point at the one module that works: %v", err)
+		}
+	})
+}
+
+// TestPythonOpen covers the builtin open(). monty implements real file
+// objects but asks the host to answer the `open` OS call with a file handle,
+// which is what openFile does — so open() is confined by the same path
+// boundary as pathlib and bash, and every read or write behind the returned
+// object comes back as an ordinary authorized OS call.
+func TestPythonOpen(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("read", func(t *testing.T) {
+		out, err := runPython(t, s, dir, `python3 -c "print(open('data.txt').read(), end='')"`)
+		if err != nil {
+			t.Fatalf("open().read() failed: %v (%s)", err, out)
+		}
+		if want := "alpha\nbeta\ngamma\n"; out != want {
+			t.Errorf("got %q, want %q", out, want)
+		}
+	})
+
+	t.Run("context manager and readlines", func(t *testing.T) {
+		prog := `python3 -c "
+with open('data.txt') as f:
+    print(len(f.readlines()))
+"`
+		out, err := runPython(t, s, dir, prog)
+		if err != nil {
+			t.Fatalf("with open(...) failed: %v (%s)", err, out)
+		}
+		if strings.TrimSpace(out) != "3" {
+			t.Errorf("got %q, want 3", out)
+		}
+	})
+
+	t.Run("readline and sized read", func(t *testing.T) {
+		prog := `python3 -c "
+f = open('data.txt')
+print(repr(f.readline()))
+print(repr(f.read(4)), f.tell())
+"`
+		out, err := runPython(t, s, dir, prog)
+		if err != nil {
+			t.Fatalf("readline failed: %v (%s)", err, out)
+		}
+		for _, want := range []string{`'alpha\n'`, `'beta'`, "10"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output %q is missing %q", out, want)
+			}
+		}
+	})
+
+	t.Run("binary read", func(t *testing.T) {
+		out, err := runPython(t, s, dir, `python3 -c "print(open('data.txt','rb').read(5))"`)
+		if err != nil {
+			t.Fatalf("binary open failed: %v (%s)", err, out)
+		}
+		if want := `b'alpha'`; !strings.Contains(out, want) {
+			t.Errorf("got %q, want it to contain %q", out, want)
+		}
+	})
+
+	t.Run("write", func(t *testing.T) {
+		prog := `python3 -c "
+with open('out.txt', 'w') as f:
+    f.write('written by python')
+"`
+		if out, err := runPython(t, s, dir, prog); err != nil {
+			t.Fatalf("open(...,'w') failed: %v (%s)", err, out)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
+		if err != nil {
+			t.Fatalf("the file was not created: %v", err)
+		}
+		if want := "written by python"; string(data) != want {
+			t.Errorf("file holds %q, want %q", data, want)
+		}
+	})
+
+	t.Run("append", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(dir, "log.txt"), []byte("first\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prog := `python3 -c "
+with open('log.txt', 'a') as f:
+    f.write('second\n')
+"`
+		if out, err := runPython(t, s, dir, prog); err != nil {
+			t.Fatalf("open(...,'a') failed: %v (%s)", err, out)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "log.txt"))
+		if want := "first\nsecond\n"; string(data) != want {
+			t.Errorf("append rewrote the file: got %q, want %q", data, want)
+		}
+	})
+
+	t.Run("write mode truncates on open", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(dir, "trunc.txt"), []byte("old content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Never written to, so only the open-time effect can have changed it.
+		if out, err := runPython(t, s, dir, `python3 -c "f = open('trunc.txt', 'w')"`); err != nil {
+			t.Fatalf("open failed: %v (%s)", err, out)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "trunc.txt"))
+		if len(data) != 0 {
+			t.Errorf(`open(..., "w") left %q; it must truncate like CPython`, data)
+		}
+	})
+
+	t.Run("missing file raises a catchable FileNotFoundError", func(t *testing.T) {
+		prog := `python3 -c "
+try:
+    open('nope.txt')
+except FileNotFoundError as e:
+    print('caught')
+"`
+		out, err := runPython(t, s, dir, prog)
+		if err != nil {
+			t.Fatalf("FileNotFoundError should be catchable, not fatal: %v (%s)", err, out)
+		}
+		if !strings.Contains(out, "caught") {
+			t.Errorf("got %q, want it to contain \"caught\"", out)
+		}
+	})
+}
+
+// TestPythonOpenRespectsBoundary is the security half of TestPythonOpen: now
+// that open() returns a working file object, it must be no more permissive
+// than pathlib. Every read and write behind the handle is authorized against
+// the same path sets, and the open itself is checked before that.
+func TestPythonOpenRespectsBoundary(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(victim, []byte("intact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name    string
+		command string
+	}{
+		{"read outside", `python3 -c "print(open('` + secret + `').read())"`},
+		{"read outside via traversal", `python3 -c "print(open('../../../../etc/passwd').read())"`},
+		{"write outside", `python3 -c "open('` + victim + `', 'w').write('clobbered')"`},
+		{"append outside", `python3 -c "open('` + victim + `', 'a').write('more')"`},
+		{"read outside in binary", `python3 -c "print(open('` + secret + `', 'rb').read())"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := runPython(t, s, dir, c.command)
+			if err == nil {
+				t.Fatalf("open() reached outside the boundary: %q", out)
+			}
+			if strings.Contains(out, "TOPSECRET") {
+				t.Fatalf("ESCAPE: read a file outside the boundary: %q", out)
+			}
+		})
+	}
+
+	if data, _ := os.ReadFile(victim); string(data) != "intact" {
+		t.Errorf("a denied open() still modified the host file: %q", data)
+	}
+}
+
+// TestPythonHeredoc covers the way an agent hands over a multi-line program:
+// a heredoc. It is the invocation that makes Python usable for anything past
+// a one-liner, since -c has to survive shell quoting.
+func TestPythonHeredoc(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "in.txt"), []byte("a\nbb\nccc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name: "quoted delimiter",
+			command: "python3 - <<'PY'\n" +
+				"print('from heredoc')\n" +
+				"PY",
+			want: "from heredoc",
+		},
+		{
+			name: "unquoted delimiter",
+			command: "python3 - <<PY\n" +
+				"print('unquoted')\n" +
+				"PY",
+			want: "unquoted",
+		},
+		{
+			// No `-`: CPython reads a redirected stdin, and so does this.
+			name: "without the dash",
+			command: "python3 <<'PY'\n" +
+				"print('no dash')\n" +
+				"PY",
+			want: "no dash",
+		},
+		{
+			name:    "piped program",
+			command: `echo "print('piped')" | python3 -`,
+			want:    "piped",
+		},
+		{
+			name: "multi-line program with real work",
+			command: "python3 - <<'PY'\n" +
+				"from pathlib import Path\n" +
+				"lines = Path('in.txt').read_text().splitlines()\n" +
+				"for n, line in enumerate(lines, 1):\n" +
+				"    print(n, len(line))\n" +
+				"PY",
+			want: "1 1\n2 2\n3 3",
+		},
+		{
+			name: "arguments after the dash reach sys.argv",
+			command: "python3 - one two <<'PY'\n" +
+				"import sys\n" +
+				"print(sys.argv)\n" +
+				"PY",
+			want: "['-', 'one', 'two']",
+		},
+		{
+			name: "open() inside a heredoc",
+			command: "python3 - <<'PY'\n" +
+				"with open('written.txt', 'w') as f:\n" +
+				"    f.write('via heredoc')\n" +
+				"print(open('written.txt').read())\n" +
+				"PY",
+			want: "via heredoc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runPython(t, s, dir, tt.command)
+			if err != nil {
+				t.Fatalf("heredoc failed: %v (output %q)", err, out)
+			}
+			if strings.TrimSpace(out) != tt.want {
+				t.Errorf("got %q, want %q", strings.TrimSpace(out), tt.want)
+			}
+		})
+	}
+
+	t.Run("the heredoc body is still bounded", func(t *testing.T) {
+		outside := t.TempDir()
+		secret := filepath.Join(outside, "secret.txt")
+		if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		command := "python3 - <<'PY'\n" +
+			"print(open('" + secret + "').read())\n" +
+			"PY"
+		out, err := runPython(t, s, dir, command)
+		if err == nil {
+			t.Fatalf("a heredoc program reached outside the boundary: %q", out)
+		}
+		if strings.Contains(out, "TOPSECRET") {
+			t.Fatalf("ESCAPE: %q", out)
+		}
+	})
+}
+
+// TestPythonInlineOnly covers runtimes.montypython.inline_only: monty keeps
+// serving the code an agent writes inline, and stops standing in for CPython
+// on a project's own .py files, which it may not be able to run faithfully.
+func TestPythonInlineOnly(t *testing.T) {
+	s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
+		MontyPython: &config.MontyPythonConfig{InlineOnly: boolPtr(true)},
+	})
+	defer s.Close()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "script.py")
+	if err := os.WriteFile(script, []byte("print('from a file')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "good.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"inline -c", `python3 -c "print('inline')"`, "inline"},
+		{"heredoc", "python3 - <<'PY'\nprint('heredoc')\nPY", "heredoc"},
+		{"piped", `echo "print('piped')" | python3 -`, "piped"},
+		{"py_compile still checks a file", "python3 -m py_compile good.py && echo CHECKED", "CHECKED"},
+	}
+	for _, c := range allowed {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := runPython(t, s, dir, c.command)
+			if err != nil {
+				t.Fatalf("inline_only should allow this: %v (output %q)", err, out)
+			}
+			if strings.TrimSpace(out) != c.want {
+				t.Errorf("got %q, want %q", strings.TrimSpace(out), c.want)
+			}
+		})
+	}
+
+	t.Run("a script file is refused", func(t *testing.T) {
+		out, err := runPython(t, s, dir, "python3 script.py")
+		if err == nil {
+			t.Fatalf("inline_only should refuse a script file, got %q", out)
+		}
+		// The message has to say what to do instead, or the agent just retries.
+		for _, want := range []string{"inline_only", "-c", "uv run"} {
+			if !strings.Contains(out+err.Error(), want) {
+				t.Errorf("the refusal does not mention %q: %v / %q", want, err, out)
+			}
+		}
+		if strings.Contains(out, "from a file") {
+			t.Error("the script ran anyway")
+		}
+	})
+
+	t.Run("a python-shebang script is refused too", func(t *testing.T) {
+		// The shebang path re-dispatches as `python3 ./run.py`, so it lands on
+		// the same gate rather than sneaking a file in.
+		run := filepath.Join(dir, "run.py")
+		if err := os.WriteFile(run, []byte("#!/usr/bin/env python3\nprint('via shebang')\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runPython(t, s, dir, "./run.py")
+		if err == nil {
+			t.Fatalf("expected a refusal, got %q", out)
+		}
+		if strings.Contains(out, "via shebang") {
+			t.Error("the script ran anyway")
+		}
+	})
+
+	t.Run("off by default", func(t *testing.T) {
+		plain := newTestSandbox()
+		defer plain.Close()
+		out, err := runPython(t, plain, dir, "python3 script.py")
+		if err != nil {
+			t.Fatalf("a script file should run with inline_only unset: %v (%q)", err, out)
+		}
+		if want := "from a file"; strings.TrimSpace(out) != want {
+			t.Errorf("got %q, want %q", out, want)
 		}
 	})
 }

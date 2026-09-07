@@ -77,6 +77,10 @@ type pythonInvocation struct {
 	// syntaxCheck holds the files to syntax-check instead of running anything,
 	// set by `-m py_compile`. See checkPythonSyntax.
 	syntaxCheck []string
+	// scriptFile is the path the program was read from, empty when it came in
+	// inline (-c or stdin). It is what runtimes.montypython.inline_only keys
+	// off; see the refusal in parsePythonArgs.
+	scriptFile string
 }
 
 // parsePythonArgs turns a python/python3 argv into the program to run. It
@@ -84,7 +88,12 @@ type pythonInvocation struct {
 // shapes monty cannot serve. readScript is called for a script-file argument so
 // the caller can read it through the path boundary; it is not called for -c or
 // stdin.
-func parsePythonArgs(args []string, stdin io.Reader, readScript func(path string) (string, error)) (*pythonInvocation, error) {
+//
+// inlineOnly is runtimes.montypython.inline_only: with it set, only a program
+// supplied inline (-c, or stdin via a heredoc or pipe) runs, and a script file
+// is refused before it is even read. `-m py_compile` and -V still work — they
+// answer a question about a file rather than running one.
+func parsePythonArgs(args []string, stdin io.Reader, inlineOnly bool, readScript func(path string) (string, error)) (*pythonInvocation, error) {
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
 		arg := rest[i]
@@ -146,18 +155,45 @@ func parsePythonArgs(args []string, stdin io.Reader, readScript func(path string
 			return nil, fmt.Errorf("python: flag %q is not supported in the sandbox", arg)
 
 		default:
+			if inlineOnly {
+				return nil, fmt.Errorf("python: running a script file is disabled "+
+					"(runtimes.montypython.inline_only is set), because %s A .py file written "+
+					"for CPython can import packages monty does not have, or hit a corner of "+
+					"the language where its subset diverges. Pass the code inline instead "+
+					"(python3 -c '...', or python3 - <<'PY' ... PY), or:\n%s",
+					pythonIsMontyNote, pythonEscapeHatches)
+			}
 			code, err := readScript(arg)
 			if err != nil {
 				return nil, err
 			}
 			return &pythonInvocation{
-				code: code,
-				name: arg,
-				argv: append([]string{arg}, rest[i+1:]...),
+				code:       code,
+				name:       arg,
+				argv:       append([]string{arg}, rest[i+1:]...),
+				scriptFile: arg,
 			}, nil
 		}
 	}
-	// Bare `python3`, or only ignorable flags: CPython would start a REPL.
+	// Bare `python3` with something redirected or piped in: CPython reads the
+	// program from stdin, so `python3 <<'PY' ... PY` works without the `-`.
+	// The sandbox's top-level interpreter is built with a nil stdin, so a
+	// non-nil one here means the command really did redirect something —
+	// there is no terminal to block on.
+	if stdin != nil {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, fmt.Errorf("python: cannot read program from stdin: %w", err)
+		}
+		return &pythonInvocation{
+			code: string(data),
+			name: "<stdin>",
+			// CPython leaves argv[0] empty when the program came from a
+			// redirect rather than an explicit `-`.
+			argv: []string{""},
+		}, nil
+	}
+	// Nothing to run: CPython would start a REPL, which monty has no answer for.
 	return nil, fmt.Errorf("python: no program given, and the interactive interpreter is not available " +
 		"in the sandbox. Pass a script file or use -c")
 }
@@ -179,7 +215,12 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 	fs := newMontyFS(hc.Dir, sets)
 	defer fs.close()
 
-	inv, err := parsePythonArgs(args, hc.Stdin, func(path string) (string, error) {
+	var inlineOnly bool
+	if cfg := s.getConfig(); cfg.Runtimes != nil {
+		inlineOnly = cfg.Runtimes.MontyPython.MontyPythonInlineOnly()
+	}
+
+	inv, err := parsePythonArgs(args, hc.Stdin, inlineOnly, func(path string) (string, error) {
 		// A script file is a file access like any other: it answers to the
 		// read boundary before a line of it is interpreted.
 		root, rel, err := fs.authorize(path, false)
