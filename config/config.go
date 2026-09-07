@@ -492,14 +492,61 @@ func (u *UvConfig) UvPublish() bool {
 	return *u.Publish
 }
 
+// MontyPythonConfig controls the embedded Python (monty) runtime.
+//
+// Unlike the other runtimes this one is enabled by default. There is nothing to
+// install or detect — the interpreter is a WebAssembly blob compiled into the
+// lite-sandbox binary — and it is more contained than the commands already on
+// the whitelist: no network, no environment, no ambient filesystem access, and
+// every file it touches is checked against the same readable/writable paths
+// that bound bash. Set enabled: false to turn it off, after which python and
+// python3 are rejected like any other command that is not allowed.
+type MontyPythonConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// InlineOnly restricts monty to programs the agent wrote inline — `-c` and
+	// stdin (a heredoc or a pipe) — and refuses a script *file*.
+	//
+	// The point is that the two cases fail differently. A snippet an agent just
+	// composed is written against whatever the interpreter provides, and if it
+	// hits one of monty's walls the error says so. A project's own .py file was
+	// written for CPython: it imports third-party packages monty does not have,
+	// and where monty's subset diverges it can produce a plausible wrong answer
+	// rather than an error. Turning this on keeps the interpreter for the first
+	// case and makes the second say so, instead of running a file that was
+	// never meant for it.
+	//
+	// Nothing falls through to the host interpreter as a result — refusing is
+	// the whole behavior. To run real CPython, enable the uv runtime and use
+	// `uv run`, or opt python into extra_commands.
+	InlineOnly *bool `yaml:"inline_only,omitempty"`
+}
+
+// MontyPythonEnabled returns whether python/python3 are allowed (default: true).
+func (p *MontyPythonConfig) MontyPythonEnabled() bool {
+	if p == nil || p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
+// MontyPythonInlineOnly reports whether monty is limited to inline programs
+// (-c and stdin), refusing script files (default: false).
+func (p *MontyPythonConfig) MontyPythonInlineOnly() bool {
+	if p == nil || p.InlineOnly == nil {
+		return false
+	}
+	return *p.InlineOnly
+}
+
 // RuntimesConfig controls code execution runtime permissions.
 type RuntimesConfig struct {
-	Go      *GoConfig      `yaml:"go,omitempty"`
-	Pnpm    *PnpmConfig    `yaml:"pnpm,omitempty"`
-	Rust    *RustConfig    `yaml:"rust,omitempty"`
-	Deno    *DenoConfig    `yaml:"deno,omitempty"`
-	Flutter *FlutterConfig `yaml:"flutter,omitempty"`
-	Uv      *UvConfig      `yaml:"uv,omitempty"`
+	Go          *GoConfig          `yaml:"go,omitempty"`
+	Pnpm        *PnpmConfig        `yaml:"pnpm,omitempty"`
+	Rust        *RustConfig        `yaml:"rust,omitempty"`
+	Deno        *DenoConfig        `yaml:"deno,omitempty"`
+	Flutter     *FlutterConfig     `yaml:"flutter,omitempty"`
+	Uv          *UvConfig          `yaml:"uv,omitempty"`
+	MontyPython *MontyPythonConfig `yaml:"montypython,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;

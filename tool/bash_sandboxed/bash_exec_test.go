@@ -122,9 +122,9 @@ func TestExecuteBash(t *testing.T) {
 		},
 		{
 			name:    "bash -c with blocked command",
-			command: `bash -c 'python evil.py'`,
+			command: `bash -c 'perl evil.py'`,
 			wantErr: true,
-			errMsg:  "python",
+			errMsg:  "perl",
 		},
 		{
 			name:    "sh -c with blocked command",
@@ -143,11 +143,11 @@ func TestExecuteBash(t *testing.T) {
 		{
 			name: "bash script with blocked command",
 			setup: func(t *testing.T, dir string) {
-				os.WriteFile(filepath.Join(dir, "evil.sh"), []byte("python -c 'print(1)'\n"), 0600)
+				os.WriteFile(filepath.Join(dir, "evil.sh"), []byte("perl -e 'print 1'\n"), 0600)
 			},
 			command: `bash evil.sh`,
 			wantErr: true,
-			errMsg:  "python",
+			errMsg:  "perl",
 		},
 		{
 			name:    "bash -c with variable",
@@ -640,11 +640,11 @@ func TestExecuteScript(t *testing.T) {
 		{
 			name: "script with blocked command",
 			setup: func(t *testing.T, dir string) {
-				os.WriteFile(filepath.Join(dir, "evil.sh"), []byte("python -c 'print(1)'\n"), 0755)
+				os.WriteFile(filepath.Join(dir, "evil.sh"), []byte("perl -e 'print 1'\n"), 0755)
 			},
 			command: `./evil.sh`,
 			wantErr: true,
-			errMsg:  "python",
+			errMsg:  "perl",
 		},
 		{
 			name:    "script file does not exist",

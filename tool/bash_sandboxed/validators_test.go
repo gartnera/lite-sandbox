@@ -12,9 +12,9 @@ func TestValidate_BlockedFindFlags(t *testing.T) {
 		errMsg  string
 	}{
 		// -exec with a non-whitelisted command is blocked via recursive validation
-		{"find -exec python", `find . -exec python {} \;`, `command "python" is not allowed`},
-		{"find -execdir python", `find . -execdir python {} +`, `command "python" is not allowed`},
-		{"find -ok python", `find . -ok python {} \;`, `command "python" is not allowed`},
+		{"find -exec perl", `find . -exec perl {} \;`, `command "perl" is not allowed`},
+		{"find -execdir perl", `find . -execdir perl {} +`, `command "perl" is not allowed`},
+		{"find -ok perl", `find . -ok perl {} \;`, `command "perl" is not allowed`},
 		{"find -exec empty", `find . -exec \;`, `find -exec has no command to execute`},
 		// File-write flags remain unconditionally blocked
 		{"find -delete", `find . -delete`, `find flag "-delete" is not allowed`},
@@ -77,11 +77,11 @@ func TestValidate_Xargs(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"xargs python", `echo file | xargs python`, `command "python" is not allowed`},
-		{"xargs with blocked subcommand", `find . -name '*.go' | xargs python -c ''`, `command "python" is not allowed`},
-		{"xargs -I python", `find . | xargs -I {} python {}`, `command "python" is not allowed`},
-		{"xargs -n python", `find . | xargs -n1 python`, `command "python" is not allowed`},
-		{"xargs -- python", `find . | xargs -- python`, `command "python" is not allowed`},
+		{"xargs perl", `echo file | xargs perl`, `command "perl" is not allowed`},
+		{"xargs with blocked subcommand", `find . -name '*.go' | xargs perl -c ''`, `command "perl" is not allowed`},
+		{"xargs -I perl", `find . | xargs -I {} perl {}`, `command "perl" is not allowed`},
+		{"xargs -n perl", `find . | xargs -n1 perl`, `command "perl" is not allowed`},
+		{"xargs -- perl", `find . | xargs -- perl`, `command "perl" is not allowed`},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.name, func(t *testing.T) {
@@ -291,13 +291,13 @@ func TestValidate_RecursiveFindAndXargs(t *testing.T) {
 		errMsg  string
 	}{
 		// nested find -exec: inner exec runs a blocked command
-		{"find -exec find -exec python", `find . -exec find . -exec python {} \; \;`, `command "python" is not allowed`},
+		{"find -exec find -exec perl", `find . -exec find . -exec perl {} \; \;`, `command "perl" is not allowed`},
 		// find -exec running xargs which runs a blocked command
-		{"find -exec xargs python", `find . -exec xargs python {} \;`, `command "python" is not allowed`},
+		{"find -exec xargs perl", `find . -exec xargs perl {} \;`, `command "perl" is not allowed`},
 		// xargs running xargs which runs a blocked command
-		{"xargs xargs python", `find . | xargs xargs python`, `command "python" is not allowed`},
+		{"xargs xargs perl", `find . | xargs xargs perl`, `command "perl" is not allowed`},
 		// xargs running find whose -exec runs a blocked command
-		{"xargs find -exec python", `find . | xargs find . -exec python {} \;`, `command "python" is not allowed`},
+		{"xargs find -exec perl", `find . | xargs find . -exec perl {} \;`, `command "perl" is not allowed`},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.name, func(t *testing.T) {
@@ -458,8 +458,8 @@ func TestValidate_RgPre(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"rg --pre python", "rg --pre python pattern", `command "python" is not allowed`},
-		{"rg --pre=python", "rg --pre=python pattern", `command "python" is not allowed`},
+		{"rg --pre perl", "rg --pre perl pattern", `command "perl" is not allowed`},
+		{"rg --pre=perl", "rg --pre=perl pattern", `command "perl" is not allowed`},
 		{"rg --pre curl", "rg --pre curl pattern", `command "curl" is not allowed`},
 		{"rg --pre no arg", "rg --pre", `rg --pre requires a command argument`},
 	}

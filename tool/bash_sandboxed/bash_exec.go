@@ -555,9 +555,11 @@ func literalWords(args []string) []*syntax.Word {
 const execArgvMaxDepth = 4
 
 // execArgv is the body of the interpreter's ExecHandler: it gates and runs one
-// external command with its fully expanded argv. depth counts shebang
-// re-dispatches (see the script branch).
-func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+// external command with its fully expanded argv. sets is the caller's already
+// resolved allowed-path boundary, passed through for the embedded Python
+// interpreter's OS-call authorization. depth counts shebang re-dispatches (see
+// the script branch).
+func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool, readAllowedPaths, writeAllowedPaths []string, sets resolvedPathSets, depth int) error {
 	// Intercept `aws configure list-profiles` in brokered IMDS mode so an
 	// agent can discover the profiles it may select via AWS_PROFILE (the
 	// real command would read the masked ~/.aws and return nothing).
@@ -618,6 +620,21 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 		return executeAwk(ctx, args)
 	case "bash", "sh":
 		return s.executeBash(ctx, args)
+	case "python", "python3":
+		// Normally dispatched to the embedded monty interpreter rather
+		// than any python on PATH. sets is the authorization input for
+		// its OS-call handler, which is what keeps Python file I/O
+		// inside the same boundary as bash. See python.go.
+		//
+		// An explicit extra_commands / unsandboxed_commands entry is
+		// the exception: naming python there is a deliberate request
+		// for the real interpreter (monty is a subset and cannot import
+		// third-party packages), so honour it and fall through to the
+		// normal exec path. Those entries already bypass validation by
+		// design — this only decides which interpreter runs.
+		if !s.pythonExplicitlyRequested(args) {
+			return s.executePython(ctx, args, sets)
+		}
 	}
 	if isScriptPath(cmdName) {
 		hc := interp.HandlerCtx(ctx)
@@ -657,7 +674,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 				return fmt.Errorf("script %q: interpreter nesting too deep", cmdName)
 			}
 			full := append(append(shebang, path), args[1:]...)
-			return s.execArgv(ctx, full, useOSSandbox, readAllowedPaths, writeAllowedPaths, depth+1)
+			return s.execArgv(ctx, full, useOSSandbox, readAllowedPaths, writeAllowedPaths, sets, depth+1)
 		}
 		return s.executeScript(ctx, args)
 	}
@@ -757,7 +774,7 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			return interp.DefaultOpenHandler()(ctx, path, flag, perm)
 		}),
 		interp.ExecHandler(func(ctx context.Context, args []string) error {
-			return s.execArgv(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, 0)
+			return s.execArgv(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, sets, 0)
 		}),
 	}
 }

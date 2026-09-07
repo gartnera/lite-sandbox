@@ -852,3 +852,40 @@ func TestValidateExpandedPaths_GrepPatternNotPath(t *testing.T) {
 		})
 	}
 }
+
+// TestAllowedPathUnderSymlinkedAncestor covers an allowed entry that does not
+// exist yet and sits under a symlinked ancestor. Candidates are resolved
+// through their longest existing ancestor, so the allowed set has to be
+// resolved the same way or every candidate under the grant resolves to the
+// real path and stops matching it. macOS reaches this on any temp path, where
+// /var is a symlink to /private/var; the symlink here reproduces it anywhere.
+func TestAllowedPathUnderSymlinkedAncestor(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	grant := filepath.Join(link, "scratch") // deliberately not created
+	sets := resolvePathSets([]string{grant}, []string{grant})
+
+	t.Run("write under the grant", func(t *testing.T) {
+		p := filepath.Join(grant, "sub")
+		if err := checkPathBoundary(p, p, real, true, sets.write); err != nil {
+			t.Fatalf("write under a not-yet-created grant was denied: %v", err)
+		}
+	})
+
+	t.Run("read under the grant", func(t *testing.T) {
+		p := filepath.Join(grant, "sub", "file.txt")
+		if err := checkPathBoundary(p, p, real, false, sets.read); err != nil {
+			t.Fatalf("read under a not-yet-created grant was denied: %v", err)
+		}
+	})
+
+	t.Run("a sibling of the grant is still denied", func(t *testing.T) {
+		p := filepath.Join(link, "elsewhere", "secret.txt")
+		if err := checkPathBoundary(p, p, real, true, sets.write); err == nil {
+			t.Fatal("a path outside the grant was allowed")
+		}
+	})
+}

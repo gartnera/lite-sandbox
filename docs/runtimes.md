@@ -1,7 +1,10 @@
 # Runtime Support
 
 Code execution runtimes are disabled by default and can be enabled individually
-via config. This page covers Go, pnpm, Rust, Deno, Flutter, and uv.
+via config. This page covers Go, pnpm, Rust, Deno, Flutter, uv, and Python.
+
+Python is the exception: it is **enabled by default**, because it does not run a
+toolchain from the host at all. See [Python Runtime Support](#python-runtime-support).
 
 ## Go Runtime Support
 
@@ -260,3 +263,196 @@ Security features:
   package index (shared state)
 - `uv self update` is blocked — it downloads and overwrites the uv executable in
   place (an unsandboxable modification of the tool itself, like `deno upgrade`)
+
+## Monty Python Runtime Support
+
+`python` and `python3` are **enabled by default** and do not run any Python on
+your `PATH`. They are served by [monty](https://github.com/pydantic/monty), a
+Python interpreter compiled to WebAssembly and embedded in the lite-sandbox
+binary, running in-process. The runtime is called `montypython` in config, to
+keep it distinct from the real thing.
+
+```bash
+python3 -c "print('hello')"
+python3 script.py --flag input.csv     # arguments arrive as sys.argv
+python3 -m py_compile script.py        # syntax check
+echo "print(6*7)" | python3 -
+```
+
+This is on by default where every other runtime is off because there is nothing
+to install or detect, and monty is more contained than most commands already on
+the whitelist: it has no network access, no environment, and no filesystem
+access of its own. Turn it off with:
+
+```yaml
+runtimes:
+  montypython:
+    enabled: false   # Reject python/python3 (default: true)
+```
+
+```bash
+lite-sandbox config runtimes montypython disable
+lite-sandbox config runtimes montypython show
+```
+
+### Restricting it to inline code
+
+`inline_only` keeps monty for programs the agent writes inline -- `-c`, or a
+heredoc -- and refuses a script *file*:
+
+```yaml
+runtimes:
+  montypython:
+    inline_only: true   # Only -c and stdin; refuse script files (default: false)
+```
+
+```bash
+lite-sandbox config runtimes montypython enable --inline-only
+lite-sandbox config runtimes montypython disable --inline-only   # clear it, python stays on
+```
+
+The two cases fail differently. A snippet an agent just composed is written
+against whatever the interpreter provides, and if it hits one of monty's walls
+the error says so. A project's own `.py` file was written for CPython: it
+imports packages monty does not have, and where monty's subset diverges it can
+produce a plausible wrong answer instead of an error. With `inline_only` set,
+the first case still works and the second says so up front.
+
+Nothing falls through to the host interpreter as a result -- refusing is the
+whole behavior. For real CPython, enable the [uv runtime](#uv-python) and use
+`uv run`. `python3 -m py_compile file.py` still works, since it answers a
+question about a file rather than running it.
+
+### How file access works
+
+monty performs no I/O itself. When Python touches the filesystem the interpreter
+suspends and hands lite-sandbox a typed OS call, which is authorized against the
+**same readable/writable paths as bash** before being performed:
+
+- Reads (`read_text`, `read_bytes`, `stat`, `iterdir`, `exists`, …) are checked
+  against the readable paths.
+- Writes (`write_text`, `append_text`, `write_bytes`, `mkdir`, `unlink`,
+  `rmdir`, `rename`, …) are checked against the writable paths.
+- `.git` is off limits, as it is for `cat` and `sed`.
+- A denied call ends the run. Python cannot catch it, so a script cannot loop on
+  the boundary probing for a gap.
+
+```bash
+# Works: inside the working directory
+python3 -c "from pathlib import Path; Path('out.txt').write_text('hi')"
+
+# Denied: outside it, including via a symlink that points out
+python3 -c "from pathlib import Path; print(Path('/etc/passwd').read_text())"
+```
+
+The builtin `open()` works and is bounded the same way. monty holds no file
+descriptor: it builds its file object from a handle lite-sandbox returns, and
+every read or write behind that object comes back as one of the authorized OS
+calls above -- so `open()` is neither more nor less permissive than `pathlib`.
+`read()`, `read(n)`, `readline()`, `readlines()`, `write()`, `seek()`,
+`tell()`, `close()`, `with open(...) as f`, binary mode, and `.name` / `.mode`
+/ `.closed` all behave. The open-time effect happens when you open, as in
+CPython: `"w"` truncates, `"a"` creates, and `"r"` on a missing file raises a
+`FileNotFoundError` the script can catch.
+
+`os.getenv` and `os.environ` always report an empty environment. Re-exposing the
+host's would hand Python the credentials the rest of the sandbox masks.
+
+### What monty does not support
+
+monty implements a **subset of Python**, and this is the thing most likely to
+surprise you. There are no third-party packages — `numpy`, `pandas`, `requests`
+and everything else cannot be imported, and there is no `pip` or `venv`. The
+standard library is partial: `os`, `pathlib`, `json`, `re`, `math`, `datetime`,
+`sys`, `typing`, `asyncio`, `dataclasses`, `collections`, `functools`,
+`itertools` and `base64` are available.
+
+Also unavailable:
+
+| Not supported | Use instead |
+| --- | --- |
+| Iterating a file (`for line in f`) | `f.readlines()` |
+| `open()` update modes (`r+`, `w+`, `a+`) | Read, then write separately |
+| `python -m module` (except `py_compile`) | `-c` or a script file |
+| `sys.exit`, `sys.stdout.write` | `print()`, and the shell for exit codes |
+| Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |
+| Generators, `match`, `del` | Lists and comprehensions |
+
+When a program hits one of these, the error names monty and says what to do
+instead, so it is not mistaken for a broken environment.
+
+### sys.argv
+
+monty has no `sys.argv` of its own — its `sys` module is built from a fixed
+attribute list, and Python cannot assign to it. lite-sandbox supplies it, so
+arguments reach programs the way they do under CPython:
+
+```bash
+python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']
+python3 -c "import sys; print(sys.argv)" a b   # ['-c', 'a', 'b']
+```
+
+`import sys`, `import sys as s`, and `from sys import argv` all work. This only
+happens for programs that mention `argv`; anything else is handed to monty
+exactly as written. Tracebacks are reported in your own line numbering either
+way.
+
+### Syntax checking
+
+`python -m py_compile FILE...` works and is a genuine check: monty compiles a
+whole module before executing any of it, so the file is parsed without a line of
+it running. It is silent and exits 0 when the files compile, and prints the
+compiler's error and exits 1 when one does not. No `.pyc` files are written.
+
+```bash
+python3 -m py_compile script.py && echo "syntax ok"
+```
+
+No other `-m` module is available.
+
+### Opting out: running the real python
+
+There are three ways out, and every monty limitation message names all of them
+so an agent that hits one is not left guessing.
+
+**1. Run the host interpreter for `python` itself.** Add it to
+`extra_commands`, and `python`/`python3` resolve from `$PATH` as usual:
+
+```bash
+lite-sandbox config extra-commands add python3
+```
+
+```yaml
+extra_commands:
+  - python3            # every invocation uses the host interpreter
+  - python3 manage.py  # or only matching ones; the rest stay on monty
+```
+
+Like any `extra_commands` entry this **bypasses sandbox command validation** for
+those invocations — the script runs as real CPython with subprocesses, network
+and no path boundary (the OS sandbox, if enabled, still confines it; use
+`unsandboxed_commands` to bypass that too). A bare entry also lifts the refusal
+to run python as a wrapped subcommand of `xargs`/`env`/`timeout`/`find -exec`,
+since it already runs unwrapped.
+
+**2. Run CPython under uv, which stays sandboxed.** `uv run` executes real
+CPython as a subprocess confined by the OS sandbox rather than by monty:
+
+```bash
+lite-sandbox config runtimes uv enable
+uv run script.py
+```
+
+**3. Turn the built-in interpreter off.** `python`/`python3` are then rejected
+like any other command that is not allowed:
+
+```bash
+lite-sandbox config runtimes montypython disable
+```
+
+### Limits
+
+Each run is bounded by the bash tool's command timeout, plus a memory cap, a
+recursion limit, and a cap on how many filesystem operations one run may make.
+Exceeding any of them stops the program with a message that says which limit it
+hit.

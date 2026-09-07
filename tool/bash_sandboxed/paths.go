@@ -134,6 +134,8 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 // patterns — so they are excluded from file-path security checks.
 func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 	switch cmdName {
+	case "python", "python3":
+		return pythonNonPathArgIndices(args)
 	case "git":
 		return gitGlobalPathArgIndices(args)
 	case "sed":
@@ -415,8 +417,13 @@ func resolveAllowedPaths(allowedPaths []string) []resolvedAllowedPath {
 		base, nestedOnly := splitNestedOnly(allowed)
 		resolved, err := filepath.EvalSymlinks(base)
 		if err != nil {
-			// If we can't resolve, fall back to the original path.
-			resolved = base
+			// The entry does not exist yet. Resolve the longest existing
+			// ancestor and re-append the rest, exactly as ResolvePath does for
+			// the candidate paths checked against this set: keeping the literal
+			// spelling here instead would deny a grant whose ancestor is a
+			// symlink (macOS resolves /var to /private/var), since every
+			// candidate under it resolves to the real path and stops matching.
+			resolved = resolveExistingPrefix(base)
 		}
 		out[i] = resolvedAllowedPath{base: resolved, nestedOnly: nestedOnly}
 	}
@@ -432,12 +439,11 @@ func resolveAllowedPaths(allowedPaths []string) []resolvedAllowedPath {
 // Pinning the resolution for the duration of an execution is at least as
 // restrictive as re-resolving per call: candidate paths are still resolved
 // individually at check time, so a symlinked allowed directory that is
-// re-pointed mid-execution cannot move the boundary along with it. The one
-// observable difference is fail-closed: an allowed entry that does not exist
-// when the execution starts keeps its literal spelling (see
-// resolveAllowedPaths), so if the command itself creates it under a symlinked
-// ancestor (e.g. /tmp -> /private/tmp on macOS) later accesses resolve to the
-// real path and no longer match until the next execution.
+// re-pointed mid-execution cannot move the boundary along with it. An entry
+// that does not exist when the execution starts is resolved through its
+// longest existing ancestor (see resolveAllowedPaths), the same way candidates
+// are, so a grant under a symlinked ancestor still matches once the command
+// creates it.
 type resolvedPathSets struct {
 	read  []resolvedAllowedPath
 	write []resolvedAllowedPath

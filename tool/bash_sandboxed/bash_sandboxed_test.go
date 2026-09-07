@@ -659,8 +659,6 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"crontab", "crontab -l", `command "crontab" is not allowed`},
 
 		// Code execution (trivial sandbox bypass)
-		{"python", "python -c 'import os; os.system(\"rm -rf /\")'", `command "python" is not allowed`},
-		{"python3", "python3 -c 'print(1)'", `command "python3" is not allowed`},
 		{"node", "node -e 'console.log(1)'", `command "node" is not allowed`},
 		{"ruby", "ruby -e 'puts 1'", `command "ruby" is not allowed`},
 		{"perl", "perl -e 'print 1'", `command "perl" is not allowed`},
@@ -708,7 +706,7 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"exec", "exec echo hello", `command "exec" is not allowed`},
 		{"bare source", "source", `bare "source"`},
 		{"bare dot source", ".", `bare "."`},
-		{"xargs with blocked command", "echo hello | xargs python", `command "python" is not allowed`},
+		{"xargs with blocked command", "echo hello | xargs perl", `command "perl" is not allowed`},
 
 		// Text processing with write capability
 		{"csplit", "csplit file /pattern/", `command "csplit" is not allowed`},
@@ -762,8 +760,8 @@ func TestValidate_BlockedProcSubst(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"blocked command inside input substitution", `diff <(python3 script.py) <(echo b)`, `command "python3" is not allowed`},
-		{"blocked command inside output substitution", `echo hello > >(python3 script.py)`, `command "python3" is not allowed`},
+		{"blocked command inside input substitution", `diff <(perl script.py) <(echo b)`, `command "perl" is not allowed`},
+		{"blocked command inside output substitution", `echo hello > >(perl script.py)`, `command "perl" is not allowed`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -783,7 +781,7 @@ func TestValidate_BlockedProcSubst(t *testing.T) {
 }
 
 func TestValidate_BlockedInPipeline(t *testing.T) {
-	f, err := ParseBash("echo hello | python script.py")
+	f, err := ParseBash("echo hello | perl script.py")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -791,13 +789,13 @@ func TestValidate_BlockedInPipeline(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error for blocked command in pipeline")
 	}
-	if !strings.Contains(err.Error(), `"python"`) {
-		t.Fatalf("expected python error, got %q", err.Error())
+	if !strings.Contains(err.Error(), `"perl"`) {
+		t.Fatalf("expected perl error, got %q", err.Error())
 	}
 }
 
 func TestValidate_BlockedInSubshell(t *testing.T) {
-	f, err := ParseBash("(python script.py)")
+	f, err := ParseBash("(perl script.py)")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -808,7 +806,7 @@ func TestValidate_BlockedInSubshell(t *testing.T) {
 }
 
 func TestValidate_BlockedInIfBody(t *testing.T) {
-	f, err := ParseBash("if true; then python script.py; fi")
+	f, err := ParseBash("if true; then perl script.py; fi")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -819,7 +817,7 @@ func TestValidate_BlockedInIfBody(t *testing.T) {
 }
 
 func TestValidate_BlockedInForLoop(t *testing.T) {
-	f, err := ParseBash("for i in 1 2 3; do python $i; done")
+	f, err := ParseBash("for i in 1 2 3; do perl $i; done")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -830,7 +828,7 @@ func TestValidate_BlockedInForLoop(t *testing.T) {
 }
 
 func TestValidate_BlockedInCommandSubstitution(t *testing.T) {
-	f, err := ParseBash("echo $(python script.py)")
+	f, err := ParseBash("echo $(perl script.py)")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -1644,7 +1642,7 @@ func TestValidateCommand(t *testing.T) {
 	}
 
 	// Blocked command should fail
-	err = s.ValidateCommand("python script.py", workDir, []string{workDir}, []string{workDir})
+	err = s.ValidateCommand("perl script.py", workDir, []string{workDir}, []string{workDir})
 	if err == nil {
 		t.Fatal("expected blocked command to fail validation")
 	}
@@ -1771,7 +1769,7 @@ func TestValidateCommand_BashWithFlags(t *testing.T) {
 
 	// Create a script with blocked command
 	scriptPath := filepath.Join(workDir, "script.sh")
-	os.WriteFile(scriptPath, []byte("#!/bin/bash\npython -c 'print(1)'\n"), 0755)
+	os.WriteFile(scriptPath, []byte("#!/bin/bash\nperl -e 'print 1'\n"), 0755)
 
 	// bash -e ./script.sh should fail
 	err := s.ValidateCommand("bash -e ./script.sh", workDir, []string{workDir}, []string{workDir})
