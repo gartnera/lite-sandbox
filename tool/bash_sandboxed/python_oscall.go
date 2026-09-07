@@ -181,10 +181,17 @@ func (m *montyFS) rootFor(base string) (rootedDir, error) {
 // burning the suspension budget probing the boundary. Python cannot catch
 // these — monty surfaces them to the host, not to the interpreter — which is
 // what makes a denial final.
-func (s *Sandbox) montyOsCall(m *montyFS) montygo.OsCallFunc {
+func (s *Sandbox) montyOsCall(m *montyFS, stdin *stdinSource) montygo.OsCallFunc {
 	return func(ctx context.Context, call *montygo.OsCall) (any, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		// sys.stdin is a file handle anchored at a path with no filesystem
+		// meaning, so this is the one read that does not go to the boundary.
+		// Every other path, including this one under any other operation,
+		// falls through to the authorization below. See python_stdin.go.
+		if result, handled, err := serveStdin(stdin, call); handled {
+			return result, err
 		}
 		switch call.Function {
 

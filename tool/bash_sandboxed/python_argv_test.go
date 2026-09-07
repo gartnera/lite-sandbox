@@ -222,22 +222,28 @@ func TestPythonArgvTracebackLineNumbers(t *testing.T) {
 	}
 }
 
-// TestApplyArgvShimIsOptIn checks a program that never mentions argv is handed
-// to monty exactly as written — no prologue, no rewrite, no line shift.
-func TestApplyArgvShimIsOptIn(t *testing.T) {
+// TestApplySysShimIsOptIn checks a program that never mentions argv or stdin is
+// handed to monty exactly as written — no prologue, no rewrite, no line shift.
+func TestApplySysShimIsOptIn(t *testing.T) {
 	code := "import sys\nprint(sys.version)\n"
-	got, offset := applyArgvShim(code, []string{"x.py"})
+	got, offset, inputs := applySysShim(code, []string{"x.py"})
 	if got != code {
 		t.Errorf("program without argv was modified:\n%q", got)
 	}
 	if offset != 0 {
 		t.Errorf("offset = %d, want 0", offset)
 	}
+	if len(inputs) != 0 {
+		t.Errorf("a program without the shim should need no inputs, got %v", inputs)
+	}
 
 	withArgv := "import sys\nprint(sys.argv)\n"
-	got, offset = applyArgvShim(withArgv, []string{"x.py"})
+	got, offset, inputs = applySysShim(withArgv, []string{"x.py"})
 	if offset == 0 {
 		t.Error("expected a non-zero line offset once the prologue is added")
+	}
+	if _, ok := inputs[pythonStdinInput]; !ok {
+		t.Errorf("the prologue binds sys.stdin, so the handle must be an input; got %v", inputs)
 	}
 	if strings.Count(got, "\n") != strings.Count(withArgv, "\n")+offset {
 		t.Errorf("the rewrite changed the program's line count, so tracebacks will be wrong:\n%q", got)
@@ -340,5 +346,51 @@ func TestPythonArgvUnderBoundary(t *testing.T) {
 	}
 	if strings.Contains(out+err.Error(), "TOPSECRET") {
 		t.Fatalf("argv leaked protected content: %q / %v", out, err)
+	}
+}
+
+// TestRewriteImportForms covers the import shapes that bind the real sys
+// module. The multi-module form is the one an agent's one-liner reaches for
+// (`import sys, json`), and missing it meant the shim silently did not apply.
+func TestRewriteImportForms(t *testing.T) {
+	shim := pythonShimName
+	tests := []struct{ name, in, want string }{
+		{"plain", "import sys", "import sys; sys = " + shim + "()"},
+		{"aliased", "import sys as system", "import sys as system; system = " + shim + "()"},
+		{"sys first", "import sys, json", "import sys, json; sys = " + shim + "()"},
+		{"sys last", "import json, sys", "import json, sys; sys = " + shim + "()"},
+		{"sys middle aliased", "import json, sys as s, re", "import json, sys as s, re; s = " + shim + "()"},
+		{"indented", "    import sys", "    import sys; sys = " + shim + "()"},
+		{"trailing space kept", "import sys  ", "import sys; sys = " + shim + "()  "},
+		// A module that merely starts with the same letters binds nothing the
+		// shim owns, so it must be left exactly as written.
+		{"syslog untouched", "import syslog", "import syslog"},
+		{"submodule untouched", "import os.path", "import os.path"},
+		{"no import", "print(sys.argv)", "print(sys.argv)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rewriteStatement(tt.in); got != tt.want {
+				t.Errorf("rewriteStatement(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRewriteFromSysImport covers the from-import forms for both shimmed
+// attributes. The real sys has neither, so these become assignments rather
+// than imports that would raise ImportError.
+func TestRewriteFromSysImport(t *testing.T) {
+	shim := pythonShimName
+	tests := []struct{ in, want string }{
+		{"from sys import argv", "argv = " + shim + ".argv"},
+		{"from sys import stdin", "stdin = " + shim + ".stdin"},
+		{"from sys import argv as a", "a = " + shim + ".argv"},
+		{"from sys import stdin as inp", "inp = " + shim + ".stdin"},
+	}
+	for _, tt := range tests {
+		if got := rewriteStatement(tt.in); got != tt.want {
+			t.Errorf("rewriteStatement(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

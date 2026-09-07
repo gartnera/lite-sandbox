@@ -264,14 +264,20 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 			limits.MaxDuration = remaining - remaining/20
 		}
 	}
-	// monty has no sys.argv, so it is supplied by a prologue when the program
-	// asks for it; lineOffset is how far that shifts the program's own line
-	// numbering. See python_argv.go.
-	code, lineOffset := applyArgvShim(inv.code, inv.argv)
+	// monty has no sys.argv or sys.stdin, so they are supplied by a prologue
+	// when the program asks for either; lineOffset is how far that shifts the
+	// program's own line numbering, and inputs carry the stdin file handle the
+	// prologue binds. See python_argv.go and python_stdin.go.
+	code, lineOffset, inputs := applySysShim(inv.code, inv.argv)
 
-	_, err = runner.Execute(ctx, code, nil,
+	// parsePythonArgs has already drained hc.Stdin when the program itself came
+	// from there (`python3 -`), which leaves sys.stdin empty — the same thing
+	// CPython gives that pipeline.
+	stdin := newStdinSource(hc.Stdin)
+
+	_, err = runner.Execute(ctx, code, inputs,
 		montygo.WithPrintFunc(func(out string) { io.WriteString(hc.Stdout, out) }),
-		montygo.WithOsCallFunc(s.montyOsCall(fs)),
+		montygo.WithOsCallFunc(s.montyOsCall(fs, stdin)),
 		montygo.WithLimits(limits),
 	)
 	if err != nil {

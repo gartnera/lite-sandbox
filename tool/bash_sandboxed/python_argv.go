@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	montygo "github.com/fugue-labs/monty-go"
 )
 
 // monty has no sys.argv. Its `sys` module is built in Rust from a fixed
@@ -34,14 +36,25 @@ import (
 // The leading underscores keep it out of the way of user names.
 const pythonShimName = "_lite_sandbox_sys"
 
-// argvPrologue builds the statements prepended to a program that wants argv.
-// The shim proxies the real sys attributes so that rebinding `sys` to it does
-// not cost the program sys.version, sys.platform and friends.
-func argvPrologue(argv []string) string {
+// pythonStdinInput is the name the prologue reads sys.stdin from. It is
+// supplied as an interpreter input carrying a file handle, not baked into the
+// source, because stdin's contents are not known at compile time. See
+// python_stdin.go.
+const pythonStdinInput = "_lite_sandbox_stdin"
+
+// sysPrologue builds the statements prepended to a program that wants argv or
+// stdin. The shim proxies the real sys attributes so that rebinding `sys` to it
+// does not cost the program sys.version, sys.platform and friends.
+//
+// Both argv and stdin are always defined, whichever of the two the program
+// asked for: the shim replaces `sys` wholesale, so leaving one out would make
+// mentioning argv the reason stdin stopped working.
+func sysPrologue(argv []string) string {
 	var b strings.Builder
 	b.WriteString("import sys as _lite_sandbox_real_sys\n")
 	b.WriteString("class " + pythonShimName + ":\n")
 	b.WriteString("    argv = " + pythonListLiteral(argv) + "\n")
+	b.WriteString("    stdin = " + pythonStdinInput + "\n")
 	for _, attr := range []string{"version", "version_info", "platform", "stdout", "stderr"} {
 		b.WriteString("    " + attr + " = _lite_sandbox_real_sys." + attr + "\n")
 	}
@@ -94,22 +107,35 @@ func pythonStringLiteral(s string) string {
 // module. Each is matched against a whole *statement*, so a mention inside a
 // larger expression is left alone.
 var (
-	reImportSys      = regexp.MustCompile(`^(\s*)import\s+sys([ \t]*)$`)
-	reImportSysAs    = regexp.MustCompile(`^(\s*)import\s+sys\s+as\s+([A-Za-z_]\w*)([ \t]*)$`)
-	reFromSysArgv    = regexp.MustCompile(`^(\s*)from\s+sys\s+import\s+argv([ \t]*)$`)
-	reFromSysArgvAs  = regexp.MustCompile(`^(\s*)from\s+sys\s+import\s+argv\s+as\s+([A-Za-z_]\w*)([ \t]*)$`)
-	pythonArgvMarker = "argv"
+	reImportStmt = regexp.MustCompile(`^(\s*)import\s+(\S.*?)([ \t]*)$`)
+	reSysAsName  = regexp.MustCompile(`^sys\s+as\s+([A-Za-z_]\w*)$`)
+	reFromSys    = regexp.MustCompile(`^(\s*)from\s+sys\s+import\s+(argv|stdin)([ \t]*)$`)
+	reFromSysAs  = regexp.MustCompile(`^(\s*)from\s+sys\s+import\s+(argv|stdin)\s+as\s+([A-Za-z_]\w*)([ \t]*)$`)
+	// The attributes the shim supplies that the real sys module lacks, and so
+	// the only reason to prepend a prologue at all.
+	pythonSysMarkers = []string{"argv", "stdin"}
 )
 
-// applyArgvShim returns the program to hand to monty and the number of lines
-// the prologue added. When the program never mentions argv it is returned
-// unchanged with a zero offset.
-func applyArgvShim(code string, argv []string) (string, int) {
-	if !strings.Contains(code, pythonArgvMarker) {
-		return code, 0
+// applySysShim returns the program to hand to monty, the number of lines the
+// prologue added, and the interpreter inputs the prologue expects. When the
+// program never mentions the shimmed attributes it is returned unchanged, with
+// a zero offset and no inputs.
+func applySysShim(code string, argv []string) (string, int, map[string]any) {
+	wanted := false
+	for _, marker := range pythonSysMarkers {
+		if strings.Contains(code, marker) {
+			wanted = true
+			break
+		}
 	}
-	prologue := argvPrologue(argv)
-	return prologue + rewriteSysBindings(code), strings.Count(prologue, "\n")
+	if !wanted {
+		return code, 0, nil
+	}
+	prologue := sysPrologue(argv)
+	inputs := map[string]any{
+		pythonStdinInput: montygo.FileHandle{Path: pythonStdinPath, Mode: "r"},
+	}
+	return prologue + rewriteSysBindings(code), strings.Count(prologue, "\n"), inputs
 }
 
 // rewriteSysBindings re-applies the shim after any statement that would rebind
@@ -156,19 +182,59 @@ func rewriteSysBindings(code string) string {
 
 // rewriteStatement returns stmt with the shim re-applied, or stmt unchanged.
 func rewriteStatement(stmt string) string {
+	if rewritten, ok := rewriteImport(stmt); ok {
+		return rewritten
+	}
 	switch {
-	case reImportSys.MatchString(stmt):
-		return reImportSys.ReplaceAllString(stmt, "${1}import sys; sys = "+pythonShimName+"()${2}")
-	case reImportSysAs.MatchString(stmt):
-		return reImportSysAs.ReplaceAllString(stmt, "${1}import sys as ${2}; ${2} = "+pythonShimName+"()${3}")
-	case reFromSysArgv.MatchString(stmt):
-		// The real sys has no argv to import, so this becomes a plain
-		// assignment rather than an import that would raise ImportError.
-		return reFromSysArgv.ReplaceAllString(stmt, "${1}argv = "+pythonShimName+".argv${2}")
-	case reFromSysArgvAs.MatchString(stmt):
-		return reFromSysArgvAs.ReplaceAllString(stmt, "${1}${2} = "+pythonShimName+".argv${3}")
+	case reFromSys.MatchString(stmt):
+		// The real sys has neither attribute to import, so this becomes a
+		// plain assignment rather than an import that would raise ImportError.
+		return reFromSys.ReplaceAllString(stmt, "${1}${2} = "+pythonShimName+".${2}${3}")
+	case reFromSysAs.MatchString(stmt):
+		return reFromSysAs.ReplaceAllString(stmt, "${1}${3} = "+pythonShimName+".${2}${4}")
 	}
 	return stmt
+}
+
+// rewriteImport re-applies the shim after an `import` statement that binds the
+// real sys module, and reports whether it did.
+//
+// It handles the multi-module forms too (`import sys, json`, `import json, sys
+// as system`), which the one-liners an agent writes reach for constantly. Only
+// an entry that is exactly `sys`, or `sys as <name>`, counts: a module merely
+// starting with those letters (`syslog`) binds nothing this shim owns.
+//
+// The rewrite only ever appends `; <name> = <shim>()` to the statement, so it
+// adds no newline and the program's line numbering is untouched.
+func rewriteImport(stmt string) (string, bool) {
+	m := reImportStmt.FindStringSubmatch(stmt)
+	if m == nil {
+		return stmt, false
+	}
+	indent, modules, trailing := m[1], m[2], m[3]
+
+	var bound []string
+	for _, entry := range strings.Split(modules, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "sys" {
+			bound = append(bound, "sys")
+			continue
+		}
+		if as := reSysAsName.FindStringSubmatch(entry); as != nil {
+			bound = append(bound, as[1])
+		}
+	}
+	if len(bound) == 0 {
+		return stmt, false
+	}
+
+	var b strings.Builder
+	b.WriteString(indent + "import " + modules)
+	for _, name := range bound {
+		b.WriteString("; " + name + " = " + pythonShimName + "()")
+	}
+	b.WriteString(trailing)
+	return b.String(), true
 }
 
 // literalMask reports, for each byte of src, whether it sits inside a string
