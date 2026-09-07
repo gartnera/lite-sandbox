@@ -381,21 +381,35 @@ Also unavailable:
 When a program hits one of these, the error names monty and says what to do
 instead, so it is not mistaken for a broken environment.
 
-### sys.argv
+### sys.argv and sys.stdin
 
-monty has no `sys.argv` of its own — its `sys` module is built from a fixed
-attribute list, and Python cannot assign to it. lite-sandbox supplies it, so
-arguments reach programs the way they do under CPython:
+monty has neither of its own — its `sys` module is built from a fixed attribute
+list, and Python cannot assign to it. lite-sandbox supplies both, so arguments
+and piped input reach programs the way they do under CPython:
 
 ```bash
 python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']
 python3 -c "import sys; print(sys.argv)" a b   # ['-c', 'a', 'b']
+
+cat data.json | python3 -c "import sys, json; print(json.load(sys.stdin))"   # no: see below
+cat data.json | python3 -c "import sys, json; print(json.loads(sys.stdin.read()))"
 ```
 
-`import sys`, `import sys as s`, and `from sys import argv` all work. This only
-happens for programs that mention `argv`; anything else is handed to monty
-exactly as written. Tracebacks are reported in your own line numbering either
-way.
+`sys.stdin` supports `read()`, `readline()` and `readlines()`. It is the same
+stdin the command was given, so it works in a pipeline, from a heredoc, or with
+`< file` redirection, and reads as empty when nothing is piped in. `python3 -`
+takes the program from stdin, which leaves nothing for the program to read —
+the same as CPython. Reading `/dev/stdin` by name gets the same stream;
+everything else about that path stays on the normal boundary.
+
+Two gaps to know about, both monty's rather than lite-sandbox's: `json.load(f)`
+does not exist (only `loads`), and a file object is not iterable, so
+`for line in sys.stdin:` fails — use `sys.stdin.readlines()`.
+
+`import sys`, `import sys as s`, `import sys, json` and `from sys import argv`
+(or `stdin`) all work. This only happens for programs that mention `argv` or
+`stdin`; anything else is handed to monty exactly as written. Tracebacks are
+reported in your own line numbering either way.
 
 ### Syntax checking
 

@@ -1422,3 +1422,144 @@ func TestPythonInlineOnly(t *testing.T) {
 		}
 	})
 }
+
+// TestPythonStdin covers sys.stdin: the file handle the prologue binds, served
+// from the command's real stdin rather than the filesystem. See
+// python_stdin.go.
+func TestPythonStdin(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	workDir := t.TempDir()
+
+	run := func(t *testing.T, cmd string) (string, error) {
+		t.Helper()
+		return s.Execute(context.Background(), cmd, workDir, []string{workDir}, []string{workDir})
+	}
+
+	tests := []struct {
+		name string
+		cmd  string
+		want string
+	}{{
+		name: "read returns everything piped in",
+		cmd:  `printf 'a\nb\n' | python3 -c "import sys; print(repr(sys.stdin.read()))"`,
+		want: "'a\\nb\\n'\n",
+	}, {
+		// The form an agent actually writes, and the one a single-module
+		// import regex would have missed.
+		name: "import sys, json one-liner",
+		cmd:  `printf '{"attribute": "hello"}' | python3 -c "import sys, json; print(json.loads(sys.stdin.read())['attribute'])"`,
+		want: "hello\n",
+	}, {
+		name: "readline takes one line and leaves the rest",
+		cmd:  `printf 'a\nb\n' | python3 -c "import sys; print(repr(sys.stdin.readline())); print(repr(sys.stdin.read()))"`,
+		want: "'a\\n'\n'b\\n'\n",
+	}, {
+		name: "readlines splits the stream",
+		cmd:  `printf 'a\nb\n' | python3 -c "import sys; print(sys.stdin.readlines())"`,
+		want: "['a\\n', 'b\\n']\n",
+	}, {
+		name: "from sys import stdin",
+		cmd:  `printf 'piped' | python3 -c "from sys import stdin; print(stdin.read())"`,
+		want: "piped\n",
+	}, {
+		name: "aliased import still gets the shim",
+		cmd:  `printf 'piped' | python3 -c "import sys as system; print(system.stdin.read())"`,
+		want: "piped\n",
+	}, {
+		// Nothing piped in is EOF, not an error: the interpreter leaves Stdin
+		// nil there and a program reading it should see what a terminal gives.
+		name: "no stdin reads as empty",
+		cmd:  `python3 -c "import sys; print(repr(sys.stdin.read()))"`,
+		want: "''\n",
+	}, {
+		// `python3 -` takes the program from stdin, so there is nothing left
+		// for the program to read — same as CPython.
+		name: "program from stdin leaves stdin empty",
+		cmd:  `echo "import sys; print(repr(sys.stdin.read()))" | python3 -`,
+		want: "''\n",
+	}, {
+		name: "a second read is at end of stream",
+		cmd:  `printf 'once' | python3 -c "import sys; sys.stdin.read(); print(repr(sys.stdin.read()))"`,
+		want: "''\n",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := run(t, tt.cmd)
+			if err != nil {
+				t.Fatalf("%v (output %q)", err, out)
+			}
+			if out != tt.want {
+				t.Fatalf("got %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
+// TestPythonStdinPathIsReadOnly checks what naming the stdin path directly can
+// and cannot do. Reading it is the stream the name means — the program's own
+// stdin, which it already had. Everything else stays on the boundary in
+// python_oscall.go, which denies it: the path is outside the workspace.
+func TestPythonStdinPathIsReadOnly(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	workDir := t.TempDir()
+
+	run := func(cmd string) (string, error) {
+		return s.Execute(context.Background(), cmd, workDir, []string{workDir}, []string{workDir})
+	}
+
+	t.Run("open by name reads stdin", func(t *testing.T) {
+		out, err := run(`printf 'piped' | python3 -c "print(open('/dev/stdin').read())"`)
+		if err != nil {
+			t.Fatalf("%v (output %q)", err, out)
+		}
+		if out != "piped\n" {
+			t.Fatalf("got %q, want %q", out, "piped\n")
+		}
+	})
+
+	t.Run("reading it as a path reads stdin", func(t *testing.T) {
+		out, err := run(`printf 'piped' | python3 -c "from pathlib import Path; print(Path('/dev/stdin').read_text())"`)
+		if err != nil {
+			t.Fatalf("%v (output %q)", err, out)
+		}
+		if out != "piped\n" {
+			t.Fatalf("got %q, want %q", out, "piped\n")
+		}
+	})
+
+	t.Run("opening it for writing is refused", func(t *testing.T) {
+		out, err := run(`python3 -c "open('/dev/stdin', 'w')"`)
+		if err == nil {
+			t.Fatalf("opening the stdin path for writing was allowed: %q", out)
+		}
+	})
+
+	t.Run("writing to it is denied", func(t *testing.T) {
+		out, err := run(`python3 -c "from pathlib import Path; Path('/dev/stdin').write_text('x')"`)
+		if err == nil {
+			t.Fatalf("writing to the stdin path was allowed: %q", out)
+		}
+	})
+
+	t.Run("stat is denied", func(t *testing.T) {
+		out, err := run(`python3 -c "from pathlib import Path; print(Path('/dev/stdin').stat())"`)
+		if err == nil {
+			t.Fatalf("stat on the stdin path was allowed: %q", out)
+		}
+	})
+
+	// The interception keys on the exact path, so a workspace file cannot be
+	// shadowed by it — including one whose name only looks like the sentinel.
+	t.Run("a workspace file named dev/stdin is untouched", func(t *testing.T) {
+		out, err := run(`mkdir -p dev && printf 'workspace' > dev/stdin && printf 'piped' | python3 -c "print(open('dev/stdin').read())"`)
+		if err != nil {
+			t.Fatalf("%v (output %q)", err, out)
+		}
+		if out != "workspace\n" {
+			t.Fatalf("got %q, want the workspace file's contents", out)
+		}
+	})
+}
