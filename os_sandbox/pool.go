@@ -168,19 +168,107 @@ func resolveCredentialMasks(blockAWSCredentials bool) credentialMasks {
 	return masks
 }
 
+// WorkerOptions configures a sandbox worker's filesystem policy. Both platform
+// backends (bwrap mounts on Linux, SBPL rules on macOS) enforce the same
+// policy from these fields.
+type WorkerOptions struct {
+	// WorkDir is the working directory; always writable.
+	WorkDir string
+	// ExtraBinds are additional writable paths (runtime caches, writable_paths,
+	// internal_writable_paths, the worktree parent, the docker proxy socket dir).
+	ExtraBinds []string
+	// ROBinds are additional read-only paths (internal_readable_paths). Reads
+	// inside the sandbox are broadly allowed already, so on Linux these only
+	// matter for host paths hidden by the worker's /tmp overlay; on macOS they
+	// are a no-op.
+	ROBinds []string
+	// BlockAWSCredentials hides ~/.aws (IMDS broker mode). ~/.ssh private keys
+	// are ALWAYS hidden regardless.
+	BlockAWSCredentials bool
+	// MaskPaths are made unreachable (e.g. the real Docker daemon socket) so a
+	// sandboxed command cannot bypass a broker by reaching the resource directly.
+	MaskPaths []string
+
+	// HomeWritable binds the user's home directory writable (denylist mode).
+	// Developer tooling writes caches and state all over $HOME; rather than
+	// enumerating them, denylist mode accepts broad writes there and relies on
+	// DeniedReadPaths/DeniedWritePaths for the paths that matter.
+	HomeWritable bool
+	// DeniedReadPaths are hidden entirely: a directory becomes an empty,
+	// unreadable (mode 000) tmpfs; a file is replaced by an empty mode-000 file.
+	// Non-root processes get EACCES, which is a legible, classifiable signal;
+	// root sees empty content. On Linux a missing directory entry is created
+	// (mode 0700) so it can be masked; a missing file entry is skipped, since
+	// bwrap would otherwise create an empty file on the host (see DenyPath).
+	DeniedReadPaths []DenyPath
+	// DeniedWritePaths stay readable but are mounted read-only over themselves
+	// (bwrap) or denied file-write* (SBPL). Same missing-path handling.
+	DeniedWritePaths []DenyPath
+}
+
+// DenyPath is one deny-list entry with its expected kind, which decides what
+// happens when the path does not exist at worker start: bubblewrap can only
+// overlay an existing mount point and creates a missing one on the host, so a
+// missing directory is created up front (harmless, then masked) while a
+// missing file is left alone — an empty ~/.bash_profile appearing on the host
+// would change the user's shell. sandbox-exec needs neither: its deny rules
+// apply to paths whether or not they exist.
+type DenyPath struct {
+	Path string
+	Dir  bool
+}
+
+// prepareDenyPaths sorts entries into the existing directories and files that
+// can be overlaid, creating missing directories, and returns the missing
+// files that cannot be protected on this backend.
+func prepareDenyPaths(entries []DenyPath) (dirs, files, missing []string) {
+	for _, e := range entries {
+		fi, err := os.Stat(e.Path)
+		switch {
+		case err == nil && fi.IsDir():
+			dirs = append(dirs, e.Path)
+		case err == nil:
+			files = append(files, e.Path)
+		case e.Dir:
+			if err := os.MkdirAll(e.Path, 0o700); err != nil {
+				missing = append(missing, e.Path)
+				continue
+			}
+			dirs = append(dirs, e.Path)
+		default:
+			missing = append(missing, e.Path)
+		}
+	}
+	return dirs, files, missing
+}
+
+// MissingDenyFiles reports which file entries in the deny lists do not exist and
+// so cannot be masked by the Linux backend until they do. Used by `config mode
+// show` to make the gap visible.
+func MissingDenyFiles(entries []DenyPath) []string {
+	var out []string
+	for _, e := range entries {
+		if e.Dir {
+			continue
+		}
+		if _, err := os.Stat(e.Path); err != nil {
+			out = append(out, e.Path)
+		}
+	}
+	return out
+}
+
 // StartWorker starts a new sandbox worker process.
 // The worker runs the "lite-sandbox sandbox-worker" subcommand inside a platform-specific sandbox.
 // On Linux, this uses bwrap. On macOS, this uses sandbox-exec with SBPL profiles.
-// extraBinds specifies additional writable paths to bind mount (e.g., for runtimes).
-// roBinds specifies additional read-only paths (internal_readable_paths). Reads
-// inside the sandbox are broadly allowed already, so on Linux these only matter
-// for host paths hidden by the worker's /tmp overlay; on macOS they are a no-op.
-// blockAWSCredentials specifies whether to block ~/.aws directory.
-// Note: ~/.ssh private keys are ALWAYS blocked regardless of this parameter.
-// maskPaths are filesystem paths made unreachable inside the worker (e.g. the
-// real Docker daemon socket), so a sandboxed command cannot bypass a broker by
-// connecting to the underlying resource directly.
-func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []string, blockAWSCredentials bool, maskPaths []string) (*Worker, error) {
+// See WorkerOptions for the filesystem policy.
+func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
+	workDir := opts.WorkDir
+	extraBinds := opts.ExtraBinds
+	roBinds := opts.ROBinds
+	blockAWSCredentials := opts.BlockAWSCredentials
+	maskPaths := opts.MaskPaths
+
 	// Find our own binary path to pass to the sandbox
 	self, err := os.Executable()
 	if err != nil {
@@ -265,7 +353,42 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 			}
 		}
 
-		args := buildBwrapArgs(self, realWorkDir, binds, roMounts, masks.sshKeyPaths, maskPaths, awsTmpfsDir)
+		plan := bwrapPlan{
+			self:        self,
+			workDir:     realWorkDir,
+			binds:       binds,
+			roBinds:     roMounts,
+			sshKeyPaths: masks.sshKeyPaths,
+			maskPaths:   maskPaths,
+			awsTmpfsDir: awsTmpfsDir,
+			maskFile:    maskSourceFile(),
+		}
+		if opts.HomeWritable {
+			if home, err := os.UserHomeDir(); err == nil {
+				if real, err := filepath.EvalSymlinks(home); err == nil {
+					home = real
+				}
+				if err := os.MkdirAll(home, 0755); err == nil {
+					plan.homeDir = home
+				}
+			}
+		}
+		// Deny lists: a directory and a file are masked differently, and only an
+		// existing path can be overlaid (see DenyPath for what happens to a
+		// missing one).
+		readDirs, readFiles, missingRead := prepareDenyPaths(opts.DeniedReadPaths)
+		for _, d := range readDirs {
+			if d != awsTmpfsDir { // already masked
+				plan.deniedReadDirs = append(plan.deniedReadDirs, d)
+			}
+		}
+		plan.deniedReadFiles = readFiles
+		writeDirs, writeFiles, missingWrite := prepareDenyPaths(opts.DeniedWritePaths)
+		plan.deniedWritePaths = append(writeDirs, writeFiles...)
+		if n := len(missingRead) + len(missingWrite); n > 0 {
+			slog.WarnContext(ctx, "deny-list files that do not exist are not masked until created", "read", missingRead, "write", missingWrite)
+		}
+		args := buildBwrapArgs(plan)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
 
 	case "darwin":
@@ -273,7 +396,11 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds.
 		// roBinds are not needed here: the profile's "(allow default)" already
 		// permits reads everywhere except the credential/socket masks.
-		profile := generateSBPLProfile(realWorkDir, extraBinds, masks, maskPaths)
+		profile := generateSBPLProfile(realWorkDir, extraBinds, masks, maskPaths, sbplDenylist{
+			homeWritable:     opts.HomeWritable,
+			deniedReadPaths:  denyPathStrings(opts.DeniedReadPaths),
+			deniedWritePaths: denyPathStrings(opts.DeniedWritePaths),
+		})
 
 		// sandbox-exec -p <profile> <binary> <args>
 		cmd = exec.CommandContext(ctx, "sandbox-exec", "-p", profile, self, "sandbox-worker")
@@ -340,61 +467,103 @@ func StartWorker(ctx context.Context, workDir string, extraBinds, roBinds []stri
 	return w, nil
 }
 
+// bwrapPlan is the input to buildBwrapArgs: everything the mount layout
+// depends on, already existence-filtered and symlink-resolved by StartWorker.
+type bwrapPlan struct {
+	self    string
+	workDir string
+	// binds are writable, roBinds read-only (both bind-mounted over themselves).
+	binds, roBinds []string
+	// homeDir, when set, is bound writable before every other bind (denylist
+	// mode). Empty in allowlist mode.
+	homeDir string
+	// Masks, applied last so no bind can re-expose them.
+	sshKeyPaths      []string // --ro-bind <maskFile> <key>
+	awsTmpfsDir      string   // --tmpfs ~/.aws ("" when off/absent)
+	maskPaths        []string // --ro-bind /dev/null <socket>
+	deniedReadDirs   []string // --perms 000 --tmpfs <dir>
+	deniedReadFiles  []string // --ro-bind <maskFile> <file>
+	deniedWritePaths []string // --ro-bind <p> <p>, before the read masks
+	// maskFile is the source bound over masked files: an empty mode-000 file
+	// (see maskSourceFile), or /dev/null when one cannot be created.
+	maskFile string
+}
+
 // buildBwrapArgs assembles the ordered bwrap argument list for the Linux
 // sandbox worker.
 //
-// The invariant that makes this secure is ORDERING: bwrap applies mounts in the
-// order given and a later overlapping mount wins. All writable binds (the extra
-// runtime/writable_paths binds and the workDir bind) are emitted first; the
-// credential and broker-socket masks are emitted AFTER them. If a mask were
-// emitted before an overlapping bind — e.g. workDir under $HOME, or
-// writable_paths containing "~" which binds $HOME writable — the bind would
-// override the mask and re-expose ~/.ssh private keys, ~/.aws, or a broker
-// socket, silently breaking the "always denied" guarantee. Masking last closes
-// that hole regardless of what the binds cover.
+// Order matters: bwrap applies mounts in sequence and the last overlapping
+// mount wins. All writable and read-only binds come first, and every mask
+// (credentials, deny lists, broker sockets) is emitted AFTER them. If a mask
+// were emitted before a bind that overlaps it (e.g. workDir under $HOME, a
+// writable_paths entry of "~", or $HOME itself in denylist mode), the later
+// bind would override the mask and re-expose the secret.
 //
+// Layout:
 //   - --ro-bind / / : read-only root filesystem
 //   - --tmpfs /tmp : writable /tmp (Go and other tools need it for build cache)
-//   - --bind <path> <path> : writable runtime/config directories
+//   - --bind <home> <home> : writable home directory (denylist mode only)
 //   - --ro-bind <path> <path> : read-only internal_readable_paths (mostly
 //     relevant for host paths the /tmp tmpfs would otherwise hide)
+//   - --bind <path> <path> : writable runtime/config directories
 //   - --bind <workDir> <workDir> : writable working directory (overrides the
 //     /tmp tmpfs when workDir is under /tmp, e.g. in tests)
-//   - --ro-bind /dev/null <ssh-key> : mask each SSH private key
-//   - --tmpfs <~/.aws> : empty overlay hiding AWS credentials
+//   - --ro-bind <p> <p> : write-denied paths (readable, not modifiable)
+//   - --ro-bind <maskFile> <ssh-key> : mask each SSH private key
+//   - --tmpfs <~/.aws> : empty overlay hiding AWS credentials (IMDS mode)
+//   - --perms 000 --tmpfs <dir> : read-denied directories
+//   - --ro-bind <maskFile> <file> : read-denied files
 //   - --ro-bind /dev/null <socket> : mask broker sockets (e.g. the real
-//     /var/run/docker.sock); overlaying /dev/null turns the path into a char
-//     device so connect() fails, defeating `unset DOCKER_HOST`/`-H` bypasses
+//     Docker daemon socket)
 //   - --dev /dev / --proc /proc : fresh devtmpfs and procfs
-//   - --unshare-all --share-net : unshare everything except the network
-//   - --die-with-parent : kill the worker if the parent dies
-//   - --chdir <workDir> : start in the working directory
-func buildBwrapArgs(self, realWorkDir string, binds, roBinds, sshKeyPaths, maskPaths []string, awsTmpfsDir string) []string {
+//   - --unshare-all --share-net : isolate everything but the network
+//   - --die-with-parent : the worker dies with the MCP server
+func buildBwrapArgs(p bwrapPlan) []string {
 	args := []string{
 		"--ro-bind", "/", "/",
 		"--tmpfs", "/tmp",
+	}
+	if p.homeDir != "" {
+		args = append(args, "--bind", p.homeDir, p.homeDir)
 	}
 
 	// Writable and read-only binds first, so the masks below can override any
 	// overlap — an internal_readable_paths entry covering ~/.ssh or ~/.aws must
 	// not re-expose the masked secrets.
-	for _, path := range roBinds {
+	for _, path := range p.roBinds {
 		args = append(args, "--ro-bind", path, path)
 	}
-	for _, path := range binds {
+	for _, path := range p.binds {
 		args = append(args, "--bind", path, path)
 	}
-	args = append(args, "--bind", realWorkDir, realWorkDir)
+	args = append(args, "--bind", p.workDir, p.workDir)
 
+	// Write-denied paths: read-only over themselves. These precede the read
+	// masks so a read-denied file inside a write-denied directory (an SSH key
+	// under ~/.ssh) ends up masked, not merely read-only.
+	for _, path := range p.deniedWritePaths {
+		args = append(args, "--ro-bind", path, path)
+	}
+
+	maskFile := p.maskFile
+	if maskFile == "" {
+		maskFile = "/dev/null"
+	}
 	// Credential/socket masks last: no later mount may override them.
-	for _, keyPath := range sshKeyPaths {
-		args = append(args, "--ro-bind", "/dev/null", keyPath)
+	for _, keyPath := range p.sshKeyPaths {
+		args = append(args, "--ro-bind", maskFile, keyPath)
 	}
-	if awsTmpfsDir != "" {
-		args = append(args, "--tmpfs", awsTmpfsDir)
+	if p.awsTmpfsDir != "" {
+		args = append(args, "--tmpfs", p.awsTmpfsDir)
 	}
-	for _, p := range maskPaths {
-		args = append(args, "--ro-bind", "/dev/null", p)
+	for _, dir := range p.deniedReadDirs {
+		args = append(args, "--perms", "000", "--tmpfs", dir)
+	}
+	for _, file := range p.deniedReadFiles {
+		args = append(args, "--ro-bind", maskFile, file)
+	}
+	for _, m := range p.maskPaths {
+		args = append(args, "--ro-bind", "/dev/null", m)
 	}
 
 	args = append(args,
@@ -403,11 +572,48 @@ func buildBwrapArgs(self, realWorkDir string, binds, roBinds, sshKeyPaths, maskP
 		"--unshare-all",
 		"--share-net",
 		"--die-with-parent",
-		"--chdir", realWorkDir,
+		"--chdir", p.workDir,
 		"--",
-		self, "sandbox-worker",
+		p.self, "sandbox-worker",
 	)
 	return args
+}
+
+// maskSourceFile returns the path of an empty, mode-000 file to bind over
+// masked files. Unlike /dev/null it yields EACCES to a non-root reader, which
+// is both a clearer error for the agent's tools and a signal that can be
+// attributed to the sandbox. Falls back to /dev/null if it cannot be created.
+func maskSourceFile() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "/dev/null"
+	}
+	path := filepath.Join(dir, "lite-sandbox", "mask-empty")
+	// Lstat: the cache directory is write-denied in denylist mode, but never
+	// follow a symlink here regardless — the mask must be a file we created.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() == 0 && fi.Mode().Perm() == 0 {
+		return path
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "/dev/null"
+	}
+	// Recreate so the content is certainly empty, then drop every permission.
+	_ = os.Remove(path)
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		return "/dev/null"
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		return "/dev/null"
+	}
+	return path
+}
+
+// sbplDenylist carries the denylist-mode filesystem policy into the SBPL
+// profile generator.
+type sbplDenylist struct {
+	homeWritable     bool
+	deniedReadPaths  []string
+	deniedWritePaths []string
 }
 
 // generateSBPLProfile generates a Scheme-based sandbox profile for macOS sandbox-exec.
@@ -415,7 +621,7 @@ func buildBwrapArgs(self, realWorkDir string, binds, roBinds, sshKeyPaths, maskP
 // to specific directories (workDir, extraBinds, and system temp directories).
 // masks carries the credential paths to deny (see resolveCredentialMasks):
 // ~/.ssh private keys are ALWAYS blocked, ~/.aws only when AWS blocking is on.
-func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMasks, maskPaths []string) string {
+func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMasks, maskPaths []string, dl sbplDenylist) string {
 	var sb strings.Builder
 
 	sb.WriteString("(version 1)\n")
@@ -444,6 +650,14 @@ func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMa
 	for _, p := range maskPaths {
 		sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (literal \"%s\"))\n", p))
 		sb.WriteString(fmt.Sprintf("(deny network-outbound (literal \"%s\"))\n", p))
+	}
+
+	// Denylist mode: read-denied paths are hidden outright. Seatbelt matches
+	// on the real path, so emit the symlink-resolved form too.
+	for _, p := range dl.deniedReadPaths {
+		for _, rp := range withResolved(p) {
+			sb.WriteString(fmt.Sprintf("(deny file-read* (%s \"%s\"))\n", sbplScope(rp), rp))
+		}
 	}
 
 	// Confine writes to the allowed subpaths below. Without this catch-all deny
@@ -487,6 +701,36 @@ func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMa
 	// Allow write access to /dev for standard streams
 	sb.WriteString("(allow file-write* (subpath \"/dev\"))\n")
 
+	// Denylist mode: the home directory is writable, then the write-denied
+	// paths are carved back out. Last matching rule wins, so the denies must
+	// follow the home allow.
+	if dl.homeWritable {
+		if home, err := os.UserHomeDir(); err == nil {
+			for _, h := range withResolved(home) {
+				sb.WriteString(fmt.Sprintf("(allow file-write* (subpath \"%s\"))\n", h))
+			}
+		}
+	}
+	for _, p := range dl.deniedWritePaths {
+		for _, rp := range withResolved(p) {
+			sb.WriteString(fmt.Sprintf("(deny file-write* (%s \"%s\"))\n", sbplScope(rp), rp))
+		}
+	}
+	// A hidden path must not be writable either: the host user would read a
+	// planted ~/.aws/config or ~/.claude.json later even though nothing inside
+	// the sandbox can. Likewise the broker sockets, which may live under $HOME
+	// (Docker Desktop, Colima) and were only denied before the home allow.
+	for _, p := range dl.deniedReadPaths {
+		for _, rp := range withResolved(p) {
+			sb.WriteString(fmt.Sprintf("(deny file-write* (%s \"%s\"))\n", sbplScope(rp), rp))
+		}
+	}
+	if dl.homeWritable {
+		for _, p := range maskPaths {
+			sb.WriteString(fmt.Sprintf("(deny file-write* (literal \"%s\"))\n", p))
+		}
+	}
+
 	// Allow process execution
 	sb.WriteString("(allow process-exec (subpath \"/\"))\n")
 	sb.WriteString("(allow process-fork)\n")
@@ -508,6 +752,31 @@ func generateSBPLProfile(workDir string, extraBinds []string, masks credentialMa
 	sb.WriteString("(allow sysctl-read)\n")
 
 	return sb.String()
+}
+
+func denyPathStrings(entries []DenyPath) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Path)
+	}
+	return out
+}
+
+// sbplScope returns the SBPL path filter for p: "subpath" for a directory (or
+// a path that does not exist yet), "literal" for a file.
+func sbplScope(p string) string {
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		return "literal"
+	}
+	return "subpath"
+}
+
+// withResolved returns p and, when it differs, its symlink-resolved form.
+func withResolved(p string) []string {
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return []string{p, r}
+	}
+	return []string{p}
 }
 
 // Exec runs a command in the worker, streaming stdin/stdout/stderr.

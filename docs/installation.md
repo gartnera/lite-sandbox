@@ -38,6 +38,8 @@ lite-sandbox install codex            # configure only Codex
 lite-sandbox install claude opencode  # configure exactly these
 ```
 
+After configuring the agents, `install` also takes care of lite-sandbox's own config (`lite-sandbox config path`). Defaults stay strict: a **first-time** config is created with only `audit: true`, so the mode is the `allowlist` default and validation findings are logged for `lite-sandbox audit report`. An **existing** config is left untouched. To opt into a looser posture for incremental adoption, pass `--mode denylist` (or `open`); `denylist` also enables the OS sandbox when bubblewrap (Linux) or sandbox-exec (macOS) passes a preflight check and `os_sandbox` was never set. See [Incremental adoption](adoption.md).
+
 The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol and Crush's built-in tools aren't governed by lite-sandbox's hook, so `--with-tool-hook` is a no-op for those two and `--bash-ast-hook-mode` skips them.
 
 ## Claude Code

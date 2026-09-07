@@ -1,6 +1,38 @@
 # Security Model
 
-Commands go through multiple validation layers.
+Commands go through multiple validation layers. Which layers *block* depends
+on the configured `mode` — `allowlist` by default; see
+[Incremental adoption](adoption.md) for the looser opt-outs — and every layer still
+*runs* in every mode so that, with `audit: true`, each finding is recorded with
+the modes that would have enforced it.
+
+## Modes and what they defend against
+
+| Rule | `open` | `denylist` | `allowlist` |
+|---|---|---|---|
+| Command whitelist, runtime enable gates, direct execution of `./script` | audit only | audit only | enforced |
+| Path boundary on arguments, redirections, file opens; `.git` protection | audit only | enforced | enforced |
+| Per-command argument validators (`git push`, `find -delete`, `tar -x`, publish flags, …) | audit only | enforced | enforced |
+| Structural checks (coprocesses, `<>`, protected env assignments, shells in wrapped position) | audit only | enforced | enforced |
+| OS sandbox writes | off | `$HOME` writable; deny lists masked | project + configured paths |
+
+**`denylist` assumes a cooperative agent.** It stops the mistakes an agent
+makes on its own — `find ~`, `cat $HOME/.aws/config`, `rm -rf ..`,
+`> ~/.bashrc`, an accidental `git push` — and, under the OS sandbox, hides
+credentials from the programs it starts. It does not stop an agent that has
+been steered by content it read (prompt injection) from running a script that
+opens a file the AST layer never saw a path for, unless the OS sandbox masks
+that file; nor does it block network tools, so anything readable is
+exfiltratable. **`allowlist` is the posture for untrusted input**: unlisted
+programs, network tools and runtimes are blocked outright, and the OS sandbox
+confines writes to the project. The rest of this document describes the
+layers in full; the table above is what each mode keeps.
+
+The command whitelist is, by construction, the layer that breaks developer
+workflows (`python3`, `npm`, `make`, `./script` are all off it), which is why
+it is the one `denylist` drops. Note the path boundary applies to *every*
+command's arguments, listed or not, so `python3 ~/other/x.py` is still rejected
+in `denylist` mode as out of scope.
 
 ## Static preflight (AST-level, before execution)
 
@@ -41,19 +73,23 @@ os_sandbox: true          # Enable OS-level sandboxing (default: false)
 Or via CLI:
 
 ```bash
-# Enable OS sandbox
-lite-sandbox config os-sandbox enable
-
-# Show current status
+lite-sandbox config os-sandbox check    # can bubblewrap / sandbox-exec run here?
+lite-sandbox config os-sandbox enable   # runs the same check first; --force to skip it
 lite-sandbox config os-sandbox show
 ```
+
+`lite-sandbox config mode set denylist` (and `install --mode denylist`) enable it
+when the check passes and `os_sandbox` was never set. `enable` refuses when the
+check fails, because with `os_sandbox: true` and no working backend every
+command fails; the error names what to install.
 
 ### Common isolation (both platforms)
 
 The two backends use different mechanisms (bubblewrap mounts vs. SBPL rules) but
 enforce the same policy:
 
-- **Writes confined to the working directory** — Only the working directory (and its resolved symlink), configured `writable_paths`, the Claude Code per-user scratchpad root (`/tmp/claude-<uid>`), the per-user system temp dir (`$TMPDIR`, e.g. macOS's `/var/folders/.../T`, when it is not the world-shared `/tmp`), the main worktree when `git.allow_worktree_parent` is enabled and the working directory is a linked worktree, and temp dirs are writable; everything else on the host is read-only. Since these grants are baked into the sandbox profile at worker start, any config change recycles the worker so the new policy takes effect on the next command.
+- **Writes confined to the working directory (`allowlist` mode)** — Only the working directory (and its resolved symlink), configured `writable_paths`, the Claude Code per-user scratchpad root (`/tmp/claude-<uid>`), the per-user system temp dir (`$TMPDIR`, e.g. macOS's `/var/folders/.../T`, when it is not the world-shared `/tmp`), the main worktree when `git.allow_worktree_parent` is enabled and the working directory is a linked worktree, and temp dirs are writable; everything else on the host is read-only. Since these grants are baked into the sandbox profile at worker start, any config change recycles the worker so the new policy takes effect on the next command.
+- **`$HOME` writable, deny lists masked (`denylist` mode)** — The home directory is bound writable so tool caches and state need no enumeration, and the built-in [deny lists](configuration.md#denied-paths-denylist-mode) are applied on top: read-denied paths become unreadable (`--perms 000` tmpfs for directories, an empty mode-000 file bound over files; SBPL `deny file-read*` on macOS), write-denied paths are bound read-only over themselves (`deny file-write*`). Everything outside `$HOME` stays read-only as in `allowlist` mode. The masks are emitted after every bind, so neither the home bind nor a `writable_paths` entry can re-expose them, and a read-denied path is also write-denied so nothing can be planted there for the host user to pick up later. **Linux caveat:** bubblewrap can only overlay a path that exists, and creates a missing mount point on the host. A missing deny-listed *directory* is therefore created (mode 0700) before being masked; a missing deny-listed *file* (a `~/.zshrc` that was never written, say) is left alone — an empty `~/.bash_profile` appearing on the host would change the user's shell — and is not protected until it exists. `lite-sandbox config mode show` marks these. sandbox-exec has no such gap: its deny rules apply to paths whether or not they exist. The lists are evaluated when the worker starts (every config change restarts it).
 - **Writable temp directories** — `/tmp` and the platform's other temporary directories are writable, as required for build caches and `TMPDIR`.
 - **Runtime bind mounts** — Additional writable paths are granted for enabled runtimes (e.g., `$GOPATH`/`$GOCACHE` for Go, the fvm SDK cache and pub cache for Flutter, or `uv cache dir`/`uv python dir` for uv).
 - **Internal paths** — `internal_readable_paths` / `internal_writable_paths` loosen only this OS-sandbox layer, so programs a command spawns can reach their own data (e.g. a tool's `~/.cache` directory). They are deliberately excluded from every agent-facing boundary: the static/runtime path validation still denies direct reads and writes, the PreToolUse file-tool hook and the docker proxy's bind-mount checks don't honor them, and Deno's auto-injected `--allow-read`/`--allow-write` never includes them (granting them to Deno-executed code would be a trivial sandbox workaround). They can never re-expose the SSH/AWS credential masks.

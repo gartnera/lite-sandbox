@@ -505,6 +505,20 @@ type RuntimesConfig struct {
 // Config holds all user configuration. New fields can be added over time;
 // unknown YAML fields are silently ignored for forward compatibility.
 type Config struct {
+	// Mode is the enforcement posture: "open", "denylist", or "allowlist" (the
+	// default when unset). See Mode for what each enforces.
+	Mode string `yaml:"mode,omitempty"`
+	// Audit, when true, records every validation finding — blocked or not,
+	// tagged with the modes that would block it — to the audit log
+	// (`lite-sandbox audit path`). Default false.
+	Audit *bool `yaml:"audit,omitempty"`
+	// DeniedReadPaths / DeniedWritePaths extend the built-in deny lists applied
+	// by the OS sandbox in denylist mode (see DefaultDeniedReadPaths and
+	// DefaultDeniedWritePaths). Read-denied paths are hidden entirely;
+	// write-denied paths stay readable but cannot be modified.
+	DeniedReadPaths  []string `yaml:"denied_read_paths,omitempty"`
+	DeniedWritePaths []string `yaml:"denied_write_paths,omitempty"`
+
 	ExtraCommands       []string `yaml:"extra_commands,omitempty"`
 	UnsandboxedCommands []string `yaml:"unsandboxed_commands,omitempty"`
 	ReadablePaths       []string `yaml:"readable_paths,omitempty"`
@@ -655,6 +669,9 @@ func Load() (*Config, error) {
 	}
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := cfg.validateModes(); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	return &cfg, nil

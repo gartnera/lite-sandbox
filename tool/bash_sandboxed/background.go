@@ -284,7 +284,7 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 		if err != nil {
 			return nil, err
 		}
-		if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		if err := s.validateFileCtx(withAuditScope(context.Background(), command, workDir, "bash"), f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 			return nil, fmt.Errorf("validation failed: %w", err)
 		}
 	}
@@ -293,6 +293,7 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	// shutdown cancels it) and stores its cancel before the process becomes
 	// reachable. Cancellation is driven by KillBackground / Close.
 	proc, ctx := s.bg.create(command)
+	ctx = withAuditScope(ctx, command, workDir, "bash")
 
 	// Track the runner goroutine so shutdown (killAll) can wait for it to finish
 	// tearing down its OS process. Add before launching so a concurrent shutdown

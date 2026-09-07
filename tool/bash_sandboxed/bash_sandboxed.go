@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/audit"
 	"github.com/gartnera/lite-sandbox/os_sandbox"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -116,6 +117,9 @@ type Sandbox struct {
 	// bg tracks background ("run_in_background") processes started via
 	// ExecuteBackground, mirroring the Claude Code Bash/BashOutput/KillShell tools.
 	bg *backgroundManager
+	// audit receives every validation finding (see Sandbox.report) while the
+	// config's audit flag is on; nil otherwise. Managed by UpdateConfig.
+	audit *audit.Logger
 }
 
 // NewSandbox creates a Sandbox with no extra commands.
@@ -187,6 +191,20 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	// has to be captured here (for the enable-transition log below).
 	prevOSSandbox := s.cfg.OSSandboxEnabled()
 	s.cfg = cfg
+	// Auditing follows the config: open the logger when it turns on, drop it
+	// when it turns off. The path is resolved once; LITE_SANDBOX_AUDIT_LOG
+	// overrides it (see audit.DefaultPath).
+	if cfg.AuditEnabled() {
+		if s.audit == nil {
+			if p, err := audit.DefaultPath(); err == nil {
+				s.audit = audit.New(p, 0)
+			} else {
+				slog.Warn("audit enabled but log path unavailable", "error", err)
+			}
+		}
+	} else {
+		s.audit = nil
+	}
 	s.extraCommands = m
 	s.extraSubCommands = sub
 	s.bareExtraCommands = bare
@@ -1041,14 +1059,19 @@ func extractFunctionsFromFile(filePath, workDir string, funcs map[string]bool) {
 // 4. Per-command argument validators (e.g., blocking find -exec)
 // 5. Blocked environment variable assignments (PATH, LD_PRELOAD, etc.)
 func (s *Sandbox) validate(f *syntax.File) error {
-	return s.validateWithFunctions(f, nil)
+	return s.validateWithFunctionsCtx(context.Background(), f, nil)
 }
 
 // validateWithWorkDir validates the AST, also collecting function declarations
 // from inline FuncDecl nodes and sourced files to allow calls to user-defined functions.
 func (s *Sandbox) validateWithWorkDir(f *syntax.File, workDir string) error {
+	return s.validateWithWorkDirCtx(context.Background(), f, workDir)
+}
+
+// validateWithWorkDirCtx is validateWithWorkDir with the audit scope on ctx.
+func (s *Sandbox) validateWithWorkDirCtx(ctx context.Context, f *syntax.File, workDir string) error {
 	funcs := collectDeclaredFunctions(f, workDir)
-	return s.validateWithFunctions(f, funcs)
+	return s.validateWithFunctionsCtx(ctx, f, funcs)
 }
 
 // validateFile runs the full static preflight over a parsed AST: the command /
@@ -1063,19 +1086,26 @@ func (s *Sandbox) validateWithWorkDir(f *syntax.File, workDir string) error {
 // The allowed-path sets are symlink-resolved once here and shared by both path
 // passes rather than being resolved separately by each.
 func (s *Sandbox) validateFile(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
-	if err := s.validateWithWorkDir(f, workDir); err != nil {
+	return s.validateFileCtx(context.Background(), f, workDir, readAllowedPaths, writeAllowedPaths)
+}
+
+// validateFileCtx is validateFile with the audit scope on ctx. Every check's
+// result goes through Sandbox.report, which audits it and decides — by rule
+// and mode — whether it is enforced.
+func (s *Sandbox) validateFileCtx(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	if err := s.validateWithWorkDirCtx(ctx, f, workDir); err != nil {
 		return err
 	}
 	if s.getConfig().RejectsRedundantCd() {
-		if err := validateNoRedundantCd(f, workDir); err != nil {
+		if err := s.report(ctx, layerStatic, ruleRedundantCd, validateNoRedundantCd(f, workDir)); err != nil {
 			return err
 		}
 	}
 	sets := resolvePathSets(readAllowedPaths, writeAllowedPaths)
-	if err := validatePathsResolved(f, workDir, sets); err != nil {
+	if err := s.report(ctx, layerStatic, rulePathBoundary, validatePathsResolved(f, workDir, sets)); err != nil {
 		return err
 	}
-	return validateRedirectPathsResolved(f, workDir, sets)
+	return s.report(ctx, layerStatic, rulePathBoundary, validateRedirectPathsResolved(f, workDir, sets))
 }
 
 // validateNoRedundantCd rejects a `cd <absolute-path>` whose target resolves to
@@ -1120,10 +1150,27 @@ func validateNoRedundantCd(f *syntax.File, workDir string) error {
 // validateWithFunctions is the core validation logic, optionally accepting
 // a set of declared function names to allow in addition to the command whitelist.
 func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string]bool) error {
+	return s.validateWithFunctionsCtx(context.Background(), f, declaredFuncs)
+}
+
+// validateWithFunctionsCtx is validateWithFunctions with the audit scope on
+// ctx. Each finding is routed through Sandbox.report: an enforced finding
+// stops the walk and is returned; an advisory one (a rule the current mode
+// does not enforce) is audited and the walk continues, so in denylist mode an
+// unlisted command still has its arguments and paths checked.
+func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, declaredFuncs map[string]bool) error {
 	extra := s.getExtraCommands()
 	extraSub := s.getExtraSubCommands()
 	bare := s.getBareExtraCommands()
 	var validationErr error
+	// fail records an enforced finding and stops the walk.
+	fail := func(layer string, fallback rule, err error) bool {
+		if err := s.report(ctx, layer, fallback, err); err != nil {
+			validationErr = err
+			return true
+		}
+		return false
+	}
 	syntax.Walk(f, func(node syntax.Node) bool {
 		if validationErr != nil {
 			return false
@@ -1131,14 +1178,12 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 		switch n := node.(type) {
 		case *syntax.Stmt:
 			for _, r := range n.Redirs {
-				if err := validateRedirect(r); err != nil {
-					validationErr = err
+				if fail(layerStatic, ruleStructural, validateRedirect(r)) {
 					return false
 				}
 			}
 		case *syntax.CallExpr:
-			if err := validateAssigns(n.Assigns); err != nil {
-				validationErr = err
+			if fail(layerStatic, ruleStructural, validateAssigns(n.Assigns)) {
 				return false
 			}
 			if len(n.Args) > 0 {
@@ -1166,17 +1211,31 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 					// processes.
 					osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
 					if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] && !osOnly {
-						if !s.getConfig().LocalBinaryExecution.IsEnabled() || !isScriptPath(cmdName) {
-							validationErr = fmt.Errorf("command %q is not allowed", cmdName)
+						// Whitelist and local-binary gates: allowlist-only rules, so
+						// in denylist/open mode this records the finding and moves on.
+						var gateErr error
+						if isScriptPath(cmdName) {
+							if !s.getConfig().LocalBinaryExecution.IsEnabled() {
+								gateErr = directExecutionNotAllowed(cmdName)
+							}
+						} else {
+							gateErr = commandNotAllowed(cmdName)
+						}
+						if fail(layerStatic, ruleCommandWhitelist, gateErr) {
 							return false
 						}
 					}
 					// Skip per-command validators for commands allowed via extra_commands —
 					// the user has explicitly opted in to those commands.
 					if !inExtra {
+						// Runtime enable gate first (allowlist-only), then the
+						// command's own argument validator, which applies in every
+						// enforcing mode.
+						if fail(layerStatic, ruleRuntimeDisabled, s.runtimeDisabledError(cmdName)) {
+							return false
+						}
 						if validator, ok := commandArgValidators[cmdName]; ok {
-							if err := validator(s, n.Args); err != nil {
-								validationErr = err
+							if fail(layerStatic, ruleArgValidator, validator(s, n.Args)) {
 								return false
 							}
 						}
@@ -1184,16 +1243,16 @@ func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string
 				}
 			}
 		case *syntax.DeclClause:
-			if err := validateAssigns(n.Args); err != nil {
-				validationErr = err
+			if fail(layerStatic, ruleStructural, validateAssigns(n.Args)) {
 				return false
 			}
 		case *syntax.ProcSubst:
 			// Allowed: the walker recurses into the substitution's statements,
 			// so all commands inside are validated against the whitelist.
 		case *syntax.CoprocClause:
-			validationErr = fmt.Errorf("coprocesses are not allowed")
-			return false
+			if fail(layerStatic, ruleStructural, fmt.Errorf("coprocesses are not allowed")) {
+				return false
+			}
 		}
 		return true
 	})
@@ -1235,7 +1294,10 @@ func (s *Sandbox) ValidateCommand(command string, workDir string, readAllowedPat
 	if err != nil {
 		return err
 	}
-	if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	// ValidateCommand backs the PreToolUse hook's --validate-bash path, so its
+	// findings are attributed to the hook in the audit log.
+	ctx := withAuditScope(context.Background(), command, workDir, "hook")
+	if err := s.validateFileCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return err
 	}
 	if err := s.validateScriptContents(f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
@@ -1302,6 +1364,12 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil // fail-open: file may not exist at validation time
+	}
+	// A script for another interpreter (#!/usr/bin/env python3) is not bash;
+	// parsing it as bash would flag its keywords as unknown commands. The
+	// runtime ExecHandler gates the interpreter itself instead.
+	if interp := scriptInterpreter(string(data)); interp != "" && !isShellInterpreter(interp) {
+		return nil
 	}
 	sf, err := ParseBash(stripShebang(string(data)))
 	if err != nil {
@@ -1758,7 +1826,10 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 		return "", err
 	}
 
-	if err := s.validateFile(f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	// The audit scope rides on ctx into the static pass and, through the
+	// interpreter, into every runtime handler and nested interpreter.
+	ctx = withAuditScope(ctx, command, workDir, "bash")
+	if err := s.validateFileCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return "", fmt.Errorf("validation failed: %w", err)
 	}
 
@@ -1985,11 +2056,35 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	// s.cfg is read directly rather than via getConfig(): s.mu is already held
 	// exclusively here and sync.RWMutex is not reentrant.
 	blockAWS := s.cfg.AWS.UsesIMDS()
-	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", blockAWS)
-	w, err := os_sandbox.StartWorker(context.Background(), s.workerWorkDir, extraBinds, roBinds, blockAWS, dockerMaskPaths)
+	opts := os_sandbox.WorkerOptions{
+		WorkDir:             s.workerWorkDir,
+		ExtraBinds:          extraBinds,
+		ROBinds:             roBinds,
+		BlockAWSCredentials: blockAWS,
+		MaskPaths:           dockerMaskPaths,
+	}
+	// Denylist mode flips the worker's write posture: the home directory is
+	// writable and only the deny lists are carved out. Allowlist mode keeps the
+	// original cwd-confined layout.
+	if s.cfg.EffectiveMode() == config.ModeDenylist {
+		opts.HomeWritable = true
+		opts.DeniedReadPaths = denyPaths(s.cfg.EffectiveDeniedReadEntries())
+		opts.DeniedWritePaths = denyPaths(s.cfg.EffectiveDeniedWriteEntries())
+	}
+	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", blockAWS, "mode", s.cfg.EffectiveMode())
+	w, err := os_sandbox.StartWorker(context.Background(), opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)
 	}
 	s.worker = w
 	return w, nil
+}
+
+// denyPaths converts config deny-list entries to the worker's type.
+func denyPaths(entries []config.DeniedPath) []os_sandbox.DenyPath {
+	out := make([]os_sandbox.DenyPath, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, os_sandbox.DenyPath{Path: e.Path, Dir: e.Dir})
+	}
+	return out
 }

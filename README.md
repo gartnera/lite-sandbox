@@ -11,6 +11,8 @@ lite-sandbox install                                 # Configure every detected 
 
 Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHub release](https://github.com/gartnera/lite-sandbox/releases); once installed, `lite-sandbox update` upgrades the binary in place to the latest release (`lite-sandbox version` shows the current one).
 
+The default is the strictest posture: only whitelisted commands run and code-execution runtimes are opt-in. If you want to start looser and tighten over time, see [docs/adoption.md](docs/adoption.md).
+
 `install` autodetects which supported agent CLIs — **Claude Code**, **OpenAI Codex CLI**, **opencode**, and **Crush** — are installed on the host (binary on `PATH` or config directory present) and configures each one: it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a usage directive so the agent routes shell commands through the sandbox. Name agents explicitly to configure just those:
 
 ```bash
@@ -24,6 +26,7 @@ Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hoo
 
 ## Documentation
 
+- **[Incremental adoption](docs/adoption.md)** — other enforcement modes, audit reports, and tightening over time.
 - **[Installation](docs/installation.md)** — getting the binary and keeping it updated, automatic and manual agent setup, built-in tool boundaries, and hook modes.
 - **[Configuration](docs/configuration.md)** — config file, CLI management, readable/writable paths, and git support.
 - **[Runtime support](docs/runtimes.md)** — enabling Go, pnpm, Rust, Deno, and uv.

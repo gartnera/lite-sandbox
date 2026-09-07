@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
@@ -311,33 +312,70 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"timeout": validateTimeoutArgs,
 }
 
-// runtimeGate builds a per-command argument validator that first enforces a
-// config-gated runtime's enable switch and then, if the runtime is on, runs
-// that runtime's own argument validation (validate may be nil when there is
-// nothing further to check).
+// runtimeGateInfo describes a config-gated runtime command: which config
+// switch enables it and how to read that switch. Sites consult runtimeGates
+// (via Sandbox.runtimeDisabledError) before running the command's validator, so
+// the enable check is mode-aware: enforced in allowlist mode, advisory (audited,
+// then ignored) in denylist and open mode.
+type runtimeGateInfo struct {
+	configKey string
+	enabled   func(*config.RuntimesConfig) bool
+}
+
+// runtimeGates is populated by runtimeGate as commandArgValidators is built.
+var runtimeGates = map[string]runtimeGateInfo{}
+
+// runtimeGate registers name as a config-gated runtime command and returns the
+// validator that runs the runtime's own argument checks. The enable switch
+// itself is NOT checked here — callers do that first through
+// runtimeDisabledError, so it can be gated on the mode and audited — which is
+// also why validate must tolerate a nil runtime section: in denylist mode the
+// runtime may run without ever having been configured.
 //
-// name is the command as it appears in the error message and configKey the
-// config field the user must set, so each command keeps its own exact message.
-// The cfg.Runtimes nil check is required because enabled dereferences that
-// pointer; the per-runtime section below it may be nil, which every leaf
-// accessor (GoEnabled, PnpmEnabled, RustEnabled, DenoEnabled, FlutterEnabled,
-// UvEnabled) treats as "disabled" on a nil receiver rather than panicking.
-// validate therefore only ever runs with a non-nil section.
+// name is the command as it appears in error messages and configKey the config
+// field the user must set. validate may be nil when there is nothing further to
+// check. Every per-runtime accessor (GoGenerate, PnpmPublish, ...) is nil-safe
+// on its section, so validate runs safely against an unconfigured runtime.
 func runtimeGate(
 	name, configKey string,
 	enabled func(*config.RuntimesConfig) bool,
 	validate func(*config.RuntimesConfig, []*syntax.Word) error,
 ) func(*Sandbox, []*syntax.Word) error {
+	runtimeGates[name] = runtimeGateInfo{configKey: configKey, enabled: enabled}
 	return func(s *Sandbox, args []*syntax.Word) error {
-		cfg := s.getConfig()
-		if cfg.Runtimes == nil || !enabled(cfg.Runtimes) {
-			return fmt.Errorf("command %q is not allowed (%s is disabled)", name, configKey)
-		}
 		if validate == nil {
 			return nil
 		}
-		return validate(cfg.Runtimes, args)
+		rt := s.getConfig().Runtimes
+		if rt == nil {
+			rt = &config.RuntimesConfig{}
+		}
+		return validate(rt, args)
 	}
+}
+
+// runtimeDisabledError returns the tagged runtime-disabled error when name is a
+// config-gated runtime command whose runtime is not enabled, and nil otherwise
+// (not gated, or enabled). Callers pass it through Sandbox.report so it is
+// enforced only in allowlist mode.
+func (s *Sandbox) runtimeDisabledError(name string) error {
+	info, ok := runtimeGates[name]
+	if !ok {
+		return nil
+	}
+	cfg := s.getConfig()
+	if cfg.Runtimes != nil && info.enabled(cfg.Runtimes) {
+		return nil
+	}
+	// runtimes.<x>.enabled -> `lite-sandbox config runtimes <x> enable`
+	fix, hint := "", ""
+	if k, ok := strings.CutPrefix(info.configKey, "runtimes."); ok {
+		if rt, ok := strings.CutSuffix(k, ".enabled"); ok {
+			fix = fmt.Sprintf("lite-sandbox config runtimes %s enable", rt)
+			hint = fmt.Sprintf("; the user can enable it with `%s`", fix)
+		}
+	}
+	return tagRuleFix(ruleRuntimeDisabled, name, fix, fmt.Errorf("command %q is not allowed (%s is disabled)%s", name, info.configKey, hint))
 }
 
 // Runtime enable accessors and argument-validation adapters used by runtimeGate.

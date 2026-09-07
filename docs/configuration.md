@@ -1,9 +1,60 @@
 # Configuration
 
-Extra commands can be allowed via a config file at the platform-appropriate location:
+The config file lives at the platform-appropriate location (`lite-sandbox
+config path` prints it):
 
 - **Linux**: `~/.config/lite-sandbox/config.yaml`
 - **macOS**: `~/Library/Application Support/lite-sandbox/config.yaml`
+
+It is reloaded automatically when changed — no server restart needed.
+
+## Mode and audit
+
+```yaml
+mode: denylist      # open | denylist | allowlist   (default when unset: allowlist)
+audit: true         # record validation findings (default: false)
+```
+
+`mode` selects the enforcement posture; see [Adoption](adoption.md) for the
+full comparison and the intended progression:
+
+- **`open`** — nothing is enforced; every command runs. Pair it with `audit` to
+  see what the other modes would block.
+- **`denylist`** — any program may run, but path arguments and redirections
+  must stay inside the working directory (plus `readable_paths` /
+  `writable_paths`), the per-command validators still apply (`git push`,
+  `pnpm publish`, `find -delete`, …), and under the OS sandbox `$HOME` is
+  writable with the [deny lists](#denied-paths-denylist-mode) masked. The
+  opt-out for [incremental adoption](adoption.md); `config mode set denylist`
+  also enables the OS sandbox when it is available and `os_sandbox` was never
+  set.
+- **`allowlist`** — only whitelisted commands run and code-execution runtimes
+  are opt-in. The default.
+
+`audit: true` appends every validation finding — blocked or not, tagged with
+the modes that would block it — to `lite-sandbox audit path`, for
+`lite-sandbox audit report`. Manage both with the CLI:
+
+```bash
+lite-sandbox config mode show                 # effective mode, audit, deny lists
+lite-sandbox config mode set denylist
+lite-sandbox config mode set denylist --dir ~/work/new-repo   # one directory only
+lite-sandbox config audit enable|disable|show
+lite-sandbox audit report [--since 7d] [--cwd ~/work/new-repo] [--json]
+lite-sandbox audit clear
+```
+
+Like every section, `mode` and `audit` can be flipped per directory via
+[overrides](#per-directory-overrides), so one repo can run `allowlist` while
+the rest of the machine runs `denylist`; `mode set --dir` writes such an
+override, and `audit report --cwd` narrows the report to sessions launched in
+that directory.
+
+## Extra commands
+
+Commands outside the whitelist can be allowed in `allowlist` mode (in
+`denylist` and `open` mode every command may already run, so this mainly
+matters for the raw-bash path described below):
 
 ```yaml
 extra_commands:
@@ -43,8 +94,6 @@ Subcommand-restricted entries only unsandbox matching invocations — e.g.
 
 Manage the list with
 `lite-sandbox config unsandboxed-commands add|list|remove`.
-
-The config file is automatically reloaded when changed — no server restart needed.
 
 ## CLI config management
 
@@ -99,6 +148,55 @@ when it is a private, per-user location; when `$TMPDIR` is unset and the temp di
 is the world-shared `/tmp` (the common Linux default), it is **not** granted
 wholesale — the uid-scoped scratchpad above still covers `/tmp/claude-<uid>`
 there.
+
+## Denied paths (denylist mode)
+
+In `denylist` mode the OS sandbox binds `$HOME` writable — developer tooling
+writes caches and state all over it, and enumerating them is a losing game —
+and instead masks a built-in deny list. Two lists, because the reasons differ:
+
+- **Read-denied** paths are hidden entirely (an unreadable empty directory or
+  file; a non-root process gets `EACCES`): `~/.aws` (unless
+  `aws.allow_raw_credentials`), `~/.gnupg`, `~/.netrc`, `~/.kube`, `~/.pypirc`,
+  `~/.config/gh`, `~/Library/Keychains`, and the agents' own credentials
+  (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). SSH
+  private keys are always masked, detected by content.
+- **Write-denied** paths stay readable but cannot be modified: shell startup
+  files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.config/fish/config.fish`, …),
+  `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.npmrc`,
+  `~/.docker/config.json`, persistence locations (`~/.local/bin`, user systemd
+  units, `~/.config/autostart`, `~/.config/environment.d`, LaunchAgents), and —
+  so a command cannot loosen the policy that governs it or erase the evidence —
+  lite-sandbox's own config file, audit log, and mask cache, plus the settings
+  and instruction files of each *installed* agent (`~/.claude/settings.json`,
+  `~/.claude/{skills,agents,commands,plugins}`, `~/.codex/config.toml`,
+  `~/.codex/prompts`, opencode's and Crush's configs). Agent entries are listed
+  only when that agent's config directory exists.
+
+On Linux a missing deny-listed directory is created (mode 0700) so it can be
+masked; a missing deny-listed file cannot be masked without creating an empty
+file on the host, so it is skipped until it exists. `config mode show` marks
+such entries. See [Security](security.md#os-level-sandboxing-optional).
+
+Extend either list; `~` is expanded and missing paths are skipped:
+
+```yaml
+denied_read_paths:
+  - ~/company-secrets
+denied_write_paths:
+  - ~/.local/bin
+```
+
+```bash
+lite-sandbox config denied-read-paths add ~/company-secrets
+lite-sandbox config denied-write-paths add ~/.local/bin
+lite-sandbox config mode show          # prints the effective lists
+```
+
+The lists only take effect under the OS sandbox (`os_sandbox: true`): the AST
+layer already keeps the agent's own commands inside the project, so the masks
+exist for the programs those commands start. In `allowlist` mode the OS
+sandbox keeps its original cwd-confined layout and these lists are unused.
 
 ## Internal readable / writable paths (OS sandbox only)
 

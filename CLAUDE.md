@@ -25,6 +25,8 @@ This is an MCP (Model Context Protocol) server that gives AI coding agents shell
 
 **Command flow:** MCP request → `cmd/serve.go` → `Sandbox.Execute()` in `tool/bash_sandboxed/`, which parses the command into a bash AST (`mvdan.cc/sh/v3`), statically validates it, then executes it via the `mvdan.cc/sh` interpreter (NOT `bash -c`) with runtime hooks that re-validate after variable expansion. When the OS sandbox is enabled, commands are additionally dispatched to a long-lived sandboxed worker process (`os_sandbox/`).
 
+**Modes** (`config/mode.go`, `tool/bash_sandboxed/rules.go`): the config's `mode` — `open`, `denylist`, or `allowlist` (the default; the looser modes are explicit opt-outs via `config mode set` / `install --mode`) — decides which validation rules *block*. Every check's error is classified under a `rule` and routed through `Sandbox.report`, which audits it (when `audit: true`, to `internal/audit`'s JSONL log read by `lite-sandbox audit report`) and returns it only if the mode enforces that rule. The command whitelist, runtime enable gates, and local-binary gate are allowlist-only; the path boundary, argument validators, and structural checks also hold in denylist; open enforces nothing. In denylist mode the OS sandbox worker binds `$HOME` writable and masks the deny lists (`Config.EffectiveDeniedReadPaths/WritePaths`, `os_sandbox.WorkerOptions`). See `docs/adoption.md`.
+
 **Security layers** (see `docs/security.md`, the source of truth):
 
 1. **Static preflight** — commands must be in the `allowedCommands` whitelist (`tool/bash_sandboxed/commands.go`); per-command argument validators (`validators*.go`) block dangerous flags (e.g. `find -exec`, `git push`); coprocesses and read-write redirections are rejected; literal path arguments are checked against allowed directories (`paths.go`). Dynamically-named top-level commands (`$CMD ...`) can't be resolved statically, so they are deferred to the runtime layer rather than rejected; dynamic names inside wrappers (`env`/`xargs`/`find -exec`/`timeout`) are still rejected since those children never re-enter the interpreter.
@@ -37,7 +39,8 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 - `cmd/` — Cobra CLI: MCP server (`serve.go`), installers (`install*.go`), PreToolUse hook (`hook.go`), interactive shell (`shell.go`), config subcommands (`config_*.go`)
 - `tool/bash_sandboxed/` — parsing, validation (static + runtime), execution, background process management
 - `os_sandbox/` — sandboxed worker process and pool (bwrap/sandbox-exec, gob protocol)
-- `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`)
+- `config/` — YAML config loading, watching, and per-directory overrides (any section, via `Config.ForDirectory`); `mode.go` holds the mode enum and the built-in deny lists
+- `internal/audit` — JSONL audit log of validation findings (written by the MCP server and the hook) and the report aggregation behind `lite-sandbox audit report` (`cmd/audit.go` is only flags and printing)
 - `internal/hook` — hook event/decision types; `internal/imds` — IMDS credential server; `internal/dockerproxy` — Docker socket filtering proxy
 - `internal/version` — build version (set by GoReleaser ldflags; `lite-sandbox version`); `internal/ghrelease` — GitHub release download client shared by `lite-sandbox update` (`internal/selfupdate`) and the e2e agent provisioning
 
@@ -65,4 +68,4 @@ cd e2e/claude && uv run pytest -v
 ## Notes
 
 - always inspect `man` pages of commands you are asked to parse. you can rely on the local pages rather than using web fetch.
-- user-facing documentation lives in `docs/` (installation, configuration, runtimes, AWS/Docker, background processes, security, development). Keep it in sync with behavior changes.
+- user-facing documentation lives in `docs/` (adoption, installation, configuration, runtimes, AWS/Docker, background processes, security, development). Keep it in sync with behavior changes.
