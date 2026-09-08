@@ -36,6 +36,10 @@ func TestValidate_AllowedWriteCommands(t *testing.T) {
 		{"tee file", "echo hi | tee out.txt"},
 		{"tee append", "echo hi | tee -a out.txt"},
 		{"tee multiple files", "echo hi | tee a.txt b.txt"},
+		{"mktemp default", "mktemp"},
+		{"mktemp dir", "mktemp -d"},
+		{"mktemp template in cwd", "mktemp fileXXXXXX"},
+		{"mktemp -p cwd", "mktemp -d -p ."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
