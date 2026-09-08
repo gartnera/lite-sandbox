@@ -201,6 +201,12 @@ var allowedCommands = map[string]bool{
 	// Container tooling (config-gated, daemon access via filtering proxy)
 	"docker": true,
 
+	// Temp file/dir creation. mktemp writes to $TMPDIR (/tmp) by default; those
+	// writes are contained by the OS sandbox's private /tmp when it is enabled.
+	// With the OS sandbox off, temp files land in the host /tmp. Template/-p
+	// arguments that name a path are still path-validated like any other command.
+	"mktemp": true,
+
 	// Scoped write commands (path-validated to stay within allowedPaths)
 	"cp":    true,
 	"mv":    true,
