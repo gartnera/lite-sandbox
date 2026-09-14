@@ -14,7 +14,7 @@ var dockerCmd = &cobra.Command{
 
 var dockerShowCmd = &cobra.Command{
 	Use:   "show",
-	Short: "Show current Docker configuration",
+	Short: "Show current Docker configuration (with --dir, the one in effect there)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -205,7 +205,15 @@ var dockerDisableCmd = &cobra.Command{
 			return err
 		}
 
-		cfg.Docker = nil
+		// Under --dir an unset section means "inherit the base", so record an
+		// explicitly disabled one instead: it replaces the base's for that
+		// directory and keeps docker off there.
+		if configDir != "" {
+			f := false
+			cfg.Docker = &config.DockerConfig{Enabled: &f}
+		} else {
+			cfg.Docker = nil
+		}
 
 		if err := saveConfig(cfg); err != nil {
 			return err

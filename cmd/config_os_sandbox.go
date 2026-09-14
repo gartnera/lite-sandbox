@@ -78,6 +78,9 @@ var configOSSandboxCheckCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Check whether the OS sandbox can run on this host",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := rejectConfigDir(cmd); err != nil {
+			return err
+		}
 		if err := os_sandbox.Preflight(cmd.Context()); err != nil {
 			return fmt.Errorf("OS sandbox unavailable: %w", err)
 		}

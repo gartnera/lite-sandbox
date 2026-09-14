@@ -296,10 +296,44 @@ Resolution rules:
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
 
-The `config aws` subcommands accept a `--dir <path>` flag to edit the AWS section
-of an override instead of the base (e.g. `lite-sandbox config aws force-profile
-<profile> --dir <path>`). Overrides for other sections — and the `merge` flag —
-are authored by editing the `overrides` list in the config file directly.
+### Writing overrides from the CLI: `--dir`
+
+Every command under `lite-sandbox config` takes a `--dir <path>` flag — it is
+registered once on `config`, so any setting can be scoped to one directory
+without hand-editing the file:
+
+```bash
+lite-sandbox config extra-commands add npm --dir .        # only in this repo
+lite-sandbox config mode set denylist --dir ~/work/new    # only under that path
+lite-sandbox config runtimes go enable --dir ~/work/acme
+lite-sandbox config docker disable --dir ~/work/untrusted
+lite-sandbox config aws force-profile acme-dev --dir ~/work/acme
+```
+
+A `--dir` edit starts from **what that directory resolves to today** — the base
+config with any override already stored for it applied — and records only the
+sections the command actually changed. So an `add` extends the list the directory
+already sees instead of silently replacing it, and settings the command didn't
+touch keep inheriting from the base. Setting a directory to the value it already
+resolves to writes no override at all.
+
+Reads honour the flag too: `lite-sandbox config show --dir <path>` prints the
+configuration in effect there, and so does any section's `show`/`list`
+(`config docker show --dir .`, `config extra-commands list --dir .`).
+
+Two commands reject `--dir`, since they are not per-directory settings:
+`config path` and `config os-sandbox check`.
+
+To see or undo what `--dir` wrote:
+
+```bash
+lite-sandbox config overrides list            # every directory with settings
+lite-sandbox config overrides remove <dir>    # drop all of that directory's settings
+```
+
+The `merge: true` flag is still authored by editing the `overrides` list in the
+config file directly; `--dir` always writes replace-style sections (seeded from
+the base, as described above).
 
 ## Git Support
 

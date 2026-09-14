@@ -46,14 +46,14 @@ func captureStdout(t *testing.T, fn func()) (out string) {
 // which `config aws force-profile --dir` creates without touching the base.
 func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
-	t.Cleanup(func() { awsOverrideDir = "" })
+	t.Cleanup(func() { configDir = "" })
 
 	// Create a directory override with no base aws section.
-	awsOverrideDir = "/work/acme"
+	configDir = "/work/acme"
 	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"acme-dev"}); err != nil {
 		t.Fatalf("dir force-profile: %v", err)
 	}
-	awsOverrideDir = ""
+	configDir = ""
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -81,8 +81,8 @@ func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
 
 func TestAWSAllowedProfilesCmd(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
-	awsOverrideDir = ""
-	t.Cleanup(func() { awsOverrideDir = "" })
+	configDir = ""
+	t.Cleanup(func() { configDir = "" })
 
 	// allowed_profiles requires force_profile to be set first.
 	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"dev"}); err == nil {
@@ -136,26 +136,28 @@ func TestAWSAllowedProfilesCmd(t *testing.T) {
 
 func TestAWSAllowedProfilesCmd_Dir(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
-	t.Cleanup(func() { awsOverrideDir = "" })
+	t.Cleanup(func() { configDir = "" })
+
+	// --dir with no force_profile anywhere (base or override) is rejected.
+	configDir = "/work/acme"
+	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"acme-dev"}); err == nil {
+		t.Fatal("expected error for --dir with no force_profile in effect")
+	}
+	configDir = ""
 
 	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"ro"}); err != nil {
 		t.Fatalf("base force-profile: %v", err)
 	}
 
-	// --dir without an existing force_profile override is rejected.
-	awsOverrideDir = "/work/acme"
-	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"acme-dev"}); err == nil {
-		t.Fatal("expected error for --dir without an existing override")
-	}
-
-	// Create the override, then set its allowed_profiles.
+	// The directory's own profile, then its allowed_profiles.
+	configDir = "/work/acme"
 	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"acme-ro"}); err != nil {
 		t.Fatalf("dir force-profile: %v", err)
 	}
 	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"acme-dev", "acme-prod"}); err != nil {
 		t.Fatalf("dir allowed-profiles: %v", err)
 	}
-	awsOverrideDir = ""
+	configDir = ""
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -169,6 +171,40 @@ func TestAWSAllowedProfilesCmd_Dir(t *testing.T) {
 		t.Fatalf("override = {%q, %v}, want {acme-ro, [acme-dev acme-prod]}", o.ForceProfile, o.AllowedProfiles)
 	}
 	// Base config is untouched.
+	if cfg.AWS.ForceProfile != "ro" || len(cfg.AWS.AllowedProfiles) != 0 {
+		t.Errorf("base changed: profile=%q allowed=%v", cfg.AWS.ForceProfile, cfg.AWS.AllowedProfiles)
+	}
+}
+
+// TestAWSAllowedProfilesCmd_DirInheritsBaseProfile pins the inheritance --dir
+// gives every setting: a directory with no aws override of its own resolves to
+// the base's force_profile, so allowed_profiles can be set there without
+// restating it, and the stored override carries it.
+func TestAWSAllowedProfilesCmd_DirInheritsBaseProfile(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { configDir = "" })
+
+	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"ro"}); err != nil {
+		t.Fatalf("base force-profile: %v", err)
+	}
+
+	configDir = "/work/acme"
+	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"acme-dev"}); err != nil {
+		t.Fatalf("dir allowed-profiles: %v", err)
+	}
+	configDir = ""
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := findAWSOverride(cfg, "/work/acme")
+	if o == nil {
+		t.Fatal("expected an override for /work/acme")
+	}
+	if o.ForceProfile != "ro" || !slices.Equal(o.AllowedProfiles, []string{"acme-dev"}) {
+		t.Fatalf("override = {%q, %v}, want {ro, [acme-dev]}", o.ForceProfile, o.AllowedProfiles)
+	}
 	if len(cfg.AWS.AllowedProfiles) != 0 {
 		t.Errorf("base AllowedProfiles should be empty, got %v", cfg.AWS.AllowedProfiles)
 	}

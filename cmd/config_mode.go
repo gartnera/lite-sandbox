@@ -39,6 +39,9 @@ var configModeShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if configDir != "" {
+			fmt.Printf("Directory: %s\n", resolveDirArg(configDir))
+		}
 		fmt.Printf("Mode: %s", cfg.EffectiveMode())
 		if cfg.Mode == "" {
 			fmt.Print(" (default; not set in config)")
@@ -57,10 +60,6 @@ var configModeShowCmd = &cobra.Command{
 	},
 }
 
-// modeOverrideDir is the --dir flag for `config mode set`: edit the mode of
-// the directory override for that path instead of the base config.
-var modeOverrideDir string
-
 var configModeSetCmd = &cobra.Command{
 	Use:       "set <open|denylist|allowlist>",
 	Short:     "Set the enforcement mode (globally, or for one directory with --dir)",
@@ -75,21 +74,22 @@ var configModeSetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if modeOverrideDir != "" {
+		baseMode := configBase(cfg).EffectiveMode()
+		cfg.Mode = string(mode)
+
+		if configDir != "" {
 			// Per-directory: only the override's mode changes. The OS sandbox
 			// toggle is a base-config decision and is left alone.
-			o := overridePtr(cfg, modeOverrideDir)
-			o.Mode = string(mode)
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
-			fmt.Printf("mode set to %s for %s (base mode stays %s)\n", mode, o.Path, cfg.EffectiveMode())
-			if mode == config.ModeDenylist && !cfg.ForDirectory(o.Path).OSSandboxEnabled() {
+			fmt.Printf("mode set to %s%s (base mode stays %s)\n", mode, configScope(), baseMode)
+			if mode == config.ModeDenylist && !cfg.OSSandboxEnabled() {
 				fmt.Println("note: os_sandbox is off for this directory, so the deny lists are not enforced against programs commands start")
 			}
 			return nil
 		}
-		cfg.Mode = string(mode)
+
 		// Denylist relies on the OS sandbox to hold its deny lists against child
 		// processes; turn it on when it was never configured and the backend works.
 		var osErr error
@@ -199,7 +199,6 @@ func printDenyList(title string, entries []config.DeniedPath) {
 }
 
 func init() {
-	configModeSetCmd.Flags().StringVar(&modeOverrideDir, "dir", "", "set the mode for this directory (a per-directory override) instead of globally")
 	configCmd.AddCommand(configModeCmd)
 	configModeCmd.AddCommand(configModeShowCmd)
 	configModeCmd.AddCommand(configModeSetCmd)
