@@ -92,12 +92,12 @@ func TestConfigModeSet_OpenWithoutAuditWarns(t *testing.T) {
 
 func TestConfigModeSet_Dir(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
-	t.Cleanup(func() { modeOverrideDir = "" })
+	t.Cleanup(func() { configDir = "" })
 	orig := osSandboxPreflight
 	osSandboxPreflight = func(context.Context) error { t.Fatal("preflight must not run for --dir"); return nil }
 	t.Cleanup(func() { osSandboxPreflight = orig })
 
-	modeOverrideDir = "/work/untrusted"
+	configDir = "/work/untrusted"
 	out := captureStdout(t, func() {
 		if err := configModeSetCmd.RunE(configModeSetCmd, []string{"denylist"}); err != nil {
 			t.Fatal(err)
