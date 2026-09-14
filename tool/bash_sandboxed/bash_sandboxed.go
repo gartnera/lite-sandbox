@@ -76,7 +76,13 @@ type Sandbox struct {
 	unsandboxedBare            map[string]bool
 	unsandboxedBareScriptPaths map[string]bool
 	unsandboxedSub             map[string][][]string
-	imdsEndpoint               string
+	// deniedCommands is the parsed command deny list (denied_commands plus the
+	// built-in self-protection entries), keyed by command base name. It is
+	// checked before every other command gate — static, runtime, and wrapped —
+	// and outranks extra_commands / unsandboxed_commands: a denied invocation
+	// is denied however it was allowed. See denied_commands.go.
+	deniedCommands map[string][]deniedEntry
+	imdsEndpoint   string
 	// imdsRegion is the AWS region resolved for the brokered profile (from the
 	// host-side ~/.aws config, which is masked inside the sandbox). It is injected
 	// as AWS_REGION so regional AWS commands work without an explicit --region,
@@ -132,10 +138,15 @@ type Sandbox struct {
 
 // NewSandbox creates a Sandbox with no extra commands.
 func NewSandbox() *Sandbox {
+	cfg := &config.Config{}
 	return &Sandbox{
-		cfg:           &config.Config{},
+		cfg:           cfg,
 		argValidators: commandArgValidators,
 		bg:            newBackgroundManager(),
+		// The built-in deny entries hold before any config is loaded, so a
+		// sandbox that never sees UpdateConfig (or one whose config failed to
+		// load) still refuses the self-protection commands.
+		deniedCommands: parseDeniedCommands(cfg.EffectiveDeniedCommands()),
 	}
 }
 
@@ -220,6 +231,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.unsandboxedBare = unsandboxedBare
 	s.unsandboxedBareScriptPaths = unsandboxedBareScripts
 	s.unsandboxedSub = unsandboxedSub
+	s.deniedCommands = parseDeniedCommands(cfg.EffectiveDeniedCommands())
 
 	// Invalidate lazily computed state derived from the previous config.
 	// Runtime paths (GOPATH, GOCACHE, pnpm store, ...) are detected on first
@@ -1218,6 +1230,15 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 				// walking so nested commands in the arguments (command/process
 				// substitutions) are still validated statically.
 				if cmdName != "" {
+					// The deny list comes first and is checked even for commands
+					// extra_commands allows: it is the one gate those entries do
+					// not lift. A dynamically-named command reaches the runtime
+					// handlers, which re-check it against the expanded argv.
+					if entry, denied := s.deniedCommandWords(cmdName, n.Args[1:]); denied {
+						if fail(layerStatic, ruleCommandDenylist, commandDeniedError(cmdName, entry)) {
+							return false
+						}
+					}
 					// Check whether this command is allowed via extra_commands.
 					// Bare entries (no subcommand restriction) always match.
 					// Restricted entries (e.g. "pnpx prettier") only match when the
@@ -1492,12 +1513,19 @@ func (s *Sandbox) getBareExtraScriptPaths() map[string]bool {
 // isExtraCommandInvocation reports whether the command string should bypass
 // bash AST parsing because its leading command is a bare extra_commands entry
 // (i.e., added without a subcommand restriction).
+//
+// A command whose name appears anywhere in the deny list never takes the
+// bypass, even with a bare extra_commands entry: the raw path has no parsed
+// argv to match entries against, so the invocation is routed through normal
+// parsing instead, where deniedCommandWords decides it precisely. An
+// invocation that turns out not to match an entry still runs — just parsed and
+// validated rather than handed to the real bash.
 func (s *Sandbox) isExtraCommandInvocation(command string) bool {
 	word := firstCommandWord(command)
 	if word == "" {
 		return false
 	}
-	return s.getBareExtraCommands()[word]
+	return s.getBareExtraCommands()[word] && !s.deniedCommandName(word)
 }
 
 // isUnsandboxedInvocation reports whether the command string's leading command
@@ -1558,28 +1586,12 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 // ExecHandler) and the AST path (extraSubCommandMatches, via wordLits). An
 // invocation with no non-flag arguments matches (typically prints help).
 func argsMatchSubCommand(restrictions [][]string, args []string) bool {
-	var nonFlag []string
-	for _, a := range args {
-		if a == "" || strings.HasPrefix(a, "-") {
-			continue
-		}
-		nonFlag = append(nonFlag, a)
-	}
+	nonFlag := nonFlagArgs(args)
 	if len(nonFlag) == 0 {
 		return true
 	}
 	for _, seq := range restrictions {
-		if len(seq) > len(nonFlag) {
-			continue
-		}
-		match := true
-		for i, tok := range seq {
-			if nonFlag[i] != tok {
-				match = false
-				break
-			}
-		}
-		if match {
+		if hasTokenPrefix(nonFlag, seq) {
 			return true
 		}
 	}

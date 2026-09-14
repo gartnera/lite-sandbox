@@ -166,6 +166,15 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 			if rule == "command_whitelist" && dangerousCommands[subj] {
 				continue
 			}
+			// A deny-list finding carries the `denied-commands remove` command
+			// as its fix so the agent can relay it, but the report never
+			// proposes it: the deny is a decision the user already made, and
+			// the built-in entries are what keep an agent from editing the
+			// sandbox's own policy. Lifting one is a deliberate act, not a
+			// friction fix.
+			if rule == "command_denylist" {
+				continue
+			}
 			reason := fmt.Sprintf("%q: %s", subj, ruleReason(rule))
 			if rule == "command_whitelist" {
 				reason += " (a bare extra_commands entry skips validation; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
@@ -215,6 +224,8 @@ func ruleReason(rule string) string {
 		return "its runtime is not enabled"
 	case "local_binary":
 		return "direct execution of a path"
+	case "command_denylist":
+		return "on the command deny list"
 	}
 	return rule
 }

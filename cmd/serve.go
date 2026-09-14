@@ -356,7 +356,7 @@ func runServe() error {
 		slog.Warn("failed to load config, using defaults", "error", err)
 	} else {
 		sandbox.UpdateConfig(cfg, cwd)
-		slog.Info("loaded config", "extra_commands", cfg.ExtraCommands, "unsandboxed_commands", cfg.UnsandboxedCommands)
+		slog.Info("loaded config", "extra_commands", cfg.ExtraCommands, "unsandboxed_commands", cfg.UnsandboxedCommands, "denied_commands", cfg.EffectiveDeniedCommands())
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -398,7 +398,7 @@ func runServe() error {
 			// the sandbox and IMDS below both see the effective config.
 			newCfg = newCfg.ForDirectory(cwd)
 			sandbox.UpdateConfig(newCfg, cwd)
-			slog.Info("reloaded config", "extra_commands", newCfg.ExtraCommands, "unsandboxed_commands", newCfg.UnsandboxedCommands)
+			slog.Info("reloaded config", "extra_commands", newCfg.ExtraCommands, "unsandboxed_commands", newCfg.UnsandboxedCommands, "denied_commands", newCfg.EffectiveDeniedCommands())
 
 			// Start, stop, or restart the IMDS server to match the new AWS settings.
 			if err := imdsLC.apply(newCfg.AWS); err != nil {

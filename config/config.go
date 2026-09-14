@@ -568,8 +568,16 @@ type Config struct {
 
 	ExtraCommands       []string `yaml:"extra_commands,omitempty"`
 	UnsandboxedCommands []string `yaml:"unsandboxed_commands,omitempty"`
-	ReadablePaths       []string `yaml:"readable_paths,omitempty"`
-	WritablePaths       []string `yaml:"writable_paths,omitempty"`
+	// DeniedCommands extends the built-in command deny list (see
+	// DefaultDeniedCommands) applied by the validation layers in denylist and
+	// allowlist mode. Entries use the extra_commands format — a bare command
+	// name, or a name plus a leading-argument prefix ("lite-sandbox config") —
+	// and a match blocks the invocation even when extra_commands or
+	// unsandboxed_commands allows it. An entry prefixed with "-" drops a
+	// built-in default instead of adding one. See EffectiveDeniedCommands.
+	DeniedCommands []string `yaml:"denied_commands,omitempty"`
+	ReadablePaths  []string `yaml:"readable_paths,omitempty"`
+	WritablePaths  []string `yaml:"writable_paths,omitempty"`
 	// InternalReadablePaths / InternalWritablePaths grant access only at the OS
 	// sandbox layer (the bwrap/sandbox-exec worker), so programs a command spawns
 	// can reach their own data (e.g. a tool's ~/.cache directory) — while the
