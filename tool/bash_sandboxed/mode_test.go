@@ -44,6 +44,7 @@ func TestRule_BlockedIn(t *testing.T) {
 		{ruleCommandWhitelist, false, false, true},
 		{ruleRuntimeDisabled, false, false, true},
 		{ruleLocalBinary, false, false, true},
+		{ruleCommandDenylist, false, true, true},
 		{rulePathBoundary, false, true, true},
 		{ruleArgValidator, false, true, true},
 		{ruleStructural, false, true, true},

@@ -231,6 +231,12 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if cmdName == "" {
 		return tagRule(ruleStructural, "", fmt.Errorf("dynamic command names are not allowed"))
 	}
+	// The command deny list applies to a wrapped command exactly as it does to
+	// a top-level one — a wrapper spawns its child itself, so this is the only
+	// layer that sees it.
+	if entry, denied := s.deniedCommandWords(cmdName, args[1:]); denied {
+		return commandDeniedError(cmdName, entry)
+	}
 	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName))
 	}

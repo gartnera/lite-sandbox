@@ -25,6 +25,7 @@ os_sandbox: true    # bubblewrap / sandbox-exec worker
 | | `open` | `denylist` | `allowlist` |
 |---|---|---|---|
 | Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; runtimes opt-in |
+| Denied commands (`denied_commands`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
 | Path arguments and redirections outside the project | run | blocked | blocked |
 | `git push`, `pnpm publish`, `find -delete`, `tar -x`, … | run | blocked | blocked |
 | Network tools (`curl`, `wget`, `nc`) | run | run | blocked |
@@ -49,6 +50,12 @@ is *scope* and *shared state*:
 - The per-command validators still apply: `git push` (unless
   `git.remote_write`), `pnpm publish`, `cargo publish`, `find -delete`,
   `tar -x`, `find -exec` and the other flags the sandbox has always blocked.
+- The command deny list still applies, and outranks `extra_commands`. Its
+  built-in entries keep the agent out of the sandbox's own policy: without
+  them, dropping the whitelist means `lite-sandbox config mode set open` is
+  just another program the agent may run, and the config is hot-reloaded.
+  `lite-sandbox config denied-commands list` prints the effective list; extend
+  it with `denied-commands add`.
 - Under the OS sandbox, `$HOME` is writable so caches and tool state just
   work, and a built-in deny list is carved out: credential stores are hidden
   (`~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.kube`, the agents' own auth files,
@@ -59,7 +66,10 @@ is *scope* and *shared state*:
   `denied-write-paths add`.
 
 This mode assumes the agent is cooperative: it follows the constraints it is
-told about and does not write a script to route around a denial. That matches
+told about and does not write a script to route around a denial. The deny lists
+are gates at the validation layer, so a program the agent starts is confined by
+the OS sandbox or not at all — which is why `mode set denylist` turns the OS
+sandbox on when it can, and says so when it cannot. That matches
 observed behavior for agents working on a developer's own code. It does *not*
 hold against prompt injection, where content the agent reads instructs it to
 escape; `denylist` will not stop a Python one-liner that reads a file the
@@ -113,8 +123,9 @@ The suggestions are derived from what the agent attempted, which means the
 agent also decides what ranks highest. Treat them as proposals to review. The
 report never proposes privilege, network, or shell commands for
 `extra-commands add`, never proposes widening the boundary to your home
-directory, a deny-listed path, or a system directory, and notes that a bare
-`extra_commands` entry skips validation entirely.
+directory, a deny-listed path, or a system directory, never proposes lifting a
+`denied_commands` entry, and notes that a bare `extra_commands` entry skips
+validation entirely.
 
 The log is written by the MCP server and the PreToolUse hook, never by
 sandboxed commands, and is created `0600`, since command strings can carry

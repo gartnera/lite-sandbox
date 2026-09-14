@@ -95,6 +95,74 @@ Subcommand-restricted entries only unsandbox matching invocations — e.g.
 Manage the list with
 `lite-sandbox config unsandboxed-commands add|list|remove`.
 
+## Denied commands
+
+`denied_commands` is the deny list the other two cannot lift. It is checked
+before every command gate — static, runtime, and wrapped (`env`, `xargs`,
+`timeout`, `find -exec`) — and a match refuses the invocation in `denylist` and
+`allowlist` mode however else it was allowed, `extra_commands` and
+`unsandboxed_commands` included. In `open` mode, like every rule, a match is
+only recorded to the audit log.
+
+```yaml
+denied_commands:
+  - sudo                 # bare entry: the command itself, whatever its arguments
+  - gh auth              # subcommand entry: only invocations starting with it
+  - -lite-sandbox hook   # leading "-": drop a built-in entry (see below)
+```
+
+Entries use the `extra_commands` format, with three differences that come from
+being a deny list rather than an allow list:
+
+- **Matching is by base name**, so an entry also covers the same binary invoked
+  by path (`/usr/local/bin/lite-sandbox`, `./lite-sandbox`). A deny that can be
+  sidestepped by spelling the path differently is not a deny.
+- **A subcommand entry matches wherever the subcommand could start**, not only
+  at the first argument, because which flags consume a value is per-command
+  knowledge the deny list does not have: `lite-sandbox --log-level debug config
+  mode set open` matches `lite-sandbox config`. Tokens that appear later as
+  data do not match — with `git push` denied, `git log --grep push` still runs.
+- **A bare entry never takes the raw-bash path.** A command named in the deny
+  list is always parsed, even if `extra_commands` lists it bare, so the
+  invocation can be matched against the entry.
+
+### Built-in entries
+
+The defaults deny the sandbox's own policy-editing subcommands — `config`,
+`install`, `update`, and `hook` — for the canonical binary name and the name it
+was installed under:
+
+```
+lite-sandbox config denied-commands list
+lite-sandbox config   (built-in)
+lite-sandbox install  (built-in)
+lite-sandbox update   (built-in)
+lite-sandbox hook     (built-in)
+```
+
+They exist because `denylist` mode drops the command whitelist: without them an
+agent can run `lite-sandbox config mode set open`, which the MCP server
+hot-reloads, and enforcement is off for its next command. (With the OS sandbox
+enabled the config file is also mounted read-only in the worker, so the write
+fails there too — but the OS sandbox is off by default and unavailable without
+bubblewrap, and these entries hold either way.)
+
+The entries are subcommand-scoped, so the read-only subcommands an agent uses
+to explain its own constraints (`version`, `config show`, `audit report`) keep
+working. Lifting one is a deliberate decision:
+
+```bash
+lite-sandbox config denied-commands list
+lite-sandbox config denied-commands add sudo "gh auth"
+lite-sandbox config denied-commands remove "lite-sandbox update"   # records "-lite-sandbox update"
+```
+
+`remove` deletes a user entry, and records a `-` entry for a built-in one
+(which is what `denied_commands: ["-lite-sandbox update"]` above does by hand).
+Like every section, `denied_commands` can be set per directory through
+[overrides](#per-directory-overrides); the built-in entries apply under an
+override too, since they are not part of the section it replaces.
+
 ## CLI config management
 
 ```bash
@@ -112,6 +180,11 @@ lite-sandbox config extra-commands list
 
 # Remove extra allowed commands
 lite-sandbox config extra-commands remove curl
+
+# Manage the command deny list (outranks the two lists above)
+lite-sandbox config denied-commands list
+lite-sandbox config denied-commands add sudo "gh auth"
+lite-sandbox config denied-commands remove sudo
 ```
 
 ## Readable / writable paths

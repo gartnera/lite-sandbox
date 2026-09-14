@@ -571,6 +571,15 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	}
 	extra := s.getExtraCommands()
 	cmdName := args[0]
+	// Runtime deny-list check, before every other gate and every dispatch
+	// (bash, awk, python, scripts, the OS sandbox worker): this is where a
+	// dynamically-named or script-launched denied command is caught, since its
+	// real name and arguments are only concrete here.
+	if entry, denied := s.deniedCommand(cmdName, args[1:]); denied {
+		if err := s.report(ctx, layerRuntime, ruleCommandDenylist, commandDeniedError(cmdName, entry)); err != nil {
+			return err
+		}
+	}
 	// Runtime command whitelist check — catches blocked commands
 	// introduced via source/. or other dynamic execution paths.
 	// Process-control commands (kill, pkill) are permitted only when
@@ -754,6 +763,11 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			if len(args) > 0 && interp.IsBuiltin(args[0]) {
 				name := args[0]
 				extra := s.getExtraCommands()
+				if entry, denied := s.deniedCommand(name, args[1:]); denied {
+					if err := s.report(ctx, layerRuntime, ruleCommandDenylist, commandDeniedError(name, entry)); err != nil {
+						return nil, err
+					}
+				}
 				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
 				if !allowedCommands[name] && !extra[name] && !osOnly {
 					if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(name)); err != nil {

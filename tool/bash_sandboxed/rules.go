@@ -24,6 +24,11 @@ const (
 	// ruleLocalBinary: direct execution of a path (./script, /path/bin) without
 	// local_binary_execution enabled. Allowlist only.
 	ruleLocalBinary rule = "local_binary"
+	// ruleCommandDenylist: the invocation matches an entry in the command deny
+	// list (config denied_commands plus the built-in self-protection entries).
+	// Enforced in denylist mode too, and it outranks extra_commands: a denied
+	// command stays denied however it was allowed.
+	ruleCommandDenylist rule = "command_denylist"
 	// rulePathBoundary: a path argument, redirection target, or file open
 	// resolves outside the readable/writable boundary, or inside .git.
 	rulePathBoundary rule = "path_boundary"
@@ -215,6 +220,17 @@ func (s *Sandbox) enforcesAllowlist() bool {
 func commandNotAllowed(name string) error {
 	fix := fmt.Sprintf("lite-sandbox config extra-commands add %s", name)
 	return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed; the user can allow it with `%s`", name, fix))
+}
+
+// commandDeniedError builds the tagged deny-list error for an invocation of
+// name that matched entry. Unlike the whitelist error, the remedy it names is
+// a removal from the deny list, which is a deliberate user decision — the
+// agent relays it, it cannot act on it (the removal itself runs through
+// `lite-sandbox config`, which the built-in entries deny).
+func commandDeniedError(name, entry string) error {
+	fix := fmt.Sprintf("lite-sandbox config denied-commands remove %q", entry)
+	return tagRuleFix(ruleCommandDenylist, name, fix,
+		fmt.Errorf("command %q is denied by denied_commands entry %q; the user can lift it with `%s`", name, entry, fix))
 }
 
 // directExecutionNotAllowed builds the tagged error for running a path
