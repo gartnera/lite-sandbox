@@ -46,13 +46,13 @@ func TestBuildBwrapArgs_MasksAfterBinds(t *testing.T) {
 	dockerSock := "/var/run/docker.sock"
 
 	args := buildBwrapArgs(bwrapPlan{
-		self:        "/usr/bin/lite-sandbox",
-		workDir:     workDir,
-		binds:       []string{home}, // writable_paths: ["~"] binds $HOME writable
-		roBinds:     []string{home}, // internal_readable_paths: ["~"] also overlaps every mask
-		sshKeyPaths: []string{sshKey},
-		maskPaths:   []string{dockerSock},
-		awsTmpfsDir: awsDir,
+		self:            "/usr/bin/lite-sandbox",
+		workDir:         workDir,
+		binds:           []string{home},   // writable_paths: ["~"] binds $HOME writable
+		roBinds:         []string{home},   // internal_readable_paths: ["~"] also overlaps every mask
+		deniedReadFiles: []string{sshKey}, // the credential masks arrive as read-denied paths, in every mode
+		deniedReadDirs:  []string{awsDir},
+		maskPaths:       []string{dockerSock},
 	})
 
 	workDirIdx := bindTargetIndex(t, args, workDir)
@@ -111,13 +111,17 @@ func TestBuildBwrapArgs_Structure(t *testing.T) {
 	}
 }
 
-// TestBuildBwrapArgs_NoAWSWhenEmpty verifies an empty awsTmpfsDir emits no
-// ~/.aws tmpfs (the caller passes "" when blocking is off or the dir is absent).
-func TestBuildBwrapArgs_NoAWSWhenEmpty(t *testing.T) {
+// TestBuildBwrapArgs_NoMasksWhenEmpty verifies that with no deny-list entries
+// no mask is emitted: the caller decides what is hidden (a lifted ~/.aws or
+// SSH key is simply absent from the plan).
+func TestBuildBwrapArgs_NoMasksWhenEmpty(t *testing.T) {
 	args := buildBwrapArgs(bwrapPlan{self: "/usr/bin/lite-sandbox", workDir: "/work"})
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--tmpfs" && strings.HasSuffix(args[i+1], "/.aws") {
-			t.Fatalf("did not expect a ~/.aws tmpfs with empty awsTmpfsDir, args: %v", args)
+		if args[i] == "--tmpfs" && args[i+1] != "/tmp" {
+			t.Fatalf("did not expect a mask tmpfs with an empty deny list, args: %v", args)
+		}
+		if args[i] == "--perms" {
+			t.Fatalf("did not expect --perms with an empty deny list, args: %v", args)
 		}
 	}
 }

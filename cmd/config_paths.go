@@ -20,6 +20,9 @@ entry is a path plus what applies there:
 
   read: true              readable                            (allow <path>)
   write: true             writable, which implies readable    (allow <path> --write)
+                          a grant on a path the built-in deny lists name lifts
+                          that entry (allow ~/.ssh --internal un-masks the SSH
+                          private keys for the programs a command spawns)
   internal: true          the grant holds only at the OS sandbox layer, for
                           programs a command spawns; the agent's own reads and
                           writes there are still refused      (allow ... --internal)
@@ -96,9 +99,22 @@ var configPathsAllowCmd = &cobra.Command{
 				return err
 			}
 			fmt.Printf("%s: %s\n", p, e.Describe())
+			// A grant on a built-in deny-list path is how the default is
+			// lifted, so say what it just un-masked.
+			for _, d := range cfg.DeniedEntriesLiftedBy(p) {
+				fmt.Printf("  lifts built-in denial: %s%s\n", d.Path, describeLift(d))
+			}
 		}
 		return saveConfig(cfg)
 	},
+}
+
+// describeLift is the parenthetical after a lifted built-in's path.
+func describeLift(d config.DeniedPath) string {
+	if d.Note != "" {
+		return " (" + d.Note + ")"
+	}
+	return ""
 }
 
 var configPathsDenyCmd = &cobra.Command{

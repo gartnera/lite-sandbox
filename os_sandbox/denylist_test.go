@@ -18,9 +18,8 @@ func TestBuildBwrapArgs_DenylistPosture(t *testing.T) {
 		self:             "/usr/bin/lite-sandbox",
 		workDir:          home + "/proj",
 		homeDir:          home,
-		sshKeyPaths:      []string{home + "/.ssh/id_rsa"},
 		deniedReadDirs:   []string{home + "/.aws", home + "/.gnupg"},
-		deniedReadFiles:  []string{home + "/.netrc", home + "/.claude.json"},
+		deniedReadFiles:  []string{home + "/.ssh/id_rsa", home + "/.netrc", home + "/.claude.json"},
 		deniedWritePaths: []string{home + "/.bashrc", home + "/.ssh"},
 		maskFile:         "/cache/lite-sandbox/mask-empty",
 	})
@@ -63,10 +62,10 @@ func TestBuildBwrapArgs_DenylistPosture(t *testing.T) {
 }
 
 // TestBuildBwrapArgs_AllowlistUnchanged checks that without denylist fields the
-// layout has no home bind and the SSH mask falls back to /dev/null when no
-// mask file is given.
+// layout has no home bind and the SSH key mask (an every-mode read-denied
+// file) falls back to /dev/null when no mask file is given.
 func TestBuildBwrapArgs_AllowlistUnchanged(t *testing.T) {
-	args := buildBwrapArgs(bwrapPlan{self: "/usr/bin/lite-sandbox", workDir: "/work", sshKeyPaths: []string{"/home/user/.ssh/id_rsa"}})
+	args := buildBwrapArgs(bwrapPlan{self: "/usr/bin/lite-sandbox", workDir: "/work", deniedReadFiles: []string{"/home/user/.ssh/id_rsa"}})
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--bind /home/user /home/user") {
 		t.Errorf("no home bind expected in allowlist layout: %v", args)
@@ -116,7 +115,7 @@ func TestGenerateSBPLProfile_Denylist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	profile := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, nil, sbplDenylist{
+	profile := generateSBPLProfile("/tmp/work", nil, nil, sbplDenylist{
 		homeWritable:     true,
 		deniedReadPaths:  []string{denyDir},
 		deniedWritePaths: []string{denyFile},
@@ -146,7 +145,7 @@ func TestGenerateSBPLProfile_Denylist(t *testing.T) {
 	}
 
 	// Without the denylist fields none of this appears.
-	plain := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, nil, sbplDenylist{})
+	plain := generateSBPLProfile("/tmp/work", nil, nil, sbplDenylist{})
 	if strings.Contains(plain, homeAllow) {
 		t.Errorf("allowlist profile must not make home writable:\n%s", plain)
 	}
@@ -161,7 +160,7 @@ func TestGenerateSBPLProfile_MaskPathsUnwritableWithHome(t *testing.T) {
 		t.Skip("no home directory")
 	}
 	sock := filepath.Join(home, ".docker", "run", "docker.sock")
-	profile := generateSBPLProfile("/tmp/work", nil, credentialMasks{}, []string{sock}, sbplDenylist{homeWritable: true})
+	profile := generateSBPLProfile("/tmp/work", nil, []string{sock}, sbplDenylist{homeWritable: true})
 	homeAllow := `(allow file-write* (subpath "` + home + `"))`
 	sockDeny := `(deny file-write* (literal "` + sock + `"))`
 	if strings.LastIndex(profile, sockDeny) < strings.Index(profile, homeAllow) {

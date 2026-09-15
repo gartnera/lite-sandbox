@@ -63,7 +63,9 @@ is *scope* and *shared state*:
   (shell rc files, `~/.gitconfig`, `~/.ssh`, the agent settings that hold the
   Bash deny, and lite-sandbox's own config). `lite-sandbox config mode show`
   prints the effective lists; extend them with `lite-sandbox config paths deny
-  <path>` (hidden) or `paths deny <path> --write` (read-only).
+  <path>` (hidden) or `paths deny <path> --write` (read-only), and lift a
+  built-in with a grant on its path (`paths allow ~/.ssh --internal` lets the
+  `ssh` a command spawns use the keys).
 
 This mode assumes the agent is cooperative: it follows the constraints it is
 told about and does not write a script to route around a denial. The deny lists

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,6 +48,57 @@ func TestConfigModeCmd(t *testing.T) {
 	})
 	if !strings.Contains(out, "Mode: denylist") || !strings.Contains(out, "Read-denied paths") || !strings.Contains(out, "os_sandbox is off") {
 		t.Errorf("denylist show output = %q", out)
+	}
+}
+
+// TestConfigModeCmd_ShowLiftedBuiltins checks `mode show` lists the SSH keys as
+// hidden in every mode and, once a paths grant lifts them, says so with the
+// grant rather than dropping them from the listing.
+func TestConfigModeCmd_ShowLiftedBuiltins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(home, ".ssh", "id_ed25519")
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "config"} {
+		if err := os.WriteFile(filepath.Join(home, ".ssh", name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	show := func() string {
+		return captureStdout(t, func() {
+			if err := configModeShowCmd.RunE(configModeShowCmd, nil); err != nil {
+				t.Fatalf("show: %v", err)
+			}
+		})
+	}
+	out := show()
+	if !strings.Contains(out, "Always hidden under the OS sandbox") || !strings.Contains(out, key+"   (SSH private key)") {
+		t.Errorf("allowlist show should list the key as always hidden:\n%s", out)
+	}
+	if strings.Contains(out, key+".pub") || strings.Contains(out, "Read-denied paths") {
+		t.Errorf("allowlist show must list neither the public key nor the denylist-only lists:\n%s", out)
+	}
+
+	pathsAllowInternal = true
+	t.Cleanup(func() { pathsAllowInternal = false })
+	allowOut := captureStdout(t, func() {
+		if err := configPathsAllowCmd.RunE(configPathsAllowCmd, []string{"~/.ssh"}); err != nil {
+			t.Fatalf("allow: %v", err)
+		}
+	})
+	if !strings.Contains(allowOut, "lifts built-in denial: "+key+" (SSH private key)") {
+		t.Errorf("allow should report the lifted key:\n%s", allowOut)
+	}
+	out = show()
+	if !strings.Contains(out, key+"   (NOT enforced: lifted by the paths grant on ~/.ssh; SSH private key)") {
+		t.Errorf("show should report the lifted key with its grant:\n%s", out)
 	}
 }
 
