@@ -97,9 +97,29 @@ func (c *Config) validateModes() error {
 // user's shell — so missing files are skipped and reported by `config mode
 // show`. Built-in entries carry the right kind; user-added entries are
 // classified by what exists on disk.
+//
+// The remaining fields describe a built-in entry. A built-in is one statement
+// in the default path list that the config's own `paths` entries are merged
+// over (see LiftedBy and the Effective* accessors): a grant on the same path
+// lifts it, so the user decides, not the binary.
 type DeniedPath struct {
 	Path string
 	Dir  bool
+	// AllModes marks a built-in the OS sandbox enforces in every mode, not only
+	// denylist: the credential masks (SSH private keys; ~/.aws in IMDS broker
+	// mode), which hold in allowlist mode too where the rest of the deny lists
+	// are unused.
+	AllModes bool
+	// Group is a second path whose grant also lifts the entry, for a built-in
+	// that stands for part of a directory: each SSH private key names ~/.ssh,
+	// so one grant on the directory lifts every key while the non-key files
+	// there were never masked.
+	Group string
+	// Note describes a built-in in listings ("SSH private key").
+	Note string
+	// LiftedBy is the path (as written) of the paths grant that lifts this
+	// built-in, when one does; such an entry is reported, not enforced.
+	LiftedBy string
 }
 
 // Paths returns just the path strings of entries.
@@ -113,8 +133,9 @@ func deniedPathStrings(entries []DeniedPath) []string {
 
 // DefaultDeniedReadPaths returns the built-in set of paths whose contents are
 // hidden from sandboxed commands in denylist mode: credential stores and the
-// agents' own auth files. Paths are absolute. SSH private keys are handled
-// separately by the worker, which detects them by content rather than name.
+// agents' own auth files, plus — in every mode (AllModes) — the SSH private
+// keys in ~/.ssh, one entry per key file (see SSHPrivateKeyEntries). Paths are
+// absolute.
 //
 // The list is deliberately limited to secrets that developer tooling rarely
 // needs: a masked ~/.npmrc or ~/.docker/config.json would break private
@@ -147,7 +168,7 @@ func DefaultDeniedReadPaths() []DeniedPath {
 	if codex := codexHome(home); dirExists(codex) {
 		out = append(out, file(filepath.Join(codex, "auth.json")))
 	}
-	return out
+	return append(out, SSHPrivateKeyEntries(home)...)
 }
 
 // DefaultDeniedWritePaths returns the built-in set of paths sandboxed commands
@@ -240,26 +261,130 @@ func DefaultDeniedWritePaths() []DeniedPath {
 	return out
 }
 
-// EffectiveDeniedReadEntries returns the read-denied entries in effect: the
-// built-in defaults plus the config's read: false paths entries (and the
+// EffectiveDeniedReadEntries returns the read-denied entries in effect in
+// denylist mode: the built-in defaults that no paths grant lifts (see
+// LiftedDeniedEntries) plus the config's read: false paths entries (and the
 // deprecated denied_read_paths), with ~ expanded and classified by what exists
 // on disk. When AWS is configured to use raw credentials, ~/.aws is dropped
 // from the defaults since the CLI must read it.
 func (c *Config) EffectiveDeniedReadEntries() []DeniedPath {
-	defaults := DefaultDeniedReadPaths()
-	if c != nil && c.AWS.AllowsRawCredentials() {
-		if home, err := os.UserHomeDir(); err == nil {
-			defaults = deleteDeniedPath(defaults, filepath.Join(home, ".aws"))
-		}
-	}
-	return uniqueDeniedPaths(append(defaults, userDeniedPaths(c.DeniedReadPathList())...))
+	active, _ := c.splitDefaults(c.defaultDeniedReadPaths(), liftsRead)
+	return uniqueDeniedPaths(append(active, userDeniedPaths(c.DeniedReadPathList())...))
 }
 
-// EffectiveDeniedWriteEntries returns the write-denied entries in effect: the
-// built-in defaults plus the config's write: false paths entries (and the
-// deprecated denied_write_paths).
+// EffectiveDeniedWriteEntries returns the write-denied entries in effect in
+// denylist mode: the built-in defaults that no paths grant lifts plus the
+// config's write: false paths entries (and the deprecated denied_write_paths).
 func (c *Config) EffectiveDeniedWriteEntries() []DeniedPath {
-	return uniqueDeniedPaths(append(DefaultDeniedWritePaths(), userDeniedPaths(c.DeniedWritePathList())...))
+	active, _ := c.splitDefaults(DefaultDeniedWritePaths(), liftsWrite)
+	return uniqueDeniedPaths(append(active, userDeniedPaths(c.DeniedWritePathList())...))
+}
+
+// AlwaysDeniedReadEntries returns the read-denied built-ins in effect in every
+// mode — the credential masks (AllModes) that no paths grant lifts. In
+// allowlist mode they are the whole of what the OS sandbox hides; in denylist
+// mode they are a subset of EffectiveDeniedReadEntries.
+func (c *Config) AlwaysDeniedReadEntries() []DeniedPath {
+	active, _ := c.splitDefaults(c.defaultDeniedReadPaths(), liftsRead)
+	var out []DeniedPath
+	for _, d := range active {
+		if d.AllModes {
+			out = append(out, d)
+		}
+	}
+	return uniqueDeniedPaths(out)
+}
+
+// LiftedDeniedEntries returns the built-in deny-list entries the config's paths
+// grants lift, read-denied and write-denied, each with LiftedBy set to the
+// granting path. They are what `config mode show` reports as not enforced.
+func (c *Config) LiftedDeniedEntries() (read, write []DeniedPath) {
+	_, read = c.splitDefaults(c.defaultDeniedReadPaths(), liftsRead)
+	_, write = c.splitDefaults(DefaultDeniedWritePaths(), liftsWrite)
+	return read, write
+}
+
+// defaultDeniedReadPaths is DefaultDeniedReadPaths with the aws section
+// applied to its ~/.aws entry — the aws section is a shim over the same list,
+// not a second mask. allow_raw_credentials drops the entry, since the CLI must
+// read the files; force_profile (IMDS broker mode) makes it hold in every mode,
+// since the credentials come from the broker and the files must stay hidden
+// even where the rest of the deny list is unused. Like every built-in, a paths
+// grant on ~/.aws lifts it.
+func (c *Config) defaultDeniedReadPaths() []DeniedPath {
+	defaults := DefaultDeniedReadPaths()
+	if c == nil {
+		return defaults
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return defaults
+	}
+	aws := filepath.Join(home, ".aws")
+	switch {
+	case c.AWS.AllowsRawCredentials():
+		defaults = deleteDeniedPath(defaults, aws)
+	case c.AWS.UsesIMDS():
+		for i := range defaults {
+			if defaults[i].Path == aws {
+				defaults[i].AllModes = true
+				defaults[i].Note = "AWS credentials; brokered via IMDS"
+			}
+		}
+	}
+	return defaults
+}
+
+// splitDefaults merges the config's paths entries over the built-in defaults:
+// a default is lifted when an entry for the same path (or the default's Group)
+// grants what the default denies, per lifts. It returns the defaults still in
+// force and the lifted ones with LiftedBy set. Only an exact path lifts — a
+// grant on a parent (a writable ~, say) leaves every default beneath it
+// masked, so widening the boundary never silently drops the deny lists.
+func (c *Config) splitDefaults(defaults []DeniedPath, lifts func(PathEntry) bool) (active, lifted []DeniedPath) {
+	var grants []PathEntry
+	for _, e := range c.AllPathEntries() {
+		if lifts(e) {
+			grants = append(grants, e)
+		}
+	}
+	for _, d := range defaults {
+		by := ""
+		for _, e := range grants {
+			if e.SamePath(d.Path) || (d.Group != "" && e.SamePath(d.Group)) {
+				by = e.Path
+				break
+			}
+		}
+		if by == "" {
+			active = append(active, d)
+			continue
+		}
+		d.LiftedBy = by
+		lifted = append(lifted, d)
+	}
+	return active, lifted
+}
+
+// liftsRead reports whether a paths entry grants read access (a write grant
+// implies read), which lifts a read denial on its path.
+func liftsRead(e PathEntry) bool { return e.GrantsRead() || e.GrantsWrite() }
+
+// liftsWrite reports whether a paths entry grants write access, which lifts a
+// write denial on its path.
+func liftsWrite(e PathEntry) bool { return e.GrantsWrite() }
+
+// DeniedEntriesLiftedBy returns the built-in deny-list entries that a paths
+// grant on p lifts, for the CLI to say so when it records one.
+func (c *Config) DeniedEntriesLiftedBy(p string) []DeniedPath {
+	read, write := c.LiftedDeniedEntries()
+	var out []DeniedPath
+	for _, d := range append(read, write...) {
+		if (PathEntry{Path: d.LiftedBy}).SamePath(p) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // EffectiveDeniedReadPaths is EffectiveDeniedReadEntries as plain paths.

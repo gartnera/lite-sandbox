@@ -88,7 +88,6 @@ func printAWSMode(a *config.AWSConfig, indent string) {
 		fmt.Printf("%sDescription: AWS CLI reads from ~/.aws/credentials directly\n", indent)
 		fmt.Printf("%sSecurity: Less secure (long-term credentials)\n", indent)
 		fmt.Printf("%s~/.aws: Accessible\n", indent)
-		fmt.Printf("%s~/.ssh: Private keys blocked\n", indent)
 	case a.UsesIMDS():
 		fmt.Printf("%sMode: force_profile (%s)\n", indent, a.IMDSProfile())
 		fmt.Printf("%sDescription: AWS CLI uses IMDS server with temporary credentials\n", indent)
@@ -96,8 +95,7 @@ func printAWSMode(a *config.AWSConfig, indent string) {
 		if len(a.AllowedProfiles) > 0 {
 			fmt.Printf("%sAllowed profiles (via AWS_PROFILE): %s\n", indent, strings.Join(a.AllowedProfiles, ", "))
 		}
-		fmt.Printf("%s~/.aws: Blocked\n", indent)
-		fmt.Printf("%s~/.ssh: Private keys blocked\n", indent)
+		fmt.Printf("%s~/.aws: Blocked under the OS sandbox in every mode (a paths grant on ~/.aws lifts it; `config mode show`)\n", indent)
 	default:
 		fmt.Printf("%sMode: disabled\n", indent)
 		fmt.Printf("%sAWS CLI commands are not allowed\n", indent)
@@ -113,7 +111,7 @@ In this mode:
 - AWS CLI reads credentials from ~/.aws/credentials directly
 - No IMDS server is started
 - ~/.aws is NOT blocked (accessible to commands)
-- ~/.ssh private keys are ALWAYS blocked
+- ~/.ssh private keys stay blocked (a paths grant on ~/.ssh is what lifts that)
 - Uses long-term credentials (no automatic rotation)
 
 This mode is simpler but less secure. Use for development/testing only.`,

@@ -263,9 +263,27 @@ func TestEffectiveDeniedReadPaths_RawAWSCredentials(t *testing.T) {
 	if slices.Contains(cfg.EffectiveDeniedReadPaths(), aws) {
 		t.Error("~/.aws must stay readable when allow_raw_credentials is set")
 	}
-	// IMDS mode keeps it denied (the worker masks it anyway).
+	// IMDS mode keeps it denied, and in every mode: the credentials come from
+	// the broker, so the files stay hidden in allowlist mode too.
 	cfg = &Config{AWS: &AWSConfig{ForceProfile: "dev"}}
 	if !slices.Contains(cfg.EffectiveDeniedReadPaths(), aws) {
 		t.Error("~/.aws should stay read-denied in IMDS mode")
+	}
+	if !slices.Contains(deniedPathStrings(cfg.AlwaysDeniedReadEntries()), aws) {
+		t.Error("~/.aws should be hidden in every mode under IMDS")
+	}
+	// Without the aws section it is a denylist-only entry.
+	if slices.Contains(deniedPathStrings((&Config{}).AlwaysDeniedReadEntries()), aws) {
+		t.Error("~/.aws should be denylist-only without an aws section")
+	}
+	// The aws section is a shim over the paths list: a grant on ~/.aws lifts
+	// the built-in like any other, IMDS mode included.
+	yes := true
+	cfg = &Config{AWS: &AWSConfig{ForceProfile: "dev"}, Paths: []PathEntry{{Path: "~/.aws", Read: &yes, Internal: true}}}
+	if slices.Contains(cfg.EffectiveDeniedReadPaths(), aws) || len(cfg.AlwaysDeniedReadEntries()) != 0 && slices.Contains(deniedPathStrings(cfg.AlwaysDeniedReadEntries()), aws) {
+		t.Error("a paths grant on ~/.aws should lift the built-in denial")
+	}
+	if read, _ := cfg.LiftedDeniedEntries(); len(read) != 1 || read[0].Path != aws || read[0].LiftedBy != "~/.aws" || !read[0].AllModes {
+		t.Errorf("lifted entries = %+v", read)
 	}
 }

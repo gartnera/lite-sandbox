@@ -2078,19 +2078,19 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		return s.worker, nil
 	}
 
-	// ~/.aws is masked inside the worker only in brokered IMDS mode, where
-	// credentials come from the IMDS server instead of the (unreadable) files.
-	// Raw-credentials mode and an unconfigured AWS section leave it readable.
-	// Note: ~/.ssh private keys are ALWAYS masked, regardless of this flag.
 	// s.cfg is read directly rather than via getConfig(): s.mu is already held
 	// exclusively here and sync.RWMutex is not reentrant.
-	blockAWS := s.cfg.AWS.UsesIMDS()
 	opts := os_sandbox.WorkerOptions{
-		WorkDir:             s.workerWorkDir,
-		ExtraBinds:          extraBinds,
-		ROBinds:             roBinds,
-		BlockAWSCredentials: blockAWS,
-		MaskPaths:           dockerMaskPaths,
+		WorkDir:    s.workerWorkDir,
+		ExtraBinds: extraBinds,
+		ROBinds:    roBinds,
+		MaskPaths:  dockerMaskPaths,
+		// The credential masks hold in every mode: the ~/.ssh private keys,
+		// and ~/.aws in brokered IMDS mode where credentials come from the
+		// IMDS server instead of the files (raw-credentials mode and an
+		// unconfigured aws section leave it readable) — less whatever a paths
+		// grant on the path lifted.
+		DeniedReadPaths: denyPaths(s.cfg.AlwaysDeniedReadEntries()),
 	}
 	// Denylist mode flips the worker's write posture: the home directory is
 	// writable and only the deny lists are carved out. Allowlist mode keeps the
@@ -2100,7 +2100,7 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		opts.DeniedReadPaths = denyPaths(s.cfg.EffectiveDeniedReadEntries())
 		opts.DeniedWritePaths = denyPaths(s.cfg.EffectiveDeniedWriteEntries())
 	}
-	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "blockAWS", blockAWS, "mode", s.cfg.EffectiveMode())
+	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "mode", s.cfg.EffectiveMode(), "deniedRead", len(opts.DeniedReadPaths))
 	w, err := os_sandbox.StartWorker(context.Background(), opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start worker: %w", err)

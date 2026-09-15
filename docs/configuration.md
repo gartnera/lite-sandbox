@@ -304,8 +304,12 @@ and instead masks a built-in deny list. Two kinds, because the reasons differ:
   file; a non-root process gets `EACCES`): `~/.aws` (unless
   `aws.allow_raw_credentials`), `~/.gnupg`, `~/.netrc`, `~/.kube`, `~/.pypirc`,
   `~/.config/gh`, `~/Library/Keychains`, and the agents' own credentials
-  (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). SSH
-  private keys are always masked, detected by content.
+  (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). The
+  SSH private keys in `~/.ssh` — every file there except `known_hosts`,
+  `config`, `authorized_keys` and `*.pub`, detected by name — are entries of
+  this list too, one per key, and the two credential masks (the keys, and
+  `~/.aws` under `aws.force_profile`) hold in **every** mode, not only
+  `denylist`.
 - **Write-denied** paths stay readable but cannot be modified: shell startup
   files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.config/fish/config.fish`, …),
   `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.npmrc`,
@@ -343,7 +347,45 @@ lite-sandbox config mode show          # prints the effective lists, built-in en
 Denials only take effect under the OS sandbox (`os_sandbox: true`): the AST
 layer already keeps the agent's own commands inside the project, so the masks
 exist for the programs those commands start. In `allowlist` mode the OS
-sandbox keeps its original cwd-confined layout and denials are unused.
+sandbox keeps its original cwd-confined layout and denials are unused — except
+the two credential masks above, which hold in every mode.
+
+### Lifting a built-in denial
+
+The built-in deny lists are the default half of the `paths` list: your entries
+are merged over them, and a grant on the **same path** as a built-in replaces
+it. A `read: true` (or `write: true`, which implies read) grant lifts a read
+denial; a `write: true` grant lifts a write denial. Only the exact path counts —
+a grant on `~` or a `~/.ssh/*` nested-only grant lifts nothing beneath it, so
+widening the boundary never silently drops the deny lists. The SSH private keys
+are grouped under `~/.ssh`: a grant on the directory lifts every key, a grant on
+one key file lifts that key only.
+
+The usual case is `git` over SSH, where the `ssh` a command spawns needs the
+keys but the agent has no business reading them. An `internal` grant is that
+distinction:
+
+```bash
+lite-sandbox config paths allow ~/.ssh --internal          # ssh can use every key; `cat ~/.ssh/id_ed25519` still fails
+lite-sandbox config paths allow ~/.ssh/deploy_key --internal   # one key only
+lite-sandbox config paths allow ~/.aws --internal          # the same for the AWS credential files (or `config aws allow-raw-credentials`)
+lite-sandbox config paths allow ~/.bashrc --write          # a write denial, lifted the same way
+```
+
+```yaml
+paths:
+  - path: ~/.ssh
+    read: true
+    internal: true   # keys readable by spawned programs; ~/.ssh stays write-denied
+```
+
+`allow` prints the built-in it just lifted, and `lite-sandbox config mode show`
+keeps listing a lifted entry, marked with the grant that lifts it, so the
+effective policy is never silently shorter than the documented one. A grant
+without `internal` also widens the agent-facing boundary to the path, as any
+grant does. Lifting applies per directory like the rest of `paths`: an
+[override](#per-directory-overrides) that grants `~/.ssh` lifts the masks for
+commands run under that directory only.
 
 ### Deprecated: one list per kind
 

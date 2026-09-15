@@ -57,12 +57,20 @@ var configModeShowCmd = &cobra.Command{
 		if cfg.EffectiveMode() == config.ModeOpen {
 			fmt.Println("\nNote: mode is open, so denied commands are recorded but not blocked.")
 		}
+		// The credential masks hold under the OS sandbox in every mode; the
+		// rest of the deny lists only in denylist mode. A built-in a paths
+		// grant lifted is listed with the grant, so the gap is visible.
+		liftedRead, liftedWrite := cfg.LiftedDeniedEntries()
+		printDenyList("Always hidden under the OS sandbox (every mode):",
+			cfg.AlwaysDeniedReadEntries(), allModesOnly(liftedRead, true))
 		if cfg.EffectiveMode() == config.ModeDenylist {
-			printDenyList("Read-denied paths (hidden from sandboxed commands under the OS sandbox):", cfg.EffectiveDeniedReadEntries())
-			printDenyList("Write-denied paths (readable, not modifiable, under the OS sandbox):", cfg.EffectiveDeniedWriteEntries())
-			if !cfg.OSSandboxEnabled() {
-				fmt.Println("\nNote: os_sandbox is off, so the deny lists are not enforced against child processes.")
-			}
+			printDenyList("Read-denied paths (hidden from sandboxed commands under the OS sandbox):",
+				allModesOnly(cfg.EffectiveDeniedReadEntries(), false), allModesOnly(liftedRead, false))
+			printDenyList("Write-denied paths (readable, not modifiable, under the OS sandbox):",
+				cfg.EffectiveDeniedWriteEntries(), liftedWrite)
+		}
+		if !cfg.OSSandboxEnabled() {
+			fmt.Println("\nNote: os_sandbox is off, so the deny lists are not enforced against child processes.")
 		}
 		return nil
 	},
@@ -192,18 +200,48 @@ var configAuditDisableCmd = &cobra.Command{
 // printDenyList prints deny-list entries, marking file entries that do not
 // exist: on Linux those cannot be masked until they are created (see
 // os_sandbox.DenyPath), so the gap is made visible rather than implied closed.
-func printDenyList(title string, entries []config.DeniedPath) {
+// The lifted entries — built-ins a paths grant overrides — follow, each with
+// the grant that lifts it, since a deny list that is silently shorter than
+// the documented one would be a gap too.
+func printDenyList(title string, entries, lifted []config.DeniedPath) {
 	fmt.Println()
 	fmt.Println(title)
+	if len(entries)+len(lifted) == 0 {
+		fmt.Println("  none")
+		return
+	}
 	for _, e := range entries {
 		note := ""
+		if e.Note != "" {
+			note = "   (" + e.Note + ")"
+		}
 		if !e.Dir {
 			if _, err := os.Stat(e.Path); err != nil {
-				note = "   (does not exist; on Linux not masked until created)"
+				note += "   (does not exist; on Linux not masked until created)"
 			}
 		}
 		fmt.Printf("  %s%s\n", e.Path, note)
 	}
+	for _, e := range lifted {
+		note := ""
+		if e.Note != "" {
+			note = "; " + e.Note
+		}
+		fmt.Printf("  %s   (NOT enforced: lifted by the paths grant on %s%s)\n", e.Path, e.LiftedBy, note)
+	}
+}
+
+// allModesOnly filters deny-list entries by whether they hold in every mode,
+// so `mode show` lists each entry once: under the every-mode heading or the
+// denylist one.
+func allModesOnly(entries []config.DeniedPath, allModes bool) []config.DeniedPath {
+	var out []config.DeniedPath
+	for _, e := range entries {
+		if e.AllModes == allModes {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func init() {
