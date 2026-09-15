@@ -21,13 +21,13 @@ full comparison and the intended progression:
 - **`open`** — nothing is enforced; every command runs. Pair it with `audit` to
   see what the other modes would block.
 - **`denylist`** — any program may run, but path arguments and redirections
-  must stay inside the working directory (plus `readable_paths` /
-  `writable_paths`), the per-command validators still apply (`git push`,
+  must stay inside the working directory (plus the paths granted in
+  [`paths`](#paths)), the per-command validators still apply (`git push`,
   `pnpm publish`, `find -delete`, …), and under the OS sandbox `$HOME` is
-  writable with the [deny lists](#denied-paths-denylist-mode) masked. The
-  opt-out for [incremental adoption](adoption.md); `config mode set denylist`
-  also enables the OS sandbox when it is available and `os_sandbox` was never
-  set.
+  writable with the [deny lists](#denials-read-false-write-false-denylist-mode)
+  masked. The opt-out for [incremental adoption](adoption.md); `config mode set
+  denylist` also enables the OS sandbox when it is available and `os_sandbox`
+  was never set.
 - **`allowlist`** — only whitelisted commands run and code-execution runtimes
   are opt-in. The default.
 
@@ -185,28 +185,75 @@ lite-sandbox config extra-commands remove curl
 lite-sandbox config denied-commands list
 lite-sandbox config denied-commands add sudo "gh auth"
 lite-sandbox config denied-commands remove sudo
+
+# Grant or deny paths (one command for every kind of path entry)
+lite-sandbox config paths allow ~/reference-data          # readable
+lite-sandbox config paths allow ~/scratch --write         # read and write
+lite-sandbox config paths deny ~/company-secrets          # hidden (denylist mode)
+lite-sandbox config paths list
+lite-sandbox config paths remove ~/scratch
 ```
 
-## Readable / writable paths
+## Paths
 
-By default the sandbox confines reads and writes to the working directory. Extra
-locations can be granted via `readable_paths` / `writable_paths`:
+By default the sandbox confines reads and writes to the working directory. One
+list, `paths`, carries every other statement about a path: what commands may
+read or write beyond the working directory, and what the OS sandbox must hide
+or keep read-only in `denylist` mode. Each entry names a path and sets `read`
+and/or `write` — `true` grants, `false` denies, unset says nothing — plus an
+optional `internal` for grants that should hold only at the OS sandbox layer:
 
 ```yaml
-readable_paths:
-  - ~/reference-data                 # this dir and everything under it
-  - ~/.superconductor/worktrees/haystack/*  # only paths NESTED below it
-writable_paths:
-  - ~/scratch
+paths:
+  - path: ~/reference-data                        # readable: this dir and everything under it
+    read: true
+  - path: ~/.superconductor/worktrees/haystack/*  # readable: only paths NESTED below it
+    read: true
+  - path: ~/scratch                               # writable, which implies readable
+    write: true
+  - path: ~/.cache/some-tool                      # writable for spawned programs only (see below)
+    write: true
+    internal: true
+  - path: ~/company-secrets                       # hidden entirely (denylist mode, OS sandbox)
+    read: false
+  - path: ~/.local/bin                            # readable but not writable (denylist mode, OS sandbox)
+    write: false
 ```
+
+The CLI writes the same entries:
+
+```bash
+lite-sandbox config paths allow ~/reference-data
+lite-sandbox config paths allow "~/.superconductor/worktrees/haystack/*"
+lite-sandbox config paths allow ~/scratch --write
+lite-sandbox config paths allow ~/.cache/some-tool --write --internal
+lite-sandbox config paths deny ~/company-secrets
+lite-sandbox config paths deny ~/.local/bin --write
+lite-sandbox config paths list
+lite-sandbox config paths remove ~/scratch
+```
+
+Each path has one entry: `allow` and `deny` replace whatever the config said
+about that path before (so `allow ~/x --write` after `allow ~/x` upgrades it),
+and `remove` drops every statement about it. `~` is expanded. An entry that
+sets neither key, grants `write` while denying `read`, or marks a denial
+`internal` is rejected when the config loads. `read: true` together with
+`write: false` is coherent — readable, and kept read-only under the OS sandbox.
+Like every section, `paths` can be set per directory with
+[`--dir`](#writing-overrides-from-the-cli---dir).
+
+### Grants: `read: true`, `write: true`
+
+A grant widens the boundary the agent may touch, at every layer: the static and
+runtime path validation, the file-tool hook, the OS sandbox, and Deno's injected
+`--allow-read`/`--allow-write`. `write: true` implies read.
 
 A bare path grants the directory **and** all of its contents. A trailing `/*`
 grants only paths **nested below** the directory — the directory itself is not a
 valid read/search target. This is useful for a container that holds many sibling
 directories (e.g. a worktree parent): `worktrees/haystack/*` lets the sandbox
 read an individual peer worktree while blocking a single `grep`/`ls` from
-sweeping every worktree at once. Manage these with
-`lite-sandbox config readable-paths add <path>` / `writable-paths add <path>`.
+sweeping every worktree at once.
 
 The Claude Code per-user scratchpad root (`/tmp/claude-<uid>`, which macOS
 resolves to `/private/tmp/claude-<uid>`) is always readable and writable without
@@ -222,11 +269,36 @@ is the world-shared `/tmp` (the common Linux default), it is **not** granted
 wholesale — the uid-scoped scratchpad above still covers `/tmp/claude-<uid>`
 there.
 
-## Denied paths (denylist mode)
+### Internal grants: `internal: true` (OS sandbox only)
+
+`internal: true` narrows a grant to the **OS sandbox layer** (see
+[Security](security.md)), so programs a command spawns can reach their own data
+— while the agent itself still cannot read or write the path directly (the
+AST/runtime path validation, the file-tool hook, and Deno's injected
+`--allow-read`/`--allow-write` all keep denying it):
+
+```yaml
+paths:
+  - path: ~/.cache/some-tool   # the tool can update its cache; `cat`/`sed` there still fail
+    write: true
+    internal: true
+  - path: /opt/reference-data
+    read: true
+    internal: true
+```
+
+Use this when a tool needs its own state directory to function under the OS
+sandbox, but you don't want to widen the boundary the agent can touch. It only
+has an effect when `os_sandbox` is enabled — without it there is no OS layer to
+loosen. Note that inside the OS sandbox the filesystem is already broadly
+readable, so an internal read grant mainly matters for host paths hidden by the
+sandbox's `/tmp` overlay on Linux.
+
+### Denials: `read: false`, `write: false` (denylist mode)
 
 In `denylist` mode the OS sandbox binds `$HOME` writable — developer tooling
 writes caches and state all over it, and enumerating them is a losing game —
-and instead masks a built-in deny list. Two lists, because the reasons differ:
+and instead masks a built-in deny list. Two kinds, because the reasons differ:
 
 - **Read-denied** paths are hidden entirely (an unreadable empty directory or
   file; a non-root process gets `EACCES`): `~/.aws` (unless
@@ -251,49 +323,47 @@ masked; a missing deny-listed file cannot be masked without creating an empty
 file on the host, so it is skipped until it exists. `config mode show` marks
 such entries. See [Security](security.md#os-level-sandboxing-optional).
 
-Extend either list; `~` is expanded and missing paths are skipped:
+Extend either kind with a denying entry (`read: false` hides the path,
+`write: false` keeps it readable but not writable); missing paths are skipped:
 
 ```yaml
-denied_read_paths:
-  - ~/company-secrets
-denied_write_paths:
-  - ~/.local/bin
+paths:
+  - path: ~/company-secrets
+    read: false
+  - path: ~/.local/bin
+    write: false
 ```
 
 ```bash
-lite-sandbox config denied-read-paths add ~/company-secrets
-lite-sandbox config denied-write-paths add ~/.local/bin
-lite-sandbox config mode show          # prints the effective lists
+lite-sandbox config paths deny ~/company-secrets
+lite-sandbox config paths deny ~/.local/bin --write
+lite-sandbox config mode show          # prints the effective lists, built-in entries included
 ```
 
-The lists only take effect under the OS sandbox (`os_sandbox: true`): the AST
+Denials only take effect under the OS sandbox (`os_sandbox: true`): the AST
 layer already keeps the agent's own commands inside the project, so the masks
 exist for the programs those commands start. In `allowlist` mode the OS
-sandbox keeps its original cwd-confined layout and these lists are unused.
+sandbox keeps its original cwd-confined layout and denials are unused.
 
-## Internal readable / writable paths (OS sandbox only)
+### Deprecated: one list per kind
 
-`internal_readable_paths` / `internal_writable_paths` grant access **only at the
-OS sandbox layer** (see [Security](security.md)), so programs a command spawns
-can reach their own data — while the agent itself still cannot read or write
-those paths directly (the AST/runtime path validation, the file-tool hook, and
-Deno's injected `--allow-read`/`--allow-write` all keep denying them):
+Before `paths`, each kind had its own key — `readable_paths`,
+`writable_paths`, `internal_readable_paths`, `internal_writable_paths`,
+`denied_read_paths`, `denied_write_paths` — and its own CLI command. They still
+load, resolve as the union with `paths`, and the old commands still run
+(hidden, printing a deprecation notice, and writing `paths` entries). `paths
+list` marks entries that still come from an old key, and `paths allow`/`deny`
+move a path to the new form when they touch it. To rewrite a whole file at once:
 
-```yaml
-internal_writable_paths:
-  - ~/.cache/some-tool   # the tool can update its cache; `cat`/`sed` there still fail
-internal_readable_paths:
-  - /opt/reference-data
+```bash
+lite-sandbox config paths migrate
 ```
 
-Use these when a tool needs its own state directory to function under the OS
-sandbox, but you don't want to widen the boundary the agent can touch. They only
-have an effect when `os_sandbox` is enabled — without it there is no OS layer to
-loosen. Note that inside the OS sandbox the filesystem is already broadly
-readable, so `internal_readable_paths` mainly matters for host paths hidden by
-the sandbox's `/tmp` overlay on Linux. Manage these with
-`lite-sandbox config internal-readable-paths add <path>` /
-`internal-writable-paths add <path>`.
+The two spellings differ under [overrides](#per-directory-overrides): an old
+key on an override replaced only that one list and inherited the other five,
+whereas `paths` on an override replaces the whole section. `migrate` keeps what
+every directory resolves to by giving such an override the full set of entries
+in effect for its directory, so run it rather than renaming keys by hand.
 
 ## Redundant `cd` rejection
 
@@ -325,13 +395,14 @@ section it can be flipped per directory via the overrides below.
 Any part of the configuration can be changed for specific working directories via
 the top-level `overrides` list. Each entry pairs a `path` with any config
 sections that replace the base for commands run **at or under** that path. This is
-not AWS-specific — `aws`, `docker`, `runtimes`, `readable_paths`/`writable_paths`,
-`os_sandbox`, and every other section can be overridden the same way.
+not AWS-specific — `aws`, `docker`, `runtimes`, `paths`, `os_sandbox`, and every
+other section can be overridden the same way.
 
 ```yaml
 os_sandbox: true
-writable_paths:
-  - ~/scratch
+paths:
+  - path: ~/scratch
+    write: true
 aws:
   force_profile: "default"        # base mode for everything else
 
@@ -339,8 +410,9 @@ overrides:
   - path: ~/work/acme             # ~ is expanded
     aws:
       force_profile: "acme-dev"   # broker a different AWS profile here
-    writable_paths:
-      - ~/work/acme/artifacts     # replaces (not extends) writable_paths here
+    paths:                        # replaces (not extends) the base paths list here
+      - path: ~/work/acme/artifacts
+        write: true
   - path: ~/work/acme/prod
     aws:
       force_profile: "acme-prod"  # more specific path wins under prod/
@@ -365,7 +437,7 @@ Resolution rules:
   example above flips just `docker.allow_privileged` and keeps the base
   `docker.enabled`). Either way, sections the override never mentions are
   inherited from the base unchanged, and leaf values it does set (scalars, flags,
-  and lists like `writable_paths`) come from the override.
+  and lists like `paths`) come from the override.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
 
@@ -377,6 +449,7 @@ without hand-editing the file:
 
 ```bash
 lite-sandbox config extra-commands add npm --dir .        # only in this repo
+lite-sandbox config paths allow ~/work/acme/out --write --dir ~/work/acme
 lite-sandbox config mode set denylist --dir ~/work/new    # only under that path
 lite-sandbox config runtimes go enable --dir ~/work/acme
 lite-sandbox config docker disable --dir ~/work/untrusted

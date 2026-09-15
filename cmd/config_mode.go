@@ -215,29 +215,4 @@ func init() {
 	configAuditCmd.AddCommand(configAuditShowCmd)
 	configAuditCmd.AddCommand(configAuditEnableCmd)
 	configAuditCmd.AddCommand(configAuditDisableCmd)
-
-	configCmd.AddCommand(newStringListCommand(stringListSpec{
-		use:   "denied-read-paths",
-		short: "Manage paths hidden from sandboxed commands in denylist mode (on top of the built-in defaults)",
-		long: "Paths listed here are masked inside the OS sandbox in denylist mode, in addition to the built-in\n" +
-			"defaults (credential stores and the agents' own auth files). `lite-sandbox config mode show`\n" +
-			"prints the effective list. Entries support ~ expansion.",
-		noun:      "path",
-		items:     "user-added read-denied paths",
-		listLabel: "denied_read_paths",
-		get:       func(c *config.Config) []string { return c.DeniedReadPaths },
-		set:       func(c *config.Config, v []string) { c.DeniedReadPaths = v },
-	}))
-	configCmd.AddCommand(newStringListCommand(stringListSpec{
-		use:   "denied-write-paths",
-		short: "Manage paths sandboxed commands may read but not modify in denylist mode (on top of the built-in defaults)",
-		long: "Paths listed here are mounted read-only inside the OS sandbox in denylist mode, in addition to the\n" +
-			"built-in defaults (shell startup files, the sandbox's own config, the agents' settings).\n" +
-			"`lite-sandbox config mode show` prints the effective list. Entries support ~ expansion.",
-		noun:      "path",
-		items:     "user-added write-denied paths",
-		listLabel: "denied_write_paths",
-		get:       func(c *config.Config) []string { return c.DeniedWritePaths },
-		set:       func(c *config.Config, v []string) { c.DeniedWritePaths = v },
-	}))
 }

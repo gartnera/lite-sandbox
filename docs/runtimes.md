@@ -185,7 +185,7 @@ dart run build_runner build
 
 Like Go (which auto-detects `GOPATH`/`GOCACHE`), the Flutter runtime
 automatically detects and grants access to the paths these tools read and write,
-so builds and tests work without hand-configuring `readable_paths`:
+so builds and tests work without hand-configuring `paths` grants:
 
 - **fvm cache** — `FVM_CACHE_PATH` (or the legacy `FVM_HOME`), defaulting to
   `~/fvm`. This is where fvm stores each managed Flutter SDK version.

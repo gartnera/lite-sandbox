@@ -44,8 +44,8 @@ is off, so developer tooling works without configuration. What stays enforced
 is *scope* and *shared state*:
 
 - Every path argument, redirection, and file open — of any command, listed or
-  not — must resolve inside the working directory plus `readable_paths` /
-  `writable_paths`. `find ~`, `grep -r secret $HOME`, `rm -rf ..`,
+  not — must resolve inside the working directory plus the paths granted in
+  `paths`. `find ~`, `grep -r secret $HOME`, `rm -rf ..`,
   `> ~/.bashrc` are all rejected, including after variable expansion.
 - The per-command validators still apply: `git push` (unless
   `git.remote_write`), `pnpm publish`, `cargo publish`, `find -delete`,
@@ -62,8 +62,8 @@ is *scope* and *shared state*:
   SSH private keys) and persistence and self-protection paths are read-only
   (shell rc files, `~/.gitconfig`, `~/.ssh`, the agent settings that hold the
   Bash deny, and lite-sandbox's own config). `lite-sandbox config mode show`
-  prints the effective lists; extend them with `denied-read-paths add` /
-  `denied-write-paths add`.
+  prints the effective lists; extend them with `lite-sandbox config paths deny
+  <path>` (hidden) or `paths deny <path> --write` (read-only).
 
 This mode assumes the agent is cooperative: it follows the constraints it is
 told about and does not write a script to route around a denial. The deny lists
@@ -106,7 +106,7 @@ Suggested config changes (most findings first):
          "npm" is not on the allowlist
      11  lite-sandbox config runtimes go enable
          "go" needs the go runtime
-      3  lite-sandbox config readable-paths add /work/shared-lib
+      3  lite-sandbox config paths allow /work/shared-lib
          paths under this directory were outside the boundary
 ```
 

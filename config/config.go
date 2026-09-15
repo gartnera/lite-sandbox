@@ -559,10 +559,20 @@ type Config struct {
 	// tagged with the modes that would block it — to the audit log
 	// (`lite-sandbox audit path`). Default false.
 	Audit *bool `yaml:"audit,omitempty"`
+	// Paths is the one list of path statements: what sandboxed commands may
+	// read or write beyond the working directory, and what the OS sandbox must
+	// hide or keep read-only in denylist mode. See PathEntry for the shape.
+	// The six *Paths lists below are the deprecated one-list-per-kind spelling
+	// of the same thing; they still load, resolve as the union with Paths, and
+	// MigratePaths rewrites them. The CLI (`lite-sandbox config paths`) writes
+	// only Paths.
+	Paths []PathEntry `yaml:"paths,omitempty"`
 	// DeniedReadPaths / DeniedWritePaths extend the built-in deny lists applied
 	// by the OS sandbox in denylist mode (see DefaultDeniedReadPaths and
 	// DefaultDeniedWritePaths). Read-denied paths are hidden entirely;
 	// write-denied paths stay readable but cannot be modified.
+	//
+	// Deprecated: use Paths entries with read: false / write: false.
 	DeniedReadPaths  []string `yaml:"denied_read_paths,omitempty"`
 	DeniedWritePaths []string `yaml:"denied_write_paths,omitempty"`
 
@@ -576,8 +586,12 @@ type Config struct {
 	// unsandboxed_commands allows it. An entry prefixed with "-" drops a
 	// built-in default instead of adding one. See EffectiveDeniedCommands.
 	DeniedCommands []string `yaml:"denied_commands,omitempty"`
-	ReadablePaths  []string `yaml:"readable_paths,omitempty"`
-	WritablePaths  []string `yaml:"writable_paths,omitempty"`
+	// ReadablePaths / WritablePaths widen the boundary the agent may read or
+	// write beyond the working directory.
+	//
+	// Deprecated: use Paths entries with read: true / write: true.
+	ReadablePaths []string `yaml:"readable_paths,omitempty"`
+	WritablePaths []string `yaml:"writable_paths,omitempty"`
 	// InternalReadablePaths / InternalWritablePaths grant access only at the OS
 	// sandbox layer (the bwrap/sandbox-exec worker), so programs a command spawns
 	// can reach their own data (e.g. a tool's ~/.cache directory) — while the
@@ -586,6 +600,8 @@ type Config struct {
 	// hook, docker bind mounts, and Deno's injected --allow-read/--allow-write
 	// all exclude them). Unlike readable_paths/writable_paths, these never widen
 	// the agent-visible boundary.
+	//
+	// Deprecated: use Paths entries with internal: true.
 	InternalReadablePaths []string                    `yaml:"internal_readable_paths,omitempty"`
 	InternalWritablePaths []string                    `yaml:"internal_writable_paths,omitempty"`
 	Git                   *GitConfig                  `yaml:"git,omitempty"`
@@ -607,30 +623,6 @@ type Config struct {
 	// match wins. Resolve the effective config for a directory with ForDirectory.
 	// Any section can be overridden, not just AWS.
 	Overrides []DirectoryOverride `yaml:"overrides,omitempty"`
-}
-
-// ExpandedReadablePaths returns ReadablePaths with ~ expanded to the user's
-// home directory and all paths resolved to absolute paths.
-func (c *Config) ExpandedReadablePaths() []string {
-	return expandPaths(c.ReadablePaths)
-}
-
-// ExpandedWritablePaths returns WritablePaths with ~ expanded to the user's
-// home directory and all paths resolved to absolute paths.
-func (c *Config) ExpandedWritablePaths() []string {
-	return expandPaths(c.WritablePaths)
-}
-
-// ExpandedInternalReadablePaths returns InternalReadablePaths with ~ expanded
-// to the user's home directory and all paths resolved to absolute paths.
-func (c *Config) ExpandedInternalReadablePaths() []string {
-	return expandPaths(c.InternalReadablePaths)
-}
-
-// ExpandedInternalWritablePaths returns InternalWritablePaths with ~ expanded
-// to the user's home directory and all paths resolved to absolute paths.
-func (c *Config) ExpandedInternalWritablePaths() []string {
-	return expandPaths(c.InternalWritablePaths)
 }
 
 // ExpandPath expands ~ and resolves p to an absolute path (so "." and other
@@ -727,6 +719,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := cfg.validateModes(); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := cfg.validatePaths(); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	return &cfg, nil

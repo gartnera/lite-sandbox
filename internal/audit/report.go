@@ -146,7 +146,7 @@ var systemRoots = []string{
 
 // suggestions turns the aggregated subjects into concrete config commands.
 // Findings that carry a Fix (whitelist, runtime, local-binary) are grouped by
-// it; boundary findings become a readable-paths suggestion for the enclosing
+// it; boundary findings become a `paths allow` suggestion for the enclosing
 // directory unless that directory is protected or a system root.
 func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Suggestion {
 	merged := map[string]*Suggestion{}
@@ -200,7 +200,7 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 		dirs[dir] += a.count
 	}
 	for dir, n := range dirs {
-		add("lite-sandbox config readable-paths add "+dir, "paths under this directory were outside the boundary (use writable-paths add if they are written)", n)
+		add("lite-sandbox config paths allow "+dir, "paths under this directory were outside the boundary (add --write if they are written)", n)
 	}
 
 	out := make([]Suggestion, 0, len(merged))
