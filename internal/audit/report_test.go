@@ -46,7 +46,7 @@ func TestBuildReport(t *testing.T) {
 		"lite-sandbox config extra-commands add npm":        2,
 		"lite-sandbox config local-binary-execution enable": 1,
 		"lite-sandbox config runtimes go enable":            1,
-		"lite-sandbox config readable-paths add " + dir:     2,
+		"lite-sandbox config paths allow " + dir:            2,
 	}
 	got := map[string]int{}
 	for _, s := range rep.Suggestions {

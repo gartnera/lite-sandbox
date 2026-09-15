@@ -287,9 +287,11 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bo
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 	allowed := readPaths
 	boundary := "readable"
+	allowFlag := ""
 	if write {
 		allowed = writePaths
 		boundary = "writable"
+		allowFlag = " --write"
 	}
 	if bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
 		return nil
@@ -301,10 +303,10 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write bo
 			"Allowed %s paths: %s\n"+
 			"What to do instead: work within the project directory (%s). "+
 			"If this path is genuinely needed, ask the user to add it via "+
-			"`lite-sandbox config %s-paths add <path>`.",
+			"`lite-sandbox config paths allow <path>%s`.",
 		what, path, resolved, boundary,
 		boundary, strings.Join(allowed, ", "),
-		cwd, boundary,
+		cwd, allowFlag,
 	)
 	// The file-tool boundary is a path_boundary finding: enforced in denylist
 	// and allowlist mode, advisory (audited, then deferred to Claude Code's

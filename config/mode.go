@@ -241,9 +241,10 @@ func DefaultDeniedWritePaths() []DeniedPath {
 }
 
 // EffectiveDeniedReadEntries returns the read-denied entries in effect: the
-// built-in defaults plus the config's denied_read_paths (with ~ expanded,
-// classified by what exists on disk). When AWS is configured to use raw
-// credentials, ~/.aws is dropped from the defaults since the CLI must read it.
+// built-in defaults plus the config's read: false paths entries (and the
+// deprecated denied_read_paths), with ~ expanded and classified by what exists
+// on disk. When AWS is configured to use raw credentials, ~/.aws is dropped
+// from the defaults since the CLI must read it.
 func (c *Config) EffectiveDeniedReadEntries() []DeniedPath {
 	defaults := DefaultDeniedReadPaths()
 	if c != nil && c.AWS.AllowsRawCredentials() {
@@ -251,21 +252,14 @@ func (c *Config) EffectiveDeniedReadEntries() []DeniedPath {
 			defaults = deleteDeniedPath(defaults, filepath.Join(home, ".aws"))
 		}
 	}
-	var extra []string
-	if c != nil {
-		extra = c.DeniedReadPaths
-	}
-	return uniqueDeniedPaths(append(defaults, userDeniedPaths(extra)...))
+	return uniqueDeniedPaths(append(defaults, userDeniedPaths(c.DeniedReadPathList())...))
 }
 
 // EffectiveDeniedWriteEntries returns the write-denied entries in effect: the
-// built-in defaults plus the config's denied_write_paths.
+// built-in defaults plus the config's write: false paths entries (and the
+// deprecated denied_write_paths).
 func (c *Config) EffectiveDeniedWriteEntries() []DeniedPath {
-	var extra []string
-	if c != nil {
-		extra = c.DeniedWritePaths
-	}
-	return uniqueDeniedPaths(append(DefaultDeniedWritePaths(), userDeniedPaths(extra)...))
+	return uniqueDeniedPaths(append(DefaultDeniedWritePaths(), userDeniedPaths(c.DeniedWritePathList())...))
 }
 
 // EffectiveDeniedReadPaths is EffectiveDeniedReadEntries as plain paths.

@@ -121,7 +121,7 @@ Both paths honor `CODEX_HOME` (they use `$CODEX_HOME` when set, otherwise `~/.co
 
 ### One config for both Claude Code and Codex
 
-Codex's hook protocol is the same as Claude Code's — same `PreToolUse` event, the same JSON payload on stdin (`tool_name`, `tool_input`, `cwd`, …), and the same `permissionDecision: "deny"` response. lite-sandbox reuses **the same `hook` binary and the same config file** (`readable_paths`/`writable_paths`, extra commands, git settings — see [Configuration](configuration.md)) for both agents. So one security/sandbox config governs Claude Code and Codex together; a `lite-sandbox config writable-paths add …` change applies to both.
+Codex's hook protocol is the same as Claude Code's — same `PreToolUse` event, the same JSON payload on stdin (`tool_name`, `tool_input`, `cwd`, …), and the same `permissionDecision: "deny"` response. lite-sandbox reuses **the same `hook` binary and the same config file** (`paths`, extra commands, git settings — see [Configuration](configuration.md)) for both agents. So one security/sandbox config governs Claude Code and Codex together; a `lite-sandbox config paths allow … --write` change applies to both.
 
 To also confine **reads and writes** to the sandbox's paths (not just the shell), add `--with-tool-hook`, exactly as with Claude Code:
 
@@ -366,7 +366,7 @@ This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.
 - **allows the sandbox's own tools** (`mcp__lite-sandbox__*`) outright, so they stay prompt-free in subagents and skills, which don't inherit `permissions.allow` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950));
 - **defers** everything in-bounds to Claude Code's normal permission flow.
 
-The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go`): the working directory plus any `readable_paths`/`writable_paths` from config, plus the worktree parent when `git.allow_worktree_parent` is set. Writable paths are also treated as readable. Denials carry a clear reason telling the model the path is out of bounds and that the user can widen the boundary with `lite-sandbox config readable-paths add` / `writable-paths add`.
+The path boundaries are computed exactly like the bash tool's (see `cmd/serve.go`): the working directory plus any paths granted in the config's `paths` list, plus the worktree parent when `git.allow_worktree_parent` is set. Writable paths are also treated as readable. Denials carry a clear reason telling the model the path is out of bounds and that the user can widen the boundary with `lite-sandbox config paths allow <path>` (`--write` for writes).
 
 ### Bash: hook vs. permission deny
 
