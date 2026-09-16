@@ -22,7 +22,7 @@ lite-sandbox install claude opencode       # configure exactly these
 lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths
 ```
 
-To try the sandbox without changing any agent configuration, use `launch`: it runs the agent sandboxed for that session only and leaves your setup untouched (Claude Code for now, and stricter by default than `install`).
+To try the sandbox without changing any agent configuration, use `launch`: it runs the agent sandboxed for that session only and leaves your setup untouched.
 
 ```bash
 lite-sandbox launch claude
