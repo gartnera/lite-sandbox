@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -224,6 +225,57 @@ func TestConfigurePermissions(t *testing.T) {
 	}
 	if denyCount != 1 {
 		t.Errorf("expected Bash deny to appear once, got %d times", denyCount)
+	}
+}
+
+// TestConfigurePermissionsPreservesPermissionKeys checks that settings inside
+// the permissions object that lite-sandbox has no opinion about survive an
+// install: only allow and deny are ours to edit.
+func TestConfigurePermissionsPreservesPermissionKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+
+	existing := `{"permissions":{"defaultMode":"acceptEdits","ask":["WebFetch"],"additionalDirectories":["/srv"],"deny":["WebSearch"]}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	if err := configurePermissions(tmpDir, claudeOptions{}.plan("/usr/local/bin/lite-sandbox")); err != nil {
+		t.Fatalf("configurePermissions failed: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var raw struct {
+		Permissions map[string]json.RawMessage `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	// Compared semantically: the file is rewritten with indentation, so the
+	// preserved values come back re-formatted.
+	for key, want := range map[string]any{
+		"defaultMode":           "acceptEdits",
+		"ask":                   []any{"WebFetch"},
+		"additionalDirectories": []any{"/srv"},
+	} {
+		var got any
+		if err := json.Unmarshal(raw.Permissions[key], &got); err != nil {
+			t.Fatalf("parse permissions.%s: %v", key, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("permissions.%s = %v, want %v", key, got, want)
+		}
+	}
+	// Ours were still applied, and the user's own deny entry kept.
+	var deny []string
+	if err := json.Unmarshal(raw.Permissions["deny"], &deny); err != nil {
+		t.Fatalf("parse deny: %v", err)
+	}
+	if !slices.Contains(deny, "Bash") || !slices.Contains(deny, "WebSearch") {
+		t.Errorf("deny = %v, want both Bash and the pre-existing WebSearch", deny)
 	}
 }
 

@@ -22,12 +22,14 @@ lite-sandbox install claude opencode       # configure exactly these
 lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths
 ```
 
-To try the sandbox without changing any agent configuration, use `launch` instead: it starts the agent with the same MCP server, permissions, hook, and usage directive passed on its command line, for that run only (Claude Code for now).
+To try the sandbox without changing any agent configuration, use `launch` instead: it starts the agent with the same MCP server, permissions, hook, and usage directive passed on its command line, for that run only (Claude Code for now). They are layered over your own settings, servers, and `CLAUDE.md`, not substituted for them.
 
 ```bash
 lite-sandbox launch claude                     # sandboxed session, nothing written to ~/.claude
 lite-sandbox launch claude -p "run the tests"  # arguments after the agent are passed through
 ```
+
+Since it only configures one session, `launch` is stricter by default: the built-in `Bash` tool is denied *and* the hook confines the built-in file tools to the sandbox's paths, which is what makes its `acceptEdits` default safe — edits inside the boundary apply without prompts, and ones outside it are blocked.
 
 Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hook binary and the **same config file** to govern both agents — one security/sandbox config for all of them. The `--with-tool-hook` and `--bash-ast-hook-mode` flags apply to `claude` and `codex` (opencode has no compatible hook protocol). See [docs/installation.md](docs/installation.md) for manual setup, per-agent details, and coverage caveats.
 

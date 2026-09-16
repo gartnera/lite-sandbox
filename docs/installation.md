@@ -44,24 +44,37 @@ The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to
 
 ## Temporary setup: `lite-sandbox launch`
 
-`launch` is `install`'s throwaway counterpart: it starts an agent CLI with the sandbox already wired up, without writing anything to that agent's configuration. Everything `install` would put in the agent's config files is passed on the agent's command line for that one run, so the sandbox applies to the launched session only and quitting it leaves no trace. The agent's own settings — including its sign-in state — are still loaded; the sandbox settings are layered on top.
+`launch` is `install`'s throwaway counterpart: it starts an agent CLI with the sandbox already wired up, without writing anything to that agent's configuration. Everything `install` would put in the agent's config files is passed on the agent's command line for that one run, so the sandbox applies to the launched session only and quitting it leaves no trace.
 
 **Claude Code is the only supported agent for now** (it is the one whose CLI takes an MCP server, settings, and a system-prompt addition per run):
 
 ```bash
 lite-sandbox launch claude                     # interactive session, sandboxed
 lite-sandbox launch claude -p "run the tests"  # arguments after the agent are passed through
-lite-sandbox launch --with-tool-hook claude    # lite-sandbox's own flags come first
 lite-sandbox launch --dry-run claude           # print the command instead of running it
 ```
 
-Everything after the agent name is handed to the agent untouched, so lite-sandbox's flags must precede it (or be separated with `--`). `--with-tool-hook`, `--bash-ast-hook-mode`, and `--always-load` mean exactly what they do for `install` (see the sections below); they are translated into Claude Code's `--mcp-config`, `--settings`, and `--append-system-prompt` flags:
+Everything after the agent name is handed to the agent untouched, so lite-sandbox's flags must precede it (or be separated with `--`).
+
+### What it passes
 
 | What `install claude` writes | What `launch claude` passes |
 | --- | --- |
-| MCP server in `~/.claude.json` | `--mcp-config` (added alongside your own servers, not instead of them) |
-| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` (layered over your settings) |
+| MCP server in `~/.claude.json` | `--mcp-config` |
+| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` |
 | Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+
+**These stack on top of your own configuration, they don't replace it.** Your `settings.json` permission rules still apply (the allow/deny lists are merged), your own MCP servers still load alongside the sandbox's (`--strict-mcp-config` is deliberately *not* passed), your `CLAUDE.md` still reaches the model, and your sign-in state is untouched — lite-sandbox's entries are layered over them for the session.
+
+### Defaults
+
+Because it configures a single session rather than every project you open, `launch` is stricter than `install` by default:
+
+- **The built-in `Bash` tool is denied**, exactly as in the default install, so it isn't even offered to the model.
+- **`--with-tool-hook` is on**, so the `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` to its writable paths. (This is a stronger combination than `install --with-tool-hook`, which moves the `Bash` block *into* the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary on top.) Pass `--with-tool-hook=false` for install's default posture.
+- **`--permission-mode acceptEdits`**, written as `permissions.defaultMode`, so edits apply without a prompt — the hook above is what keeps them inside the boundary, and a write outside it is still denied. Pass an empty value (`--permission-mode ""`) to leave Claude Code's own default alone, or your own `--permission-mode` *after* the agent name, which wins over the setting.
+
+`--bash-ast-hook-mode` and `--always-load` mean exactly what they do for `install` (see the sections below).
 
 lite-sandbox's **own** config (`lite-sandbox config path`) is read as usual — unlike `install`, `launch` neither creates nor modifies it, so a host without one runs at the strict `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` when you want the agent setup to stick.
 

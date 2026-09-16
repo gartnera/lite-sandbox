@@ -17,6 +17,7 @@ import (
 var launchWithToolHook bool
 var launchBashASTHookMode bool
 var launchAlwaysLoad bool
+var launchPermissionMode string
 var launchDryRun bool
 
 var launchCmd = &cobra.Command{
@@ -34,19 +35,31 @@ still loaded and the sandbox settings are layered on top.
 
 Claude Code is the only supported agent for now:
 
-  lite-sandbox launch claude                    # interactive session, sandboxed
-  lite-sandbox launch claude -p "run the tests" # arguments after the agent are passed through
-  lite-sandbox launch --with-tool-hook claude   # lite-sandbox's own flags come first
+  lite-sandbox launch claude                      # interactive session, sandboxed
+  lite-sandbox launch claude -p "run the tests"   # arguments after the agent are passed through
+  lite-sandbox launch --with-tool-hook=false claude  # lite-sandbox's own flags come first
 
 Everything after the agent name is handed to the agent untouched, so
 lite-sandbox's flags must precede it (or be separated with --).
 
-The flags mirror the ones "install" exposes:
+Because it configures a single session rather than every project the user
+opens, launch is stricter than install by default:
 
-  --with-tool-hook      govern the built-in tools with the PreToolUse hook
-                        instead of denying Bash outright: Bash is redirected to
-                        mcp__lite-sandbox__bash, and Read/Write/Edit are
-                        confined to the sandbox's readable/writable paths
+  --with-tool-hook      ON by default: a PreToolUse hook confines the built-in
+                        Read/Glob/Grep to the sandbox's readable paths and
+                        Write/Edit/NotebookEdit to its writable paths, so the
+                        built-in file tools respect the same boundary as the
+                        bash tool. The built-in Bash tool stays denied outright
+                        (unlike "install --with-tool-hook", which moves that
+                        block into the hook). Pass --with-tool-hook=false for
+                        install's default posture.
+  --permission-mode     Claude Code's permission mode for the session, set as
+                        permissions.defaultMode; "acceptEdits" by default, so
+                        edits inside the boundary apply without a prompt — the
+                        hook is what keeps them inside it. Pass an empty value
+                        to leave Claude Code's own default alone, or your own
+                        --permission-mode after the agent name (a CLI flag wins
+                        over the setting).
   --bash-ast-hook-mode  do not configure the MCP server; instead AST-check each
                         built-in Bash command in the hook and allow it when it
                         passes (Bash still runs UNSANDBOXED — a weaker
@@ -63,8 +76,10 @@ make the agent configuration permanent.`,
 }
 
 func init() {
-	launchCmd.Flags().BoolVar(&launchWithToolHook, "with-tool-hook", false,
-		"register a PreToolUse hook that redirects built-in Bash to the MCP tool and confines built-in Read/Write/Edit to the sandbox's readable/writable paths")
+	launchCmd.Flags().BoolVar(&launchWithToolHook, "with-tool-hook", true,
+		"confine the built-in Read/Write/Edit tools to the sandbox's readable/writable paths with a PreToolUse hook; --with-tool-hook=false for install's default posture (built-in Bash is denied either way)")
+	launchCmd.Flags().StringVar(&launchPermissionMode, "permission-mode", "acceptEdits",
+		"Claude Code permission mode for the session (permissions.defaultMode), e.g. acceptEdits, plan, default; empty leaves Claude Code's own default alone")
 	launchCmd.Flags().BoolVar(&launchBashASTHookMode, "bash-ast-hook-mode", false,
 		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
 	launchCmd.Flags().BoolVar(&launchAlwaysLoad, "always-load", true,
@@ -164,8 +179,9 @@ func launchMode() config.Mode {
 //
 //   - --mcp-config adds the lite-sandbox MCP server (without --strict-mcp-config,
 //     so the user's own servers still load);
-//   - --settings layers the tool permissions and the PreToolUse hook over the
-//     user's settings;
+//   - --settings layers the tool permissions, the permission mode, and the
+//     PreToolUse hook over the user's settings (they are merged with the
+//     user's own, not substituted for them);
 //   - --append-system-prompt carries the usage directive that install appends to
 //     CLAUDE.md.
 //
@@ -197,9 +213,15 @@ func claudeLaunchArgs(binPath string, agentArgs []string) ([]string, error) {
 // options (see claudeOptions).
 func claudeLaunchOptions() claudeOptions {
 	return claudeOptions{
-		withToolHook:    launchWithToolHook,
+		withToolHook: launchWithToolHook,
+		// Unlike install's --with-tool-hook, the hook governs the filesystem
+		// tools while the built-in Bash tool stays denied by permission: the
+		// model is not offered a shell it would only be redirected away from,
+		// and the block does not depend on the hook running.
+		redirectBash:    false,
 		bashASTHookMode: launchBashASTHookMode,
 		alwaysLoad:      launchAlwaysLoad,
+		permissionMode:  launchPermissionMode,
 	}
 }
 

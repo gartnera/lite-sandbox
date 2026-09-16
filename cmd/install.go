@@ -127,7 +127,10 @@ func init() {
 // options (see claudeOptions).
 func claudeInstallOptions() claudeOptions {
 	return claudeOptions{
-		withToolHook:    installWithToolHook,
+		withToolHook: installWithToolHook,
+		// --with-tool-hook has always moved the Bash block from the permission
+		// deny to the hook, so the redirect message reaches the model.
+		redirectBash:    installWithToolHook,
 		bashASTHookMode: installBashASTHookMode,
 		alwaysLoad:      installAlwaysLoad,
 	}
@@ -445,6 +448,10 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 type permissionsConfig struct {
 	Allow []string `json:"allow,omitempty"`
 	Deny  []string `json:"deny,omitempty"`
+	// DefaultMode is Claude Code's permission mode for the session
+	// ("acceptEdits", ...). Only `launch` sets it; `install` leaves whatever the
+	// user configured alone.
+	DefaultMode string `json:"defaultMode,omitempty"`
 }
 
 // readSettingsFile reads and parses a settings.json file into a generic map,
@@ -489,35 +496,49 @@ func configurePermissions(claudeDir string, plan claudePlan) error {
 		return err
 	}
 
-	// Parse existing permissions if present
-	var perms permissionsConfig
+	// The permissions subtree is edited key by key so the settings lite-sandbox
+	// has no opinion about (defaultMode, ask, additionalDirectories, ...) survive
+	// the round-trip.
+	perms := make(map[string]json.RawMessage)
 	if raw, ok := cfg["permissions"]; ok {
 		if err := json.Unmarshal(raw, &perms); err != nil {
 			return fmt.Errorf("failed to parse permissions in settings.json: %w", err)
 		}
 	}
+	allow, err := stringList(perms, "allow")
+	if err != nil {
+		return err
+	}
+	deny, err := stringList(perms, "deny")
+	if err != nil {
+		return err
+	}
 
+	want := plan.claudePermissions()
 	// Auto-allow every sandbox tool — the bash tool plus the background-process
 	// management tools (bash_output, kill_shell, list_shells) — so polling and
 	// stopping background commands never triggers a permission prompt.
-	want := plan.claudePermissions()
 	for _, allowPermission := range want.Allow {
-		if !slices.Contains(perms.Allow, allowPermission) {
-			perms.Allow = append(perms.Allow, allowPermission)
+		if !slices.Contains(allow, allowPermission) {
+			allow = append(allow, allowPermission)
 		}
 	}
-
-	const denyPermission = builtinBashPermission
-	if !slices.Contains(want.Deny, denyPermission) {
+	if !slices.Contains(want.Deny, builtinBashPermission) {
 		// Let the hook own the Bash block; a deny rule would suppress its
 		// decision. Strip any Bash deny a prior install added.
-		perms.Deny = slices.DeleteFunc(perms.Deny, func(p string) bool { return p == denyPermission })
-	} else if !slices.Contains(perms.Deny, denyPermission) {
+		deny = slices.DeleteFunc(deny, func(p string) bool { return p == builtinBashPermission })
+	} else if !slices.Contains(deny, builtinBashPermission) {
 		// Ban the built-in Bash tool outright so Claude must use the sandbox.
-		perms.Deny = append(perms.Deny, denyPermission)
+		deny = append(deny, builtinBashPermission)
 	}
 
-	// Marshal permissions back into the config
+	if err := setStringList(perms, "allow", allow); err != nil {
+		return err
+	}
+	if err := setStringList(perms, "deny", deny); err != nil {
+		return err
+	}
+
 	permsRaw, err := json.Marshal(perms)
 	if err != nil {
 		return err
@@ -525,6 +546,35 @@ func configurePermissions(claudeDir string, plan claudePlan) error {
 	cfg["permissions"] = permsRaw
 
 	return writeSettingsFile(settingsPath, cfg)
+}
+
+// stringList reads a string-array key from a JSON object, treating an absent
+// key as empty.
+func stringList(obj map[string]json.RawMessage, key string) ([]string, error) {
+	raw, ok := obj[key]
+	if !ok {
+		return nil, nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("failed to parse permissions.%s in settings.json: %w", key, err)
+	}
+	return list, nil
+}
+
+// setStringList writes a string-array key back, removing it when the list is
+// empty so the file keeps the shape it had before.
+func setStringList(obj map[string]json.RawMessage, key string, list []string) error {
+	if len(list) == 0 {
+		delete(obj, key)
+		return nil
+	}
+	raw, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+	obj[key] = raw
+	return nil
 }
 
 // reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook

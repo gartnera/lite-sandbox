@@ -10,14 +10,60 @@ import (
 const testBin = "/usr/local/bin/lite-sandbox"
 
 // setLaunchFlags sets the launch command's flag variables for one test and
-// restores them afterwards.
-func setLaunchFlags(t *testing.T, withToolHook, bashASTHookMode, alwaysLoad bool) {
+// restores them afterwards. The zero-argument defaults are the command's own
+// (see its flag registration): the tool hook on, alwaysLoad on, acceptEdits.
+func setLaunchFlags(t *testing.T, opts ...func(*launchFlags)) {
 	t.Helper()
-	prevHook, prevAST, prevAlways := launchWithToolHook, launchBashASTHookMode, launchAlwaysLoad
+	f := launchFlags{withToolHook: true, alwaysLoad: true, permissionMode: "acceptEdits"}
+	for _, o := range opts {
+		o(&f)
+	}
+	prev := launchFlags{launchWithToolHook, launchBashASTHookMode, launchAlwaysLoad, launchPermissionMode}
 	t.Cleanup(func() {
-		launchWithToolHook, launchBashASTHookMode, launchAlwaysLoad = prevHook, prevAST, prevAlways
+		launchWithToolHook, launchBashASTHookMode = prev.withToolHook, prev.bashASTHookMode
+		launchAlwaysLoad, launchPermissionMode = prev.alwaysLoad, prev.permissionMode
 	})
-	launchWithToolHook, launchBashASTHookMode, launchAlwaysLoad = withToolHook, bashASTHookMode, alwaysLoad
+	launchWithToolHook, launchBashASTHookMode = f.withToolHook, f.bashASTHookMode
+	launchAlwaysLoad, launchPermissionMode = f.alwaysLoad, f.permissionMode
+}
+
+// launchFlags mirrors the launch command's flag variables for setLaunchFlags.
+type launchFlags struct {
+	withToolHook    bool
+	bashASTHookMode bool
+	alwaysLoad      bool
+	permissionMode  string
+}
+
+func noToolHook(f *launchFlags)       { f.withToolHook = false }
+func bashASTHookMode(f *launchFlags)  { f.bashASTHookMode = true }
+func noAlwaysLoad(f *launchFlags)     { f.alwaysLoad = false }
+func noPermissionMode(f *launchFlags) { f.permissionMode = "" }
+
+// launchSettings builds the argv for the current flags and returns it with the
+// parsed --settings document.
+func launchSettings(t *testing.T, agentArgs []string) ([]string, claudeSettings) {
+	t.Helper()
+	argv, err := claudeLaunchArgs(testBin, agentArgs)
+	if err != nil {
+		t.Fatalf("claudeLaunchArgs failed: %v", err)
+	}
+	var settings claudeSettings
+	if err := json.Unmarshal([]byte(flagValue(t, argv, "--settings")), &settings); err != nil {
+		t.Fatalf("parse --settings: %v", err)
+	}
+	return argv, settings
+}
+
+// hookGroup returns the single PreToolUse matcher group in settings.
+func hookGroup(t *testing.T, settings claudeSettings) (matcher, command string) {
+	t.Helper()
+	groups := asSlice(settings.Hooks["PreToolUse"])
+	if len(groups) != 1 {
+		t.Fatalf("expected one PreToolUse group, got %d: %v", len(groups), settings.Hooks)
+	}
+	group := asMap(groups[0])
+	return asString(group["matcher"]), asString(asMap(asSlice(group["hooks"])[0])["command"])
 }
 
 // flagValue returns the value that follows flag in argv.
@@ -34,15 +80,12 @@ func flagValue(t *testing.T, argv []string, flag string) string {
 }
 
 // TestClaudeLaunchArgsDefault checks the default launch: the MCP server, the
-// tool permissions plus the Bash deny, the subagent hook, and the usage
-// directive — the same configuration `install claude` writes to disk.
+// tool permissions plus the Bash deny, the acceptEdits permission mode, the
+// hook confining the built-in file tools, and the usage directive.
 func TestClaudeLaunchArgsDefault(t *testing.T) {
-	setLaunchFlags(t, false, false, true)
+	setLaunchFlags(t)
 
-	argv, err := claudeLaunchArgs(testBin, []string{"-p", "hello"})
-	if err != nil {
-		t.Fatalf("claudeLaunchArgs failed: %v", err)
-	}
+	argv, settings := launchSettings(t, []string{"-p", "hello"})
 
 	// The agent's own arguments come last: --mcp-config is variadic and would
 	// otherwise swallow them.
@@ -70,27 +113,27 @@ func TestClaudeLaunchArgsDefault(t *testing.T) {
 		t.Error("alwaysLoad not set (it is on by default)")
 	}
 
-	var settings claudeSettings
-	if err := json.Unmarshal([]byte(flagValue(t, argv, "--settings")), &settings); err != nil {
-		t.Fatalf("parse --settings: %v", err)
-	}
 	for _, want := range mcpToolPermissions {
 		if !slices.Contains(settings.Permissions.Allow, want) {
 			t.Errorf("permission %q not allowed: %v", want, settings.Permissions.Allow)
 		}
 	}
+	// The built-in Bash tool is denied outright even though the hook is on: the
+	// hook's Bash branch and its filesystem branch are independent, so there is
+	// no reason to weaken the block to a hook decision.
 	if !slices.Contains(settings.Permissions.Deny, builtinBashPermission) {
 		t.Errorf("built-in Bash not denied: %v", settings.Permissions.Deny)
 	}
-	if settings.Hooks == nil {
-		t.Fatal("no PreToolUse hook in --settings")
+	if settings.Permissions.DefaultMode != "acceptEdits" {
+		t.Errorf("defaultMode = %q, want acceptEdits", settings.Permissions.DefaultMode)
 	}
-	group := asMap(asSlice(settings.Hooks["PreToolUse"])[0])
-	if got := asString(group["matcher"]); got != mcpToolMatcher {
-		t.Errorf("hook matcher = %q, want %q", got, mcpToolMatcher)
+
+	matcher, command := hookGroup(t, settings)
+	if want := hookToolMatcher + "|" + mcpToolMatcher; matcher != want {
+		t.Errorf("hook matcher = %q, want %q (the file tools are confined by default)", matcher, want)
 	}
-	if got := asString(asMap(asSlice(group["hooks"])[0])["command"]); got != testBin+" hook" {
-		t.Errorf("hook command = %q, want %q", got, testBin+" hook")
+	if want := testBin + " hook"; command != want {
+		t.Errorf("hook command = %q, want %q", command, want)
 	}
 
 	if got := flagValue(t, argv, "--append-system-prompt"); got != claudeDirective {
@@ -98,64 +141,66 @@ func TestClaudeLaunchArgsDefault(t *testing.T) {
 	}
 }
 
-// TestClaudeLaunchArgsWithToolHook checks that --with-tool-hook moves the Bash
-// block from the permission deny to the hook, which then also governs the
-// filesystem tools.
-func TestClaudeLaunchArgsWithToolHook(t *testing.T) {
-	setLaunchFlags(t, true, false, true)
+// TestClaudeLaunchArgsNoToolHook checks that --with-tool-hook=false falls back
+// to install's default posture: Bash denied, the hook only pre-approving the
+// sandbox's own MCP tools, and the built-in file tools left to Claude Code.
+func TestClaudeLaunchArgsNoToolHook(t *testing.T) {
+	setLaunchFlags(t, noToolHook)
 
-	argv, err := claudeLaunchArgs(testBin, nil)
-	if err != nil {
-		t.Fatalf("claudeLaunchArgs failed: %v", err)
+	_, settings := launchSettings(t, nil)
+	if !slices.Contains(settings.Permissions.Deny, builtinBashPermission) {
+		t.Errorf("built-in Bash not denied: %v", settings.Permissions.Deny)
 	}
-	var settings claudeSettings
-	if err := json.Unmarshal([]byte(flagValue(t, argv, "--settings")), &settings); err != nil {
-		t.Fatalf("parse --settings: %v", err)
+	matcher, _ := hookGroup(t, settings)
+	if matcher != mcpToolMatcher {
+		t.Errorf("hook matcher = %q, want %q", matcher, mcpToolMatcher)
 	}
-	if slices.Contains(settings.Permissions.Deny, builtinBashPermission) {
-		t.Error("built-in Bash denied by permission rule; the deny would suppress the hook's decision")
+}
+
+// TestClaudeLaunchArgsPermissionMode checks that an empty --permission-mode
+// leaves Claude Code's own default in place.
+func TestClaudeLaunchArgsPermissionMode(t *testing.T) {
+	setLaunchFlags(t, noPermissionMode)
+
+	argv, settings := launchSettings(t, nil)
+	if settings.Permissions.DefaultMode != "" {
+		t.Errorf("defaultMode = %q, want it absent", settings.Permissions.DefaultMode)
 	}
-	group := asMap(asSlice(settings.Hooks["PreToolUse"])[0])
-	if want := hookToolMatcher + "|" + mcpToolMatcher; asString(group["matcher"]) != want {
-		t.Errorf("hook matcher = %q, want %q", asString(group["matcher"]), want)
+	if strings.Contains(flagValue(t, argv, "--settings"), "defaultMode") {
+		t.Errorf("defaultMode key present in --settings: %s", flagValue(t, argv, "--settings"))
 	}
 }
 
 // TestClaudeLaunchArgsBashASTHookMode checks that --bash-ast-hook-mode
-// launches with no MCP server, no directive, and the validating hook.
+// launches with no MCP server and no directive, and that Bash reaches the
+// validating hook instead of being denied.
 func TestClaudeLaunchArgsBashASTHookMode(t *testing.T) {
-	setLaunchFlags(t, false, true, true)
+	setLaunchFlags(t, bashASTHookMode)
 
-	argv, err := claudeLaunchArgs(testBin, nil)
-	if err != nil {
-		t.Fatalf("claudeLaunchArgs failed: %v", err)
-	}
+	argv, settings := launchSettings(t, nil)
 	if slices.Contains(argv, "--mcp-config") {
 		t.Errorf("--mcp-config passed in --bash-ast-hook-mode: %v", argv)
 	}
 	if slices.Contains(argv, "--append-system-prompt") {
 		t.Errorf("usage directive passed without an MCP server to point at: %v", argv)
 	}
-	var settings claudeSettings
-	if err := json.Unmarshal([]byte(flagValue(t, argv, "--settings")), &settings); err != nil {
-		t.Fatalf("parse --settings: %v", err)
-	}
 	if len(settings.Permissions.Allow) != 0 || len(settings.Permissions.Deny) != 0 {
-		t.Errorf("permissions = %+v, want none (Bash is validated in place)", settings.Permissions)
+		t.Errorf("permissions = %+v, want no allow/deny (Bash is validated in place; a deny would suppress the hook's allow)", settings.Permissions)
 	}
-	group := asMap(asSlice(settings.Hooks["PreToolUse"])[0])
-	if asString(group["matcher"]) != bashValidateMatcher {
-		t.Errorf("hook matcher = %q, want %q", asString(group["matcher"]), bashValidateMatcher)
+	matcher, command := hookGroup(t, settings)
+	// The tool hook is on by default, so the matcher covers the file tools too.
+	if matcher != hookToolMatcher {
+		t.Errorf("hook matcher = %q, want %q", matcher, hookToolMatcher)
 	}
-	if want := testBin + " hook --validate-bash"; asString(asMap(asSlice(group["hooks"])[0])["command"]) != want {
-		t.Errorf("hook command = %q, want %q", asString(asMap(asSlice(group["hooks"])[0])["command"]), want)
+	if want := testBin + " hook --validate-bash"; command != want {
+		t.Errorf("hook command = %q, want %q", command, want)
 	}
 }
 
 // TestClaudeLaunchArgsAlwaysLoadOff checks --always-load=false leaves the flag
 // off the MCP server entry.
 func TestClaudeLaunchArgsAlwaysLoadOff(t *testing.T) {
-	setLaunchFlags(t, false, false, false)
+	setLaunchFlags(t, noAlwaysLoad)
 
 	argv, err := claudeLaunchArgs(testBin, nil)
 	if err != nil {

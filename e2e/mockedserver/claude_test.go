@@ -63,25 +63,82 @@ func TestClaudeCode(t *testing.T) {
 
 // TestClaudeCodeLaunch drives `lite-sandbox launch claude`, the temporary
 // alternative to `install`: the MCP server, permissions, hook, and usage
-// directive reach Claude Code through its command line for this one run. The
-// session must behave like the default install, and Claude Code's config must
-// come back untouched.
+// directive reach Claude Code through its command line for this one run.
+//
+// launch is stricter than install's default, and both halves are checked here:
+// the built-in Bash tool is denied outright (as in the default install) *and*
+// the hook confines the built-in file tools, so a write outside the writable
+// paths is blocked while one inside applies without a permission prompt (the
+// acceptEdits default). Claude Code's config must come back untouched.
 func TestClaudeCodeLaunch(t *testing.T) {
 	requireE2E(t)
-	calls := sandboxCalls(claudeSandboxTool)
+	project := newProject(t)
+	inside := filepath.Join(project, "written-by-claude.txt")
+	write := func(path string) mockmodel.ToolCall {
+		return mockmodel.ToolCall{Name: "Write", Arguments: map[string]string{"file_path": path, "content": "written-by-claude"}}
+	}
+	calls := append([]mockmodel.ToolCall{write(outsidePath), write(inside)}, sandboxCalls(claudeSandboxTool)...)
 	model := startModel(t, calls)
 	configDir, environ := claudeEnv(t, model)
 
 	// No installSandbox: `launch` is the whole configuration.
-	output := runAgent(t, newProject(t), environ, bins.sandbox,
-		append([]string{"launch", "claude"}, "-p", "--output-format", "json", prompt)...)
+	output := runAgent(t, project, environ, bins.sandbox,
+		"launch", "claude", "-p", "--output-format", "json", prompt)
 
 	tools := assertConversation(t, output, model, calls, claudeSandboxTool, true)
 	if tools["Bash"] {
 		t.Errorf("built-in Bash tool still offered to the model despite the permission deny")
 	}
+	results := lastResults(t, model)
+	assertResult(t, results, 0, hookOutsideWritable)
+	// acceptEdits: the in-boundary write applied without a permission prompt.
+	assertResult(t, results, 1, "written-by-claude.txt")
+	if data, err := os.ReadFile(inside); err != nil || string(data) != "written-by-claude" {
+		t.Errorf("in-boundary write did not apply (%v): %q", err, data)
+	}
 	assertDirective(t, model, claudeSandboxTool)
 	assertClaudeConfigUntouched(t, configDir)
+}
+
+// TestClaudeCodeLaunchLayersOverUserConfig checks that what launch passes is
+// merged with the user's own configuration rather than replacing it: their
+// permission rules, their MCP servers, and their CLAUDE.md all still apply to
+// the sandboxed session.
+func TestClaudeCodeLaunchLayersOverUserConfig(t *testing.T) {
+	requireE2E(t)
+	calls := sandboxCalls(claudeSandboxTool)
+	model := startModel(t, calls)
+	configDir, environ := claudeEnv(t, model)
+
+	// The user's own settings: a deny for a built-in tool lite-sandbox never
+	// touches, plus a second MCP server (this binary again, under another name)
+	// and a memory file.
+	writeFile(t, filepath.Join(configDir, "settings.json"), `{"permissions":{"deny":["Read"]}}`)
+	probe, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		"probe": map[string]any{"command": bins.sandbox, "args": []string{"serve-mcp"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(configDir, ".claude.json"), string(probe))
+	const memoryMarker = "USER-MEMORY-MARKER"
+	writeFile(t, filepath.Join(configDir, "CLAUDE.md"), memoryMarker)
+
+	output := runAgent(t, newProject(t), environ, bins.sandbox,
+		"launch", "claude", "-p", "--output-format", "json", prompt)
+
+	tools := assertConversation(t, output, model, calls, claudeSandboxTool, true)
+	if tools["Read"] {
+		t.Errorf("the user's own Read deny was dropped: %v", tools)
+	}
+	if tools["Bash"] {
+		t.Errorf("built-in Bash tool still offered despite lite-sandbox's deny")
+	}
+	if !tools["mcp__probe__bash"] {
+		t.Errorf("the user's own MCP server was dropped: %v", tools)
+	}
+	assertDirective(t, model, memoryMarker)
+	assertDirective(t, model, claudeSandboxTool)
 }
 
 // assertClaudeConfigUntouched checks that launch wrote none of the three
@@ -96,6 +153,7 @@ func assertClaudeConfigUntouched(t *testing.T, configDir string) {
 			t.Errorf("launch wrote %s: %s", name, data)
 		}
 	}
+
 	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
 	if err != nil {
 		return

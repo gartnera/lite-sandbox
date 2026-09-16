@@ -8,15 +8,26 @@ import "encoding/json"
 // command-line flags for a single run. Both go through claudePlan so the two
 // entry points can never drift apart.
 type claudeOptions struct {
-	// withToolHook governs the built-in tools with the PreToolUse hook instead
-	// of the blunt Bash deny: Bash is redirected to the MCP tool and
-	// Read/Write/Edit are confined to the sandbox's paths.
+	// withToolHook confines the built-in filesystem tools (Read/Write/Edit/...)
+	// to the sandbox's readable/writable paths with the PreToolUse hook.
 	withToolHook bool
+	// redirectBash lets the hook block the built-in Bash tool with a message
+	// redirecting to the MCP tool, instead of denying it with a permission rule.
+	// This is what `install --with-tool-hook` does: the deny would take
+	// precedence over the hook and suppress the redirect. `launch` leaves it
+	// off, so Bash stays denied outright (and is not even offered to the model)
+	// while the hook still governs the filesystem tools.
+	redirectBash bool
 	// bashASTHookMode validates the built-in Bash tool's AST in the hook and
 	// allows it when it passes, instead of configuring the MCP server.
 	bashASTHookMode bool
 	// alwaysLoad exempts the sandbox MCP tools from Tool Search deferral.
 	alwaysLoad bool
+	// permissionMode is Claude Code's permissions.defaultMode for the session
+	// ("acceptEdits", ...). Empty leaves Claude Code's own default in place.
+	// Only `launch` sets it: it configures one session, whereas `install`
+	// writes settings that apply to every project the user opens.
+	permissionMode string
 }
 
 // claudePlan is what a set of claudeOptions resolves to: the decisions both
@@ -33,6 +44,9 @@ type claudePlan struct {
 	// alwaysLoad is the requested alwaysLoad, forced off when there is no MCP
 	// server to apply it to.
 	alwaysLoad bool
+	// permissionMode is Claude Code's permissions.defaultMode, or "" to leave it
+	// alone.
+	permissionMode string
 	// validateBash and governFS are the resolved hook behaviors, kept for the
 	// install command's reporting.
 	validateBash bool
@@ -46,12 +60,19 @@ type claudePlan struct {
 // plan resolves the options for the lite-sandbox binary at binPath.
 func (o claudeOptions) plan(binPath string) claudePlan {
 	p := claudePlan{
-		validateBash: o.bashASTHookMode,
-		governFS:     o.withToolHook,
-		configMCP:    !o.bashASTHookMode,
+		validateBash:   o.bashASTHookMode,
+		governFS:       o.withToolHook,
+		configMCP:      !o.bashASTHookMode,
+		permissionMode: o.permissionMode,
 	}
 	wantHook := o.withToolHook || o.bashASTHookMode
-	p.denyBash = !wantHook
+	// Deny the built-in Bash tool unless something needs it to reach the hook:
+	// the redirect (whose message a deny would suppress) or --bash-ast-hook-mode
+	// (where the hook allows commands that pass validation). Denying it and
+	// governing the filesystem tools with the hook is not a conflict — the two
+	// branches of the hook are independent — so it is the strongest combination
+	// and the one `launch` uses by default.
+	p.denyBash = !(o.redirectBash || o.bashASTHookMode)
 	p.alwaysLoad = o.alwaysLoad && p.configMCP
 	p.hookCommand, p.hookMatcher = claudeHookPlan(binPath, wantHook, p.validateBash, p.governFS, p.configMCP)
 	return p
@@ -108,7 +129,7 @@ func mcpServerEntry(binPath string, alwaysLoad bool) mcpServerConfig {
 // tools auto-allowed when the MCP server is configured, the built-in Bash tool
 // denied when no hook governs it.
 func (p claudePlan) claudePermissions() permissionsConfig {
-	var perms permissionsConfig
+	perms := permissionsConfig{DefaultMode: p.permissionMode}
 	if p.configMCP {
 		perms.Allow = append(perms.Allow, mcpToolPermissions...)
 	}
