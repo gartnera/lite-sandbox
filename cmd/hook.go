@@ -171,7 +171,7 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 				"What to do instead: rework the command to use only sandbox-approved, "+
 				"non-destructive operations within the project's paths. If this command "+
 				"is genuinely needed, ask the user to permit it via `lite-sandbox config` "+
-				"(e.g. extra-commands or readable/writable paths).",
+				"(e.g. `config commands allow` or `config paths allow`).",
 			in.Describe(), err,
 		)
 		return hook.NewDecision(hook.DecisionDeny, reason)

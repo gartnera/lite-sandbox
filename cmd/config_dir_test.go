@@ -122,10 +122,10 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.ExtraCommands, []string{"make", "ninja"}) {
-		t.Errorf("base extra_commands = %v, want [make ninja]", cfg.ExtraCommands)
+	if !slices.Equal(cfg.ExtraCommandList(), []string{"make", "ninja"}) {
+		t.Errorf("base extra_commands = %v, want [make ninja]", cfg.ExtraCommandList())
 	}
-	got := cfg.ForDirectory(dir).ExtraCommands
+	got := cfg.ForDirectory(dir).ExtraCommandList()
 	if !slices.Equal(got, []string{"make", "npm"}) {
 		t.Errorf("extra_commands for %s = %v, want [make npm]", dir, got)
 	}
@@ -303,11 +303,11 @@ func TestConfigDir_FlagRegisteredOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.ForDirectory("/work/acme").ExtraCommands; !slices.Equal(got, []string{"npm"}) {
+	if got := cfg.ForDirectory("/work/acme").ExtraCommandList(); !slices.Equal(got, []string{"npm"}) {
 		t.Errorf("extra_commands for the directory = %v, want [npm]", got)
 	}
-	if len(cfg.ExtraCommands) != 0 {
-		t.Errorf("base extra_commands = %v, want none", cfg.ExtraCommands)
+	if len(cfg.ExtraCommandList()) != 0 {
+		t.Errorf("base extra_commands = %v, want none", cfg.ExtraCommandList())
 	}
 
 	// Every runnable command under `config` inherits the same flag.

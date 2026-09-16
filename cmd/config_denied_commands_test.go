@@ -9,6 +9,9 @@ import (
 	"github.com/gartnera/lite-sandbox/config"
 )
 
+// TestConfigDeniedCommandsCmd: the former `denied-commands` command still
+// works as a hidden alias, writing the unified `commands` form — a denial as
+// allow: false, a lifted built-in as allow: true.
 func TestConfigDeniedCommandsCmd(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 
@@ -27,15 +30,18 @@ func TestConfigDeniedCommandsCmd(t *testing.T) {
 			t.Fatalf("add: %v", err)
 		}
 	})
-	if !strings.Contains(out, "sudo denied") || !strings.Contains(out, "already denied") {
+	if !strings.Contains(out, "sudo: deny") || !strings.Contains(out, "lite-sandbox config: deny (built-in default restored)") {
 		t.Errorf("add output = %q", out)
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.DeniedCommands, []string{"sudo"}) {
-		t.Errorf("stored denied_commands = %v", cfg.DeniedCommands)
+	if cfg.UsesDeprecatedCommandKeys() {
+		t.Errorf("the alias must write the new section only: %+v", cfg)
+	}
+	if !slices.Equal(cfg.DeniedCommandList(), []string{"sudo"}) {
+		t.Errorf("stored denials = %v", cfg.DeniedCommandList())
 	}
 
 	// Removing a user entry deletes it; removing a built-in records a lift.
@@ -52,14 +58,14 @@ func TestConfigDeniedCommandsCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(cfg.DeniedCommands, []string{"-lite-sandbox config"}) {
-		t.Errorf("stored denied_commands after remove = %v", cfg.DeniedCommands)
+	if len(cfg.Commands) != 1 || !cfg.Commands[0].Allows() || cfg.Commands[0].Command != "lite-sandbox config" {
+		t.Errorf("stored commands after remove = %+v", cfg.Commands)
 	}
 	if slices.Contains(cfg.EffectiveDeniedCommands(), "lite-sandbox config") {
 		t.Errorf("lifted entry still in effect: %v", cfg.EffectiveDeniedCommands())
 	}
 
-	// Re-adding it drops the lift rather than listing the same entry twice.
+	// Re-adding it drops the lift rather than restating the built-in.
 	if err := configDeniedCommandsAddCmd.RunE(configDeniedCommandsAddCmd, []string{"lite-sandbox config"}); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
@@ -67,8 +73,8 @@ func TestConfigDeniedCommandsCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.DeniedCommands) != 0 {
-		t.Errorf("re-add should clear the lift, got %v", cfg.DeniedCommands)
+	if len(cfg.Commands) != 0 {
+		t.Errorf("re-add should clear the lift, got %+v", cfg.Commands)
 	}
 	if !slices.Contains(cfg.EffectiveDeniedCommands(), "lite-sandbox config") {
 		t.Errorf("built-in not restored: %v", cfg.EffectiveDeniedCommands())

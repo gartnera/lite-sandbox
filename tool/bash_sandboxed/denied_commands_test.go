@@ -33,7 +33,7 @@ func TestDeniedCommands_SelfProtection(t *testing.T) {
 	if err == nil {
 		t.Fatal("lite-sandbox config must be denied in denylist mode")
 	}
-	if !strings.Contains(err.Error(), "denied_commands") {
+	if !strings.Contains(err.Error(), "command deny list") {
 		t.Errorf("error should name the deny list: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestDeniedCommands_Modes(t *testing.T) {
 			s, logPath := newDenySandbox(t, c.mode, workDir, config.Config{})
 			err := s.ValidateCommand(cmd, workDir, []string{workDir}, []string{workDir})
 			if c.blocked {
-				if err == nil || !strings.Contains(err.Error(), "denied_commands") {
+				if err == nil || !strings.Contains(err.Error(), "command deny list") {
 					t.Fatalf("want deny error in %s mode, got %v", c.mode, err)
 				}
 			} else if err != nil {
@@ -123,7 +123,7 @@ func TestDeniedCommands_OutranksEscapeHatches(t *testing.T) {
 				t.Error("a denied command must not take the unparsed raw-bash path")
 			}
 			err := s.ValidateCommand("lite-sandbox config mode set open", workDir, []string{workDir}, []string{workDir})
-			if err == nil || !strings.Contains(err.Error(), "denied_commands") {
+			if err == nil || !strings.Contains(err.Error(), "command deny list") {
 				t.Fatalf("deny must outrank %s: %v", c.name, err)
 			}
 			// A non-denied invocation of the same command still runs.
@@ -155,7 +155,7 @@ func TestDeniedCommands_InvocationForms(t *testing.T) {
 	for _, c := range denied {
 		t.Run(c.name, func(t *testing.T) {
 			err := s.ValidateCommand(c.cmd, workDir, paths, paths)
-			if err == nil || !strings.Contains(err.Error(), "denied_commands") {
+			if err == nil || !strings.Contains(err.Error(), "command deny list") {
 				t.Fatalf("%s should be denied: %v", c.cmd, err)
 			}
 		})
@@ -182,7 +182,7 @@ func TestDeniedCommands_RuntimeExpansion(t *testing.T) {
 			if err == nil {
 				t.Fatalf("denied command ran: out=%q", out)
 			}
-			if !strings.Contains(err.Error(), "denied_commands") {
+			if !strings.Contains(err.Error(), "command deny list") {
 				t.Errorf("error should name the deny list: %v", err)
 			}
 			if strings.Contains(out, "ran") {
@@ -207,7 +207,7 @@ func TestDeniedCommands_PrefixScope(t *testing.T) {
 	paths := []string{workDir}
 
 	if err := s.ValidateCommand("git remote add origin /tmp/x", workDir, paths, paths); err == nil ||
-		!strings.Contains(err.Error(), "denied_commands") {
+		!strings.Contains(err.Error(), "command deny list") {
 		t.Errorf("git remote should be denied: %v", err)
 	}
 	for _, cmd := range []string{"git status", "git log --oneline"} {

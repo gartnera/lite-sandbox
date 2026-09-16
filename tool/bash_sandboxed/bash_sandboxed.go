@@ -159,7 +159,8 @@ func NewSandbox() *Sandbox {
 // know overrides exist. workDir is still needed to anchor bare script paths and
 // the OS-sandbox worker's working directory.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
-	m := make(map[string]bool, len(cfg.ExtraCommands)+len(cfg.UnsandboxedCommands))
+	extraList, unsandboxedList := cfg.ExtraCommandList(), cfg.UnsandboxedCommandList()
+	m := make(map[string]bool, len(extraList)+len(unsandboxedList))
 	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
 	bareScripts := make(map[string]bool)
@@ -198,10 +199,10 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			}
 		}
 	}
-	for _, c := range cfg.ExtraCommands {
+	for _, c := range extraList {
 		processEntry(c, false)
 	}
-	for _, c := range cfg.UnsandboxedCommands {
+	for _, c := range unsandboxedList {
 		processEntry(c, true)
 	}
 	s.mu.Lock()

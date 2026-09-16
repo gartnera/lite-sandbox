@@ -26,7 +26,7 @@ down.
 whole process group, so children the command forked — dev servers, daemons,
 `something &` — are reaped, not just the direct process:
 
-- Bare `extra_commands` background commands (where forking servers typically
+- Bare allowed-command (`commands`) background commands (where forking servers typically
   run) lead their own process group on the host and are killed as a group.
 - Under the OS sandbox, the worker kills each command's process group on Linux;
   on macOS the sandbox's signal confinement limits this to the direct process,

@@ -10,7 +10,7 @@ import (
 // command must never reach: each one rewrites the policy that is supposed to
 // be governing it.
 //
-//   - config:  edits the config file (mode, extra_commands, deny lists, ...),
+//   - config:  edits the config file (mode, commands, paths, ...),
 //     which the MCP server hot-reloads, so `config mode set open` disables
 //     enforcement for the very next command.
 //   - install: rewrites the agents' own settings — including the built-in Bash
@@ -62,21 +62,24 @@ func selfCommandNames() []string {
 }
 
 // EffectiveDeniedCommands returns the command deny list in effect: the
-// built-in defaults plus the config's denied_commands, with entries prefixed
-// by "-" removing a previously listed one (which is how a built-in default is
-// dropped: `denied_commands: ["-lite-sandbox config"]`).
+// built-in defaults plus the config's denials (commands entries with
+// allow: false, and the deprecated denied_commands list), minus the built-ins
+// lifted by a commands entry with allow: true of the same text
+// (LiftedDeniedCommands). In the deprecated list an entry prefixed by "-"
+// removes a previously listed one the same way: `denied_commands:
+// ["-lite-sandbox config"]`.
 //
 // Entries keep the extra_commands format: a bare name denies every invocation
 // of that command, a name followed by tokens denies only invocations whose
 // leading non-flag arguments start with them.
 func (c *Config) EffectiveDeniedCommands() []string {
-	var extra []string
-	if c != nil {
-		extra = c.DeniedCommands
-	}
+	extra := c.DeniedCommandList()
 	out := make([]string, 0, len(DefaultDeniedCommands())+len(extra))
 	seen := map[string]bool{}
 	removed := map[string]bool{}
+	for _, lifted := range c.LiftedDeniedCommands() {
+		removed[lifted] = true
+	}
 	add := func(e string) {
 		e = NormalizeCommandEntry(e)
 		if e == "" {

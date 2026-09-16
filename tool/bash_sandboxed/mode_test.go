@@ -221,7 +221,7 @@ func TestAllowlistMode_UnchangedAndHinted(t *testing.T) {
 	if err == nil {
 		t.Fatal("npm should be blocked in allowlist mode")
 	}
-	for _, want := range []string{`command "npm" is not allowed`, "extra-commands add npm"} {
+	for _, want := range []string{`command "npm" is not allowed`, "commands allow npm"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks hint %q", err, want)
 		}
