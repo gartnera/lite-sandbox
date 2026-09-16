@@ -8,33 +8,6 @@ import (
 	"github.com/gartnera/lite-sandbox/config"
 )
 
-func TestDetectWorktreeParent_NotAGitRepo(t *testing.T) {
-	tmp := t.TempDir()
-	if got := detectWorktreeParent(tmp); got != "" {
-		t.Errorf("expected empty for non-git dir, got %q", got)
-	}
-}
-
-func TestDetectWorktreeParent_MainWorktree(t *testing.T) {
-	repo := initRepo(t)
-	if got := detectWorktreeParent(repo); got != "" {
-		t.Errorf("expected empty for main worktree, got %q", got)
-	}
-}
-
-func TestDetectWorktreeParent_LinkedWorktree(t *testing.T) {
-	repo := initRepo(t)
-	wt := filepath.Join(filepath.Dir(repo), "wt")
-	run(t, repo, "git", "worktree", "add", "-b", "feature", wt)
-
-	got := detectWorktreeParent(wt)
-	wantResolved, _ := filepath.EvalSymlinks(repo)
-	gotResolved, _ := filepath.EvalSymlinks(got)
-	if gotResolved != wantResolved {
-		t.Errorf("expected main worktree %q, got %q", wantResolved, gotResolved)
-	}
-}
-
 func TestSandbox_WorktreeParentPath_FlagOff(t *testing.T) {
 	repo := initRepo(t)
 	wt := filepath.Join(filepath.Dir(repo), "wt")
@@ -59,6 +32,16 @@ func TestSandbox_WorktreeParentPath_FlagOn(t *testing.T) {
 	gotResolved, _ := filepath.EvalSymlinks(got)
 	if gotResolved != wantResolved {
 		t.Errorf("expected %q, got %q", wantResolved, gotResolved)
+	}
+}
+
+func TestSandbox_WorktreeParentPath_MainWorktree(t *testing.T) {
+	repo := initRepo(t)
+	s := newTestSandboxWithGitConfig(&config.GitConfig{
+		AllowWorktreeParent: boolPtr(true),
+	})
+	if got := s.WorktreeParentPath(repo); got != "" {
+		t.Errorf("expected empty for main worktree, got %q", got)
 	}
 }
 

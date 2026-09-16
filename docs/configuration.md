@@ -518,6 +518,35 @@ Resolution rules:
   and lists like `paths`) come from the override.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
+- **Linked git worktrees inherit their repository's override.** A worktree
+  created with `git worktree add` usually lives far from the checkout it came
+  from — often in a shared container like `~/.superconductor/worktrees/<repo>/` —
+  so it matches no override of its own. When nothing matches the working
+  directory directly, resolution retries from the repository's **main worktree**,
+  and the override written for the repo applies there too:
+
+  ```yaml
+  overrides:
+    - path: ~/workspace/github.com/acme/haystack   # the checkout
+      runtimes:
+        go:
+          enabled: true
+  ```
+
+  ```console
+  $ git worktree list
+  /Users/alex/workspace/github.com/acme/haystack                  5c65658 [master]
+  /Users/alex/.superconductor/worktrees/haystack/sc-vortex-d091   85bf9a8 [feature]
+  ```
+
+  Commands run in `sc-vortex-d091` get the same `runtimes.go.enabled` as the
+  checkout. An override matching the worktree itself (or any directory above it,
+  such as the container) still wins — inheritance only fills the gap when nothing
+  matches directly, so a worktree can always be configured separately. Note that
+  this shares *settings*, not path grants: a `paths` entry naming a directory
+  inside the repo keeps pointing there, and granting the sandbox access to the
+  main worktree from a linked one is the separate
+  [`git.allow_worktree_parent`](#git-support) flag.
 
 ### Writing overrides from the CLI: `--dir`
 

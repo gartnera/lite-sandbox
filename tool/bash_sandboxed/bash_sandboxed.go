@@ -112,11 +112,8 @@ type Sandbox struct {
 	// the paths rather than run eagerly on every UpdateConfig.
 	runtimeReadPaths []string
 	runtimeDetected  bool
-	// worktreeParentCache memoizes detectWorktreeParent per working directory
-	// so long-lived callers (the MCP server) don't fork git on every command.
-	worktreeParentCache map[string]string
-	worker              *os_sandbox.Worker
-	workerWorkDir       string
+	worker           *os_sandbox.Worker
+	workerWorkDir    string
 	// argValidators holds a reference to commandArgValidators so that
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
@@ -239,7 +236,6 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	// use via RuntimeReadPaths, since detection spawns subprocesses.
 	s.runtimeReadPaths = nil
 	s.runtimeDetected = false
-	s.worktreeParentCache = nil
 
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
