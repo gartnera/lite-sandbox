@@ -446,8 +446,10 @@ func TestConfigurePermissionsToolHook(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	if err := configurePermissions(tmpDir, true, false); err != nil {
-		t.Fatalf("configurePermissions(allowMCP=true, denyBash=false) failed: %v", err)
+	// --with-tool-hook: the hook governs Bash, so the plan drops the deny.
+	plan := claudeOptions{withToolHook: true}.plan("/usr/local/bin/lite-sandbox")
+	if err := configurePermissions(tmpDir, plan); err != nil {
+		t.Fatalf("configurePermissions(--with-tool-hook) failed: %v", err)
 	}
 
 	data, err := os.ReadFile(settingsPath)

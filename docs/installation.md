@@ -42,6 +42,29 @@ After configuring the agents, `install` also takes care of lite-sandbox's own co
 
 The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol; opencode has no compatible hook protocol and Crush's built-in tools aren't governed by lite-sandbox's hook, so `--with-tool-hook` is a no-op for those two and `--bash-ast-hook-mode` skips them.
 
+## Temporary setup: `lite-sandbox launch`
+
+`launch` is `install`'s throwaway counterpart: it starts an agent CLI with the sandbox already wired up, without writing anything to that agent's configuration. Everything `install` would put in the agent's config files is passed on the agent's command line for that one run, so the sandbox applies to the launched session only and quitting it leaves no trace. The agent's own settings — including its sign-in state — are still loaded; the sandbox settings are layered on top.
+
+**Claude Code is the only supported agent for now** (it is the one whose CLI takes an MCP server, settings, and a system-prompt addition per run):
+
+```bash
+lite-sandbox launch claude                     # interactive session, sandboxed
+lite-sandbox launch claude -p "run the tests"  # arguments after the agent are passed through
+lite-sandbox launch --with-tool-hook claude    # lite-sandbox's own flags come first
+lite-sandbox launch --dry-run claude           # print the command instead of running it
+```
+
+Everything after the agent name is handed to the agent untouched, so lite-sandbox's flags must precede it (or be separated with `--`). `--with-tool-hook`, `--bash-ast-hook-mode`, and `--always-load` mean exactly what they do for `install` (see the sections below); they are translated into Claude Code's `--mcp-config`, `--settings`, and `--append-system-prompt` flags:
+
+| What `install claude` writes | What `launch claude` passes |
+| --- | --- |
+| MCP server in `~/.claude.json` | `--mcp-config` (added alongside your own servers, not instead of them) |
+| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` (layered over your settings) |
+| Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+
+lite-sandbox's **own** config (`lite-sandbox config path`) is read as usual — unlike `install`, `launch` neither creates nor modifies it, so a host without one runs at the strict `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` when you want the agent setup to stick.
+
 ## Claude Code
 
 For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`) automatically:

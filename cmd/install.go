@@ -20,6 +20,11 @@ var installAlwaysLoad bool
 // mcpToolPermissions are the Claude Code permission entries auto-allowed for the
 // lite-sandbox MCP server: the bash tool and its background-process management
 // companions. Keep in sync with the tools registered in newMCPServer.
+// builtinBashPermission is the permission entry for Claude Code's built-in
+// Bash tool, which lite-sandbox denies so shell commands can only run through
+// the sandbox.
+const builtinBashPermission = "Bash"
+
 var mcpToolPermissions = []string{
 	"mcp__lite-sandbox__bash",
 	"mcp__lite-sandbox__bash_output",
@@ -116,6 +121,16 @@ func init() {
 		"configure OpenAI Codex CLI")
 	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")
 	rootCmd.AddCommand(installCmd)
+}
+
+// claudeInstallOptions is the install command's flags as the shared Claude
+// options (see claudeOptions).
+func claudeInstallOptions() claudeOptions {
+	return claudeOptions{
+		withToolHook:    installWithToolHook,
+		bashASTHookMode: installBashASTHookMode,
+		alwaysLoad:      installAlwaysLoad,
+	}
 }
 
 // installTarget is one supported agent CLI the install command can configure.
@@ -300,27 +315,18 @@ func runInstallClaude(binPath string) error {
 	}
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
-	// Resolve the install mode from the (composable) flags:
-	//   wantHook    — register a PreToolUse hook at all.
-	//   validateBash — the hook validates Bash's AST and allows it on pass,
-	//                  rather than redirecting it to the MCP tool.
-	//   governFS    — the hook also confines Read/Write/Edit/Glob/Grep paths,
-	//                  so it matches those tools (full matcher).
-	//   configMCP   — configure the MCP server (and its allow + CLAUDE.md
-	//                  directive). Skipped when Bash is validated in place,
-	//                  since nothing redirects to the MCP tool then.
-	validateBash := installBashASTHookMode
-	governFS := installWithToolHook
-	wantHook := installWithToolHook || installBashASTHookMode
-	configMCP := !installBashASTHookMode
+	// Resolve the composable flags into the shared plan (see claudeOptions);
+	// `launch claude` builds the same plan and applies it to one run instead of
+	// writing it to disk.
+	plan := claudeInstallOptions().plan(binPath)
 
 	// 1. Configure MCP server in the user config (~/.claude.json, or its
 	// CLAUDE_CONFIG_DIR equivalent)
-	if configMCP {
-		if err := configureMCPServer(claudeJsonPath, binPath, installAlwaysLoad); err != nil {
+	if plan.configMCP {
+		if err := configureMCPServer(claudeJsonPath, binPath, plan.alwaysLoad); err != nil {
 			return fmt.Errorf("failed to configure MCP server: %w", err)
 		}
-		if installAlwaysLoad {
+		if plan.alwaysLoad {
 			fmt.Printf("✓ Added MCP server to %s (alwaysLoad: tools skip Tool Search deferral)\n", claudeJsonPath)
 		} else {
 			fmt.Printf("✓ Added MCP server to %s\n", claudeJsonPath)
@@ -330,14 +336,13 @@ func runInstallClaude(binPath string) error {
 	// 2. Configure permissions. Allow the MCP tool only when it's configured.
 	// Deny the built-in Bash tool only in the default mode; when a hook governs
 	// Bash, a deny rule would override the hook's decision, so it's left off.
-	denyBash := !wantHook
-	if err := configurePermissions(claudeDir, configMCP, denyBash); err != nil {
+	if err := configurePermissions(claudeDir, plan); err != nil {
 		return fmt.Errorf("failed to configure permissions: %w", err)
 	}
 	switch {
-	case denyBash:
+	case plan.denyBash:
 		fmt.Printf("✓ Allowed lite-sandbox MCP tools and denied built-in Bash in %s\n", settingsPath)
-	case configMCP:
+	case plan.configMCP:
 		fmt.Printf("✓ Allowed lite-sandbox MCP tools in %s (built-in Bash governed by the tool hook)\n", settingsPath)
 	default:
 		fmt.Printf("✓ Ensured built-in Bash is not denied in %s (governed by the validating hook)\n", settingsPath)
@@ -345,7 +350,7 @@ func runInstallClaude(binPath string) error {
 
 	// 3. Configure CLAUDE.md (only meaningful when the MCP tool exists for the
 	// directive to point at).
-	if configMCP {
+	if plan.configMCP {
 		if err := configureCLAUDEMD(claudeDir); err != nil {
 			return fmt.Errorf("failed to configure CLAUDE.md: %w", err)
 		}
@@ -359,18 +364,17 @@ func runInstallClaude(binPath string) error {
 	// permissions.allow from settings.json (anthropics/claude-code#18950), but
 	// PreToolUse hooks still fire there, so this is what keeps the sandbox tools
 	// prompt-free inside them.
-	hookCommand, matcher := claudeHookPlan(binPath, wantHook, validateBash, governFS, configMCP)
-	if err := reconcilePreToolUseHook(claudeDir, binPath, hookCommand, matcher); err != nil {
+	if err := reconcilePreToolUseHook(claudeDir, binPath, plan.hookCommand, plan.hookMatcher); err != nil {
 		return fmt.Errorf("failed to configure tool hook: %w", err)
 	}
 	switch {
-	case governFS && validateBash:
+	case plan.governFS && plan.validateBash:
 		fmt.Printf("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) and confine reads/writes to sandbox paths in %s\n", settingsPath)
-	case governFS:
+	case plan.governFS:
 		fmt.Printf("✓ Registered PreToolUse hook to redirect built-in Bash, confine reads/writes to sandbox paths, and pre-approve the sandbox tools in subagents in %s\n", settingsPath)
-	case validateBash:
+	case plan.validateBash:
 		fmt.Printf("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in %s\n", settingsPath)
-	case configMCP:
+	case plan.configMCP:
 		fmt.Printf("✓ Registered PreToolUse hook to pre-approve the sandbox tools in subagents and skills in %s\n", settingsPath)
 	}
 
@@ -421,11 +425,7 @@ func configureMCPServer(claudeJsonPath, binPath string, alwaysLoad bool) error {
 	}
 
 	// Add or update the lite-sandbox server
-	mcpServers["lite-sandbox"] = mcpServerConfig{
-		Command:    binPath,
-		Args:       []string{"serve-mcp"},
-		AlwaysLoad: alwaysLoad,
-	}
+	mcpServers["lite-sandbox"] = mcpServerEntry(binPath, alwaysLoad)
 
 	// Marshal mcpServers back into the config
 	mcpServersRaw, err := json.Marshal(mcpServers)
@@ -473,14 +473,15 @@ func writeSettingsFile(settingsPath string, cfg map[string]json.RawMessage) erro
 	return os.WriteFile(settingsPath, data, 0644)
 }
 
-// configurePermissions controls the sandboxed bash tool allow and the built-in
-// Bash deny. allowMCP adds the mcp__lite-sandbox__bash auto-allow (skipped in
-// --bash-ast-hook-mode, which doesn't configure the MCP server). denyBash
-// hard-denies the built-in Bash tool via a permission rule so Claude must use
-// the sandbox; when false (a hook governs Bash instead) any existing Bash deny
-// is removed, since a permission deny takes precedence over the hook's
+// configurePermissions merges the plan's permissions (see claudePermissions)
+// into the user's settings.json, preserving any rules they added themselves.
+// The plan's allow entries add the mcp__lite-sandbox__* auto-allows (absent in
+// --bash-ast-hook-mode, which doesn't configure the MCP server), and its deny
+// hard-denies the built-in Bash tool so Claude must use the sandbox. When the
+// plan does not deny Bash (a hook governs it instead) any existing Bash deny is
+// removed, since a permission deny takes precedence over the hook's
 // allow/redirect decision and would suppress it.
-func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
+func configurePermissions(claudeDir string, plan claudePlan) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	cfg, err := readSettingsFile(settingsPath)
@@ -499,16 +500,15 @@ func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 	// Auto-allow every sandbox tool — the bash tool plus the background-process
 	// management tools (bash_output, kill_shell, list_shells) — so polling and
 	// stopping background commands never triggers a permission prompt.
-	if allowMCP {
-		for _, allowPermission := range mcpToolPermissions {
-			if !slices.Contains(perms.Allow, allowPermission) {
-				perms.Allow = append(perms.Allow, allowPermission)
-			}
+	want := plan.claudePermissions()
+	for _, allowPermission := range want.Allow {
+		if !slices.Contains(perms.Allow, allowPermission) {
+			perms.Allow = append(perms.Allow, allowPermission)
 		}
 	}
 
-	const denyPermission = "Bash"
-	if !denyBash {
+	const denyPermission = builtinBashPermission
+	if !slices.Contains(want.Deny, denyPermission) {
 		// Let the hook own the Bash block; a deny rule would suppress its
 		// decision. Strip any Bash deny a prior install added.
 		perms.Deny = slices.DeleteFunc(perms.Deny, func(p string) bool { return p == denyPermission })
@@ -525,38 +525,6 @@ func configurePermissions(claudeDir string, allowMCP, denyBash bool) error {
 	cfg["permissions"] = permsRaw
 
 	return writeSettingsFile(settingsPath, cfg)
-}
-
-// claudeHookPlan computes the PreToolUse hook command and matcher for the
-// chosen Claude Code install mode. An empty command means no hook is
-// registered. See runInstallClaude for the mode flags; configMCP additionally
-// extends the matcher to the sandbox's own MCP tools so the hook can
-// pre-approve them in subagents and skills.
-func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP bool) (command, matcher string) {
-	if wantHook {
-		if validateBash {
-			command = binPath + " hook --validate-bash"
-		} else {
-			command = binPath + " hook"
-		}
-		// On its own, --bash-ast-hook-mode governs only Bash; with --with-tool-hook
-		// it also confines the filesystem tools, so it matches all of them.
-		matcher = hookToolMatcher
-		if !governFS {
-			matcher = bashValidateMatcher
-		}
-	}
-	if configMCP {
-		if command == "" {
-			command = binPath + " hook"
-		}
-		if matcher == "" {
-			matcher = mcpToolMatcher
-		} else {
-			matcher += "|" + mcpToolMatcher
-		}
-	}
-	return command, matcher
 }
 
 // reconcilePreToolUseHook makes the registered lite-sandbox PreToolUse hook
@@ -722,8 +690,7 @@ func asString(v any) string {
 }
 
 func configureCLAUDEMD(claudeDir string) error {
-	directive := `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.`
-	return appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), directive)
+	return appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), claudeDirective)
 }
 
 // appendDirectiveOnce appends directive to the agent instructions file at path

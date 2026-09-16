@@ -1,6 +1,9 @@
 package mockedserver
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
@@ -58,6 +61,56 @@ func TestClaudeCode(t *testing.T) {
 	})
 }
 
+// TestClaudeCodeLaunch drives `lite-sandbox launch claude`, the temporary
+// alternative to `install`: the MCP server, permissions, hook, and usage
+// directive reach Claude Code through its command line for this one run. The
+// session must behave like the default install, and Claude Code's config must
+// come back untouched.
+func TestClaudeCodeLaunch(t *testing.T) {
+	requireE2E(t)
+	calls := sandboxCalls(claudeSandboxTool)
+	model := startModel(t, calls)
+	configDir, environ := claudeEnv(t, model)
+
+	// No installSandbox: `launch` is the whole configuration.
+	output := runAgent(t, newProject(t), environ, bins.sandbox,
+		append([]string{"launch", "claude"}, "-p", "--output-format", "json", prompt)...)
+
+	tools := assertConversation(t, output, model, calls, claudeSandboxTool, true)
+	if tools["Bash"] {
+		t.Errorf("built-in Bash tool still offered to the model despite the permission deny")
+	}
+	assertDirective(t, model, claudeSandboxTool)
+	assertClaudeConfigUntouched(t, configDir)
+}
+
+// assertClaudeConfigUntouched checks that launch wrote none of the three
+// things `install claude` writes: the usage directive in CLAUDE.md, the
+// permissions and hook in settings.json, and the MCP server in .claude.json.
+// (Claude Code writes .claude.json itself, so that one is checked for our
+// server rather than for existence.)
+func assertClaudeConfigUntouched(t *testing.T, configDir string) {
+	t.Helper()
+	for _, name := range []string{"CLAUDE.md", "settings.json"} {
+		if data, err := os.ReadFile(filepath.Join(configDir, name)); err == nil {
+			t.Errorf("launch wrote %s: %s", name, data)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+	if err != nil {
+		return
+	}
+	var cfg struct {
+		MCPServers map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse .claude.json: %v", err)
+	}
+	if _, ok := cfg.MCPServers["lite-sandbox"]; ok {
+		t.Errorf("launch persisted the MCP server into .claude.json: %s", data)
+	}
+}
+
 // agentRun is one completed agent invocation: the mock that served it and the
 // agent's output.
 type agentRun struct {
@@ -71,15 +124,26 @@ type agentRun struct {
 func runClaude(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string) agentRun {
 	t.Helper()
 	model := startModel(t, calls)
+	_, environ := claudeEnv(t, model)
 
-	// CLAUDE_CONFIG_DIR isolates everything Claude Code reads and writes
-	// (settings.json, CLAUDE.md, and .claude.json, which moves there too). The
-	// API key and base URL point it at the mock; the remaining variables keep
-	// it from calling home for updates, telemetry, or error reports.
-	configDir := t.TempDir()
+	installSandbox(t, "claude", environ, installFlags...)
+
+	output := runAgent(t, newProject(t), environ, bins.claude, "-p", "--output-format", "json", prompt)
+	return agentRun{model, output}
+}
+
+// claudeEnv builds the environment for one Claude Code run against model, and
+// returns the isolated config directory along with it.
+//
+// CLAUDE_CONFIG_DIR isolates everything Claude Code reads and writes
+// (settings.json, CLAUDE.md, and .claude.json, which moves there too). The
+// API key and base URL point it at the mock; the remaining variables keep
+// it from calling home for updates, telemetry, or error reports.
+func claudeEnv(t *testing.T, model *mockmodel.Server) (configDir string, environ []string) {
+	t.Helper()
+	configDir = t.TempDir()
 	home := t.TempDir()
-	project := newProject(t)
-	environ := env(home,
+	return configDir, env(home,
 		"CLAUDE_CONFIG_DIR="+configDir,
 		"ANTHROPIC_BASE_URL="+model.URL,
 		"ANTHROPIC_API_KEY=dummy",
@@ -88,9 +152,4 @@ func runClaude(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string)
 		"DISABLE_TELEMETRY=1",
 		"DISABLE_ERROR_REPORTING=1",
 	)
-
-	installSandbox(t, "claude", environ, installFlags...)
-
-	output := runAgent(t, project, environ, bins.claude, "-p", "--output-format", "json", prompt)
-	return agentRun{model, output}
 }
