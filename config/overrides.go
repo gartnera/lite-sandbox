@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	"github.com/gartnera/lite-sandbox/internal/gitworktree"
 )
 
 // DirectoryOverride changes parts of the configuration for commands whose
@@ -64,6 +66,11 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 // returned config carries no overrides itself, so reading any section off it
 // reflects dir directly. A nil receiver returns nil.
 //
+// A linked git worktree inherits the overrides of the repository it was created
+// from: when nothing matches dir itself, resolution retries against the main
+// worktree (see matchOverride), so a worktree parked under a container like
+// ~/.superconductor/worktrees is governed by the settings written for the repo.
+//
 // The result is a read-only resolved view. In replace mode its section pointers
 // and slices are shared with the receiver (and with the matched override); deep
 // merge clones the structs it writes into so it never mutates the stored config.
@@ -75,10 +82,55 @@ func (c *Config) ForDirectory(dir string) *Config {
 	}
 	resolved := *c
 	resolved.Overrides = nil
-	if i := MatchDirectoryOverride(dir, c.Overrides, func(o DirectoryOverride) string { return o.Path }); i >= 0 {
+	if i := matchOverride(dir, c.Overrides); i >= 0 {
 		overlayConfig(&resolved, &c.Overrides[i].Config, c.Overrides[i].Merge)
 	}
 	return &resolved
+}
+
+// matchOverride returns the index of the override governing dir, or -1.
+//
+// A directory is matched directly first, so an override written for a worktree
+// (or for the container it sits in) always wins. Only when nothing matches does
+// resolution fall back to the main worktree of the git repository dir belongs
+// to: linked worktrees live wherever `git worktree add` put them — often a
+// shared container far from the checkout — and configuring each one by hand
+// would be unworkable, so a worktree inherits what its repository resolves to.
+// Directories that are not linked worktrees never fork git, and neither does a
+// config without overrides.
+func matchOverride(dir string, overrides []DirectoryOverride) int {
+	pathOf := func(o DirectoryOverride) string { return o.Path }
+	if i := MatchDirectoryOverride(dir, overrides, pathOf); i >= 0 {
+		return i
+	}
+	if len(overrides) == 0 {
+		return -1
+	}
+	main := gitworktree.MainWorktree(dir)
+	if main == "" {
+		return -1
+	}
+	if i := MatchDirectoryOverride(main, overrides, pathOf); i >= 0 {
+		return i
+	}
+	// git reports the main worktree with symlinks resolved (/private/var/...),
+	// while an override path is whatever the user wrote (/var/...). Retry with
+	// both sides resolved so two spellings of one directory still match.
+	return MatchDirectoryOverride(resolveSymlinks(main), overrides, func(o DirectoryOverride) string {
+		return resolveSymlinks(expandPath(o.Path))
+	})
+}
+
+// resolveSymlinks returns path with symlinks resolved, or path itself when it
+// cannot be resolved (it may not exist yet, which is not an error here).
+func resolveSymlinks(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // overlayConfig combines the set sections of over onto base (mutating base),
