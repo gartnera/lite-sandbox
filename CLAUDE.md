@@ -66,6 +66,8 @@ The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` down
 cd e2e/claude && uv run pytest -v
 ```
 
+`lite-sandbox launch claude --dry-run` prints the agent command `launch` generates — the quickest way to eyeball that wiring by hand when changing it. Without `--dry-run` it starts a real nested Claude Code session (writing to no config), but the mock suite above already covers that path deterministically and without credentials.
+
 ## Notes
 
 - always inspect `man` pages of commands you are asked to parse. you can rely on the local pages rather than using web fetch.
