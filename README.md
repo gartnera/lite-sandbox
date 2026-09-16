@@ -22,6 +22,12 @@ lite-sandbox install claude opencode       # configure exactly these
 lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths
 ```
 
+To try the sandbox without changing any agent configuration, use `launch`: it runs the agent sandboxed for that session only and leaves your setup untouched.
+
+```bash
+lite-sandbox launch claude
+```
+
 Codex's hook protocol matches Claude Code's, so lite-sandbox reuses the same hook binary and the **same config file** to govern both agents — one security/sandbox config for all of them. The `--with-tool-hook` and `--bash-ast-hook-mode` flags apply to `claude` and `codex` (opencode has no compatible hook protocol). See [docs/installation.md](docs/installation.md) for manual setup, per-agent details, and coverage caveats.
 
 ## Documentation

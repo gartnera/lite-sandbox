@@ -21,7 +21,7 @@ go build -o lite-sandbox && OS_SANDBOX_TESTS=1 go test ./...  # Linux needs bubb
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code, Codex, opencode, and Crush (autodetecting which are installed on the host; pass names like `install codex` to select explicitly) to route shell commands through it; `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary.
+This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code, Codex, opencode, and Crush (autodetecting which are installed on the host; pass names like `install codex` to select explicitly) to route shell commands through it; `lite-sandbox launch <agent>` (Claude Code only for now) is the non-persistent counterpart, passing the same configuration on the agent's command line for a single run instead of writing it to disk (`cmd/launch.go`, sharing the policy in `cmd/claude_setup.go` with the installer); `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary.
 
 **Command flow:** MCP request → `cmd/serve.go` → `Sandbox.Execute()` in `tool/bash_sandboxed/`, which parses the command into a bash AST (`mvdan.cc/sh/v3`), statically validates it, then executes it via the `mvdan.cc/sh` interpreter (NOT `bash -c`) with runtime hooks that re-validate after variable expansion. When the OS sandbox is enabled, commands are additionally dispatched to a long-lived sandboxed worker process (`os_sandbox/`).
 
@@ -65,6 +65,8 @@ The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` down
 ```bash
 cd e2e/claude && uv run pytest -v
 ```
+
+`lite-sandbox launch claude --dry-run` prints the agent command `launch` generates — the quickest way to eyeball that wiring by hand when changing it. Without `--dry-run` it starts a real nested Claude Code session (writing to no config), but the mock suite above already covers that path deterministically and without credentials.
 
 ## Notes
 
