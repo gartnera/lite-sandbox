@@ -429,23 +429,26 @@ No other `-m` module is available.
 There are three ways out, and every monty limitation message names all of them
 so an agent that hits one is not left guessing.
 
-**1. Run the host interpreter for `python` itself.** Add it to
-`extra_commands`, and `python`/`python3` resolve from `$PATH` as usual:
+**1. Run the host interpreter for `python` itself.** Allow it as a
+[`commands` entry](configuration.md#commands), and `python`/`python3` resolve
+from `$PATH` as usual:
 
 ```bash
-lite-sandbox config extra-commands add python3
+lite-sandbox config commands allow python3
 ```
 
 ```yaml
-extra_commands:
-  - python3            # every invocation uses the host interpreter
-  - python3 manage.py  # or only matching ones; the rest stay on monty
+commands:
+  - command: python3            # every invocation uses the host interpreter
+    allow: true
+  - command: python3 manage.py  # or only matching ones; the rest stay on monty
+    allow: true
 ```
 
-Like any `extra_commands` entry this **bypasses sandbox command validation** for
+Like any allowed command this **bypasses sandbox command validation** for
 those invocations — the script runs as real CPython with subprocesses, network
-and no path boundary (the OS sandbox, if enabled, still confines it; use
-`unsandboxed_commands` to bypass that too). A bare entry also lifts the refusal
+and no path boundary (the OS sandbox, if enabled, still confines it; add
+`no_sandbox: true` to bypass that too). A bare entry also lifts the refusal
 to run python as a wrapped subcommand of `xargs`/`env`/`timeout`/`find -exec`,
 since it already runs unwrapped.
 

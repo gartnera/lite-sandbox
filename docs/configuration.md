@@ -50,80 +50,107 @@ the rest of the machine runs `denylist`; `mode set --dir` writes such an
 override, and `audit report --cwd` narrows the report to sessions launched in
 that directory.
 
-## Extra commands
+## Commands
 
-Commands outside the whitelist can be allowed in `allowlist` mode (in
-`denylist` and `open` mode every command may already run, so this mainly
-matters for the raw-bash path described below):
+The command whitelist decides what runs in `allowlist` mode, and a built-in
+deny list refuses the sandbox's own policy-editing subcommands in every
+enforcing mode. One list, `commands`, carries every other statement about a
+command: what is allowed beyond the whitelist, whether that runs on the host
+instead of inside the OS sandbox, and what is refused however else it was
+allowed. Each entry is a command plus a tri-state `allow`:
 
 ```yaml
-extra_commands:
-  - curl
-  - python3
+commands:
+  - command: curl                  # allowed past the whitelist     (was extra_commands)
+    allow: true
+  - command: uv run pyright        # only invocations whose leading arguments match
+    allow: true
+  - command: docker                # allowed, and runs on the host  (was unsandboxed_commands)
+    allow: true
+    no_sandbox: true
+  - command: sudo                  # refused however else it is allowed (was denied_commands)
+    allow: false
+  - command: gh auth               # only invocations starting with those arguments
+    allow: false
+  - command: lite-sandbox update   # an allow on a built-in denial lifts it (was "-lite-sandbox update")
+    allow: true
 ```
 
-A bare entry (a single token) allows the command with any arguments and, when it
-is the leading command of an invocation, bypasses bash AST parsing entirely —
-the whole command string runs via the real bash. An entry with a subcommand
-(e.g. `uv run pyright`) restricts the command to invocations whose leading
-non-flag arguments match, and still goes through normal parsing and validation.
-When the [OS sandbox](security.md#os-level-sandboxing-optional) is enabled,
-bare entries run inside it like every other command, so filesystem confinement
+`command` is a bare name or a name followed by the leading non-flag arguments
+the entry is limited to; internal whitespace is not significant. Each command
+has one entry: `allow` and `deny` on the CLI replace whatever the config said
+about it before.
+
+```bash
+lite-sandbox config commands allow curl "uv run pyright"
+lite-sandbox config commands allow docker --no-sandbox
+lite-sandbox config commands deny sudo "gh auth"
+lite-sandbox config commands allow "lite-sandbox update"     # lifts the built-in denial
+lite-sandbox config commands list                            # built-in denials included
+lite-sandbox config commands remove curl
+```
+
+### Allowed commands
+
+`allow: true` admits a command the whitelist does not list. This matters in
+`allowlist` mode; in `denylist` and `open` mode every command may already run,
+so there it mainly selects the raw-bash path described next. A **bare** entry
+(a single token) allows the command with any arguments and, when it is the
+leading command of an invocation, bypasses bash AST parsing entirely — the
+whole command string runs via the real bash. An entry with arguments (e.g.
+`uv run pyright`) restricts the command to invocations whose leading non-flag
+arguments match, and still goes through normal parsing and validation. When
+the [OS sandbox](security.md#os-level-sandboxing-optional) is enabled, bare
+entries run inside it like every other command, so filesystem confinement
 applies even though validation is skipped.
 
 ### Unsandboxed commands
 
-`unsandboxed_commands` is parsed exactly like `extra_commands` (same bare and
-subcommand-restricted entry formats, same validation bypass) with one
-difference: matching invocations always run **directly on the host**, bypassing
-the [OS sandbox](security.md#os-level-sandboxing-optional) worker
-(bwrap/sandbox-exec) even when it is enabled. This is a trust-based escape hatch
-for commands that cannot run confined.
+`no_sandbox: true` on an allow keeps everything above (same bare and restricted
+forms, same validation bypass) with one difference: matching invocations always
+run **directly on the host**, bypassing the
+[OS sandbox](security.md#os-level-sandboxing-optional) worker
+(bwrap/sandbox-exec) even when it is enabled. This is a trust-based escape
+hatch for commands that cannot run confined.
 
 ```yaml
-unsandboxed_commands:
-  - docker            # talk to the real docker daemon, not the filtering proxy
-  - ./scripts/deploy.sh
+commands:
+  - command: docker            # talk to the real docker daemon, not the filtering proxy
+    allow: true
+    no_sandbox: true
+  - command: ./scripts/deploy.sh
+    allow: true
+    no_sandbox: true
 ```
 
 Because these commands leave the OS sandbox, the docker filtering proxy is also
 bypassed: the proxy `DOCKER_HOST` override is not applied, so `docker` reaches
 the real daemon (or whatever `DOCKER_HOST` the host environment already sets).
-Subcommand-restricted entries only unsandbox matching invocations — e.g.
-`git push` leaves other `git` subcommands confined.
+A restricted entry only unsandboxes matching invocations — e.g. `git push`
+leaves other `git` subcommands confined.
 
-Manage the list with
-`lite-sandbox config unsandboxed-commands add|list|remove`.
+### Denied commands
 
-## Denied commands
+`allow: false` is the deny list the allows cannot lift. It is checked before
+every command gate — static, runtime, and wrapped (`env`, `xargs`, `timeout`,
+`find -exec`) — and a match refuses the invocation in `denylist` and
+`allowlist` mode however else it was allowed, `no_sandbox` entries included:
+`git push` denied and `git` allowed refuse exactly the pushes. In `open` mode,
+like every rule, a match is only recorded to the audit log.
 
-`denied_commands` is the deny list the other two cannot lift. It is checked
-before every command gate — static, runtime, and wrapped (`env`, `xargs`,
-`timeout`, `find -exec`) — and a match refuses the invocation in `denylist` and
-`allowlist` mode however else it was allowed, `extra_commands` and
-`unsandboxed_commands` included. In `open` mode, like every rule, a match is
-only recorded to the audit log.
-
-```yaml
-denied_commands:
-  - sudo                 # bare entry: the command itself, whatever its arguments
-  - gh auth              # subcommand entry: only invocations starting with it
-  - -lite-sandbox hook   # leading "-": drop a built-in entry (see below)
-```
-
-Entries use the `extra_commands` format, with three differences that come from
-being a deny list rather than an allow list:
+Denials use the same entry format as allows, with three differences that come
+from being a deny list rather than an allow list:
 
 - **Matching is by base name**, so an entry also covers the same binary invoked
   by path (`/usr/local/bin/lite-sandbox`, `./lite-sandbox`). A deny that can be
   sidestepped by spelling the path differently is not a deny.
-- **A subcommand entry matches wherever the subcommand could start**, not only
+- **A restricted entry matches wherever the subcommand could start**, not only
   at the first argument, because which flags consume a value is per-command
   knowledge the deny list does not have: `lite-sandbox --log-level debug config
   mode set open` matches `lite-sandbox config`. Tokens that appear later as
   data do not match — with `git push` denied, `git log --grep push` still runs.
-- **A bare entry never takes the raw-bash path.** A command named in the deny
-  list is always parsed, even if `extra_commands` lists it bare, so the
+- **A denied command never takes the raw-bash path.** A command named in the
+  deny list is always parsed, even if a bare allow names it too, so the
   invocation can be matched against the entry.
 
 ### Built-in entries
@@ -133,11 +160,11 @@ The defaults deny the sandbox's own policy-editing subcommands — `config`,
 was installed under:
 
 ```
-lite-sandbox config denied-commands list
-lite-sandbox config   (built-in)
-lite-sandbox install  (built-in)
-lite-sandbox update   (built-in)
-lite-sandbox hook     (built-in)
+lite-sandbox config commands list
+lite-sandbox config    deny   (built-in)
+lite-sandbox install   deny   (built-in)
+lite-sandbox update    deny   (built-in)
+lite-sandbox hook      deny   (built-in)
 ```
 
 They exist because `denylist` mode drops the command whitelist: without them an
@@ -149,19 +176,35 @@ bubblewrap, and these entries hold either way.)
 
 The entries are subcommand-scoped, so the read-only subcommands an agent uses
 to explain its own constraints (`version`, `config show`, `audit report`) keep
-working. Lifting one is a deliberate decision:
+working. Lifting one is a deliberate decision, made the same way a
+[`paths` grant lifts a built-in path denial](#paths): an allow whose text
+**equals** the built-in entry lifts it. A bare `lite-sandbox` allow does not —
+allowing a command never silently drops the deny list underneath it.
 
 ```bash
-lite-sandbox config denied-commands list
-lite-sandbox config denied-commands add sudo "gh auth"
-lite-sandbox config denied-commands remove "lite-sandbox update"   # records "-lite-sandbox update"
+lite-sandbox config commands allow "lite-sandbox update"   # lifts it
+lite-sandbox config commands deny "lite-sandbox update"    # drops the lift; the built-in is back in force
 ```
 
-`remove` deletes a user entry, and records a `-` entry for a built-in one
-(which is what `denied_commands: ["-lite-sandbox update"]` above does by hand).
-Like every section, `denied_commands` can be set per directory through
+Like every section, `commands` can be set per directory through
 [overrides](#per-directory-overrides); the built-in entries apply under an
 override too, since they are not part of the section it replaces.
+
+### Deprecated keys
+
+The three former lists still load and resolve as the union with `commands`:
+`extra_commands` (as `allow: true`), `unsandboxed_commands` (as `allow: true`
+with `no_sandbox: true`), and `denied_commands` (as `allow: false`, its `-`
+entries as `allow: true`). The former CLI commands (`extra-commands`,
+`unsandboxed-commands`, `denied-commands`) keep working as hidden aliases that
+write the new form. `lite-sandbox config commands migrate` rewrites the old
+keys once, everywhere in the file — an old-style override replaced only the
+one list it set and inherited the rest, whereas a `commands` list replaces the
+whole section, so an override that set any command list receives the full set
+of entries in effect for its directory. Two things are not one-to-one: where a
+config both allowed and denied the same command, the denial is kept (it won at
+every gate anyway); and a `-` lift becomes an allow, which lifts the same
+built-in and, in `allowlist` mode, also admits the command past the whitelist.
 
 ## CLI config management
 
@@ -172,19 +215,12 @@ lite-sandbox config path
 # Show current configuration
 lite-sandbox config show
 
-# Add extra allowed commands
-lite-sandbox config extra-commands add curl wget
-
-# List extra allowed commands
-lite-sandbox config extra-commands list
-
-# Remove extra allowed commands
-lite-sandbox config extra-commands remove curl
-
-# Manage the command deny list (outranks the two lists above)
-lite-sandbox config denied-commands list
-lite-sandbox config denied-commands add sudo "gh auth"
-lite-sandbox config denied-commands remove sudo
+# Allow or deny commands (one command for every kind of command entry)
+lite-sandbox config commands allow curl wget              # beyond the whitelist
+lite-sandbox config commands allow docker --no-sandbox    # and on the host, outside the OS sandbox
+lite-sandbox config commands deny sudo "gh auth"          # refused however else allowed
+lite-sandbox config commands list                         # built-in denials included
+lite-sandbox config commands remove curl
 
 # Grant or deny paths (one command for every kind of path entry)
 lite-sandbox config paths allow ~/reference-data          # readable
@@ -490,7 +526,7 @@ registered once on `config`, so any setting can be scoped to one directory
 without hand-editing the file:
 
 ```bash
-lite-sandbox config extra-commands add npm --dir .        # only in this repo
+lite-sandbox config commands allow npm --dir .            # only in this repo
 lite-sandbox config paths allow ~/work/acme/out --write --dir ~/work/acme
 lite-sandbox config mode set denylist --dir ~/work/new    # only under that path
 lite-sandbox config runtimes go enable --dir ~/work/acme
@@ -507,7 +543,7 @@ resolves to writes no override at all.
 
 Reads honour the flag too: `lite-sandbox config show --dir <path>` prints the
 configuration in effect there, and so does any section's `show`/`list`
-(`config docker show --dir .`, `config extra-commands list --dir .`).
+(`config docker show --dir .`, `config commands list --dir .`).
 
 Two commands reject `--dir`, since they are not per-directory settings:
 `config path` and `config os-sandbox check`.

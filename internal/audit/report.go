@@ -119,7 +119,7 @@ func BuildReport(recs []Record, opts Options) *Report {
 	return rep
 }
 
-// dangerousCommands are never proposed for `extra-commands add`: a bare entry
+// dangerousCommands are never proposed for `commands allow`: a bare entry
 // runs through real bash with no validation at all, and these are the
 // commands whose whole point is to escape (privilege, network, shells, mounts,
 // scheduled execution). The agent chooses what it attempts, and therefore what
@@ -166,7 +166,7 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 			if rule == "command_whitelist" && dangerousCommands[subj] {
 				continue
 			}
-			// A deny-list finding carries the `denied-commands remove` command
+			// A deny-list finding carries the command that lifts the entry
 			// as its fix so the agent can relay it, but the report never
 			// proposes it: the deny is a decision the user already made, and
 			// the built-in entries are what keep an agent from editing the
@@ -177,7 +177,7 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 			}
 			reason := fmt.Sprintf("%q: %s", subj, ruleReason(rule))
 			if rule == "command_whitelist" {
-				reason += " (a bare extra_commands entry skips validation; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
+				reason += " (a bare commands entry skips validation; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
 			}
 			add(a.fix, reason, a.count)
 		}

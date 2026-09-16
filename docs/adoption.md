@@ -25,7 +25,7 @@ os_sandbox: true    # bubblewrap / sandbox-exec worker
 | | `open` | `denylist` | `allowlist` |
 |---|---|---|---|
 | Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; runtimes opt-in |
-| Denied commands (`denied_commands`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
+| Denied commands (`commands` entries with `allow: false`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
 | Path arguments and redirections outside the project | run | blocked | blocked |
 | `git push`, `pnpm publish`, `find -delete`, `tar -x`, … | run | blocked | blocked |
 | Network tools (`curl`, `wget`, `nc`) | run | run | blocked |
@@ -50,12 +50,12 @@ is *scope* and *shared state*:
 - The per-command validators still apply: `git push` (unless
   `git.remote_write`), `pnpm publish`, `cargo publish`, `find -delete`,
   `tar -x`, `find -exec` and the other flags the sandbox has always blocked.
-- The command deny list still applies, and outranks `extra_commands`. Its
+- The command deny list still applies, and outranks every allowed command. Its
   built-in entries keep the agent out of the sandbox's own policy: without
   them, dropping the whitelist means `lite-sandbox config mode set open` is
   just another program the agent may run, and the config is hot-reloaded.
-  `lite-sandbox config denied-commands list` prints the effective list; extend
-  it with `denied-commands add`.
+  `lite-sandbox config commands list` prints the effective list; extend it
+  with `commands deny`.
 - Under the OS sandbox, `$HOME` is writable so caches and tool state just
   work, and a built-in deny list is carved out: credential stores are hidden
   (`~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.kube`, the agents' own auth files,
@@ -82,7 +82,7 @@ runtimes are opt-in per language, network tools are blocked, and the OS sandbox
 confines writes to the project. This is the posture for untrusted input, and
 where the incremental path ends up. Its cost is configuration: the first
 session on a new project usually needs a few `runtimes … enable` or
-`extra-commands add` lines, which is exactly what the audit report tells you
+`commands allow` lines, which is exactly what the audit report tells you
 in advance.
 
 ## Audit: tighten with evidence
@@ -104,7 +104,7 @@ Not blocked, but would be in a stricter mode (cost of stepping up):
   allowlist            41
 
 Suggested config changes (most findings first):
-     28  lite-sandbox config extra-commands add npm
+     28  lite-sandbox config commands allow npm
          "npm" is not on the allowlist
      11  lite-sandbox config runtimes go enable
          "go" needs the go runtime
@@ -124,10 +124,9 @@ rather than the baseline; if you want the nudge, that is what `denylist` is.
 The suggestions are derived from what the agent attempted, which means the
 agent also decides what ranks highest. Treat them as proposals to review. The
 report never proposes privilege, network, or shell commands for
-`extra-commands add`, never proposes widening the boundary to your home
+`commands allow`, never proposes widening the boundary to your home
 directory, a deny-listed path, or a system directory, never proposes lifting a
-`denied_commands` entry, and notes that a bare `extra_commands` entry skips
-validation entirely.
+denied command, and notes that a bare allow entry skips validation entirely.
 
 The log is written by the MCP server and the PreToolUse hook, never by
 sandboxed commands, and is created `0600`, since command strings can carry

@@ -53,7 +53,7 @@ var configModeShowCmd = &cobra.Command{
 		// open mode it is audit-only, like every other rule), so it prints
 		// outside the denylist-only section below.
 		fmt.Println("\nDenied commands (refused in denylist and allowlist mode, whatever else allows them):")
-		fmt.Print(deniedCommandsSummary(cfg))
+		fmt.Print(deniedCommandsSummary(cfg, "  "))
 		if cfg.EffectiveMode() == config.ModeOpen {
 			fmt.Println("\nNote: mode is open, so denied commands are recorded but not blocked.")
 		}

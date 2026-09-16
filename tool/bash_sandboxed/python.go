@@ -342,8 +342,8 @@ func stripOsCallWrapper(msg string) string {
 // real one. Without the second half the next move is `pip install`, which
 // cannot work either.
 const pythonEscapeHatches = "To run the real python on this machine instead:\n" +
-	"  lite-sandbox config extra-commands add python3\n" +
-	"  (python then bypasses sandbox command validation, like any extra_commands entry)\n" +
+	"  lite-sandbox config commands allow python3\n" +
+	"  (python then bypasses sandbox command validation, like any allowed command)\n" +
 	"Or run real CPython under uv, which stays sandboxed:\n" +
 	"  lite-sandbox config runtimes uv enable   # then: uv run script.py\n" +
 	"To turn the built-in interpreter off entirely:\n" +

@@ -25,9 +25,9 @@ const (
 	// local_binary_execution enabled. Allowlist only.
 	ruleLocalBinary rule = "local_binary"
 	// ruleCommandDenylist: the invocation matches an entry in the command deny
-	// list (config denied_commands plus the built-in self-protection entries).
-	// Enforced in denylist mode too, and it outranks extra_commands: a denied
-	// command stays denied however it was allowed.
+	// list (the config's denied commands plus the built-in self-protection
+	// entries). Enforced in denylist mode too, and it outranks every allow: a
+	// denied command stays denied however it was allowed.
 	ruleCommandDenylist rule = "command_denylist"
 	// rulePathBoundary: a path argument, redirection target, or file open
 	// resolves outside the readable/writable boundary, or inside .git.
@@ -218,19 +218,23 @@ func (s *Sandbox) enforcesAllowlist() bool {
 // relays to the user, so it names only the narrow remedy — never a mode
 // change, which is the user's decision to make from the audit report.
 func commandNotAllowed(name string) error {
-	fix := fmt.Sprintf("lite-sandbox config extra-commands add %s", name)
+	fix := fmt.Sprintf("lite-sandbox config commands allow %s", name)
 	return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed; the user can allow it with `%s`", name, fix))
 }
 
 // commandDeniedError builds the tagged deny-list error for an invocation of
-// name that matched entry. Unlike the whitelist error, the remedy it names is
-// a removal from the deny list, which is a deliberate user decision — the
-// agent relays it, it cannot act on it (the removal itself runs through
+// name that matched entry. Unlike the whitelist error, the remedy it names
+// lifts a deny-list entry — an allow of the same text for a built-in one,
+// removal for a user's own — which is a deliberate user decision: the agent
+// relays it, it cannot act on it (the change itself runs through
 // `lite-sandbox config`, which the built-in entries deny).
 func commandDeniedError(name, entry string) error {
-	fix := fmt.Sprintf("lite-sandbox config denied-commands remove %q", entry)
+	fix := fmt.Sprintf("lite-sandbox config commands remove %q", entry)
+	if config.IsDefaultDeniedCommand(entry) {
+		fix = fmt.Sprintf("lite-sandbox config commands allow %q", entry)
+	}
 	return tagRuleFix(ruleCommandDenylist, name, fix,
-		fmt.Errorf("command %q is denied by denied_commands entry %q; the user can lift it with `%s`", name, entry, fix))
+		fmt.Errorf("command %q is denied by the command deny list entry %q; the user can lift it with `%s`", name, entry, fix))
 }
 
 // directExecutionNotAllowed builds the tagged error for running a path

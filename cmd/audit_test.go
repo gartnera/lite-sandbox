@@ -26,8 +26,8 @@ func TestAuditReportCmd_EndToEnd(t *testing.T) {
 
 	l := audit.New(logPath, 0)
 	for _, r := range []audit.Record{
-		{CWD: "/work/app", Mode: "denylist", Source: "bash", Layer: "static", Rule: "command_whitelist", Subject: "npm", Command: "npm test", Fix: "lite-sandbox config extra-commands add npm", WouldBlockIn: []string{"allowlist"}},
-		{CWD: "/work/other", Mode: "denylist", Source: "bash", Layer: "static", Rule: "command_whitelist", Subject: "evil\x1b[2Kname", Command: "x", Fix: "lite-sandbox config extra-commands add evil", WouldBlockIn: []string{"allowlist"}},
+		{CWD: "/work/app", Mode: "denylist", Source: "bash", Layer: "static", Rule: "command_whitelist", Subject: "npm", Command: "npm test", Fix: "lite-sandbox config commands allow npm", WouldBlockIn: []string{"allowlist"}},
+		{CWD: "/work/other", Mode: "denylist", Source: "bash", Layer: "static", Rule: "command_whitelist", Subject: "evil\x1b[2Kname", Command: "x", Fix: "lite-sandbox config commands allow evil", WouldBlockIn: []string{"allowlist"}},
 	} {
 		if err := l.Write(r); err != nil {
 			t.Fatal(err)
@@ -38,7 +38,7 @@ func TestAuditReportCmd_EndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, want := range []string{"Findings: 2", "allowlist", "npm", "extra-commands add npm", "review before applying"} {
+	for _, want := range []string{"Findings: 2", "allowlist", "npm", "commands allow npm", "review before applying"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report lacks %q:\n%s", want, out)
 		}

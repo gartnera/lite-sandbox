@@ -19,8 +19,8 @@ func TestBuildReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	recs := []Record{
-		{Rule: "command_whitelist", Subject: "npm", Command: "npm test", Fix: "lite-sandbox config extra-commands add npm", WouldBlockIn: []string{"allowlist"}},
-		{Rule: "command_whitelist", Subject: "npm", Command: "npm run build", Fix: "lite-sandbox config extra-commands add npm", WouldBlockIn: []string{"allowlist"}},
+		{Rule: "command_whitelist", Subject: "npm", Command: "npm test", Fix: "lite-sandbox config commands allow npm", WouldBlockIn: []string{"allowlist"}},
+		{Rule: "command_whitelist", Subject: "npm", Command: "npm run build", Fix: "lite-sandbox config commands allow npm", WouldBlockIn: []string{"allowlist"}},
 		{Rule: "local_binary", Subject: "./run.sh", Fix: "lite-sandbox config local-binary-execution enable", Blocked: true, WouldBlockIn: []string{"allowlist"}},
 		{Rule: "runtime_disabled", Subject: "go", Fix: "lite-sandbox config runtimes go enable", WouldBlockIn: []string{"allowlist"}},
 		{Rule: "path_boundary", Subject: filepath.Join(dir, "a.txt"), Blocked: true, WouldBlockIn: []string{"denylist", "allowlist"}},
@@ -43,7 +43,7 @@ func TestBuildReport(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"lite-sandbox config extra-commands add npm":        2,
+		"lite-sandbox config commands allow npm":            2,
 		"lite-sandbox config local-binary-execution enable": 1,
 		"lite-sandbox config runtimes go enable":            1,
 		"lite-sandbox config paths allow " + dir:            2,
@@ -63,10 +63,10 @@ func TestBuildReport(t *testing.T) {
 	if rep.Suggestions[0].Count < rep.Suggestions[len(rep.Suggestions)-1].Count {
 		t.Errorf("suggestions not sorted by count: %+v", rep.Suggestions)
 	}
-	// The bare-entry caveat rides along with every extra-commands suggestion.
+	// The bare-entry caveat rides along with every commands-allow suggestion.
 	for _, s := range rep.Suggestions {
-		if strings.Contains(s.Command, "extra-commands add") && !strings.Contains(s.Reason, "skips validation") {
-			t.Errorf("extra-commands suggestion lacks the caveat: %+v", s)
+		if strings.Contains(s.Command, "commands allow") && !strings.Contains(s.Reason, "skips validation") {
+			t.Errorf("commands-allow suggestion lacks the caveat: %+v", s)
 		}
 	}
 }
@@ -75,10 +75,10 @@ func TestBuildReport_NeverSuggestsDangerousCommands(t *testing.T) {
 	var recs []Record
 	for _, c := range []string{"sudo", "curl", "ssh", "bash", "chmod", "crontab"} {
 		for i := 0; i < 50; i++ { // the agent can make anything the top finding
-			recs = append(recs, Record{Rule: "command_whitelist", Subject: c, Fix: "lite-sandbox config extra-commands add " + c, Blocked: true, WouldBlockIn: []string{"allowlist"}})
+			recs = append(recs, Record{Rule: "command_whitelist", Subject: c, Fix: "lite-sandbox config commands allow " + c, Blocked: true, WouldBlockIn: []string{"allowlist"}})
 		}
 	}
-	recs = append(recs, Record{Rule: "command_whitelist", Subject: "make", Fix: "lite-sandbox config extra-commands add make", Blocked: true, WouldBlockIn: []string{"allowlist"}})
+	recs = append(recs, Record{Rule: "command_whitelist", Subject: "make", Fix: "lite-sandbox config commands allow make", Blocked: true, WouldBlockIn: []string{"allowlist"}})
 	rep := BuildReport(recs, Options{})
 	if len(rep.Suggestions) != 1 || !strings.HasSuffix(rep.Suggestions[0].Command, " make") {
 		t.Errorf("only make should be suggested, got %+v", rep.Suggestions)
@@ -152,7 +152,7 @@ func TestParseSince(t *testing.T) {
 }
 
 func TestSanitize(t *testing.T) {
-	in := "npm\x1b[2K\rlite-sandbox config extra-commands add sudo\ttail\n"
+	in := "npm\x1b[2K\rlite-sandbox config commands allow sudo\ttail\n"
 	out := Sanitize(in)
 	if strings.ContainsAny(out, "\x1b\r\t\n") {
 		t.Errorf("control characters survived: %q", out)

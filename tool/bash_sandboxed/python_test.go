@@ -487,7 +487,7 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 			// Naming the limitation is only half of it: an agent that cannot
 			// see the way out will reach for pip next.
 			for _, wantHatch := range []string{
-				"extra-commands add python3",
+				"commands allow python3",
 				"runtimes uv enable",
 				"runtimes montypython disable",
 			} {

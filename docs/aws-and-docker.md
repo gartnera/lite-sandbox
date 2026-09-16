@@ -54,7 +54,7 @@ server — the SDK never reads the masked `~/.aws`. Notes:
 
 - A **shell-level** `AWS_PROFILE` inherited from the host is ignored (stripped) — select a profile per command, not via a session-wide export. This prevents a stray host `AWS_PROFILE` from affecting every command.
 - Selecting a profile applies that profile's region, unless the same command sets an explicit `AWS_REGION`/`AWS_DEFAULT_REGION` (or passes `--region`), which is honored.
-- Routing applies to normal validated commands. Bare `extra_commands`/`unsandboxed_commands` (which run via raw `bash -c`) always use the default profile.
+- Routing applies to normal validated commands. Bare allowed commands (`commands` entries, with or without `no_sandbox`, which run via raw `bash -c`) always use the default profile.
 
 ### Per-directory overrides
 

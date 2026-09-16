@@ -517,7 +517,7 @@ type MontyPythonConfig struct {
 	//
 	// Nothing falls through to the host interpreter as a result — refusing is
 	// the whole behavior. To run real CPython, enable the uv runtime and use
-	// `uv run`, or opt python into extra_commands.
+	// `uv run`, or allow python as a `commands` entry.
 	InlineOnly *bool `yaml:"inline_only,omitempty"`
 }
 
@@ -576,6 +576,19 @@ type Config struct {
 	DeniedReadPaths  []string `yaml:"denied_read_paths,omitempty"`
 	DeniedWritePaths []string `yaml:"denied_write_paths,omitempty"`
 
+	// Commands is the one list of command statements: what the sandbox allows
+	// beyond the whitelist (and whether that runs on the host, outside the OS
+	// sandbox), and what it refuses however else it was allowed. See
+	// CommandEntry for the shape. The three *Commands lists below are the
+	// deprecated one-list-per-kind spelling of the same thing; they still
+	// load, resolve as the union with Commands, and MigrateCommands rewrites
+	// them. The CLI (`lite-sandbox config commands`) writes only Commands.
+	Commands []CommandEntry `yaml:"commands,omitempty"`
+	// ExtraCommands allows commands beyond the whitelist; UnsandboxedCommands
+	// does the same for commands that run directly on the host.
+	//
+	// Deprecated: use Commands entries with allow: true (plus no_sandbox: true
+	// for the unsandboxed ones).
 	ExtraCommands       []string `yaml:"extra_commands,omitempty"`
 	UnsandboxedCommands []string `yaml:"unsandboxed_commands,omitempty"`
 	// DeniedCommands extends the built-in command deny list (see
@@ -585,6 +598,9 @@ type Config struct {
 	// and a match blocks the invocation even when extra_commands or
 	// unsandboxed_commands allows it. An entry prefixed with "-" drops a
 	// built-in default instead of adding one. See EffectiveDeniedCommands.
+	//
+	// Deprecated: use Commands entries with allow: false (and allow: true on a
+	// built-in entry's text to lift it).
 	DeniedCommands []string `yaml:"denied_commands,omitempty"`
 	// ReadablePaths / WritablePaths widen the boundary the agent may read or
 	// write beyond the working directory.
@@ -722,6 +738,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := cfg.validatePaths(); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := cfg.validateCommands(); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	return &cfg, nil
