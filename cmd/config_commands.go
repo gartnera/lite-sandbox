@@ -138,12 +138,18 @@ like every rule, a match is only recorded to the audit log.`,
 		no := false
 		for _, c := range args {
 			e := config.CommandEntry{Command: c, Allow: &no}
-			if config.IsDefaultDeniedCommand(config.NormalizeCommandEntry(c)) {
-				// A built-in is in force unless lifted; dropping the lift is
-				// the whole change, and keeps the file from restating it.
+			if config.IsDefaultDeniedCommand(e.Text()) {
+				// A built-in is in force unless lifted, so dropping the lift
+				// is the whole change and keeps the file from restating it —
+				// as long as that leaves the directory saying nothing about
+				// the command. Where it inherits a lift it cannot drop (a
+				// merge: true override over a base that lifts it), the
+				// explicit denial below is what restates it.
 				cfg.RemoveCommand(c)
-				fmt.Printf("%s: deny (built-in default restored)\n", e.Text())
-				continue
+				if !stillStatesCommand(cfg, e.Text()) {
+					fmt.Printf("%s: deny (built-in default restored)\n", e.Text())
+					continue
+				}
 			}
 			if err := cfg.SetCommand(e); err != nil {
 				return err
@@ -165,11 +171,16 @@ var configCommandsRemoveCmd = &cobra.Command{
 		}
 		for _, c := range args {
 			text := config.NormalizeCommandEntry(c)
-			if cfg.RemoveCommand(text) {
+			switch removed := cfg.RemoveCommand(text); {
+			case stillStatesCommand(cfg, text):
+				// A --dir edit the directory will go on inheriting: saveConfig
+				// says what stays in force and how to drop it, so claiming a
+				// removal here would contradict it.
+			case removed:
 				fmt.Printf("%s removed\n", text)
-			} else if config.IsDefaultDeniedCommand(text) {
+			case config.IsDefaultDeniedCommand(text):
 				fmt.Printf("%s is a built-in denial; `lite-sandbox config commands allow %q` lifts it\n", text, text)
-			} else {
+			default:
 				fmt.Printf("%s is not configured; nothing to remove\n", text)
 			}
 		}

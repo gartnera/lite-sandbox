@@ -161,9 +161,14 @@ var configPathsRemoveCmd = &cobra.Command{
 			return err
 		}
 		for _, p := range args {
-			if cfg.RemovePath(p) {
+			switch removed := cfg.RemovePath(p); {
+			case stillStatesPath(cfg, p):
+				// A --dir edit the directory will go on inheriting: saveConfig
+				// says what stays in force and how to drop it, so claiming a
+				// removal here would contradict it.
+			case removed:
 				fmt.Printf("%s removed\n", p)
-			} else {
+			default:
 				fmt.Printf("%s is not configured; nothing to remove\n", p)
 			}
 		}
