@@ -276,9 +276,10 @@ overrides:
 	}
 }
 
-// TestPaths_OverrideReplacesSection: like every section, an override's paths
-// list replaces the base's for its directory (and merge: true treats it as a
-// leaf the same way).
+// TestPaths_OverrideReplacesSection: a replace-mode override's paths list
+// replaces the base's for its directory, as every section does there. Only
+// merge: true combines the two entry by entry
+// (TestForDirectory_MergesKeyedSections).
 func TestPaths_OverrideReplacesSection(t *testing.T) {
 	writeConfig(t, `
 paths:
@@ -302,5 +303,38 @@ overrides:
 	}
 	if !(&DirectoryOverride{Path: "/x", Config: Config{Paths: []PathEntry{{Path: "/y"}}}}).SetsAnySection() {
 		t.Error("an override with paths should report a set section")
+	}
+}
+
+// TestPaths_MigrateMergeOverride: a merge: true override keeps only its own
+// entries, since `paths` merges entry by entry there — migrate must not copy
+// the base's entries into it, which would freeze them.
+func TestPaths_MigrateMergeOverride(t *testing.T) {
+	writeConfig(t, `
+readable_paths: [/ref]
+overrides:
+  - path: /work
+    merge: true
+    writable_paths: [/work/out]
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MigratePaths() == 0 {
+		t.Fatal("MigratePaths reported nothing to do")
+	}
+	o := cfg.Overrides[0]
+	if len(o.Paths) != 1 || o.Paths[0].Path != "/work/out" || !o.Paths[0].GrantsWrite() {
+		t.Errorf("override paths = %+v, want only its own entry", o.Paths)
+	}
+	// The directory resolves as it did: the base's readable path inherited,
+	// its own writable path on top.
+	scoped := cfg.ForDirectory("/work/sub")
+	if got := scoped.ExpandedReadablePaths(); !slices.Equal(got, []string{"/ref"}) {
+		t.Errorf("readable = %v, want the base entry inherited", got)
+	}
+	if got := scoped.ExpandedWritablePaths(); !slices.Equal(got, []string{"/work/out"}) {
+		t.Errorf("writable = %v, want the override entry", got)
 	}
 }

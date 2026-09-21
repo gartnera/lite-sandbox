@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -185,6 +186,12 @@ func loadConfig() (*config.Config, error) {
 // directory override and writes the whole config, so unrelated sections keep
 // inheriting from the base. Sections the command left alone are not recorded,
 // and an override left setting nothing is removed.
+//
+// On a merge: true override the keyed sections (`paths`, `commands`) are then
+// reduced to the delta against the base, since that override inherits them
+// entry by entry: it records what the command changed, not a frozen copy of
+// the base's entries. What such an edit cannot do is unstate an inherited
+// entry, so those are reported rather than silently ignored.
 func saveConfig(cfg *config.Config) error {
 	ed := currentEdit
 	if ed == nil {
@@ -192,15 +199,118 @@ func saveConfig(cfg *config.Config) error {
 	}
 	currentEdit = nil
 
-	applyChangedSections(&ed.override.Config, ed.before, cfg)
 	dir := resolveDirArg(configDir)
-	if ed.override.SetsAnySection() {
-		fmt.Printf("Scoped to %s (per-directory override)\n", dir)
-	} else {
+	recordEdit(ed.override, ed.root, ed.before, cfg)
+	scoped := ed.override.SetsAnySection()
+	if !scoped {
 		removeOverride(ed.root, dir)
+	}
+	// What the directory will actually resolve to once this is written, which
+	// is not always what the command produced: an override inherits the
+	// sections it does not set, and a merge: true override inherits `paths`
+	// and `commands` entry by entry.
+	inherited := inheritedStatements(ed.root.ForDirectory(dir), cfg)
+	switch {
+	case scoped:
+		fmt.Printf("Scoped to %s (per-directory override)\n", dir)
+	case len(inherited) == 0:
 		fmt.Printf("%s already resolves to that; no override needed\n", dir)
 	}
+	reportInheritedEntries(dir, inherited)
 	return config.Save(ed.root)
+}
+
+// recordEdit copies what a command changed into the directory override: the
+// sections whose value differs from the view it was handed, reduced on a
+// merge: true override to the delta against the base, since that override
+// inherits `paths` and `commands` entry by entry.
+func recordEdit(o *config.DirectoryOverride, base, before, after *config.Config) {
+	applyChangedSections(&o.Config, before, after)
+	config.PruneRestatedEntries(o, base)
+}
+
+// inheritedStatement is one `paths` or `commands` entry a --dir edit could not
+// drop: the directory goes on resolving to it however the command edited its
+// view, because an override inherits what it does not state — a section it
+// never sets, and, on a merge: true override, every entry it does not restate.
+// An override can say something else about a subject; it cannot say nothing.
+type inheritedStatement struct{ section, subject, effect string }
+
+// inheritedStatements returns the statements resolved still makes that view —
+// the configuration the command produced — no longer does. Both sides are read
+// through AllPathEntries/AllCommandEntries, so the deprecated one-list-per-kind
+// keys count as statements too, inherited the same way.
+func inheritedStatements(resolved, view *config.Config) []inheritedStatement {
+	var out []inheritedStatement
+	paths := view.AllPathEntries()
+	for _, e := range resolved.AllPathEntries() {
+		if !slices.ContainsFunc(paths, func(v config.PathEntry) bool { return v.SamePath(e.Path) }) {
+			out = append(out, inheritedStatement{"paths", e.Path, e.Describe()})
+		}
+	}
+	commands := view.AllCommandEntries()
+	for _, e := range resolved.AllCommandEntries() {
+		if !slices.ContainsFunc(commands, func(v config.CommandEntry) bool { return v.SameCommand(e.Command) }) {
+			out = append(out, inheritedStatement{"commands", e.Text(), e.Describe()})
+		}
+	}
+	return out
+}
+
+// stillStated reports whether the directory of the in-flight --dir edit will
+// go on resolving to a statement about a subject once the edit is written, so
+// a command can tell that the removal it just made to its view will not take
+// effect there. It answers by building the override exactly as saveConfig
+// will and resolving the directory against a copy of the config, which is
+// cheap and keeps the two answers from drifting apart.
+func stillStated(view *config.Config, states func(*config.Config) bool) bool {
+	ed := currentEdit
+	if ed == nil {
+		return false
+	}
+	dir := resolveDirArg(configDir)
+	probe := *ed.root
+	probe.Overrides = slices.Clone(ed.root.Overrides)
+	i := slices.IndexFunc(probe.Overrides, func(o config.DirectoryOverride) bool { return o.Path == ed.override.Path })
+	if i < 0 {
+		return false
+	}
+	o := probe.Overrides[i]
+	recordEdit(&o, &probe, ed.before, view)
+	if o.SetsAnySection() {
+		probe.Overrides[i] = o
+	} else {
+		probe.Overrides = slices.Delete(probe.Overrides, i, i+1)
+	}
+	return states(probe.ForDirectory(dir))
+}
+
+// stillStatesPath reports whether the directory will still resolve to a
+// statement about path p after the in-flight --dir edit.
+func stillStatesPath(view *config.Config, p string) bool {
+	return stillStated(view, func(c *config.Config) bool {
+		return slices.ContainsFunc(c.AllPathEntries(), func(e config.PathEntry) bool { return e.SamePath(p) })
+	})
+}
+
+// stillStatesCommand reports whether the directory will still resolve to a
+// statement about the command text after the in-flight --dir edit.
+func stillStatesCommand(view *config.Config, text string) bool {
+	return stillStated(view, func(c *config.Config) bool {
+		return slices.ContainsFunc(c.AllCommandEntries(), func(e config.CommandEntry) bool { return e.SameCommand(text) })
+	})
+}
+
+// reportInheritedEntries explains the statements a --dir edit could not drop,
+// so a removal that cannot take effect for the directory is never reported as
+// one (see inheritedStatement).
+func reportInheritedEntries(dir string, inherited []inheritedStatement) {
+	for _, e := range inherited {
+		fmt.Printf("%s: %q in the base config still applies to %s — an override can restate an entry, not drop it\n",
+			e.subject, e.effect, dir)
+		fmt.Printf("  remove it everywhere with `lite-sandbox config %s remove %s`, or state something else here with `lite-sandbox config %s allow|deny %s --dir %s`\n",
+			e.section, e.subject, e.section, e.subject, dir)
+	}
 }
 
 // configBase returns the base (unscoped) configuration behind the view

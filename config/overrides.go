@@ -22,9 +22,12 @@ import (
 //   - true: the override is DEEP-MERGED into the base — it recurses into struct
 //     sections and applies only the fields it sets, inheriting the rest. This
 //     lets an override change, say, just `docker.allow_privileged` while keeping
-//     the base's `docker.enabled`. Leaf values (scalars, `*bool` flags, and
-//     slices such as writable_paths) are still taken from the override when set,
-//     otherwise inherited.
+//     the base's `docker.enabled`. The keyed list sections `paths` and
+//     `commands` merge entry by entry (see keyedEntry): the base's statements
+//     carry into the directory and the override restates only the paths and
+//     commands it changes. Every other leaf (scalars, `*bool` flags, and the
+//     deprecated one-list-per-kind keys such as writable_paths) is still taken
+//     from the override when set, otherwise inherited.
 type DirectoryOverride struct {
 	Path   string `yaml:"path"`
 	Merge  bool   `yaml:"merge,omitempty"`
@@ -73,7 +76,8 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 //
 // The result is a read-only resolved view. In replace mode its section pointers
 // and slices are shared with the receiver (and with the matched override); deep
-// merge clones the structs it writes into so it never mutates the stored config.
+// merge clones the structs and keyed lists it writes into so it never mutates
+// the stored config.
 // Either way, treat the result as immutable — read the accessors, do not mutate
 // it or the values it points at.
 func (c *Config) ForDirectory(dir string) *Config {
@@ -172,7 +176,9 @@ func overlayConfig(base, over *Config, deep bool) {
 // base's struct, so an override can set individual fields of a section while
 // inheriting the rest without ever mutating the shared base struct. Every other
 // kind is a leaf: over's value is taken when it is "set" (a non-nil pointer,
-// slice, or map, or a non-zero scalar), otherwise base is kept.
+// slice, or map, or a non-zero scalar), otherwise base is kept. The exception
+// is a keyed list section (`paths`, `commands`), which is combined entry by
+// entry rather than replaced — see keyedEntry.
 func mergeField(base, over reflect.Value) {
 	switch over.Kind() {
 	case reflect.Pointer:
@@ -195,7 +201,16 @@ func mergeField(base, over reflect.Value) {
 			return
 		}
 		base.Set(over) // pointer to a scalar (e.g. *bool): override wins
-	case reflect.Slice, reflect.Map:
+	case reflect.Slice:
+		if over.IsNil() {
+			return
+		}
+		if isKeyedSlice(over.Type()) {
+			base.Set(mergeKeyedSlices(base, over)) // per-entry merge; see keyedEntry
+			return
+		}
+		base.Set(over)
+	case reflect.Map:
 		if !over.IsNil() {
 			base.Set(over)
 		}
@@ -204,6 +219,113 @@ func mergeField(base, over reflect.Value) {
 			base.Set(over)
 		}
 	}
+}
+
+// keyedEntry is implemented by the element type of a keyed list section: one
+// whose entries are independent statements about a subject — `paths` about a
+// path, `commands` about a command — rather than an ordered sequence whose
+// meaning is the list as a whole. MergeKey returns the subject in the form the
+// sandbox matches on, so two spellings of one path (~/x and /home/u/x) or one
+// command ("uv  run" and "uv run") are the same statement.
+//
+// A merge: true override combines such a section with the base entry by entry
+// (see mergeKeyedSlices) instead of replacing it wholesale, which is what lets
+// a directory add one path grant or deny one command without restating the
+// base's whole list.
+type keyedEntry interface {
+	MergeKey() string
+}
+
+var keyedEntryType = reflect.TypeOf((*keyedEntry)(nil)).Elem()
+
+// isKeyedSlice reports whether t is a slice of keyedEntry, i.e. a section
+// mergeKeyedSlices can combine per entry.
+func isKeyedSlice(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem().Implements(keyedEntryType)
+}
+
+// mergeKeyedSlices combines a keyed list section from a merge: true override
+// with the base's: the base entries whose subject the override does not
+// restate, in their original order, followed by every override entry. So the
+// base's statements carry into the directory, the override's statement about
+// the same path or command replaces it (one statement per subject, as both
+// sections require), and statements about new subjects are added.
+//
+// Neither input is modified: the result is a fresh slice, so a resolved view
+// never aliases the stored config.
+func mergeKeyedSlices(base, over reflect.Value) reflect.Value {
+	restated := make(map[string]bool, over.Len())
+	for i := 0; i < over.Len(); i++ {
+		restated[mergeKeyOf(over.Index(i))] = true
+	}
+	out := reflect.MakeSlice(over.Type(), 0, base.Len()+over.Len())
+	for i := 0; i < base.Len(); i++ {
+		if e := base.Index(i); !restated[mergeKeyOf(e)] {
+			out = reflect.Append(out, e)
+		}
+	}
+	return reflect.AppendSlice(out, over)
+}
+
+func mergeKeyOf(entry reflect.Value) string {
+	return entry.Interface().(keyedEntry).MergeKey()
+}
+
+// PruneRestatedEntries rewrites the keyed list sections (`paths`, `commands`)
+// of a merge: true override as the delta against base: an entry saying exactly
+// what base already says is dropped, since the merge inherits it either way.
+// The override then records only what it changes, and later edits to the base
+// keep flowing through to the directory instead of hitting a frozen copy. An
+// override left stating nothing is reported by SetsAnySection, so the caller
+// can drop it.
+//
+// A replace-mode override is left alone: its sections replace the base's
+// outright, so every entry it holds is load-bearing.
+func PruneRestatedEntries(o *DirectoryOverride, base *Config) {
+	if o == nil || !o.Merge || base == nil {
+		return
+	}
+	ov := reflect.ValueOf(&o.Config).Elem()
+	bv := reflect.ValueOf(base).Elem()
+	t := ov.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() || !isKeyedSlice(f.Type) {
+			continue
+		}
+		ov.Field(i).Set(pruneRestatements(ov.Field(i), bv.Field(i)))
+	}
+}
+
+// pruneRestatements returns the entries of section that say something base
+// does not already say verbatim — the delta a merge: true override needs to
+// hold. A nil section stays nil, and one emptied by pruning becomes nil, so an
+// override reduced to nothing is dropped by DirectoryOverride.SetsAnySection.
+func pruneRestatements(section, base reflect.Value) reflect.Value {
+	if section.IsNil() {
+		return section
+	}
+	kept := reflect.MakeSlice(section.Type(), 0, section.Len())
+	for i := 0; i < section.Len(); i++ {
+		e := section.Index(i)
+		if !statesTheSame(base, e) {
+			kept = reflect.Append(kept, e)
+		}
+	}
+	if kept.Len() == 0 {
+		return reflect.Zero(section.Type())
+	}
+	return kept
+}
+
+// statesTheSame reports whether entries holds an entry equal to e.
+func statesTheSame(entries, e reflect.Value) bool {
+	for i := 0; i < entries.Len(); i++ {
+		if reflect.DeepEqual(entries.Index(i).Interface(), e.Interface()) {
+			return true
+		}
+	}
+	return false
 }
 
 // MatchDirectoryOverride returns the index into overrides of the most specific

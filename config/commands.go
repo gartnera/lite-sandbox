@@ -87,6 +87,13 @@ func (e CommandEntry) SameCommand(c string) bool {
 	return e.Text() == NormalizeCommandEntry(c)
 }
 
+// MergeKey makes the entry a keyedEntry: the subject it states something about
+// is its command text, normalized as SameCommand compares it. A merge: true
+// override therefore restates a base entry by naming the same command, and
+// `git` and `git push` stay separate subjects — the narrower entry is its own
+// statement, as it is everywhere else.
+func (e CommandEntry) MergeKey() string { return e.Text() }
+
 // validateCommands rejects a malformed commands entry on the base config or
 // any override, so a typo cannot silently allow or deny nothing.
 func (c *Config) validateCommands() error {
@@ -321,6 +328,13 @@ func (c *Config) UsesDeprecatedCommandKeys() bool {
 // before its own lists are cleared; one that set none keeps inheriting the
 // migrated base.
 //
+// A merge: true override keeps only its own entries: `commands` merges entry
+// by entry there, so what it does not restate it inherits from the migrated
+// base anyway. That inheritance is wider than the old keys were — a deprecated
+// list on such an override replaced the base's list outright, whereas the
+// migrated entries now join it — so a base entry the override meant to shadow
+// needs an entry of its own for that command.
+//
 // A denied_commands "-" lift becomes an allow of the same text, which lifts the
 // built-in the same way. Where a config stated both, the allow is dropped and
 // the denial kept: a deny outranks an allow at every gate, so the resolution is
@@ -336,14 +350,20 @@ func (c *Config) MigrateCommands() int {
 			continue
 		}
 		// The lists in effect for the override's directory: its own where set,
-		// the base's otherwise, exactly as ForDirectory combined them.
+		// the base's otherwise, exactly as ForDirectory combined them — except
+		// under merge: true, where the base's entries are inherited per command
+		// and restating them here would only freeze a copy.
+		inherit := pickList
+		if o.Merge {
+			inherit = func(override, _ []string) []string { return override }
+		}
 		resolved := Config{
-			ExtraCommands:       pickList(o.ExtraCommands, c.ExtraCommands),
-			UnsandboxedCommands: pickList(o.UnsandboxedCommands, c.UnsandboxedCommands),
-			DeniedCommands:      pickList(o.DeniedCommands, c.DeniedCommands),
+			ExtraCommands:       inherit(o.ExtraCommands, c.ExtraCommands),
+			UnsandboxedCommands: inherit(o.UnsandboxedCommands, c.UnsandboxedCommands),
+			DeniedCommands:      inherit(o.DeniedCommands, c.DeniedCommands),
 		}
 		entries := o.Commands
-		if entries == nil {
+		if entries == nil && !o.Merge {
 			entries = c.Commands
 		}
 		converted := resolved.LegacyCommandEntries()

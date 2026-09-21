@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -363,4 +364,242 @@ func findSubcommand(t *testing.T, parent *cobra.Command, name string) *cobra.Com
 	}
 	t.Fatalf("%s has no %q subcommand", parent.CommandPath(), name)
 	return nil
+}
+
+// TestConfigDir_MergeOverrideKeepsDelta: on a merge: true override the keyed
+// sections inherit the base entry by entry, so a --dir edit records only what
+// it changed rather than freezing a copy of the base's entries.
+func TestConfigDir_MergeOverrideKeepsDelta(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+paths:
+  - path: /base/data
+    read: true
+commands:
+  - command: curl
+    allow: true
+overrides:
+  - path: /work/acme
+    merge: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withConfigDir(t, "/work/acme", func() {
+		captureStdout(t, func() {
+			setPathsFlags(t, true, false, false, false)
+			if err := configCmdRun(t, configPathsAllowCmd, "/work/acme/out"); err != nil {
+				t.Fatalf("paths allow: %v", err)
+			}
+			if err := configCmdRun(t, configCommandsDenyCmd, "npm"); err != nil {
+				t.Fatalf("commands deny: %v", err)
+			}
+		})
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Overrides) != 1 {
+		t.Fatalf("overrides = %+v, want one", cfg.Overrides)
+	}
+	o := cfg.Overrides[0]
+	if len(o.Paths) != 1 || o.Paths[0].Path != "/work/acme/out" {
+		t.Errorf("override paths = %+v, want only the added entry", o.Paths)
+	}
+	if len(o.Commands) != 1 || o.Commands[0].Command != "npm" {
+		t.Errorf("override commands = %+v, want only the added entry", o.Commands)
+	}
+	// The base's entries still reach the directory through the merge.
+	scoped := cfg.ForDirectory("/work/acme/sub")
+	if got := scoped.ReadablePathList(); !slices.Equal(got, []string{"/base/data"}) {
+		t.Errorf("readable = %v, want the base entry inherited", got)
+	}
+	if got := scoped.ExpandedWritablePaths(); !slices.Equal(got, []string{"/work/acme/out"}) {
+		t.Errorf("writable = %v, want the added entry", got)
+	}
+	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"curl"}) {
+		t.Errorf("allowed commands = %v, want the base entry inherited", got)
+	}
+	if got := scoped.DeniedCommandList(); !slices.Equal(got, []string{"npm"}) {
+		t.Errorf("denied commands = %v, want the added entry", got)
+	}
+}
+
+// TestConfigDir_MergeOverrideReportsInherited: a merge: true override can
+// restate a base entry but not drop one, so removing an inherited path under
+// --dir says so instead of reporting a removal that did not happen.
+func TestConfigDir_MergeOverrideReportsInherited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+paths:
+  - path: /base/data
+    read: true
+overrides:
+  - path: /work/acme
+    merge: true
+    paths:
+      - path: /work/acme/out
+        write: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out string
+	withConfigDir(t, "/work/acme", func() {
+		out = captureStdout(t, func() {
+			if err := configCmdRun(t, configPathsRemoveCmd, "/base/data"); err != nil {
+				t.Fatalf("paths remove: %v", err)
+			}
+		})
+	})
+	if !strings.Contains(out, `/base/data: "read" in the base config still applies to /work/acme`) {
+		t.Errorf("output = %q, want the inherited entry reported", out)
+	}
+	if !strings.Contains(out, "lite-sandbox config paths remove /base/data") {
+		t.Errorf("output = %q, want the way to drop it everywhere", out)
+	}
+	if strings.Contains(out, "/base/data removed") {
+		t.Errorf("output = %q, must not report a removal that did not happen", out)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ForDirectory("/work/acme").ReadablePathList(); !slices.Equal(got, []string{"/base/data"}) {
+		t.Errorf("readable = %v, want the base entry still in force", got)
+	}
+	// The override's own entry is untouched by the attempted removal.
+	if len(cfg.Overrides) != 1 || len(cfg.Overrides[0].Paths) != 1 {
+		t.Errorf("overrides = %+v, want the override's own entry kept", cfg.Overrides)
+	}
+}
+
+// TestConfigDir_MergeOverrideInheritsDeprecatedKeys: a merge: true override
+// inherits the deprecated one-list-per-kind keys too (they are plain leaves
+// it simply does not set), so a removal it cannot carry out is reported the
+// same way.
+func TestConfigDir_MergeOverrideInheritsDeprecatedKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+extra_commands: [curl]
+overrides:
+  - path: /work/acme
+    merge: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out string
+	withConfigDir(t, "/work/acme", func() {
+		out = captureStdout(t, func() {
+			if err := configCmdRun(t, configCommandsRemoveCmd, "curl"); err != nil {
+				t.Fatalf("commands remove: %v", err)
+			}
+		})
+	})
+	if !strings.Contains(out, `curl: "allow" in the base config still applies to /work/acme`) {
+		t.Errorf("output = %q, want the inherited entry reported", out)
+	}
+	if strings.Contains(out, "curl removed") {
+		t.Errorf("output = %q, must not report a removal that did not happen", out)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ForDirectory("/work/acme").ExtraCommandList(); !slices.Equal(got, []string{"curl"}) {
+		t.Errorf("allowed = %v, want the base entry still in force", got)
+	}
+}
+
+// TestConfigDir_MergeOverrideDeniesLiftedBuiltin: when the base lifts a
+// built-in denial, a merge: true override cannot drop that lift — so denying
+// the command for one directory writes the explicit denial that restates it,
+// rather than the "the built-in is back" shortcut that works globally.
+func TestConfigDir_MergeOverrideDeniesLiftedBuiltin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+commands:
+  - command: lite-sandbox update
+    allow: true
+overrides:
+  - path: /work/acme
+    merge: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withConfigDir(t, "/work/acme", func() {
+		captureStdout(t, func() {
+			if err := configCmdRun(t, configCommandsDenyCmd, "lite-sandbox update"); err != nil {
+				t.Fatalf("commands deny: %v", err)
+			}
+		})
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := cfg.Overrides[0]; len(o.Commands) != 1 || !o.Commands[0].Denies() {
+		t.Fatalf("override commands = %+v, want an explicit denial", o.Commands)
+	}
+	scoped := cfg.ForDirectory("/work/acme")
+	if got := scoped.LiftedDeniedCommands(); len(got) != 0 {
+		t.Errorf("lifted = %v, want the denial to have replaced the base's lift", got)
+	}
+	if !slices.Contains(scoped.EffectiveDeniedCommands(), "lite-sandbox update") {
+		t.Errorf("effective deny list = %v, want the command denied here", scoped.EffectiveDeniedCommands())
+	}
+	// Elsewhere the base's lift still stands.
+	if got := cfg.ForDirectory("/elsewhere").LiftedDeniedCommands(); !slices.Equal(got, []string{"lite-sandbox update"}) {
+		t.Errorf("base lifted = %v, want it untouched", got)
+	}
+}
+
+// TestConfigDir_RemovingLastEntryIsReported: a replace-style override cannot
+// record an emptied section (an empty list is not written), so removing the
+// last entry leaves the base's list applying to the directory. That is
+// reported, not claimed as a removal.
+func TestConfigDir_RemovingLastEntryIsReported(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+commands:
+  - command: curl
+    allow: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out string
+	withConfigDir(t, "/work/acme", func() {
+		out = captureStdout(t, func() {
+			if err := configCmdRun(t, configCommandsRemoveCmd, "curl"); err != nil {
+				t.Fatalf("commands remove: %v", err)
+			}
+		})
+	})
+	if strings.Contains(out, "curl removed") {
+		t.Errorf("output = %q, must not report a removal that did not happen", out)
+	}
+	if !strings.Contains(out, `curl: "allow" in the base config still applies to /work/acme`) {
+		t.Errorf("output = %q, want the inherited entry reported", out)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ForDirectory("/work/acme").ExtraCommandList(); !slices.Equal(got, []string{"curl"}) {
+		t.Errorf("allowed = %v, want the base entry still in force", got)
+	}
 }

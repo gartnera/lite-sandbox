@@ -104,6 +104,12 @@ func (e PathEntry) SamePath(p string) bool {
 	return expandPath(e.Path) == expandPath(p)
 }
 
+// MergeKey makes the entry a keyedEntry: the subject it states something about
+// is its path, in the expanded form SamePath compares. A merge: true override
+// therefore restates a base entry by naming the same path, however either side
+// spells it.
+func (e PathEntry) MergeKey() string { return expandPath(e.Path) }
+
 // validatePaths rejects a malformed paths entry on the base config or any
 // override, so a typo cannot silently grant or deny nothing.
 func (c *Config) validatePaths() error {
@@ -341,6 +347,13 @@ func (c *Config) UsesDeprecatedPathKeys() bool {
 // (or already had a paths list) gets the full set of entries in effect for its
 // directory — the base's for every list it did not set — before its own lists
 // are cleared; one that set none keeps inheriting the migrated base.
+//
+// A merge: true override keeps only its own entries: `paths` merges entry by
+// entry there, so what it does not restate it inherits from the migrated base
+// anyway. That inheritance is wider than the old keys were — a deprecated list
+// on such an override replaced the base's list outright, whereas the migrated
+// entries now join it — so a base entry the override meant to shadow needs an
+// entry of its own for that path.
 func (c *Config) MigratePaths() int {
 	if c == nil {
 		return 0
@@ -352,17 +365,23 @@ func (c *Config) MigratePaths() int {
 			continue
 		}
 		// The lists in effect for the override's directory: its own where set,
-		// the base's otherwise, exactly as ForDirectory combined them.
+		// the base's otherwise, exactly as ForDirectory combined them — except
+		// under merge: true, where the base's entries are inherited per path
+		// and restating them here would only freeze a copy.
+		inherit := pickList
+		if o.Merge {
+			inherit = func(override, _ []string) []string { return override }
+		}
 		resolved := Config{
-			ReadablePaths:         pickList(o.ReadablePaths, c.ReadablePaths),
-			WritablePaths:         pickList(o.WritablePaths, c.WritablePaths),
-			InternalReadablePaths: pickList(o.InternalReadablePaths, c.InternalReadablePaths),
-			InternalWritablePaths: pickList(o.InternalWritablePaths, c.InternalWritablePaths),
-			DeniedReadPaths:       pickList(o.DeniedReadPaths, c.DeniedReadPaths),
-			DeniedWritePaths:      pickList(o.DeniedWritePaths, c.DeniedWritePaths),
+			ReadablePaths:         inherit(o.ReadablePaths, c.ReadablePaths),
+			WritablePaths:         inherit(o.WritablePaths, c.WritablePaths),
+			InternalReadablePaths: inherit(o.InternalReadablePaths, c.InternalReadablePaths),
+			InternalWritablePaths: inherit(o.InternalWritablePaths, c.InternalWritablePaths),
+			DeniedReadPaths:       inherit(o.DeniedReadPaths, c.DeniedReadPaths),
+			DeniedWritePaths:      inherit(o.DeniedWritePaths, c.DeniedWritePaths),
 		}
 		entries := o.Paths
-		if entries == nil {
+		if entries == nil && !o.Merge {
 			entries = c.Paths
 		}
 		converted := resolved.LegacyPathEntries()

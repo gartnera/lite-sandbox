@@ -276,6 +276,9 @@ overrides:
 
 // TestCommands_OverrideReplacesSection: like every section, an override's
 // commands list replaces the base's for its directory.
+// TestCommands_OverrideReplacesSection: a replace-mode override's commands
+// list replaces the base's for its directory. Only merge: true combines the
+// two entry by entry (TestForDirectory_MergesKeyedSections).
 func TestCommands_OverrideReplacesSection(t *testing.T) {
 	writeConfig(t, `
 commands:
@@ -299,5 +302,35 @@ overrides:
 	}
 	if !(&DirectoryOverride{Path: "/x", Config: Config{Commands: []CommandEntry{{Command: "y"}}}}).SetsAnySection() {
 		t.Error("an override with commands should report a set section")
+	}
+}
+
+// TestCommands_MigrateMergeOverride: a merge: true override keeps only its own
+// entries, since `commands` merges entry by entry there.
+func TestCommands_MigrateMergeOverride(t *testing.T) {
+	writeConfig(t, `
+extra_commands: [curl]
+overrides:
+  - path: /work
+    merge: true
+    denied_commands: [npm]
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MigrateCommands() == 0 {
+		t.Fatal("MigrateCommands reported nothing to do")
+	}
+	o := cfg.Overrides[0]
+	if len(o.Commands) != 1 || o.Commands[0].Command != "npm" || !o.Commands[0].Denies() {
+		t.Errorf("override commands = %+v, want only its own entry", o.Commands)
+	}
+	scoped := cfg.ForDirectory("/work/sub")
+	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"curl"}) {
+		t.Errorf("allowed = %v, want the base entry inherited", got)
+	}
+	if got := scoped.DeniedCommandList(); !slices.Equal(got, []string{"npm"}) {
+		t.Errorf("denied = %v, want the override entry", got)
 	}
 }

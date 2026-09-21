@@ -188,7 +188,10 @@ lite-sandbox config commands deny "lite-sandbox update"    # drops the lift; the
 
 Like every section, `commands` can be set per directory through
 [overrides](#per-directory-overrides); the built-in entries apply under an
-override too, since they are not part of the section it replaces.
+override too, since they are not part of the section it replaces. A
+`merge: true` override combines the list with the base's
+[entry by entry](#per-directory-overrides), so one directory can deny a
+command the base allows without restating the rest.
 
 ### Deprecated keys
 
@@ -200,8 +203,10 @@ entries as `allow: true`). The former CLI commands (`extra-commands`,
 write the new form. `lite-sandbox config commands migrate` rewrites the old
 keys once, everywhere in the file — an old-style override replaced only the
 one list it set and inherited the rest, whereas a `commands` list replaces the
-whole section, so an override that set any command list receives the full set
-of entries in effect for its directory. Two things are not one-to-one: where a
+whole section (or merges entry by entry under `merge: true`, where migrate
+writes only that override's own entries), so an override that set any command
+list receives the full set of entries in effect for its directory. Two things
+are not one-to-one: where a
 config both allowed and denied the same command, the denial is kept (it won at
 every gate anyway); and a `-` lift becomes an allow, which lifts the same
 built-in and, in `allowlist` mode, also admits the command past the whitelist.
@@ -276,7 +281,9 @@ sets neither key, grants `write` while denying `read`, or marks a denial
 `internal` is rejected when the config loads. `read: true` together with
 `write: false` is coherent — readable, and kept read-only under the OS sandbox.
 Like every section, `paths` can be set per directory with
-[`--dir`](#writing-overrides-from-the-cli---dir).
+[`--dir`](#writing-overrides-from-the-cli---dir); on a `merge: true`
+[override](#per-directory-overrides) the list is combined with the base's
+entry by entry, so a directory states only the paths it changes.
 
 ### Grants: `read: true`, `write: true`
 
@@ -439,9 +446,13 @@ lite-sandbox config paths migrate
 
 The two spellings differ under [overrides](#per-directory-overrides): an old
 key on an override replaced only that one list and inherited the other five,
-whereas `paths` on an override replaces the whole section. `migrate` keeps what
-every directory resolves to by giving such an override the full set of entries
-in effect for its directory, so run it rather than renaming keys by hand.
+whereas `paths` on an override replaces the whole section (or merges entry by
+entry under `merge: true`). `migrate` keeps what every directory resolves to by
+giving such an override the full set of entries in effect for its directory, so
+run it rather than renaming keys by hand. On a `merge: true` override it writes
+only that override's own entries, since the base's are inherited per path — the
+one case where the result is wider than the old keys were, as a deprecated list
+there replaced the base's outright.
 
 ## Redundant `cd` rejection
 
@@ -488,8 +499,8 @@ overrides:
   - path: ~/work/acme             # ~ is expanded
     aws:
       force_profile: "acme-dev"   # broker a different AWS profile here
-    paths:                        # replaces (not extends) the base paths list here
-      - path: ~/work/acme/artifacts
+    paths:                        # replaces (not extends) the base paths list here;
+      - path: ~/work/acme/artifacts   # add merge: true to keep the base's entries
         write: true
   - path: ~/work/acme/prod
     aws:
@@ -500,6 +511,12 @@ overrides:
     merge: true                   # deep-merge instead of replace (see below)
     docker:
       allow_privileged: true      # only this flag changes; docker.enabled etc. kept
+    paths:                        # merged entry by entry: the base's grants still
+      - path: ~/work/trusted/out  # apply here, this one is added
+        write: true
+    commands:
+      - command: curl             # restates the base's entry for curl, here only
+        allow: false
 ```
 
 Resolution rules:
@@ -515,7 +532,19 @@ Resolution rules:
   example above flips just `docker.allow_privileged` and keeps the base
   `docker.enabled`). Either way, sections the override never mentions are
   inherited from the base unchanged, and leaf values it does set (scalars, flags,
-  and lists like `paths`) come from the override.
+  and the deprecated one-list-per-kind path and command keys) come from the
+  override.
+- **`paths` and `commands` merge entry by entry.** Both sections are lists of
+  independent statements — one per path, one per command — so under
+  `merge: true` they are combined by subject rather than taken whole: the
+  base's entries carry into the directory, an override entry naming the same
+  path or command **replaces** just that statement, and entries naming new
+  subjects are added. Subjects are matched as the sandbox matches them (`~/x`
+  and its expanded form are one path; `uv  run` and `uv run` are one command).
+  An override can restate an inherited entry — grant less, deny what the base
+  allowed — but it cannot *unstate* one: to drop a statement everywhere, remove
+  it from the base. Under the default replace mode the whole list still comes
+  from the override, which is how a directory starts from a clean list.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the concrete directory they denote.
 - **Linked git worktrees inherit their repository's override.** A worktree
@@ -586,7 +615,22 @@ lite-sandbox config overrides remove <dir>    # drop all of that directory's set
 
 The `merge: true` flag is still authored by editing the `overrides` list in the
 config file directly; `--dir` always writes replace-style sections (seeded from
-the base, as described above).
+the base, as described above). When the directory's override already has
+`merge: true`, `--dir` respects it: `paths` and `commands` are stored as the
+delta — only the entries the command added or changed, so later base edits keep
+flowing through.
+
+Either way, a `remove` the directory would go on inheriting is reported as
+such rather than claimed as a removal — on a `merge: true` override because
+the base's entry is inherited per path, and on a replace-style one because a
+section emptied of its last entry is not recorded at all, so the base's list
+applies again:
+
+```console
+$ lite-sandbox config paths remove /base/data --dir ~/work/acme
+/base/data: "read" in the base config still applies to /home/you/work/acme — an override can restate an entry, not drop it
+  remove it everywhere with `lite-sandbox config paths remove /base/data`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
+```
 
 ## Git Support
 
