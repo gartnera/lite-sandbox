@@ -1,17 +1,17 @@
 # AWS & Docker Access
 
-Both of these are opt-in integrations that let sandboxed commands reach AWS and
-Docker **without** handing them your raw credentials or an unrestricted daemon
-socket. Both are disabled by default and most useful with the
+These opt-in integrations let sandboxed commands use AWS and Docker **without**
+access to your raw credentials or an unrestricted daemon socket. Both are
+disabled by default and work best with the
 [OS sandbox](security.md#os-level-sandboxing-optional) enabled.
 
 ## AWS credentials
 
-`~/.aws` is a built-in entry of the OS sandbox's [deny list](configuration.md#denials-read-false-write-false-denylist-mode):
-hidden in `denylist` mode, and in every mode once credentials are brokered. The
-`aws` config section is a shim over that entry — it controls how (and whether)
-sandboxed commands get credentials, and sets the entry's scope accordingly. It
-has two mutually exclusive modes:
+`~/.aws` is a built-in entry of the OS sandbox's [deny list](configuration.md#denials-read-false-write-false-denylist-mode).
+It is hidden in `denylist` mode, and in every mode once credentials are
+brokered. The `aws` config section controls whether and how sandboxed commands
+get credentials, and sets that entry's scope to match. It has two mutually
+exclusive modes:
 
 ```yaml
 aws:
@@ -19,20 +19,19 @@ aws:
   force_profile: ""             # broker credentials for this profile via a local IMDS server (default: "")
 ```
 
-- **Disabled** (no `aws` section) — `~/.aws` stays blocked under the OS sandbox in `denylist` mode; commands have no AWS credentials.
-- **Raw credentials** (`allow_raw_credentials: true`) — the `~/.aws` entry is dropped so the AWS CLI/SDK use your long-term credential files directly. Simplest, but exposes the credential files to sandboxed commands. (A `paths` grant on `~/.aws` [lifts the entry](configuration.md#lifting-a-built-in-denial) the same way, without touching the `aws` section.)
-- **Brokered via IMDS** (`force_profile: "<profile>"`) — lite-sandbox starts a local [IMDSv2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html)-compatible metadata server on `127.0.0.1` (random port), resolves **temporary** credentials for the named profile, and injects `AWS_EC2_METADATA_SERVICE_ENDPOINT` into the sandbox so the SDK fetches them from there. `~/.aws` is blocked in every mode, so the raw credential files are never exposed — only short-lived, auto-refreshed credentials reach the command. Works with SSO, assume-role, and IAM-user profiles.
+- **Disabled** (no `aws` section): `~/.aws` stays blocked under the OS sandbox in `denylist` mode, and commands have no AWS credentials.
+- **Raw credentials** (`allow_raw_credentials: true`): the `~/.aws` entry is dropped, so the AWS CLI/SDK read your long-term credential files directly. This is the simplest option but exposes the credential files to sandboxed commands. A `paths` grant on `~/.aws` [lifts the entry](configuration.md#lifting-a-built-in-denial) the same way without touching the `aws` section.
+- **Brokered via IMDS** (`force_profile: "<profile>"`): lite-sandbox starts a local [IMDSv2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html)-compatible metadata server on `127.0.0.1` (random port), resolves **temporary** credentials for the named profile, and sets `AWS_EC2_METADATA_SERVICE_ENDPOINT` in the sandbox so the SDK fetches them from there. `~/.aws` is blocked in every mode, so commands only ever see short-lived, auto-refreshed credentials. Works with SSO, assume-role, and IAM-user profiles.
 
 > SSH private keys in `~/.ssh` are blocked by the OS sandbox regardless of the AWS mode; only a `paths` grant on `~/.ssh` or on a key [lifts that](configuration.md#lifting-a-built-in-denial).
 
-> **Region.** In brokered IMDS mode `~/.aws/config` is masked, so the profile's `region` setting isn't visible to commands. lite-sandbox resolves the brokered profile's region on the host and injects it as both `AWS_REGION` and `AWS_DEFAULT_REGION` (tooling is split on which it honors), so regional AWS commands work without an explicit `--region` — matching how the profile behaves outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag all still take precedence. If the profile configures no region, nothing is injected.
+> **Region.** In brokered IMDS mode `~/.aws/config` is masked, so commands can't see the profile's `region`. lite-sandbox resolves the region on the host and sets both `AWS_REGION` and `AWS_DEFAULT_REGION` (tools differ on which they read), so regional commands work without `--region`, as they do outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag takes precedence. If the profile has no region, nothing is set.
 
 ### Multiple profiles
 
-`allowed_profiles` lets a command choose among several brokered profiles at
-runtime via `AWS_PROFILE`, on top of the default `force_profile`. Each listed
-profile gets its own IMDS server; `force_profile` is the default (used when a
-command sets no `AWS_PROFILE`) and is always implicitly allowed.
+`allowed_profiles` lets a command pick one of several brokered profiles with
+`AWS_PROFILE`. Each listed profile gets its own IMDS server. `force_profile` is
+the default when a command sets no `AWS_PROFILE`, and is always allowed.
 
 ```yaml
 aws:
@@ -42,28 +41,27 @@ aws:
 
 With this config:
 
-- `aws s3 ls` → uses the `ro` profile (the default).
-- `AWS_PROFILE=dev aws s3 ls` → routed to the `dev` profile's broker; the `dev` profile's region is applied.
-- `AWS_PROFILE=staging aws s3 ls` → **denied** with `AWS profile "staging" is not in allowed_profiles (dev, prod, ro)` (the message lists what is allowed).
-- `aws configure list-profiles` → prints the brokered profiles (`dev`, `prod`, `ro`) so an agent can discover what it may select. (The real command reads the masked `~/.aws` and would return nothing, so lite-sandbox answers it directly.) Only this exact command is intercepted — any additional args or flags run the real command.
+- `aws s3 ls` uses the `ro` profile (the default).
+- `AWS_PROFILE=dev aws s3 ls` is routed to the `dev` profile's broker, with the `dev` profile's region.
+- `AWS_PROFILE=staging aws s3 ls` is **denied** with `AWS profile "staging" is not in allowed_profiles (dev, prod, ro)`.
+- `aws configure list-profiles` prints the brokered profiles (`dev`, `prod`, `ro`) so an agent can see what it may select. The real command would read the masked `~/.aws` and print nothing, so lite-sandbox answers it directly. Only this exact command is intercepted; with any extra args or flags, the real command runs.
 
-How it works: for a command that sets `AWS_PROFILE` (inline `AWS_PROFILE=X aws …`
-or an `export` in the same command), lite-sandbox strips the selector and
-repoints `AWS_EC2_METADATA_SERVICE_ENDPOINT` (and the region) at that profile's
-server — the SDK never reads the masked `~/.aws`. Notes:
+For a command that sets `AWS_PROFILE` (inline `AWS_PROFILE=X aws …` or an
+`export` in the same command), lite-sandbox strips the variable and points
+`AWS_EC2_METADATA_SERVICE_ENDPOINT` (and the region) at that profile's server.
+The SDK never reads the masked `~/.aws`. Notes:
 
-- A **shell-level** `AWS_PROFILE` inherited from the host is ignored (stripped) — select a profile per command, not via a session-wide export. This prevents a stray host `AWS_PROFILE` from affecting every command.
-- Selecting a profile applies that profile's region, unless the same command sets an explicit `AWS_REGION`/`AWS_DEFAULT_REGION` (or passes `--region`), which is honored.
-- Routing applies to normal validated commands. Bare allowed commands (`commands` entries, with or without `no_sandbox`, which run via raw `bash -c`) always use the default profile.
+- An `AWS_PROFILE` inherited from the host shell is stripped and ignored, so a stray host setting can't affect every command. Select a profile per command instead.
+- Selecting a profile applies that profile's region, unless the same command sets `AWS_REGION`/`AWS_DEFAULT_REGION` or passes `--region`.
+- Routing only applies to validated commands. Bare allowed commands (`commands` entries, with or without `no_sandbox`, which run via raw `bash -c`) always use the default profile.
 
 ### Per-directory overrides
 
-AWS settings can be changed for specific working directories through the
-top-level [`overrides`](configuration.md#per-directory-overrides) list — the same
-generic mechanism every config section uses, not an AWS-only feature. An override
-that sets `aws:` fully defines the mode for its directory (at the override's
-`path` or any directory beneath it); its fields replace the base AWS settings
-rather than merging, so the two modes never mix, and the most specific (longest)
+AWS settings can be changed per working directory with the top-level
+[`overrides`](configuration.md#per-directory-overrides) list, like any other
+section. An override that sets `aws:` fully defines the AWS config for its
+directory and everything below it: its fields replace the base AWS settings
+instead of merging, so the two modes never mix. The most specific (longest)
 matching `path` wins.
 
 ```yaml
@@ -96,16 +94,14 @@ lite-sandbox config aws remove-override <path>          # Remove a per-directory
 lite-sandbox config aws disable                         # Disable AWS access entirely
 ```
 
-`--dir` is not AWS-specific: every `lite-sandbox config` command takes it, and
-scopes that setting to commands run at or under the given directory. See
+Every `lite-sandbox config` command takes `--dir`; see
 [Per-directory overrides](configuration.md#per-directory-overrides).
 
 ## Docker access
 
-The `docker` section routes the docker CLI through a **filtering proxy** instead
-of giving it the real daemon socket. The proxy enforces the sandbox's path
-boundaries and blocks privilege escalation, while normal container/image
-workflows keep working.
+The `docker` section sends the docker CLI through a **filtering proxy** instead
+of the real daemon socket. The proxy enforces the sandbox's path boundaries and
+blocks privilege escalation; normal container and image workflows still work.
 
 ```yaml
 docker:
@@ -117,21 +113,20 @@ docker:
 ```
 
 When enabled, lite-sandbox starts the proxy on a private unix socket, points the
-sandboxed CLI at it via `DOCKER_HOST`, and (under the OS sandbox) masks the real
-daemon socket so the proxy can't be bypassed.
+sandboxed CLI at it with `DOCKER_HOST`, and (under the OS sandbox) masks the
+real daemon socket.
 
-**Requires the OS sandbox.** Only the OS sandbox can mask the real socket and
-make the proxy unbypassable — otherwise a command could just `unset DOCKER_HOST`
-(or pass `-H`) and talk to `/var/run/docker.sock` directly. The proxy therefore
-refuses to start unless `os_sandbox` is enabled, unless you explicitly opt out
-with `allow_unsandboxed: true` (not recommended).
+**Requires the OS sandbox.** Without it, the real socket can't be masked, and a
+command could `unset DOCKER_HOST` (or pass `-H`) and talk to
+`/var/run/docker.sock` directly. The proxy refuses to start unless `os_sandbox`
+is enabled or you set `allow_unsandboxed: true` (not recommended).
 
 ### What the proxy enforces
 
-- **Endpoint allowlist** — Normal read and lifecycle operations on containers, images, networks, and volumes (plus `build`, `exec`, and BuildKit) are forwarded; anything outside the allowlist is rejected with `403`.
-- **No privilege escalation** (unless `allow_privileged: true`) — rejects `--privileged`, `--cap-add`, `--device`/`--gpus`, device cgroup rules, `--security-opt` `unconfined`, host PID/IPC/user/network namespaces, and `docker build --network=host`.
-- **Host namespaces** (opt-in via `allow_host_namespaces: true`) — permits just `--pid=host`, `--net=host`, and `--ipc=host` (and `docker build --network=host`) without allowing full privileged mode. The host user namespace, container-joined namespaces, and all other escalation vectors stay blocked. Implied by `allow_privileged: true`.
-- **Bind-mount confinement** — host bind mounts (`-v`, `--mount type=bind`, and `local`-driver volumes with a `device` path) must resolve inside the sandbox boundary: read-only mounts within the readable paths, read-write mounts within the writable paths. Named/anonymous volumes are allowed. Ambiguous binds are rejected fail-closed.
+- **Endpoint allowlist**: normal read and lifecycle operations on containers, images, networks, and volumes (plus `build`, `exec`, and BuildKit) are forwarded. Anything else is rejected with `403`.
+- **No privilege escalation** (unless `allow_privileged: true`): rejects `--privileged`, `--cap-add`, `--device`/`--gpus`, device cgroup rules, `--security-opt` `unconfined`, host PID/IPC/user/network namespaces, and `docker build --network=host`.
+- **Host namespaces** (`allow_host_namespaces: true`): permits only `--pid=host`, `--net=host`, and `--ipc=host` (and `docker build --network=host`) without full privileged mode. The host user namespace, container-joined namespaces, and all other escalation flags stay blocked. Implied by `allow_privileged: true`.
+- **Bind-mount confinement**: host bind mounts (`-v`, `--mount type=bind`, and `local`-driver volumes with a `device` path) must resolve inside the sandbox boundary: read-only mounts within the readable paths, read-write mounts within the writable paths. Named and anonymous volumes are allowed. Ambiguous binds are rejected.
 
 ### Upstream socket auto-detection
 

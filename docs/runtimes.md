@@ -1,14 +1,15 @@
 # Runtime Support
 
-Code execution runtimes are disabled by default and can be enabled individually
-via config. This page covers Go, pnpm, Rust, Deno, Flutter, uv, and Python.
+Code execution runtimes are disabled by default and can be enabled one at a
+time in the config. This page covers Go, pnpm, Rust, Deno, Flutter, uv, and
+Python.
 
-Python is the exception: it is **enabled by default**, because it does not run a
-toolchain from the host at all. See [Python Runtime Support](#python-runtime-support).
+Python is the exception: it is **enabled by default** because it doesn't run a
+toolchain from the host. See [Monty Python Runtime Support](#monty-python-runtime-support).
 
 ## Go Runtime Support
 
-Go commands (`go build`, `go test`, `go mod`, etc.) are disabled by default. Enable them via config:
+Go commands (`go build`, `go test`, `go mod`, etc.) are disabled by default. To enable them:
 
 ```yaml
 runtimes:
@@ -17,7 +18,7 @@ runtimes:
     generate: false  # Allow go generate (default: false)
 ```
 
-Go runtime commands use the same runtime path validation as other commands to ensure file paths stay within allowed directories. This enables safe development workflows like:
+Go commands get the same runtime path validation as other commands, so file paths stay within the allowed directories:
 
 ```bash
 go mod init myproject
@@ -25,13 +26,13 @@ go test ./...
 go build -o mybinary
 ```
 
-The `go generate` subcommand requires explicit opt-in since it can execute arbitrary code specified in source files.
+`go generate` needs its own opt-in because it runs arbitrary commands specified in source files.
 
-See `e2e/claude/test_go_runtime_e2e.py` for a complete example demonstrating a Go development workflow (module init, testing, git workflow) using only the sandboxed tool.
+`e2e/claude/test_go_runtime_e2e.py` has a full example of a Go workflow (module init, testing, git) using only the sandboxed tool.
 
 ## pnpm Runtime Support
 
-pnpm commands are disabled by default. Enable them via config:
+pnpm commands are disabled by default. To enable them:
 
 ```yaml
 runtimes:
@@ -40,7 +41,7 @@ runtimes:
     publish: false  # Allow pnpm publish (default: false)
 ```
 
-Enable pnpm via CLI:
+Or via CLI:
 
 ```bash
 # Enable pnpm commands
@@ -53,7 +54,7 @@ lite-sandbox config runtimes pnpm enable --with-publish
 lite-sandbox config runtimes pnpm show
 ```
 
-pnpm runtime commands enable safe package management workflows:
+For example:
 
 ```bash
 pnpm install
@@ -62,23 +63,52 @@ pnpm test
 pnpm run build
 ```
 
-When the OS sandbox is enabled, the pnpm runtime automatically detects and
-grants write access to:
+With the OS sandbox enabled, the pnpm runtime detects and grants write access
+to:
 
-- **pnpm store** — `pnpm store path`, where downloaded packages live.
-- **pnpm cache** — the `cache-dir` setting, defaulting to the OS cache
+- **pnpm store**: `pnpm store path`, where downloaded packages live.
+- **pnpm cache**: the `cache-dir` setting, defaulting to the OS cache
   directory joined with `pnpm` (e.g. `~/Library/Caches/pnpm` on macOS,
-  `~/.cache/pnpm` on Linux). This holds registry metadata and the `pnpm dlx`
-  cache, so pnpm invoked indirectly inside the sandbox (e.g. by a lefthook job
-  or package script) can populate its cache.
+  `~/.cache/pnpm` on Linux). It holds registry metadata and the `pnpm dlx`
+  cache, so pnpm run indirectly inside the sandbox (e.g. by a lefthook job or
+  package script) can populate it.
 
-Security features:
-- `pnpm dlx` is blocked when invoked directly (downloads and executes remote packages)
-- `pnpm publish` requires explicit opt-in since it affects the npm registry (shared state)
+Restrictions:
+- `pnpm dlx` is blocked when invoked directly, since it downloads and runs remote packages
+- `pnpm publish` needs an explicit opt-in because it changes the npm registry
+
+## Rust Runtime Support
+
+`cargo` and `rustc` are disabled by default. To enable them:
+
+```yaml
+runtimes:
+  rust:
+    enabled: true   # Allow cargo build, test, run, fmt, clippy, add, etc. (default: false)
+    publish: false  # Allow cargo publish (default: false)
+```
+
+Or via CLI:
+
+```bash
+lite-sandbox config runtimes rust enable
+lite-sandbox config runtimes rust enable --with-publish
+lite-sandbox config runtimes rust show
+```
+
+With the OS sandbox enabled, `CARGO_HOME` (default `~/.cargo`) and
+`RUSTUP_HOME` (default `~/.rustup`) are made writable so cargo can populate
+its registry cache and toolchains.
+
+Restrictions:
+- `cargo publish` needs an explicit opt-in because it changes the crates.io registry
+- `cargo login`, `logout`, `owner`, and `yank` are blocked
+- `cargo install` is allowed only with `--path`; installing a crate by name
+  fetches it and runs its build script
 
 ## Deno Runtime Support
 
-Deno commands are disabled by default. Enable them via config:
+Deno commands are disabled by default. To enable them:
 
 ```yaml
 runtimes:
@@ -90,7 +120,7 @@ runtimes:
     allow_import: true   # Allow fetching remote modules (default: true)
 ```
 
-Enable deno via CLI:
+Or via CLI:
 
 ```bash
 # Enable deno commands (auto-sandbox is on by default)
@@ -109,7 +139,7 @@ lite-sandbox config runtimes deno disable --with-auto-sandbox
 lite-sandbox config runtimes deno show
 ```
 
-Deno runtime commands enable safe development workflows:
+For example:
 
 ```bash
 deno run main.ts
@@ -119,40 +149,36 @@ deno lint
 deno task build
 ```
 
-Security features:
-- `deno publish` requires explicit opt-in since it affects the JSR registry (shared state)
-- `deno upgrade` is blocked (modifies the deno installation in place)
-- `deno eval` is blocked — it runs with implicit access to *all* permissions and
-  rejects every `--allow-*`/`--deny-*` flag, so it cannot be confined (an
-  unsandboxable code-execution escape hatch, like shell `eval`/`exec`).
-- **Auto-sandbox** (`auto_sandbox: true`, the default) — Deno runs with no
-  permissions by default and prompts interactively when a script requests
-  access it wasn't granted, which would hang a non-interactive sandbox. With
-  auto-sandbox enabled, lite-sandbox automatically injects
-  `--allow-read`/`--allow-write` scoped to the sandbox's allowed paths for
-  permissioned subcommands (`run`, `test`, `bench`, `repl`, `serve`, `compile`,
-  `install`), so Deno's permission model mirrors the sandbox filesystem policy
-  and runs non-interactively. Existing read/write grants on the command
-  (including short `-R`/`-W` or a blanket `-A`) are respected.
-- **Network sockets off by default** — `--deny-net` is forced unless
-  `allow_network: true`. This is enforced whenever deno is enabled, independent
-  of auto-sandbox, so turning auto-sandbox off does not re-open the network.
-  `--deny-net` takes precedence over any `--allow-net`/`-A` the invoker passes.
-- **Remote imports on by default, behind a flag** — Deno fetches remote modules
-  from a default host allowlist (`deno.land`/`jsr.io`/…) out of the box, which
-  is core to normal usage, so imports are allowed by default. Setting
-  `allow_import: false` blocks remote module fetching on code-executing
-  subcommands with `--no-remote` (https/jsr) + `--no-npm` (npm) — the levers
-  that actually stop the module graph from being fetched — plus `--deny-import`
-  for runtime dynamic imports. It also blocks the CLI fetch subcommands
-  (`deno cache`, `deno add`, `deno install`), which fetch at the CLI level where
-  an injected flag cannot stop them. (Already-cached modules can still load;
-  with `allow_import: false` from the start, nothing new is fetched or cached.)
+Restrictions:
+- `deno publish` needs an explicit opt-in because it changes the JSR registry
+- `deno upgrade` is blocked because it modifies the deno installation in place
+- `deno eval` is blocked: it always runs with *all* permissions and rejects
+  every `--allow-*`/`--deny-*` flag, so it can't be confined.
+- **Auto-sandbox** (`auto_sandbox: true`, the default): Deno starts with no
+  permissions and prompts interactively when a script asks for more, which
+  would hang in the sandbox. With auto-sandbox on, lite-sandbox injects
+  `--allow-read`/`--allow-write` scoped to the sandbox's allowed paths for the
+  permissioned subcommands (`run`, `test`, `bench`, `repl`, `serve`,
+  `compile`, `install`), so Deno's permissions match the sandbox's filesystem
+  policy and it never prompts. Read/write grants already on the command
+  (including `-R`/`-W` or `-A`) are kept.
+- **Network off by default**: `--deny-net` is forced unless
+  `allow_network: true`. This applies whenever deno is enabled, whether or not
+  auto-sandbox is on, and `--deny-net` overrides any `--allow-net`/`-A` on the
+  command.
+- **Remote imports on by default**: normal Deno usage fetches modules from a
+  default host allowlist (`deno.land`/`jsr.io`/…), so imports are allowed by
+  default. `allow_import: false` adds `--no-remote` (https/jsr) and `--no-npm`
+  (npm) to code-executing subcommands, which stop the module graph from being
+  fetched, plus `--deny-import` for dynamic imports at runtime. It also blocks
+  `deno cache`, `deno add`, and `deno install`, which fetch at the CLI level
+  where an injected flag can't stop them. Modules already in the cache can
+  still load.
 
 ## Flutter Runtime Support
 
 Flutter, Dart, and fvm (Flutter Version Management) commands are disabled by
-default. Enable them via config:
+default. To enable them:
 
 ```yaml
 runtimes:
@@ -160,7 +186,7 @@ runtimes:
     enabled: true   # Allow flutter, dart, and fvm commands (default: false)
 ```
 
-Enable Flutter via CLI:
+Or via CLI:
 
 ```bash
 # Enable flutter/dart/fvm commands
@@ -173,7 +199,7 @@ lite-sandbox config runtimes flutter disable
 lite-sandbox config runtimes flutter show
 ```
 
-Flutter runtime commands enable normal mobile/web development workflows:
+For example:
 
 ```bash
 fvm install
@@ -183,35 +209,34 @@ flutter build apk
 dart run build_runner build
 ```
 
-Like Go (which auto-detects `GOPATH`/`GOCACHE`), the Flutter runtime
-automatically detects and grants access to the paths these tools read and write,
-so builds and tests work without hand-configuring `paths` grants:
+As with Go's `GOPATH`/`GOCACHE`, the Flutter runtime detects and grants access
+to the paths these tools read and write, so builds and tests work without
+extra `paths` grants:
 
-- **fvm cache** — `FVM_CACHE_PATH` (or the legacy `FVM_HOME`), defaulting to
-  `~/fvm`. This is where fvm stores each managed Flutter SDK version.
-- **pub cache** — `PUB_CACHE`, defaulting to `~/.pub-cache`. This is where
-  Dart/Flutter packages are downloaded.
-- **Flutter SDK root** — `FLUTTER_ROOT`, or resolved from a `flutter` binary on
+- **fvm cache**: `FVM_CACHE_PATH` (or the legacy `FVM_HOME`), default `~/fvm`,
+  where fvm stores each Flutter SDK version.
+- **pub cache**: `PUB_CACHE`, default `~/.pub-cache`, where Dart/Flutter
+  packages are downloaded.
+- **Flutter SDK root**: `FLUTTER_ROOT`, or found from a `flutter` binary on
   `PATH` (for a non-fvm global install). Flutter writes to `bin/cache` under
-  this directory. A candidate is only accepted when it looks like a real SDK
-  checkout (it contains a `packages/` directory), so a stray binary in a system
-  directory never widens access to `/usr`.
-- **Flutter/Dart config directories** — `~/.config/flutter`, `~/.config/dart`,
-  `~/.flutter`, and `~/.dart`, where the tools persist settings and analytics
+  it. A candidate is accepted only if it contains a `packages/` directory, so a
+  stray binary in a system directory can't widen access to `/usr`.
+- **Flutter/Dart config directories**: `~/.config/flutter`, `~/.config/dart`,
+  `~/.flutter`, and `~/.dart`, where the tools keep settings and analytics
   state.
 
-Directories that don't exist yet (fresh machine, cold caches) are created up
-front so the OS sandbox has a bind-mount source for them.
+Directories that don't exist yet are created up front so the OS sandbox has
+something to bind-mount.
 
-Flutter is a code-execution runtime: like Go, Rust, and Deno, its containment
-relies on the OS sandbox confining writes to the working directory and the
-detected runtime paths, rather than on per-argument validation. Once enabled,
-all `flutter`/`dart`/`fvm` subcommands are permitted.
+Like Go, Rust, and Deno, Flutter runs arbitrary code, so it is contained by the
+OS sandbox confining writes to the working directory and the detected paths,
+not by argument validation. Once enabled, all `flutter`/`dart`/`fvm`
+subcommands are allowed.
 
 ## uv Runtime Support
 
 [uv](https://docs.astral.sh/uv/) commands (`uv`, `uvx`) are disabled by default.
-Enable them via config:
+To enable them:
 
 ```yaml
 runtimes:
@@ -220,7 +245,7 @@ runtimes:
     publish: false  # Allow uv publish (default: false)
 ```
 
-Enable uv via CLI:
+Or via CLI:
 
 ```bash
 # Enable uv commands
@@ -233,21 +258,20 @@ lite-sandbox config runtimes uv enable --with-publish
 lite-sandbox config runtimes uv show
 ```
 
-Enabling the uv runtime automatically detects and grants access to the paths uv
-needs outside the working directory (the same mechanism used for Go's `$GOPATH`).
-These are discovered by shelling out to uv and confined so uv can populate them:
+Enabling uv grants access to the paths it needs outside the working directory,
+found by asking uv:
 
-- `uv cache dir` — the package/wheel cache (default `~/.cache/uv`)
-- `uv python dir` — uv-managed Python interpreters (default `~/.local/share/uv/python`)
-- `uv tool dir` — tool environments from `uv tool install` (default `~/.local/share/uv/tools`)
+- `uv cache dir`: the package/wheel cache (default `~/.cache/uv`)
+- `uv python dir`: uv-managed Python interpreters (default `~/.local/share/uv/python`)
+- `uv tool dir`: tool environments from `uv tool install` (default `~/.local/share/uv/tools`)
 
-The tool *bin* directory (`uv tool dir --bin`, default `~/.local/bin`) is
-deliberately left unbound: it sits on the user's `PATH`, so granting write
-access would let a sandboxed command install executables that persist and run
-outside the sandbox. As a result `uv tool install` cannot place its launcher and
-fails; use `uvx` (ephemeral tool runs, cached under `uv cache dir`) instead.
+The tool *bin* directory (`uv tool dir --bin`, default `~/.local/bin`) is not
+granted. It is on the user's `PATH`, so write access would let a sandboxed
+command install executables that later run outside the sandbox. As a result,
+`uv tool install` can't place its launcher and fails; use `uvx` instead (tool
+runs are cached under `uv cache dir`).
 
-uv runtime commands enable safe Python development workflows:
+For example:
 
 ```bash
 uv init
@@ -258,19 +282,17 @@ uv pip install flask
 uvx ruff check
 ```
 
-Security features:
-- `uv publish` requires explicit opt-in since it uploads distributions to a
-  package index (shared state)
-- `uv self update` is blocked — it downloads and overwrites the uv executable in
-  place (an unsandboxable modification of the tool itself, like `deno upgrade`)
+Restrictions:
+- `uv publish` needs an explicit opt-in because it uploads to a package index
+- `uv self update` is blocked because it overwrites the uv executable in place
 
 ## Monty Python Runtime Support
 
-`python` and `python3` are **enabled by default** and do not run any Python on
+`python` and `python3` are **enabled by default** and don't run any Python on
 your `PATH`. They are served by [monty](https://github.com/pydantic/monty), a
-Python interpreter compiled to WebAssembly and embedded in the lite-sandbox
-binary, running in-process. The runtime is called `montypython` in config, to
-keep it distinct from the real thing.
+Python interpreter compiled to WebAssembly, embedded in the lite-sandbox
+binary, and run in-process. In config the runtime is called `montypython` to
+distinguish it from real Python.
 
 ```bash
 python3 -c "print('hello')"
@@ -279,10 +301,10 @@ python3 -m py_compile script.py        # syntax check
 echo "print(6*7)" | python3 -
 ```
 
-This is on by default where every other runtime is off because there is nothing
-to install or detect, and monty is more contained than most commands already on
+It's on by default, unlike the other runtimes, because there's nothing to
+install or detect, and monty is more contained than many commands already on
 the whitelist: it has no network access, no environment, and no filesystem
-access of its own. Turn it off with:
+access of its own. To turn it off:
 
 ```yaml
 runtimes:
@@ -297,8 +319,8 @@ lite-sandbox config runtimes montypython show
 
 ### Restricting it to inline code
 
-`inline_only` keeps monty for programs the agent writes inline -- `-c`, or a
-heredoc -- and refuses a script *file*:
+`inline_only` allows programs the agent writes inline (`-c` or a heredoc) and
+refuses script *files*:
 
 ```yaml
 runtimes:
@@ -311,31 +333,31 @@ lite-sandbox config runtimes montypython enable --inline-only
 lite-sandbox config runtimes montypython disable --inline-only   # clear it, python stays on
 ```
 
-The two cases fail differently. A snippet an agent just composed is written
-against whatever the interpreter provides, and if it hits one of monty's walls
-the error says so. A project's own `.py` file was written for CPython: it
-imports packages monty does not have, and where monty's subset diverges it can
-produce a plausible wrong answer instead of an error. With `inline_only` set,
-the first case still works and the second says so up front.
+The reason: a snippet the agent just wrote targets whatever the interpreter
+provides, and if it hits one of monty's limits the error says so. A project's
+own `.py` file was written for CPython. It may import packages monty doesn't
+have, and where monty's subset differs it can produce a plausible wrong answer
+instead of an error. With `inline_only`, the first case still works and the
+second is refused up front.
 
-Nothing falls through to the host interpreter as a result -- refusing is the
-whole behavior. For real CPython, enable the [uv runtime](#uv-python) and use
-`uv run`. `python3 -m py_compile file.py` still works, since it answers a
-question about a file rather than running it.
+A refused script doesn't fall back to the host interpreter. For real CPython,
+enable the [uv runtime](#uv-runtime-support) and use `uv run`.
+`python3 -m py_compile file.py` still works, since it checks a file without
+running it.
 
 ### How file access works
 
-monty performs no I/O itself. When Python touches the filesystem the interpreter
-suspends and hands lite-sandbox a typed OS call, which is authorized against the
-**same readable/writable paths as bash** before being performed:
+monty does no I/O itself. When Python touches the filesystem, the interpreter
+suspends and hands lite-sandbox a typed OS call, which is checked against the
+**same readable/writable paths as bash** before it is performed:
 
 - Reads (`read_text`, `read_bytes`, `stat`, `iterdir`, `exists`, …) are checked
   against the readable paths.
 - Writes (`write_text`, `append_text`, `write_bytes`, `mkdir`, `unlink`,
   `rmdir`, `rename`, …) are checked against the writable paths.
 - `.git` is off limits, as it is for `cat` and `sed`.
-- A denied call ends the run. Python cannot catch it, so a script cannot loop on
-  the boundary probing for a gap.
+- A denied call ends the run. Python can't catch it, so a script can't loop
+  probing the boundary.
 
 ```bash
 # Works: inside the working directory
@@ -345,27 +367,27 @@ python3 -c "from pathlib import Path; Path('out.txt').write_text('hi')"
 python3 -c "from pathlib import Path; print(Path('/etc/passwd').read_text())"
 ```
 
-The builtin `open()` works and is bounded the same way. monty holds no file
+The builtin `open()` works with the same bounds. monty holds no file
 descriptor: it builds its file object from a handle lite-sandbox returns, and
-every read or write behind that object comes back as one of the authorized OS
-calls above -- so `open()` is neither more nor less permissive than `pathlib`.
-`read()`, `read(n)`, `readline()`, `readlines()`, `write()`, `seek()`,
-`tell()`, `close()`, `with open(...) as f`, binary mode, and `.name` / `.mode`
-/ `.closed` all behave. The open-time effect happens when you open, as in
-CPython: `"w"` truncates, `"a"` creates, and `"r"` on a missing file raises a
-`FileNotFoundError` the script can catch.
+every read or write on that object comes back as one of the checked OS calls
+above, so `open()` allows exactly what `pathlib` does. `read()`, `read(n)`,
+`readline()`, `readlines()`, `write()`, `seek()`, `tell()`, `close()`,
+`with open(...) as f`, binary mode, and `.name` / `.mode` / `.closed` all
+work. As in CPython, the mode takes effect at open time: `"w"` truncates, `"a"`
+creates, and `"r"` on a missing file raises a `FileNotFoundError` the script
+can catch.
 
-`os.getenv` and `os.environ` always report an empty environment. Re-exposing the
-host's would hand Python the credentials the rest of the sandbox masks.
+`os.getenv` and `os.environ` always see an empty environment, since the host's
+would expose the credentials the rest of the sandbox masks.
 
 ### What monty does not support
 
-monty implements a **subset of Python**, and this is the thing most likely to
-surprise you. There are no third-party packages — `numpy`, `pandas`, `requests`
-and everything else cannot be imported, and there is no `pip` or `venv`. The
-standard library is partial: `os`, `pathlib`, `json`, `re`, `math`, `datetime`,
-`sys`, `typing`, `asyncio`, `dataclasses`, `collections`, `functools`,
-`itertools` and `base64` are available.
+monty implements a **subset of Python**, which is the most likely source of
+surprises. There are no third-party packages: `numpy`, `pandas`, `requests`,
+and the rest can't be imported, and there's no `pip` or `venv`. The standard
+library is partial: `os`, `pathlib`, `json`, `re`, `math`, `datetime`, `sys`,
+`typing`, `asyncio`, `dataclasses`, `collections`, `functools`, `itertools`,
+and `base64` are available.
 
 Also unavailable:
 
@@ -378,14 +400,14 @@ Also unavailable:
 | Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |
 | Generators, `match`, `del` | Lists and comprehensions |
 
-When a program hits one of these, the error names monty and says what to do
-instead, so it is not mistaken for a broken environment.
+When a program hits one of these, the error names monty and suggests an
+alternative.
 
 ### sys.argv and sys.stdin
 
-monty has neither of its own — its `sys` module is built from a fixed attribute
-list, and Python cannot assign to it. lite-sandbox supplies both, so arguments
-and piped input reach programs the way they do under CPython:
+monty provides neither: its `sys` module has a fixed set of attributes, and
+Python can't assign to it. lite-sandbox supplies both, so arguments and piped
+input work as they do in CPython:
 
 ```bash
 python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']
@@ -395,28 +417,28 @@ cat data.json | python3 -c "import sys, json; print(json.load(sys.stdin))"   # n
 cat data.json | python3 -c "import sys, json; print(json.loads(sys.stdin.read()))"
 ```
 
-`sys.stdin` supports `read()`, `readline()` and `readlines()`. It is the same
-stdin the command was given, so it works in a pipeline, from a heredoc, or with
-`< file` redirection, and reads as empty when nothing is piped in. `python3 -`
-takes the program from stdin, which leaves nothing for the program to read —
-the same as CPython. Reading `/dev/stdin` by name gets the same stream;
-everything else about that path stays on the normal boundary.
+`sys.stdin` supports `read()`, `readline()`, and `readlines()`. It's the
+command's own stdin, so it works in a pipeline, from a heredoc, or with
+`< file`, and reads as empty when nothing is piped in. `python3 -` reads the
+program from stdin, which leaves nothing for the program itself to read, as in
+CPython. Reading `/dev/stdin` by name gets the same stream; any other use of
+that path is subject to the normal boundary.
 
-Two gaps to know about, both monty's rather than lite-sandbox's: `json.load(f)`
-does not exist (only `loads`), and a file object is not iterable, so
-`for line in sys.stdin:` fails — use `sys.stdin.readlines()`.
+Two monty gaps to watch for: `json.load(f)` doesn't exist (only `loads`), and
+file objects aren't iterable, so `for line in sys.stdin:` fails. Use
+`sys.stdin.readlines()` instead.
 
-`import sys`, `import sys as s`, `import sys, json` and `from sys import argv`
-(or `stdin`) all work. This only happens for programs that mention `argv` or
-`stdin`; anything else is handed to monty exactly as written. Tracebacks are
-reported in your own line numbering either way.
+`import sys`, `import sys as s`, `import sys, json`, and `from sys import argv`
+(or `stdin`) all work. The shim is only added to programs that mention `argv`
+or `stdin`; everything else goes to monty unchanged. Tracebacks use your
+program's line numbers either way.
 
 ### Syntax checking
 
-`python -m py_compile FILE...` works and is a genuine check: monty compiles a
-whole module before executing any of it, so the file is parsed without a line of
-it running. It is silent and exits 0 when the files compile, and prints the
-compiler's error and exits 1 when one does not. No `.pyc` files are written.
+`python -m py_compile FILE...` is a real syntax check: monty compiles a whole
+module before running any of it, so the file is parsed without executing. It
+prints nothing and exits 0 when the files compile, or prints the compiler's
+error and exits 1. No `.pyc` files are written.
 
 ```bash
 python3 -m py_compile script.py && echo "syntax ok"
@@ -426,8 +448,7 @@ No other `-m` module is available.
 
 ### Opting out: running the real python
 
-There are three ways out, and every monty limitation message names all of them
-so an agent that hits one is not left guessing.
+There are three options, and every monty limitation message lists all of them.
 
 **1. Run the host interpreter for `python` itself.** Allow it as a
 [`commands` entry](configuration.md#commands), and `python`/`python3` resolve
@@ -445,15 +466,15 @@ commands:
     allow: true
 ```
 
-Like any allowed command this **bypasses sandbox command validation** for
-those invocations — the script runs as real CPython with subprocesses, network
-and no path boundary (the OS sandbox, if enabled, still confines it; add
-`no_sandbox: true` to bypass that too). A bare entry also lifts the refusal
-to run python as a wrapped subcommand of `xargs`/`env`/`timeout`/`find -exec`,
-since it already runs unwrapped.
+Like any allowed command, this **skips sandbox command validation** for those
+invocations: the script runs as real CPython with subprocesses, network, and no
+path boundary. The OS sandbox, if enabled, still confines it; add
+`no_sandbox: true` to bypass that too. A bare entry also allows python as a
+wrapped subcommand of `xargs`/`env`/`timeout`/`find -exec`, since it can
+already run unwrapped.
 
-**2. Run CPython under uv, which stays sandboxed.** `uv run` executes real
-CPython as a subprocess confined by the OS sandbox rather than by monty:
+**2. Run CPython under uv, which stays sandboxed.** `uv run` runs real CPython
+as a subprocess, confined by the OS sandbox instead of by monty:
 
 ```bash
 lite-sandbox config runtimes uv enable
@@ -461,7 +482,7 @@ uv run script.py
 ```
 
 **3. Turn the built-in interpreter off.** `python`/`python3` are then rejected
-like any other command that is not allowed:
+like any other command that isn't allowed:
 
 ```bash
 lite-sandbox config runtimes montypython disable
@@ -469,7 +490,6 @@ lite-sandbox config runtimes montypython disable
 
 ### Limits
 
-Each run is bounded by the bash tool's command timeout, plus a memory cap, a
-recursion limit, and a cap on how many filesystem operations one run may make.
-Exceeding any of them stops the program with a message that says which limit it
-hit.
+Each run is bounded by the bash tool's command timeout, a memory cap, a
+recursion limit, and a cap on filesystem operations per run. A program that
+exceeds one is stopped with a message naming the limit.

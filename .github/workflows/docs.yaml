@@ -1,0 +1,30 @@
+name: Docs
+
+# Checks that relative links and #anchors in the Markdown files resolve.
+# Options live in lychee.toml (offline, so it can't flake on external sites).
+
+on:
+  push:
+    branches: [main]
+    paths: ['**.md', 'lychee.toml', '.github/workflows/docs.yaml']
+  pull_request:
+    branches: [main]
+    paths: ['**.md', 'lychee.toml', '.github/workflows/docs.yaml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    # An offline check of a few Markdown files; the 1-vCPU slim runner is plenty.
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress './**/*.md'
