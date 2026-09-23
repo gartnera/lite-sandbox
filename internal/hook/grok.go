@@ -117,7 +117,7 @@ func IsShellTool(name string) bool {
 // them here could fail and blind the hook to the command.
 type GrokShellInput struct {
 	tool    string
-	Command string `json:"command"`
+	Command string
 }
 
 func (g *GrokShellInput) Tool() string         { return g.tool }
@@ -126,21 +126,31 @@ func (g *GrokShellInput) Describe() string {
 	return fmt.Sprintf("run shell command: %s", truncate(g.Command, 200))
 }
 
-// PathToolInput is the argument shape of a Grok filesystem tool. The toolsets
-// spell the target differently (target_file, file_path, filePath, path,
-// target_directory, dir_path), so every spelling is accepted and the first one
-// set is the target. Only the path is modeled, for the same reason as
-// GrokShellInput.
+func (g *GrokShellInput) UnmarshalJSON(b []byte) error {
+	fields, err := exactFields(b)
+	if err != nil {
+		return err
+	}
+	return fields.str("command", &g.Command)
+}
+
+// grokPathKeys are the spellings Grok's toolsets use for a file tool's
+// target: target_file (read_file), file_path (search_replace, write, codex
+// read_file), filePath (opencode read/edit), path (grep, glob), and
+// target_directory / dir_path (list_dir, codex list_dir).
+var grokPathKeys = []string{"target_file", "file_path", "filePath", "path", "target_directory", "dir_path"}
+
+// PathToolInput is the argument shape of a Grok filesystem tool. Every
+// spelling in grokPathKeys is decoded and checked: which one the tool
+// actually reads depends on the toolset, so a call that sets several must
+// have all of them in bounds. Only the paths are modeled, for the same reason
+// as GrokShellInput.
 type PathToolInput struct {
 	tool  string
 	write bool
 
-	TargetFile      string `json:"target_file,omitempty"`
-	FilePath        string `json:"file_path,omitempty"`
-	FilePathCamel   string `json:"filePath,omitempty"`
-	Path            string `json:"path,omitempty"`
-	TargetDirectory string `json:"target_directory,omitempty"`
-	DirPath         string `json:"dir_path,omitempty"`
+	// Targets holds the non-empty path arguments, in grokPathKeys order.
+	Targets []string
 }
 
 func (p *PathToolInput) Tool() string { return p.tool }
@@ -149,31 +159,39 @@ func (p *PathToolInput) Tool() string { return p.tool }
 // searching it).
 func (p *PathToolInput) Write() bool { return p.write }
 
-// Target returns the path argument as the model wrote it, or "" when the tool
-// was called without one (grep and glob default to the workspace).
-func (p *PathToolInput) Target() string {
-	for _, s := range []string{p.TargetFile, p.FilePath, p.FilePathCamel, p.Path, p.TargetDirectory, p.DirPath} {
-		if s != "" {
-			return s
+func (p *PathToolInput) UnmarshalJSON(b []byte) error {
+	fields, err := exactFields(b)
+	if err != nil {
+		return err
+	}
+	p.Targets = nil
+	for _, k := range grokPathKeys {
+		var v string
+		if err := fields.str(k, &v); err != nil {
+			return err
+		}
+		if v != "" {
+			p.Targets = append(p.Targets, v)
 		}
 	}
-	return ""
+	return nil
 }
 
-// Paths returns the paths to check against the sandbox boundary: the target
-// as written and, when it differs, the path Grok actually opens after its own
+// Target returns the first path argument as the model wrote it, or "" when
+// the tool was called without one (grep and glob default to the workspace).
+func (p *PathToolInput) Target() string {
+	if len(p.Targets) == 0 {
+		return ""
+	}
+	return p.Targets[0]
+}
+
+// Paths returns the paths to check against the sandbox boundary: every target
+// as written and, where it differs, the path Grok actually opens after its own
 // clean-up (see GrokModelPath). Checking both keeps the hook from approving a
 // spelling that only looks in bounds before Grok normalizes it.
 func (p *PathToolInput) Paths() []string {
-	raw := p.Target()
-	if raw == "" {
-		return nil
-	}
-	paths := []string{raw}
-	if model := GrokModelPath(raw); model != "" && model != raw {
-		paths = append(paths, model)
-	}
-	return paths
+	return withModelPaths(p.Targets)
 }
 
 func (p *PathToolInput) Describe() string {
@@ -181,7 +199,74 @@ func (p *PathToolInput) Describe() string {
 	if p.write {
 		verb = "write"
 	}
-	return fmt.Sprintf("%s (%s): %s", p.tool, verb, p.Target())
+	return fmt.Sprintf("%s (%s): %s", p.tool, verb, strings.Join(p.Targets, ", "))
+}
+
+// withModelPaths returns paths followed by the GrokModelPath form of each
+// that differs, without duplicates.
+func withModelPaths(paths []string) []string {
+	var out []string
+	add := func(p string) {
+		if p != "" && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	for _, p := range paths {
+		add(p)
+	}
+	for _, p := range paths {
+		add(GrokModelPath(p))
+	}
+	return out
+}
+
+// fields is a JSON object's members under their exact keys.
+type fields map[string]json.RawMessage
+
+// exactFields decodes a JSON object without Go's case-insensitive key
+// matching. Grok decodes tool arguments with serde, which matches keys
+// exactly and ignores unknown ones, so the hook must too: otherwise
+// {"file_path": "/etc/x", "FILE_PATH": "a.go"} would be checked as a.go and
+// edited as /etc/x.
+func exactFields(b []byte) (fields, error) {
+	var f fields
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// str decodes the string member key into dst; a missing or null member leaves
+// dst unchanged, and any other type is an error.
+func (f fields) str(key string, dst *string) error {
+	raw, ok := f[key]
+	if !ok || string(raw) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	return nil
+}
+
+// strs decodes the member key, a string or an array of strings, appending to
+// dst; a missing or null member is skipped, and any other type is an error.
+func (f fields) strs(key string, dst *[]string) error {
+	raw, ok := f[key]
+	if !ok || string(raw) == "null" {
+		return nil
+	}
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		*dst = append(*dst, one)
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(raw, &many); err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = append(*dst, many...)
+	return nil
 }
 
 // GrokModelPath mirrors how Grok's tools clean a model-supplied path before
@@ -227,36 +312,47 @@ func cutAnySuffix(s string, suffixes ...string) (string, bool) {
 type MediaInput struct {
 	tool string
 
-	Image      json.RawMessage `json:"image,omitempty"`
-	Images     []string        `json:"images,omitempty"`
-	FirstFrame string          `json:"first_frame,omitempty"`
-	LastFrame  string          `json:"last_frame,omitempty"`
-	Keyframes  []struct {
-		Image string `json:"image"`
-	} `json:"keyframes,omitempty"`
+	// Refs holds every image reference, in argument order.
+	Refs []string
 }
 
 func (m *MediaInput) Tool() string { return m.tool }
 
-// Paths returns the references that name local files, the way Grok resolves
-// them: trimmed, with a file:// prefix stripped.
-func (m *MediaInput) Paths() []string {
-	var refs []string
-	var one string
-	var many []string
-	if json.Unmarshal(m.Image, &one) == nil {
-		refs = append(refs, one)
-	} else if json.Unmarshal(m.Image, &many) == nil {
-		refs = append(refs, many...)
+func (m *MediaInput) UnmarshalJSON(b []byte) error {
+	f, err := exactFields(b)
+	if err != nil {
+		return err
 	}
-	refs = append(refs, m.Images...)
-	refs = append(refs, m.FirstFrame, m.LastFrame)
-	for _, k := range m.Keyframes {
-		refs = append(refs, k.Image)
+	m.Refs = nil
+	for _, k := range []string{"image", "images", "first_frame", "last_frame"} {
+		if err := f.strs(k, &m.Refs); err != nil {
+			return err
+		}
 	}
+	if raw, ok := f["keyframes"]; ok && string(raw) != "null" {
+		var frames []json.RawMessage
+		if err := json.Unmarshal(raw, &frames); err != nil {
+			return fmt.Errorf("keyframes: %w", err)
+		}
+		for _, frame := range frames {
+			kf, err := exactFields(frame)
+			if err != nil {
+				return fmt.Errorf("keyframes: %w", err)
+			}
+			if err := kf.strs("image", &m.Refs); err != nil {
+				return fmt.Errorf("keyframes: %w", err)
+			}
+		}
+	}
+	return nil
+}
 
+// Paths returns the references that name local files, the way Grok resolves
+// them (trimmed, with a file:// prefix stripped), plus their GrokModelPath
+// form in case the loader also expands ~.
+func (m *MediaInput) Paths() []string {
 	var paths []string
-	for _, r := range refs {
+	for _, r := range m.Refs {
 		r = strings.TrimPrefix(strings.TrimSpace(r), "file://")
 		switch {
 		case r == "",
@@ -267,7 +363,7 @@ func (m *MediaInput) Paths() []string {
 		}
 		paths = append(paths, r)
 	}
-	return paths
+	return withModelPaths(paths)
 }
 
 func (m *MediaInput) Describe() string {

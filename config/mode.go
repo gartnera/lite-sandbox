@@ -168,7 +168,7 @@ func DefaultDeniedReadPaths() []DeniedPath {
 	if codex := codexHome(home); dirExists(codex) {
 		out = append(out, file(filepath.Join(codex, "auth.json")))
 	}
-	if grok := grokHome(home); dirExists(grok) {
+	if grok := GrokHome(home); dirExists(grok) {
 		// The sign-in tokens and the MCP servers' OAuth tokens (plaintext).
 		out = append(out, file(filepath.Join(grok, "auth.json")), file(filepath.Join(grok, "mcp_credentials.json")))
 	}
@@ -265,7 +265,7 @@ func DefaultDeniedWritePaths() []DeniedPath {
 	// Grok Build: its config (MCP server, permission rules), the hook
 	// directory and the files that add or disable hooks, the rules directory
 	// holding the usage directive, and what else it loads and runs.
-	if grok := grokHome(home); dirExists(grok) {
+	if grok := GrokHome(home); dirExists(grok) {
 		out = append(out,
 			file(filepath.Join(grok, "config.toml")),
 			file(filepath.Join(grok, "requirements.toml")),
@@ -453,9 +453,10 @@ func codexHome(home string) string {
 	return filepath.Join(home, ".codex")
 }
 
-// grokHome mirrors Grok Build's own resolution: $GROK_HOME when set, otherwise
-// ~/.grok.
-func grokHome(home string) string {
+// GrokHome mirrors Grok Build's own resolution of its config directory:
+// $GROK_HOME when set, otherwise ~/.grok. The Grok installer resolves it
+// through here too, so it and the deny lists always agree.
+func GrokHome(home string) string {
 	if d := os.Getenv("GROK_HOME"); d != "" {
 		return d
 	}

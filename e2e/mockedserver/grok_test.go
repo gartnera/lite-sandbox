@@ -44,10 +44,9 @@ func grokShell(command string) mockmodel.ToolCall {
 func TestGrok(t *testing.T) {
 	requireE2E(t)
 	t.Run("default", func(t *testing.T) {
-		secret := secretOutsideProject(t)
 		calls := append([]mockmodel.ToolCall{
 			grokShell("echo built-in-shell"),
-			{Name: "read_file", Arguments: map[string]any{"target_file": secret}},
+			{Name: "read_file", Arguments: map[string]any{"target_file": outsideReadable}},
 			// Over Grok's 128 KiB hook payload limit, so the hook gets a
 			// clipped string instead of the path and must deny.
 			{Name: "write", Arguments: map[string]any{"file_path": outsidePath, "content": strings.Repeat("x", 140*1024)}},
@@ -64,9 +63,8 @@ func TestGrok(t *testing.T) {
 		assertDirective(t, model.Server, "lite-sandbox__bash")
 	})
 	t.Run("bash-ast-hook-mode", func(t *testing.T) {
-		secret := secretOutsideProject(t)
 		calls := []mockmodel.ToolCall{
-			{Name: "read_file", Arguments: map[string]any{"target_file": secret}},
+			{Name: "read_file", Arguments: map[string]any{"target_file": outsideReadable}},
 			grokShell(blockedCommand),
 			grokShell(allowedCommand),
 		}
@@ -89,14 +87,10 @@ const (
 	grokHookTruncated    = "over Grok's 128 KiB hook limit"
 )
 
-// secretOutsideProject writes a file outside any directory the sandbox grants
-// and returns its path.
-func secretOutsideProject(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "secret.txt")
-	writeFile(t, p, "do-not-read")
-	return p
-}
+// outsideReadable is an existing file no default config lets the sandbox
+// read. It can't be a temp file: on macOS t.TempDir() is under the per-user
+// $TMPDIR, which the sandbox grants.
+const outsideReadable = "/etc/hosts"
 
 // runGrok installs lite-sandbox for Grok with installFlags into an isolated
 // GROK_HOME and runs `grok -p` once against a mock scripted with calls.

@@ -130,12 +130,12 @@ func TestGrokModelPath(t *testing.T) {
 }
 
 func TestPathToolInputPaths(t *testing.T) {
-	p := &PathToolInput{tool: GrokToolReadFile, TargetFile: "~/.ssh/id_rsa"}
+	p := &PathToolInput{tool: GrokToolReadFile, Targets: []string{"~/.ssh/id_rsa"}}
 	paths := p.Paths()
 	if len(paths) != 2 || paths[0] != "~/.ssh/id_rsa" || strings.HasPrefix(paths[1], "~") {
 		t.Errorf("Paths() = %q, want the raw and the expanded path", paths)
 	}
-	if got := (&PathToolInput{TargetFile: "a.txt"}).Paths(); !slices.Equal(got, []string{"a.txt"}) {
+	if got := (&PathToolInput{Targets: []string{"a.txt"}}).Paths(); !slices.Equal(got, []string{"a.txt"}) {
 		t.Errorf("Paths() = %q, want just the raw path when nothing changes", got)
 	}
 	if got := (&PathToolInput{}).Paths(); got != nil {
@@ -184,5 +184,66 @@ func TestParseGrokMediaEvent(t *testing.T) {
 		if got := in.Paths(); !slices.Equal(got, tt.want) {
 			t.Errorf("%s: Paths() = %q, want %q", tt.tool, got, tt.want)
 		}
+	}
+}
+
+// TestPathToolInputEverySpelling: the toolsets read different keys, so every
+// spelling a call sets must be checked, not just the first.
+func TestPathToolInputEverySpelling(t *testing.T) {
+	e, err := ParseEvent(strings.NewReader(grokEnvelope(GrokToolRead, `{"target_file": "src/ok.go", "filePath": "/home/u/.ssh/id_rsa", "dir_path": "/etc"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.ToolInput.(*PathToolInput).Paths()
+	for _, want := range []string{"src/ok.go", "/home/u/.ssh/id_rsa", "/etc"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("Paths() = %q, missing %q", got, want)
+		}
+	}
+}
+
+// TestGrokInputExactKeys: Grok (serde) matches argument keys exactly and
+// ignores unknown ones, so a key that differs only in case must not replace
+// the one Grok reads.
+func TestGrokInputExactKeys(t *testing.T) {
+	e, err := ParseEvent(strings.NewReader(grokEnvelope(GrokToolSearchReplace, `{"file_path": "/etc/cron.d/x", "FILE_PATH": "a.go", "old_string": "", "new_string": "x"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.ToolInput.(*PathToolInput).Paths(); !slices.Equal(got, []string{"/etc/cron.d/x"}) {
+		t.Errorf("Paths() = %q, want only the exact-case file_path", got)
+	}
+	e, err = ParseEvent(strings.NewReader(grokEnvelope(GrokToolRunTerminalCommand, `{"command": "cat ~/.ssh/id_rsa", "COMMAND": "ls"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.ToolInput.(ShellInput).ShellCommand(); got != "cat ~/.ssh/id_rsa" {
+		t.Errorf("ShellCommand() = %q, want the exact-case command", got)
+	}
+}
+
+// TestGrokInputWrongTypeFails: an argument of the wrong type must fail to
+// decode (so the hook can fail closed) rather than be silently dropped.
+func TestGrokInputWrongTypeFails(t *testing.T) {
+	for _, tc := range []struct{ tool, input string }{
+		{GrokToolReadFile, `{"target_file": 7}`},
+		{GrokToolImageEdit, `{"image": [{"path": "/x"}]}`},
+		{GrokToolReferenceToVideo, `{"keyframes": [{"image": 1}]}`},
+	} {
+		e, err := ParseEvent(strings.NewReader(grokEnvelope(tc.tool, tc.input)))
+		if err == nil || e.ToolInput != nil {
+			t.Errorf("%s %s: expected a decode error and no input, got err=%v input=%#v", tc.tool, tc.input, err, e.ToolInput)
+		}
+	}
+}
+
+func TestMediaInputTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	m := &MediaInput{Refs: []string{"~/.ssh/id_rsa"}}
+	if got := m.Paths(); !slices.Contains(got, filepath.Join(home, ".ssh/id_rsa")) {
+		t.Errorf("Paths() = %q, want the ~-expanded path too", got)
 	}
 }

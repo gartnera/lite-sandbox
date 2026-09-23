@@ -289,32 +289,57 @@ func installClaudeCode(dir, version string) error {
 // grokReleases are the download bases of Grok Build's distribution, the ones
 // https://x.ai/cli/install.sh uses: the x.ai front first, then the bucket
 // behind it. Each version publishes grok-<version>-<os>-<arch>, plain and
-// gzip-compressed. No checksum is published alongside.
+// gzip-compressed, with no checksum alongside (see grokSHA256).
 var grokReleases = []string{"https://x.ai/cli", "https://storage.googleapis.com/grok-build-public-artifacts/cli"}
 
 // installGrok downloads the Grok Build binary for version and this OS/arch
-// into dir.
+// into dir, trying each mirror in turn and verifying the pinned checksum when
+// version is GrokVersion.
 func installGrok(dir, version string) error {
 	goos := map[string]string{"linux": "linux", "darwin": "macos"}[runtime.GOOS]
 	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	if goos == "" || arch == "" {
 		return fmt.Errorf("no grok release for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+	platform := goos + "-" + arch
+	want := ""
+	if version == GrokVersion {
+		if want = grokSHA256[platform]; want == "" {
+			return fmt.Errorf("no pinned grok %s checksum for %s", version, platform)
+		}
+	}
 	var errs []error
 	for _, base := range grokReleases {
-		body, err := fetch(fmt.Sprintf("%s/grok-%s-%s-%s.gz", base, version, goos, arch))
-		if err != nil {
-			errs = append(errs, err)
-			continue
+		err := installGrokFrom(fmt.Sprintf("%s/grok-%s-%s.gz", base, version, platform), filepath.Join(dir, "grok"), want)
+		if err == nil {
+			return nil
 		}
-		defer body.Close()
-		gz, err := gzip.NewReader(body)
-		if err != nil {
-			return fmt.Errorf("grok %s: %w", version, err)
-		}
-		return writeExecutable(filepath.Join(dir, "grok"), gz)
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// installGrokFrom downloads one gzip-compressed binary to dest, checking its
+// SHA-256 against want unless want is empty.
+func installGrokFrom(url, dest, want string) error {
+	body, err := fetch(url)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	gz, err := gzip.NewReader(body)
+	if err != nil {
+		return fmt.Errorf("%s: %w", url, err)
+	}
+	sum := sha256.New()
+	if err := writeExecutable(dest, io.TeeReader(gz, sum)); err != nil {
+		return fmt.Errorf("%s: %w", url, err)
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); want != "" && got != want {
+		os.Remove(dest)
+		return fmt.Errorf("%s: checksum mismatch: got %s, pinned %s", url, got, want)
+	}
+	return nil
 }
 
 // isMusl reports whether this Linux host uses musl rather than glibc, the way

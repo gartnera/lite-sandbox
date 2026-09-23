@@ -123,7 +123,7 @@ func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
 	if hook.IsShellTool(event.ToolName) && !validateBash {
 		return denyBuiltinBash(event)
 	}
-	if d := denyTruncatedGrokInput(event); d != nil {
+	if d := denyUninspectableGrokInput(event); d != nil {
 		return d
 	}
 	if hook.IsShellTool(event.ToolName) {
@@ -132,25 +132,34 @@ func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
 	return evaluatePathPolicy(event)
 }
 
-// denyTruncatedGrokInput blocks a governed Grok Build tool call whose input
-// Grok clipped (over its 128 KiB hook payload limit): with no command or path
-// to check, deferring would let a large write outside the project, or a large
-// command in --bash-ast-hook-mode, through unchecked. This is the one case the
-// hook fails closed, and it only applies where the mode enforces the checks.
-func denyTruncatedGrokInput(event *hook.Event) *hook.Decision {
-	if !event.FromGrok() || !event.ToolInputTruncated || !hook.IsGrokTool(event.ToolName) {
+// denyUninspectableGrokInput blocks a governed Grok Build tool call whose
+// arguments the hook cannot read: either Grok clipped them (over its 128 KiB
+// hook payload limit, sent as a truncated string) or they do not decode (a
+// value of the wrong type). With no command or path to check, deferring would
+// let a large write outside the project, or a command in
+// --bash-ast-hook-mode, through unchecked — Grok's own argument parsing is
+// lenient enough that the call may still run. This is the one case the hook
+// fails closed, and only where the mode enforces the checks.
+func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
+	if !event.FromGrok() || !hook.IsGrokTool(event.ToolName) {
 		return nil
 	}
-	cwd := event.CWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if cfg, _ := config.LoadForDirectory(cwd); cfg.EffectiveMode() == config.ModeOpen {
+	if !event.ToolInputTruncated && event.ToolInput != nil {
 		return nil
+	}
+	if cfg, _ := config.LoadForDirectory(eventCWD(event)); cfg.EffectiveMode() == config.ModeOpen {
+		return nil
+	}
+	if event.ToolInputTruncated {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: this %s call is over Grok's 128 KiB hook limit, so its paths cannot be checked. "+
+				"Split it into smaller calls (e.g. write part of the file, then add the rest with edits).",
+			event.ToolName,
+		))
 	}
 	return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
-		"Blocked by lite-sandbox: this %s call is over Grok's 128 KiB hook limit, so its paths cannot be checked. "+
-			"Split it into smaller calls (e.g. write part of the file, then add the rest with edits).",
+		"Blocked by lite-sandbox: the %s arguments could not be read, so their paths cannot be checked. "+
+			"Pass each path (and the command) as a plain string.",
 		event.ToolName,
 	))
 }
@@ -285,31 +294,13 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 // inside .git) is denied. When no patch targets are visible (unexpected input
 // shape) it defers, keeping the hook fail-open.
 func evaluateApplyPatch(event *hook.Event, ap *hook.ApplyPatchInput) *hook.Decision {
-	paths := ap.Paths()
-	if len(paths) == 0 {
-		// Could not see the patch targets; defer rather than guess.
-		return nil
-	}
-
-	sb, cwd := sandboxForEvent(event)
-	if sb == nil {
-		// Without a working directory we cannot resolve the boundary; fail-open.
-		return nil
-	}
-	defer sb.Close()
-
-	for _, p := range paths {
-		if d := boundaryDenial(sb, cwd, ap.Describe(), p, true, event.FromGrok()); d != nil {
-			return d
-		}
-	}
-	return nil
+	return evaluatePaths(event, ap.Describe(), ap.Paths(), true)
 }
 
-// evaluatePaths enforces the sandbox boundary on every path one of Grok
-// Build's file or media tools touches: the readable paths for reads and
-// searches, the writable paths for edits. A call without a path (grep or glob
-// over the workspace) defers.
+// evaluatePaths enforces the sandbox boundary on every path a tool call
+// touches (Codex's apply_patch, Grok Build's file and media tools): the
+// readable paths for reads and searches, the writable paths for edits. A call
+// without a path (grep or glob over the workspace) defers.
 func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *hook.Decision {
 	if len(paths) == 0 {
 		return nil
@@ -406,9 +397,9 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write, c
 	}
 	if compact {
 		reason = fmt.Sprintf(
-			"Blocked by lite-sandbox: %s is outside the sandbox's %s paths. "+
-				"Work within %s, or ask the user to run `lite-sandbox config paths allow <path>%s`.",
-			resolved, boundary, cwd, allowFlag,
+			"Blocked by lite-sandbox: outside the sandbox's %s paths. Work within the project, "+
+				"or ask the user to run `lite-sandbox config paths allow <path>%s`. Path: %s",
+			boundary, allowFlag, resolved,
 		)
 	}
 	return hook.NewDecision(hook.DecisionDeny, reason)
@@ -466,14 +457,21 @@ func fsTarget(e *hook.Event) (path string, write bool, governed bool) {
 // determined, so the caller must defer to Claude Code's normal flow. The caller
 // owns Close() on a non-nil sandbox.
 func sandboxForEvent(event *hook.Event) (*bash_sandboxed.Sandbox, string) {
-	cwd := event.CWD
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
+	cwd := eventCWD(event)
 	if cwd == "" {
 		return nil, ""
 	}
 	return configuredSandbox(cwd), cwd
+}
+
+// eventCWD is the working directory an event's paths are relative to: the
+// event's cwd, falling back to the process's ("" when neither is known).
+func eventCWD(event *hook.Event) string {
+	if event.CWD != "" {
+		return event.CWD
+	}
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // configuredSandbox builds a sandbox for cwd with the user's config applied,

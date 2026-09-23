@@ -88,6 +88,9 @@ func TestGrokHookFileTools(t *testing.T) {
 		{"image_edit outside", hook.GrokToolImageEdit, map[string]any{"prompt": "x", "image": []string{"[Image #1]", filepath.Join(outside, "a.png")}}, true},
 		{"image_edit attachment only", hook.GrokToolImageEdit, map[string]any{"prompt": "x", "image": []string{"[Image #1]"}}, false},
 		{"reference_to_video outside frame", hook.GrokToolReferenceToVideo, map[string]any{"prompt": "x", "last_frame": filepath.Join(outside, "a.png")}, true},
+		{"second spelling outside", hook.GrokToolRead, map[string]any{"target_file": "src/ok.go", "filePath": filepath.Join(outside, "secret")}, true},
+		{"write second spelling outside", hook.GrokToolWrite, map[string]any{"filePath": "ok.txt", "file_path": filepath.Join(outside, "x"), "content": "x"}, true},
+		{"case-variant key does not hide the real one", hook.GrokToolSearchReplace, map[string]any{"file_path": filepath.Join(outside, "x"), "FILE_PATH": "a.go", "old_string": "a", "new_string": "b"}, true},
 		{"apply_patch outside", hook.ToolApplyPatch, map[string]any{"patch": "*** Begin Patch\n*** Add File: " + filepath.Join(outside, "x") + "\n+x\n*** End Patch\n"}, true},
 	}
 	for _, tt := range tests {
@@ -139,7 +142,8 @@ const grokMaxReasonChars = 256
 func TestGrokHookCompactReasons(t *testing.T) {
 	isolateConfig(t)
 	cwd := t.TempDir()
-	outside := filepath.Join(t.TempDir(), strings.Repeat("deep/", 10), "secret.txt")
+	// Long enough that a path-first message would push the fix past the clip.
+	outside := filepath.Join(t.TempDir(), strings.Repeat("deep-directory/", 16), "secret.txt")
 
 	for _, tc := range []struct {
 		tool  string
@@ -158,7 +162,7 @@ func TestGrokHookCompactReasons(t *testing.T) {
 		if len(kept) > grokMaxReasonChars {
 			kept = kept[:grokMaxReasonChars]
 		}
-		if !strings.Contains(string(kept), tc.want) {
+		if !strings.Contains(string(kept), tc.want) || (tc.tool != hook.GrokToolSearchReplace && !strings.Contains(string(kept), "config paths allow")) {
 			t.Errorf("%s: the first %d characters of the reason lack %q: %s", tc.tool, grokMaxReasonChars, tc.want, got.HookSpecificOutput.PermissionDecisionReason)
 		}
 	}
@@ -238,5 +242,24 @@ func TestGrokHookTruncatedInput(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
 	if got := runGrokHookRaw(t, cwd, hook.GrokToolWrite, clipped, true, false); got != nil {
 		t.Errorf("open mode: expected defer, got %+v", got)
+	}
+}
+
+// TestGrokHookUndecodableInput: a governed call whose arguments do not decode
+// (a path that is not a string) is denied, since Grok may still run it.
+func TestGrokHookUndecodableInput(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	for _, tc := range []struct {
+		tool  string
+		input map[string]any
+	}{
+		{hook.GrokToolReadFile, map[string]any{"target_file": []string{"/etc/passwd"}}},
+		{hook.GrokToolImageEdit, map[string]any{"prompt": "x", "image": []any{map[string]any{"path": "/etc/passwd"}}}},
+	} {
+		got := runGrokHook(t, cwd, tc.tool, tc.input, false)
+		if got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny || !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "could not be read") {
+			t.Errorf("%s: expected an undecodable-input deny, got %+v", tc.tool, got)
+		}
 	}
 }

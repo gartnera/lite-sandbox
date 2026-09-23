@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/hook"
 )
 
@@ -56,16 +58,13 @@ const (
 )
 
 // grokHome returns Grok Build's configuration directory: $GROK_HOME when set,
-// otherwise ~/.grok. This mirrors how Grok itself resolves it.
+// otherwise ~/.grok (config.GrokHome, shared with the built-in deny lists).
 func grokHome() (string, error) {
-	if h := os.Getenv("GROK_HOME"); h != "" {
-		return h, nil
-	}
 	home, err := os.UserHomeDir()
-	if err != nil {
+	if err != nil && os.Getenv("GROK_HOME") == "" {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-	return filepath.Join(home, ".grok"), nil
+	return config.GrokHome(home), nil
 }
 
 func detectGrok() bool {
@@ -91,17 +90,28 @@ type grokPlan struct {
 	hookCommand string
 }
 
-func grokInstallPlan(binPath string) grokPlan {
+func grokInstallPlan(binPath string) (grokPlan, error) {
 	p := grokPlan{
 		configMCP:    !installBashASTHookMode,
 		validateBash: installBashASTHookMode,
 		denyShell:    !installBashASTHookMode,
-		hookCommand:  binPath + " hook",
 	}
+	// Grok runs a hook command with a space in it through `sh -c`, and refuses
+	// to run one mentioning a $VAR it cannot resolve. A hook that cannot run
+	// fails open, leaving the file tools unguarded, so the binary path is
+	// shell-quoted and a path containing $ is rejected outright.
+	if strings.Contains(binPath, "$") {
+		return p, fmt.Errorf("the lite-sandbox binary path %q contains $, which Grok treats as a variable in hook commands; install the binary elsewhere", binPath)
+	}
+	quoted, err := syntax.Quote(binPath, syntax.LangPOSIX)
+	if err != nil {
+		return p, fmt.Errorf("cannot quote binary path %q for the Grok hook: %w", binPath, err)
+	}
+	p.hookCommand = quoted + " hook"
 	if p.validateBash {
-		p.hookCommand = binPath + " hook --validate-bash"
+		p.hookCommand += " --validate-bash"
 	}
-	return p
+	return p, nil
 }
 
 // runInstallGrok configures Grok Build (xAI's `grok` CLI). Grok's PreToolUse
@@ -132,7 +142,10 @@ func runInstallGrok(binPath string) error {
 	configPath := filepath.Join(grokDir, "config.toml")
 	hookPath := filepath.Join(grokDir, "hooks", "lite-sandbox.json")
 	rulesPath := filepath.Join(grokDir, "rules", "lite-sandbox.md")
-	plan := grokInstallPlan(binPath)
+	plan, err := grokInstallPlan(binPath)
+	if err != nil {
+		return err
+	}
 
 	// 1. MCP server.
 	if plan.configMCP {

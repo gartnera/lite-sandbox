@@ -223,3 +223,21 @@ func TestDetectGrok(t *testing.T) {
 		t.Error("GROK_HOME directory not detected")
 	}
 }
+
+// TestGrokHookCommandQuoting: Grok runs the hook through `sh -c`, so a binary
+// path with a space must be quoted, and one with $ (which Grok treats as a
+// variable it must resolve) is refused rather than written as a hook that
+// never runs.
+func TestGrokHookCommandQuoting(t *testing.T) {
+	setupGrokHome(t)
+	p, err := grokInstallPlan("/Users/Jane Doe/bin/lite-sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `'/Users/Jane Doe/bin/lite-sandbox' hook`; p.hookCommand != want {
+		t.Errorf("hookCommand = %q, want %q", p.hookCommand, want)
+	}
+	if _, err := grokInstallPlan("/opt/$HOME/lite-sandbox"); err == nil {
+		t.Error("expected an error for a binary path containing $")
+	}
+}
