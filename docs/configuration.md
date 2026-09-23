@@ -612,7 +612,7 @@ Git commands are enabled by default, with separate permission levels:
 
 ```yaml
 git:
-  local_read: true             # git status, log, diff, show (default: true)
+  local_read: true             # git status, log, diff, show, grep (default: true)
   local_write: true            # git add, commit, branch, tag (default: true)
   remote_read: true            # git fetch, pull, clone (default: true)
   remote_write: false          # git push (default: false)
@@ -626,6 +626,9 @@ agent to push:
 lite-sandbox config git show
 lite-sandbox config git set remote_write true
 ```
+
+`git grep` is a local read, but its `-O`/`--open-files-in-pager` flag is
+always blocked since it runs an arbitrary pager command on the matching files.
 
 Git's repository paths are checked at runtime like any other path, including
 after variable expansion (e.g. `git -C $REPO_DIR status` validates the
