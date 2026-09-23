@@ -15,20 +15,11 @@ mode: denylist      # open | denylist | allowlist   (default when unset: allowli
 audit: true         # record validation findings (default: false)
 ```
 
-`mode` sets what is enforced; see [Adoption](adoption.md) for a full
-comparison:
-
-- **`open`**: nothing is enforced and every command runs. Use it with `audit`
-  to see what the other modes would block.
-- **`denylist`**: any program may run, but path arguments and redirections
-  must stay inside the working directory (plus the paths granted in
-  [`paths`](#paths)), the per-command validators still apply (`git push`,
-  `pnpm publish`, `find -delete`, …), and under the OS sandbox `$HOME` is
-  writable with the [deny lists](#denials-read-false-write-false-denylist-mode)
-  masked. `config mode set denylist` also enables the OS sandbox when it is
-  available and `os_sandbox` was never set.
-- **`allowlist`** (default): only whitelisted commands run and code-execution
-  runtimes are opt-in.
+`mode` sets what is enforced: `open` enforces nothing, `denylist` drops the
+command whitelist but keeps the path boundary, validators, and
+[deny lists](#denials-read-false-write-false-denylist-mode), and `allowlist`
+(the default) enforces everything. See [Adoption](adoption.md#the-three-modes)
+for what each mode blocks.
 
 `audit: true` appends every validation finding, blocked or not and tagged with
 the modes that would block it, to `lite-sandbox audit path` for
@@ -129,7 +120,7 @@ subcommands confined.
 
 ### Denied commands
 
-`allow: false` entries form a deny list that allows can't override. It is
+`allow: false` entries form a deny list. It is
 checked before every command gate (static, runtime, and wrapped: `env`,
 `xargs`, `timeout`, `find -exec`). In `denylist` and `allowlist` mode a match
 is refused regardless of any allow, `no_sandbox` entries included: with
@@ -163,13 +154,8 @@ lite-sandbox update    deny   (built-in)
 lite-sandbox hook      deny   (built-in)
 ```
 
-`denylist` mode drops the command whitelist, so without these entries an agent
-could run `lite-sandbox config mode set open`, the MCP server would hot-reload
-it, and enforcement would be off for the next command. With the OS sandbox
-enabled, the config file is also mounted read-only in the worker, but the OS
-sandbox is off by default and unavailable without bubblewrap. These entries
-apply either way.
-
+They keep an agent in `denylist` mode from rewriting the policy it runs under
+(see [Security](security.md#modes-and-what-they-defend-against)).
 The entries are subcommand-scoped, so read-only subcommands an agent might use
 to explain its own constraints (`version`, `config show`, `audit report`) still
 work. As with [lifting a built-in path denial](#lifting-a-built-in-denial), an allow whose text
@@ -211,26 +197,12 @@ in `allowlist` mode, also admits the command past the whitelist.
 ## CLI config management
 
 ```bash
-# Print config file path
-lite-sandbox config path
-
-# Show current configuration
-lite-sandbox config show
-
-# Allow or deny commands (one command for every kind of command entry)
-lite-sandbox config commands allow curl wget              # beyond the whitelist
-lite-sandbox config commands allow docker --no-sandbox    # and on the host, outside the OS sandbox
-lite-sandbox config commands deny sudo "gh auth"          # refused however else allowed
-lite-sandbox config commands list                         # built-in denials included
-lite-sandbox config commands remove curl
-
-# Grant or deny paths (one command for every kind of path entry)
-lite-sandbox config paths allow ~/reference-data          # readable
-lite-sandbox config paths allow ~/scratch --write         # read and write
-lite-sandbox config paths deny ~/company-secrets          # hidden (denylist mode)
-lite-sandbox config paths list
-lite-sandbox config paths remove ~/scratch
+lite-sandbox config path    # print the config file path
+lite-sandbox config show    # show the current configuration
 ```
+
+Each section has its own subcommand, shown with the section below
+([`commands`](#commands), [`paths`](#paths), [`git`](#git-support), …).
 
 ## Paths
 
@@ -466,6 +438,26 @@ reject_redundant_cd: false
 
 Or use `lite-sandbox config redundant-cd enable|disable|show`. It can be set
 per directory with the overrides below.
+
+## Local binary execution
+
+In `allowlist` mode, running a program by path (`./binary`, `../tool`,
+`/path/to/script`) is blocked by default. To allow it:
+
+```yaml
+local_binary_execution:
+  enabled: true   # Allow ./binary, /path/to/binary (default: false)
+```
+
+```bash
+lite-sandbox config local-binary-execution enable|disable|show
+```
+
+A compiled binary (ELF/Mach-O) then runs directly. A script is run the way
+the kernel would run it, as its `#!` interpreter plus the script path, so the
+interpreter goes through the same whitelist and argument checks as a direct
+call. A bare [`commands`](#commands) allow for a script path also lets it run;
+a restricted one (`./gradlew build`) does not lift this gate.
 
 ## Per-directory overrides
 

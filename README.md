@@ -28,7 +28,7 @@ To try the sandbox without changing any agent configuration, use `launch`. It ru
 lite-sandbox launch claude
 ```
 
-Codex uses the same hook protocol as Claude Code, so both agents share one hook binary and one config file. The `--with-tool-hook` and `--bash-ast-hook-mode` flags apply to `claude` and `codex`; opencode has no compatible hook protocol. See [docs/installation.md](docs/installation.md) for manual setup, per-agent details, and coverage caveats.
+All agents share one sandbox config file. See [docs/installation.md](docs/installation.md) for manual setup, hook modes, and per-agent caveats.
 
 ## Documentation
 

@@ -1,0 +1,5 @@
+# Used by the Docs workflow and by a local `lychee './**/*.md'`.
+# Offline: only relative links and their #anchors are checked; external URLs
+# are not fetched.
+offline = true
+include_fragments = "anchor-only"

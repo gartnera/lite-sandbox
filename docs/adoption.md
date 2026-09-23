@@ -46,22 +46,16 @@ without configuration. It still enforces scope and protects shared state:
 - The per-command validators still apply: `git push` (unless
   `git.remote_write`), `pnpm publish`, `cargo publish`, `find -delete`,
   `tar -x`, `find -exec`, and the other blocked flags.
-- The command deny list still applies and overrides every allowed command.
-  Its built-in entries block the sandbox's own policy commands. Without them,
-  `lite-sandbox config mode set open` would be one more runnable program, and
-  since the config is hot-reloaded it would take effect on the next command.
-  `lite-sandbox config commands list` prints the effective list; add to it
-  with `commands deny`.
+- The [command deny list](configuration.md#denied-commands) still applies and
+  overrides every allowed command. Its built-in entries stop the agent from
+  running the sandbox's own `config`/`install`/`update`/`hook` subcommands to
+  loosen the policy. `lite-sandbox config commands list` prints the effective
+  list.
 - Under the OS sandbox, `$HOME` is writable so caches and tool state work,
-  minus a built-in deny list. Credential stores are hidden (`~/.aws`,
-  `~/.gnupg`, `~/.netrc`, `~/.kube`, the agents' auth files, SSH private
-  keys). Persistence and self-protection paths are read-only (shell rc files,
-  `~/.gitconfig`, `~/.ssh`, the agent settings that hold the Bash deny, and
-  lite-sandbox's own config). `lite-sandbox config mode show` prints the
-  effective lists. Add entries with `lite-sandbox config paths deny <path>`
-  (hidden) or `paths deny <path> --write` (read-only), and lift a built-in
-  entry by granting its path (`paths allow ~/.ssh --internal` lets `ssh`
-  spawned by a command use the keys).
+  minus a built-in [deny list](configuration.md#denials-read-false-write-false-denylist-mode):
+  credential stores are hidden, and shell rc files, persistence locations, and
+  the agents' and lite-sandbox's own config are read-only.
+  `lite-sandbox config mode show` prints the effective lists.
 
 This mode assumes a cooperative agent: one that follows the constraints it's
 told about and doesn't write a script to get around a denial. The deny lists
@@ -72,11 +66,10 @@ against prompt injection, where content the agent reads tells it to escape:
 `denylist` won't stop a Python one-liner from reading a file whose path the
 AST layer never saw, unless the OS sandbox masks that file.
 
-**`allowlist`** is the default and where incremental adoption ends up. Only
-whitelisted commands run, runtimes are opt-in per language, network tools are
-blocked, and the OS sandbox confines writes to the project. The cost is
-configuration: a new project usually needs a few `runtimes … enable` or
-`commands allow` lines, and the audit report tells you which ones in advance.
+**`allowlist`** is the default and where incremental adoption ends up. The
+cost is configuration: a new project usually needs a few `runtimes … enable`
+or `commands allow` lines, and the audit report tells you which ones in
+advance.
 
 ## Audit: tighten with evidence
 
