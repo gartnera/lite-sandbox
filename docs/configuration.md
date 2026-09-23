@@ -1,12 +1,12 @@
 # Configuration
 
-The config file lives at the platform-appropriate location (`lite-sandbox
-config path` prints it):
+The config file location depends on the platform (`lite-sandbox config path`
+prints it):
 
 - **Linux**: `~/.config/lite-sandbox/config.yaml`
 - **macOS**: `~/Library/Application Support/lite-sandbox/config.yaml`
 
-It is reloaded automatically when changed — no server restart needed.
+Changes are picked up automatically; the server doesn't need a restart.
 
 ## Mode and audit
 
@@ -15,25 +15,24 @@ mode: denylist      # open | denylist | allowlist   (default when unset: allowli
 audit: true         # record validation findings (default: false)
 ```
 
-`mode` selects the enforcement posture; see [Adoption](adoption.md) for the
-full comparison and the intended progression:
+`mode` sets what is enforced; see [Adoption](adoption.md) for a full
+comparison:
 
-- **`open`** — nothing is enforced; every command runs. Pair it with `audit` to
-  see what the other modes would block.
-- **`denylist`** — any program may run, but path arguments and redirections
+- **`open`**: nothing is enforced and every command runs. Use it with `audit`
+  to see what the other modes would block.
+- **`denylist`**: any program may run, but path arguments and redirections
   must stay inside the working directory (plus the paths granted in
   [`paths`](#paths)), the per-command validators still apply (`git push`,
   `pnpm publish`, `find -delete`, …), and under the OS sandbox `$HOME` is
   writable with the [deny lists](#denials-read-false-write-false-denylist-mode)
-  masked. The opt-out for [incremental adoption](adoption.md); `config mode set
-  denylist` also enables the OS sandbox when it is available and `os_sandbox`
-  was never set.
-- **`allowlist`** — only whitelisted commands run and code-execution runtimes
-  are opt-in. The default.
+  masked. `config mode set denylist` also enables the OS sandbox when it is
+  available and `os_sandbox` was never set.
+- **`allowlist`** (default): only whitelisted commands run and code-execution
+  runtimes are opt-in.
 
-`audit: true` appends every validation finding — blocked or not, tagged with
-the modes that would block it — to `lite-sandbox audit path`, for
-`lite-sandbox audit report`. Manage both with the CLI:
+`audit: true` appends every validation finding, blocked or not and tagged with
+the modes that would block it, to `lite-sandbox audit path` for
+`lite-sandbox audit report`. CLI:
 
 ```bash
 lite-sandbox config mode show                 # effective mode, audit, deny lists
@@ -44,20 +43,19 @@ lite-sandbox audit report [--since 7d] [--cwd ~/work/new-repo] [--json]
 lite-sandbox audit clear
 ```
 
-Like every section, `mode` and `audit` can be flipped per directory via
+`mode` and `audit` can be set per directory with
 [overrides](#per-directory-overrides), so one repo can run `allowlist` while
-the rest of the machine runs `denylist`; `mode set --dir` writes such an
-override, and `audit report --cwd` narrows the report to sessions launched in
-that directory.
+everything else runs `denylist`. `mode set --dir` writes such an override, and
+`audit report --cwd` limits the report to sessions started in that directory.
 
 ## Commands
 
 The command whitelist decides what runs in `allowlist` mode, and a built-in
 deny list refuses the sandbox's own policy-editing subcommands in every
-enforcing mode. One list, `commands`, carries every other statement about a
-command: what is allowed beyond the whitelist, whether that runs on the host
-instead of inside the OS sandbox, and what is refused however else it was
-allowed. Each entry is a command plus a tri-state `allow`:
+enforcing mode. Everything else about commands goes in the `commands` list:
+what is allowed beyond the whitelist, what runs on the host instead of inside
+the OS sandbox, and what is always refused. Each entry is a command plus a
+tri-state `allow`:
 
 ```yaml
 commands:
@@ -76,10 +74,10 @@ commands:
     allow: true
 ```
 
-`command` is a bare name or a name followed by the leading non-flag arguments
-the entry is limited to; internal whitespace is not significant. Each command
-has one entry: `allow` and `deny` on the CLI replace whatever the config said
-about it before.
+`command` is a bare name, or a name followed by the leading non-flag arguments
+the entry applies to; extra whitespace between words is ignored. Each command
+has one entry, so `allow` and `deny` on the CLI replace whatever the config
+said about it before.
 
 ```bash
 lite-sandbox config commands allow curl "uv run pyright"
@@ -92,26 +90,26 @@ lite-sandbox config commands remove curl
 
 ### Allowed commands
 
-`allow: true` admits a command the whitelist does not list. This matters in
-`allowlist` mode; in `denylist` and `open` mode every command may already run,
-so there it mainly selects the raw-bash path described next. A **bare** entry
-(a single token) allows the command with any arguments and, when it is the
-leading command of an invocation, bypasses bash AST parsing entirely — the
-whole command string runs via the real bash. An entry with arguments (e.g.
-`uv run pyright`) restricts the command to invocations whose leading non-flag
-arguments match, and still goes through normal parsing and validation. When
-the [OS sandbox](security.md#os-level-sandboxing-optional) is enabled, bare
+`allow: true` admits a command the whitelist doesn't list. This matters in
+`allowlist` mode; in `denylist` and `open` mode every command can already run,
+so there it mostly just selects the raw-bash path described next. A **bare**
+entry (a single token) allows the command with any arguments. When it is the
+leading command of an invocation, bash AST parsing is skipped and the whole
+command string runs in real bash. An entry with arguments (e.g.
+`uv run pyright`) allows only invocations whose leading non-flag arguments
+match, and those still go through normal parsing and validation. When the
+[OS sandbox](security.md#os-level-sandboxing-optional) is enabled, bare
 entries run inside it like every other command, so filesystem confinement
-applies even though validation is skipped.
+still applies even though validation is skipped.
 
 ### Unsandboxed commands
 
-`no_sandbox: true` on an allow keeps everything above (same bare and restricted
-forms, same validation bypass) with one difference: matching invocations always
-run **directly on the host**, bypassing the
+`no_sandbox: true` on an allow works the same way (same bare and restricted
+forms, same validation bypass), except matching invocations always run
+**directly on the host**, outside the
 [OS sandbox](security.md#os-level-sandboxing-optional) worker
-(bwrap/sandbox-exec) even when it is enabled. This is a trust-based escape
-hatch for commands that cannot run confined.
+(bwrap/sandbox-exec) even when it is enabled. It's an escape hatch for trusted
+commands that can't run confined.
 
 ```yaml
 commands:
@@ -123,41 +121,39 @@ commands:
     no_sandbox: true
 ```
 
-Because these commands leave the OS sandbox, the docker filtering proxy is also
-bypassed: the proxy `DOCKER_HOST` override is not applied, so `docker` reaches
-the real daemon (or whatever `DOCKER_HOST` the host environment already sets).
-A restricted entry only unsandboxes matching invocations — e.g. `git push`
-leaves other `git` subcommands confined.
+These commands also bypass the docker filtering proxy: the proxy's
+`DOCKER_HOST` override isn't applied, so `docker` reaches the real daemon (or
+whatever `DOCKER_HOST` the host environment sets). A restricted entry
+unsandboxes only matching invocations; e.g. `git push` leaves other `git`
+subcommands confined.
 
 ### Denied commands
 
-`allow: false` is the deny list the allows cannot lift. It is checked before
-every command gate — static, runtime, and wrapped (`env`, `xargs`, `timeout`,
-`find -exec`) — and a match refuses the invocation in `denylist` and
-`allowlist` mode however else it was allowed, `no_sandbox` entries included:
-`git push` denied and `git` allowed refuse exactly the pushes. In `open` mode,
-like every rule, a match is only recorded to the audit log.
+`allow: false` entries form a deny list that allows can't override. It is
+checked before every command gate (static, runtime, and wrapped: `env`,
+`xargs`, `timeout`, `find -exec`). In `denylist` and `allowlist` mode a match
+is refused regardless of any allow, `no_sandbox` entries included: with
+`git push` denied and `git` allowed, only pushes are refused. In `open` mode a
+match is only recorded to the audit log, like every rule.
 
-Denials use the same entry format as allows, with three differences that come
-from being a deny list rather than an allow list:
+Denials use the same entry format as allows, with three differences:
 
-- **Matching is by base name**, so an entry also covers the same binary invoked
-  by path (`/usr/local/bin/lite-sandbox`, `./lite-sandbox`). A deny that can be
-  sidestepped by spelling the path differently is not a deny.
+- **Matching is by base name**, so an entry also covers the same binary
+  invoked by path (`/usr/local/bin/lite-sandbox`, `./lite-sandbox`).
 - **A restricted entry matches wherever the subcommand could start**, not only
-  at the first argument, because which flags consume a value is per-command
-  knowledge the deny list does not have: `lite-sandbox --log-level debug config
-  mode set open` matches `lite-sandbox config`. Tokens that appear later as
-  data do not match — with `git push` denied, `git log --grep push` still runs.
-- **A denied command never takes the raw-bash path.** A command named in the
-  deny list is always parsed, even if a bare allow names it too, so the
-  invocation can be matched against the entry.
+  at the first argument, because the deny list doesn't know which flags take a
+  value: `lite-sandbox --log-level debug config mode set open` matches
+  `lite-sandbox config`. Tokens that appear later as data don't match: with
+  `git push` denied, `git log --grep push` still runs.
+- **A denied command never takes the raw-bash path.** A command in the deny
+  list is always parsed, even if a bare allow also names it, so the invocation
+  can be matched against the entry.
 
 ### Built-in entries
 
-The defaults deny the sandbox's own policy-editing subcommands — `config`,
-`install`, `update`, and `hook` — for the canonical binary name and the name it
-was installed under:
+By default, the sandbox's own policy-editing subcommands (`config`, `install`,
+`update`, and `hook`) are denied, both for the canonical binary name and for
+the name it was installed under:
 
 ```
 lite-sandbox config commands list
@@ -167,49 +163,50 @@ lite-sandbox update    deny   (built-in)
 lite-sandbox hook      deny   (built-in)
 ```
 
-They exist because `denylist` mode drops the command whitelist: without them an
-agent can run `lite-sandbox config mode set open`, which the MCP server
-hot-reloads, and enforcement is off for its next command. (With the OS sandbox
-enabled the config file is also mounted read-only in the worker, so the write
-fails there too — but the OS sandbox is off by default and unavailable without
-bubblewrap, and these entries hold either way.)
+`denylist` mode drops the command whitelist, so without these entries an agent
+could run `lite-sandbox config mode set open`, the MCP server would hot-reload
+it, and enforcement would be off for the next command. With the OS sandbox
+enabled, the config file is also mounted read-only in the worker, but the OS
+sandbox is off by default and unavailable without bubblewrap. These entries
+apply either way.
 
-The entries are subcommand-scoped, so the read-only subcommands an agent uses
-to explain its own constraints (`version`, `config show`, `audit report`) keep
-working. Lifting one is a deliberate decision, made the same way a
-[`paths` grant lifts a built-in path denial](#paths): an allow whose text
-**equals** the built-in entry lifts it. A bare `lite-sandbox` allow does not —
-allowing a command never silently drops the deny list underneath it.
+The entries are subcommand-scoped, so read-only subcommands an agent might use
+to explain its own constraints (`version`, `config show`, `audit report`) still
+work. As with [lifting a built-in path denial](#lifting-a-built-in-denial), an allow whose text
+**equals** the built-in entry lifts it. A bare `lite-sandbox` allow does not:
+allowing a command never drops the deny list underneath it.
 
 ```bash
 lite-sandbox config commands allow "lite-sandbox update"   # lifts it
 lite-sandbox config commands deny "lite-sandbox update"    # drops the lift; the built-in is back in force
 ```
 
-Like every section, `commands` can be set per directory through
-[overrides](#per-directory-overrides); the built-in entries apply under an
-override too, since they are not part of the section it replaces. A
+`commands` can be set per directory with
+[overrides](#per-directory-overrides). The built-in entries still apply under
+an override, since they aren't part of the section it replaces. A
 `merge: true` override combines the list with the base's
 [entry by entry](#per-directory-overrides), so one directory can deny a
 command the base allows without restating the rest.
 
 ### Deprecated keys
 
-The three former lists still load and resolve as the union with `commands`:
+The three old lists still load and are combined with `commands`:
 `extra_commands` (as `allow: true`), `unsandboxed_commands` (as `allow: true`
-with `no_sandbox: true`), and `denied_commands` (as `allow: false`, its `-`
-entries as `allow: true`). The former CLI commands (`extra-commands`,
-`unsandboxed-commands`, `denied-commands`) keep working as hidden aliases that
-write the new form. `lite-sandbox config commands migrate` rewrites the old
-keys once, everywhere in the file — an old-style override replaced only the
-one list it set and inherited the rest, whereas a `commands` list replaces the
-whole section (or merges entry by entry under `merge: true`, where migrate
-writes only that override's own entries), so an override that set any command
-list receives the full set of entries in effect for its directory. Two things
-are not one-to-one: where a
-config both allowed and denied the same command, the denial is kept (it won at
-every gate anyway); and a `-` lift becomes an allow, which lifts the same
-built-in and, in `allowlist` mode, also admits the command past the whitelist.
+with `no_sandbox: true`), and `denied_commands` (as `allow: false`, and its `-`
+entries as `allow: true`). The old CLI commands (`extra-commands`,
+`unsandboxed-commands`, `denied-commands`) still work as hidden aliases that
+write the new form.
+
+`lite-sandbox config commands migrate` rewrites the old keys everywhere in the
+file. The semantics differ under overrides: an old-style override replaced
+only the one list it set and inherited the others, while a `commands` list
+replaces the whole section (or merges entry by entry under `merge: true`). So
+migrate gives each override that set any command list the full set of entries
+in effect for its directory; on a `merge: true` override it writes only that
+override's own entries. Two conversions aren't one-to-one: if a config both
+allowed and denied the same command, the denial is kept (it won at every gate
+anyway), and a `-` lift becomes an allow, which lifts the same built-in and,
+in `allowlist` mode, also admits the command past the whitelist.
 
 ## CLI config management
 
@@ -237,12 +234,12 @@ lite-sandbox config paths remove ~/scratch
 
 ## Paths
 
-By default the sandbox confines reads and writes to the working directory. One
-list, `paths`, carries every other statement about a path: what commands may
-read or write beyond the working directory, and what the OS sandbox must hide
-or keep read-only in `denylist` mode. Each entry names a path and sets `read`
-and/or `write` — `true` grants, `false` denies, unset says nothing — plus an
-optional `internal` for grants that should hold only at the OS sandbox layer:
+By default the sandbox confines reads and writes to the working directory. The
+`paths` list holds everything else about paths: what commands may read or
+write outside the working directory, and what the OS sandbox hides or keeps
+read-only in `denylist` mode. Each entry names a path and sets `read` and/or
+`write` (`true` grants, `false` denies, unset says nothing), plus an optional
+`internal` for grants that apply only at the OS sandbox layer:
 
 ```yaml
 paths:
@@ -274,51 +271,47 @@ lite-sandbox config paths list
 lite-sandbox config paths remove ~/scratch
 ```
 
-Each path has one entry: `allow` and `deny` replace whatever the config said
+Each path has one entry. `allow` and `deny` replace whatever the config said
 about that path before (so `allow ~/x --write` after `allow ~/x` upgrades it),
-and `remove` drops every statement about it. `~` is expanded. An entry that
-sets neither key, grants `write` while denying `read`, or marks a denial
-`internal` is rejected when the config loads. `read: true` together with
-`write: false` is coherent — readable, and kept read-only under the OS sandbox.
-Like every section, `paths` can be set per directory with
-[`--dir`](#writing-overrides-from-the-cli---dir); on a `merge: true`
-[override](#per-directory-overrides) the list is combined with the base's
-entry by entry, so a directory states only the paths it changes.
+and `remove` deletes the entry. `~` is expanded. An entry that sets neither
+key, grants `write` while denying `read`, or marks a denial `internal` is
+rejected when the config loads. `read: true` with `write: false` is valid:
+readable, and kept read-only under the OS sandbox. `paths` can be set per
+directory with [`--dir`](#writing-overrides-from-the-cli---dir); on a
+`merge: true` [override](#per-directory-overrides) the list is combined with
+the base's entry by entry, so a directory lists only the paths it changes.
 
 ### Grants: `read: true`, `write: true`
 
-A grant widens the boundary the agent may touch, at every layer: the static and
-runtime path validation, the file-tool hook, the OS sandbox, and Deno's injected
+A grant widens what the agent may touch at every layer: static and runtime
+path validation, the file-tool hook, the OS sandbox, and Deno's injected
 `--allow-read`/`--allow-write`. `write: true` implies read.
 
-A bare path grants the directory **and** all of its contents. A trailing `/*`
-grants only paths **nested below** the directory — the directory itself is not a
-valid read/search target. This is useful for a container that holds many sibling
-directories (e.g. a worktree parent): `worktrees/haystack/*` lets the sandbox
-read an individual peer worktree while blocking a single `grep`/`ls` from
-sweeping every worktree at once.
+A bare path grants the directory **and** everything in it. A trailing `/*`
+grants only paths **nested below** the directory; the directory itself can't
+be read or searched. This is useful for a directory holding many siblings,
+such as a worktree parent: `worktrees/haystack/*` lets the sandbox read one
+peer worktree while stopping a single `grep`/`ls` from sweeping all of them.
 
 The Claude Code per-user scratchpad root (`/tmp/claude-<uid>`, which macOS
-resolves to `/private/tmp/claude-<uid>`) is always readable and writable without
-a config entry, so agents can use it for temporary files. It is uid-scoped and
-was already writable at the OS-sandbox layer; this only opens the agent-facing
-boundary to match.
+resolves to `/private/tmp/claude-<uid>`) is always readable and writable
+without a config entry, so agents can use it for temporary files. It is
+uid-scoped and was already writable at the OS sandbox layer.
 
 The per-user system temp directory (`$TMPDIR`, e.g. macOS's
-`/var/folders/.../T`) is likewise always readable and writable without a config
-entry, since many tools place scratch files there by default. It is granted only
-when it is a private, per-user location; when `$TMPDIR` is unset and the temp dir
-is the world-shared `/tmp` (the common Linux default), it is **not** granted
-wholesale — the uid-scoped scratchpad above still covers `/tmp/claude-<uid>`
-there.
+`/var/folders/.../T`) is also always readable and writable, since many tools
+put scratch files there. It is granted only when it is a private, per-user
+location. When `$TMPDIR` is unset and the temp dir is the shared `/tmp` (the
+usual Linux default), `/tmp` is **not** granted; the scratchpad above still
+covers `/tmp/claude-<uid>`.
 
 ### Internal grants: `internal: true` (OS sandbox only)
 
-`internal: true` narrows a grant to the **OS sandbox layer** (see
-[Security](security.md)), so programs a command spawns can reach their own data
-— while the agent itself still cannot read or write the path directly (the
-AST/runtime path validation, the file-tool hook, and Deno's injected
-`--allow-read`/`--allow-write` all keep denying it):
+`internal: true` limits a grant to the **OS sandbox layer** (see
+[Security](security.md)). Programs a command spawns can reach the path, but the
+agent still can't read or write it directly: AST/runtime path validation, the
+file-tool hook, and Deno's injected `--allow-read`/`--allow-write` keep
+denying it.
 
 ```yaml
 paths:
@@ -330,48 +323,46 @@ paths:
     internal: true
 ```
 
-Use this when a tool needs its own state directory to function under the OS
-sandbox, but you don't want to widen the boundary the agent can touch. It only
-has an effect when `os_sandbox` is enabled — without it there is no OS layer to
-loosen. Note that inside the OS sandbox the filesystem is already broadly
+Use this when a tool needs its own state directory under the OS sandbox but
+you don't want to widen what the agent can touch. It only has an effect when
+`os_sandbox` is enabled. The OS sandbox's filesystem is already broadly
 readable, so an internal read grant mainly matters for host paths hidden by the
 sandbox's `/tmp` overlay on Linux.
 
 ### Denials: `read: false`, `write: false` (denylist mode)
 
-In `denylist` mode the OS sandbox binds `$HOME` writable — developer tooling
-writes caches and state all over it, and enumerating them is a losing game —
-and instead masks a built-in deny list. Two kinds, because the reasons differ:
+In `denylist` mode the OS sandbox binds `$HOME` writable, because developer
+tools write caches and state all over it, and masks a built-in deny list
+instead. There are two kinds:
 
-- **Read-denied** paths are hidden entirely (an unreadable empty directory or
-  file; a non-root process gets `EACCES`): `~/.aws` (unless
+- **Read-denied** paths are hidden (replaced by an unreadable empty directory
+  or file; a non-root process gets `EACCES`): `~/.aws` (unless
   `aws.allow_raw_credentials`), `~/.gnupg`, `~/.netrc`, `~/.kube`, `~/.pypirc`,
   `~/.config/gh`, `~/Library/Keychains`, and the agents' own credentials
   (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). The
-  SSH private keys in `~/.ssh` — every file there except `known_hosts`,
-  `config`, `authorized_keys` and `*.pub`, detected by name — are entries of
-  this list too, one per key, and the two credential masks (the keys, and
-  `~/.aws` under `aws.force_profile`) hold in **every** mode, not only
-  `denylist`.
-- **Write-denied** paths stay readable but cannot be modified: shell startup
+  SSH private keys in `~/.ssh` (every file there except `known_hosts`,
+  `config`, `authorized_keys`, and `*.pub`, detected by name) are also on this
+  list, one entry per key. The two credential masks (the SSH keys, and `~/.aws`
+  under `aws.force_profile`) apply in **every** mode, not only `denylist`.
+- **Write-denied** paths stay readable but can't be modified: shell startup
   files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.config/fish/config.fish`, …),
   `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.npmrc`,
   `~/.docker/config.json`, persistence locations (`~/.local/bin`, user systemd
-  units, `~/.config/autostart`, `~/.config/environment.d`, LaunchAgents), and —
-  so a command cannot loosen the policy that governs it or erase the evidence —
-  lite-sandbox's own config file, audit log, and mask cache, plus the settings
-  and instruction files of each *installed* agent (`~/.claude/settings.json`,
+  units, `~/.config/autostart`, `~/.config/environment.d`, LaunchAgents), and
+  the files that could loosen the policy or erase evidence: lite-sandbox's own
+  config file, audit log, and mask cache, plus the settings and instruction
+  files of each *installed* agent (`~/.claude/settings.json`,
   `~/.claude/{skills,agents,commands,plugins}`, `~/.codex/config.toml`,
   `~/.codex/prompts`, opencode's and Crush's configs). Agent entries are listed
   only when that agent's config directory exists.
 
-On Linux a missing deny-listed directory is created (mode 0700) so it can be
-masked; a missing deny-listed file cannot be masked without creating an empty
-file on the host, so it is skipped until it exists. `config mode show` marks
+On Linux, a missing deny-listed directory is created (mode 0700) so it can be
+masked. A missing deny-listed file can't be masked without creating an empty
+file on the host, so it is skipped until it exists; `config mode show` marks
 such entries. See [Security](security.md#os-level-sandboxing-optional).
 
-Extend either kind with a denying entry (`read: false` hides the path,
-`write: false` keeps it readable but not writable); missing paths are skipped:
+Add your own with a denying entry (`read: false` hides the path, `write: false`
+keeps it readable but not writable). Missing paths are skipped:
 
 ```yaml
 paths:
@@ -387,26 +378,25 @@ lite-sandbox config paths deny ~/.local/bin --write
 lite-sandbox config mode show          # prints the effective lists, built-in entries included
 ```
 
-Denials only take effect under the OS sandbox (`os_sandbox: true`): the AST
-layer already keeps the agent's own commands inside the project, so the masks
-exist for the programs those commands start. In `allowlist` mode the OS
-sandbox keeps its original cwd-confined layout and denials are unused — except
-the two credential masks above, which hold in every mode.
+Denials only take effect under the OS sandbox (`os_sandbox: true`). The AST
+layer already keeps the agent's own commands inside the project; the masks are
+for the programs those commands start. In `allowlist` mode the OS sandbox
+keeps its cwd-confined layout and denials are unused, except for the two
+credential masks above, which apply in every mode.
 
 ### Lifting a built-in denial
 
-The built-in deny lists are the default half of the `paths` list: your entries
-are merged over them, and a grant on the **same path** as a built-in replaces
-it. A `read: true` (or `write: true`, which implies read) grant lifts a read
-denial; a `write: true` grant lifts a write denial. Only the exact path counts —
-a grant on `~` or a `~/.ssh/*` nested-only grant lifts nothing beneath it, so
-widening the boundary never silently drops the deny lists. The SSH private keys
-are grouped under `~/.ssh`: a grant on the directory lifts every key, a grant on
-one key file lifts that key only.
+Your `paths` entries are merged over the built-in deny lists, and a grant on
+the **same path** as a built-in entry replaces it. A `read: true` (or
+`write: true`, which implies read) grant lifts a read denial; a `write: true`
+grant lifts a write denial. Only the exact path counts: a grant on `~`, or a
+nested-only `~/.ssh/*` grant, lifts nothing beneath it, so widening the
+boundary never drops the deny lists. The SSH private keys are grouped under
+`~/.ssh`: a grant on the directory lifts every key, and a grant on one key
+file lifts only that key.
 
-The usual case is `git` over SSH, where the `ssh` a command spawns needs the
-keys but the agent has no business reading them. An `internal` grant is that
-distinction:
+The common case is `git` over SSH, where the `ssh` a command spawns needs the
+keys but the agent shouldn't read them. An `internal` grant does that:
 
 ```bash
 lite-sandbox config paths allow ~/.ssh --internal          # ssh can use every key; `cat ~/.ssh/id_ed25519` still fails
@@ -422,70 +412,67 @@ paths:
     internal: true   # keys readable by spawned programs; ~/.ssh stays write-denied
 ```
 
-`allow` prints the built-in it just lifted, and `lite-sandbox config mode show`
-keeps listing a lifted entry, marked with the grant that lifts it, so the
-effective policy is never silently shorter than the documented one. A grant
-without `internal` also widens the agent-facing boundary to the path, as any
-grant does. Lifting applies per directory like the rest of `paths`: an
-[override](#per-directory-overrides) that grants `~/.ssh` lifts the masks for
-commands run under that directory only.
+`allow` prints the built-in entry it lifted, and `lite-sandbox config mode
+show` keeps listing lifted entries, marked with the grant that lifts them. A
+grant without `internal` also widens the agent-facing boundary to the path,
+like any grant. Lifting applies per directory like the rest of `paths`: an
+[override](#per-directory-overrides) that grants `~/.ssh` lifts the masks only
+for commands run under that directory.
 
 ### Deprecated: one list per kind
 
-Before `paths`, each kind had its own key — `readable_paths`,
+Before `paths`, each kind had its own key (`readable_paths`,
 `writable_paths`, `internal_readable_paths`, `internal_writable_paths`,
-`denied_read_paths`, `denied_write_paths` — and its own CLI command. They still
-load, resolve as the union with `paths`, and the old commands still run
-(hidden, printing a deprecation notice, and writing `paths` entries). `paths
-list` marks entries that still come from an old key, and `paths allow`/`deny`
-move a path to the new form when they touch it. To rewrite a whole file at once:
+`denied_read_paths`, `denied_write_paths`) and CLI command. The keys still load
+and are combined with `paths`, and the old commands still run (hidden, with a
+deprecation notice, writing `paths` entries). `paths list` marks entries that
+still come from an old key, and `paths allow`/`deny` convert a path to the new
+form when they touch it. To rewrite the whole file at once:
 
 ```bash
 lite-sandbox config paths migrate
 ```
 
-The two spellings differ under [overrides](#per-directory-overrides): an old
-key on an override replaced only that one list and inherited the other five,
-whereas `paths` on an override replaces the whole section (or merges entry by
-entry under `merge: true`). `migrate` keeps what every directory resolves to by
-giving such an override the full set of entries in effect for its directory, so
-run it rather than renaming keys by hand. On a `merge: true` override it writes
-only that override's own entries, since the base's are inherited per path — the
-one case where the result is wider than the old keys were, as a deprecated list
-there replaced the base's outright.
+The two forms behave differently under [overrides](#per-directory-overrides):
+an old key on an override replaced only that one list and inherited the other
+five, while `paths` on an override replaces the whole section (or merges entry
+by entry under `merge: true`). `migrate` preserves what every directory
+resolves to by giving such an override the full set of entries in effect for
+its directory, so use it instead of renaming keys by hand. On a `merge: true`
+override it writes only that override's own entries, since the base's are
+inherited per path. That is the one case where the result is wider than
+before, because a deprecated list there replaced the base's outright.
 
 ## Redundant `cd` rejection
 
-Agents habitually prefix a command with `cd /abs/path/to/repo && ...` even though
-the sandbox already runs in that directory. By default the sandbox rejects this
-noise so the agent drops it:
+Agents often prefix commands with `cd /abs/path/to/repo && ...` even though
+the sandbox already runs in that directory. By default the sandbox rejects the
+prefix so the agent drops it:
 
 ```
 unneeded cd: cwd is already /abs/path/to/repo (drop the leading "cd /abs/path/to/repo")
 ```
 
-The match is deliberately narrow: only a **leading `cd` with a single literal,
-absolute-path argument that resolves exactly to the working directory** is
-rejected. A `cd` into a subdirectory, a relative `cd`, `cd .`, a dynamic target
-like `cd "$PWD"`, or a `cd` carrying flags are all left alone — those are either
-legitimate or not the redundant prefix agents emit.
+Only a **leading `cd` with a single literal absolute-path argument that
+resolves exactly to the working directory** is rejected. A `cd` into a
+subdirectory, a relative `cd`, `cd .`, a dynamic target like `cd "$PWD"`, and
+a `cd` with flags are all allowed.
 
-Disable it (allowing the redundant `cd`) with:
+To allow the redundant `cd`:
 
 ```yaml
 reject_redundant_cd: false
 ```
 
-Manage it with `lite-sandbox config redundant-cd enable|disable|show`. Like every
-section it can be flipped per directory via the overrides below.
+Or use `lite-sandbox config redundant-cd enable|disable|show`. It can be set
+per directory with the overrides below.
 
 ## Per-directory overrides
 
-Any part of the configuration can be changed for specific working directories via
-the top-level `overrides` list. Each entry pairs a `path` with any config
-sections that replace the base for commands run **at or under** that path. This is
-not AWS-specific — `aws`, `docker`, `runtimes`, `paths`, `os_sandbox`, and every
-other section can be overridden the same way.
+The top-level `overrides` list changes configuration for specific working
+directories. Each entry pairs a `path` with config sections that replace the
+base for commands run **at or under** that path. Any section can be
+overridden: `aws`, `docker`, `runtimes`, `paths`, `os_sandbox`, and the rest.
 
 ```yaml
 os_sandbox: true
@@ -521,38 +508,36 @@ overrides:
 
 Resolution rules:
 
-- **Most specific wins.** When a directory lies under more than one override
-  `path`, the longest matching path applies; the others are ignored (overrides do
-  not stack).
-- **Replace vs. merge.** By default an override **replaces** each section it sets:
-  an override with an `aws:` block defines the *entire* AWS mode for its
-  directory, dropping any base `aws:` fields it doesn't restate. Set `merge: true`
-  on an override to **deep-merge** it instead — it recurses into a section and
-  applies only the fields it sets, inheriting the rest (so the `~/work/trusted`
-  example above flips just `docker.allow_privileged` and keeps the base
-  `docker.enabled`). Either way, sections the override never mentions are
-  inherited from the base unchanged, and leaf values it does set (scalars, flags,
-  and the deprecated one-list-per-kind path and command keys) come from the
-  override.
-- **`paths` and `commands` merge entry by entry.** Both sections are lists of
-  independent statements — one per path, one per command — so under
-  `merge: true` they are combined by subject rather than taken whole: the
-  base's entries carry into the directory, an override entry naming the same
-  path or command **replaces** just that statement, and entries naming new
-  subjects are added. Subjects are matched as the sandbox matches them (`~/x`
-  and its expanded form are one path; `uv  run` and `uv run` are one command).
-  An override can restate an inherited entry — grant less, deny what the base
-  allowed — but it cannot *unstate* one: to drop a statement everywhere, remove
-  it from the base. Under the default replace mode the whole list still comes
-  from the override, which is how a directory starts from a clean list.
+- **Most specific wins.** When a directory is under more than one override
+  `path`, the longest matching path applies and the others are ignored
+  (overrides don't stack).
+- **Replace vs. merge.** By default an override **replaces** each section it
+  sets: an override with an `aws:` block defines the *entire* AWS config for
+  its directory, dropping base `aws:` fields it doesn't restate. With
+  `merge: true`, the override is **deep-merged** instead: only the fields it
+  sets change, and the rest are inherited (the `~/work/trusted` example above
+  changes only `docker.allow_privileged` and keeps the base
+  `docker.enabled`). Either way, sections the override doesn't mention are
+  inherited unchanged, and leaf values it does set (scalars, flags, and the
+  deprecated one-list-per-kind path and command keys) come from the override.
+- **`paths` and `commands` merge entry by entry.** Under `merge: true` these
+  lists are combined per path or per command rather than taken whole: the
+  base's entries carry over, an override entry for the same path or command
+  **replaces** that entry, and entries for new paths or commands are added.
+  Paths and commands are matched the way the sandbox matches them (`~/x` and
+  its expanded form are the same path; `uv  run` and `uv run` are the same
+  command). An override can restate an inherited entry (grant less, or deny
+  what the base allowed) but can't remove one; to drop an entry everywhere,
+  remove it from the base. In the default replace mode the whole list comes
+  from the override, which is how a directory starts from an empty list.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
-  match the concrete directory they denote.
+  match the directory they refer to.
 - **Linked git worktrees inherit their repository's override.** A worktree
-  created with `git worktree add` usually lives far from the checkout it came
-  from — often in a shared container like `~/.superconductor/worktrees/<repo>/` —
-  so it matches no override of its own. When nothing matches the working
-  directory directly, resolution retries from the repository's **main worktree**,
-  and the override written for the repo applies there too:
+  created with `git worktree add` usually lives away from its checkout, often
+  in a shared directory like `~/.superconductor/worktrees/<repo>/`, so it
+  matches no override of its own. When nothing matches the working directory,
+  resolution retries from the repository's **main worktree**, so the repo's
+  override applies there too:
 
   ```yaml
   overrides:
@@ -569,19 +554,17 @@ Resolution rules:
   ```
 
   Commands run in `sc-vortex-d091` get the same `runtimes.go.enabled` as the
-  checkout. An override matching the worktree itself (or any directory above it,
-  such as the container) still wins — inheritance only fills the gap when nothing
-  matches directly, so a worktree can always be configured separately. Note that
-  this shares *settings*, not path grants: a `paths` entry naming a directory
-  inside the repo keeps pointing there, and granting the sandbox access to the
-  main worktree from a linked one is the separate
+  checkout. An override matching the worktree itself (or a directory above it)
+  still wins; inheritance only applies when nothing matches directly, so a
+  worktree can always be configured separately. This shares *settings*, not
+  path grants: a `paths` entry naming a directory inside the repo still points
+  there, and access to the main worktree from a linked one is the separate
   [`git.allow_worktree_parent`](#git-support) flag.
 
 ### Writing overrides from the CLI: `--dir`
 
-Every command under `lite-sandbox config` takes a `--dir <path>` flag — it is
-registered once on `config`, so any setting can be scoped to one directory
-without hand-editing the file:
+Every `lite-sandbox config` command takes a `--dir <path>` flag, so any setting
+can be scoped to one directory without editing the file:
 
 ```bash
 lite-sandbox config commands allow npm --dir .            # only in this repo
@@ -592,19 +575,19 @@ lite-sandbox config docker disable --dir ~/work/untrusted
 lite-sandbox config aws force-profile acme-dev --dir ~/work/acme
 ```
 
-A `--dir` edit starts from **what that directory resolves to today** — the base
-config with any override already stored for it applied — and records only the
-sections the command actually changed. So an `add` extends the list the directory
-already sees instead of silently replacing it, and settings the command didn't
-touch keep inheriting from the base. Setting a directory to the value it already
-resolves to writes no override at all.
+A `--dir` edit starts from **what that directory currently resolves to** (the
+base config plus any override already stored for it) and records only the
+sections the command changed. So an `add` extends the list the directory
+already has instead of replacing it, and settings the command didn't touch keep
+inheriting from the base. Setting a directory to the value it already resolves
+to writes no override.
 
-Reads honour the flag too: `lite-sandbox config show --dir <path>` prints the
-configuration in effect there, and so does any section's `show`/`list`
+Reads accept the flag too: `lite-sandbox config show --dir <path>` prints the
+configuration in effect there, as does any section's `show`/`list`
 (`config docker show --dir .`, `config commands list --dir .`).
 
-Two commands reject `--dir`, since they are not per-directory settings:
-`config path` and `config os-sandbox check`.
+`config path` and `config os-sandbox check` reject `--dir`, since they aren't
+per-directory settings.
 
 To see or undo what `--dir` wrote:
 
@@ -613,18 +596,17 @@ lite-sandbox config overrides list            # every directory with settings
 lite-sandbox config overrides remove <dir>    # drop all of that directory's settings
 ```
 
-The `merge: true` flag is still authored by editing the `overrides` list in the
-config file directly; `--dir` always writes replace-style sections (seeded from
-the base, as described above). When the directory's override already has
-`merge: true`, `--dir` respects it: `paths` and `commands` are stored as the
-delta — only the entries the command added or changed, so later base edits keep
-flowing through.
+`merge: true` can only be set by editing the `overrides` list in the config
+file; `--dir` always writes replace-style sections, seeded from the base as
+described above. When the directory's override already has `merge: true`,
+`--dir` keeps it: `paths` and `commands` are stored as a delta of only the
+entries the command added or changed, so later base edits still apply.
 
-Either way, a `remove` the directory would go on inheriting is reported as
-such rather than claimed as a removal — on a `merge: true` override because
-the base's entry is inherited per path, and on a replace-style one because a
-section emptied of its last entry is not recorded at all, so the base's list
-applies again:
+In both cases, a `remove` of an entry the directory would still inherit is
+reported as such rather than as a removal. On a `merge: true` override, the
+base's entry is inherited per path. On a replace-style override, a section
+emptied of its last entry isn't recorded at all, so the base's list applies
+again:
 
 ```console
 $ lite-sandbox config paths remove /base/data --dir ~/work/acme
@@ -634,7 +616,7 @@ $ lite-sandbox config paths remove /base/data --dir ~/work/acme
 
 ## Git Support
 
-Git commands are enabled by default with granular permission levels that can be configured:
+Git commands are enabled by default, with separate permission levels:
 
 ```yaml
 git:
@@ -645,14 +627,14 @@ git:
   allow_worktree_parent: false # if cwd is a linked worktree, also allow read+write to the main worktree (default: false)
 ```
 
-Remote write operations (`git push`) are disabled by default since they affect shared state. Enable them only if you want to allow Claude to push commits:
+`git push` is disabled by default since it changes shared state. To allow the
+agent to push:
 
 ```bash
-# Show current git configuration
-lite-sandbox config show
-
-# Edit config file to enable git push
-# Add 'remote_write: true' under the git section
+lite-sandbox config git show
+lite-sandbox config git set remote_write true
 ```
 
-Git commands use runtime path validation to ensure repository paths stay within allowed directories, even when variables are expanded (e.g., `git -C $REPO_DIR status` validates the expanded path).
+Git's repository paths are checked at runtime like any other path, including
+after variable expansion (e.g. `git -C $REPO_DIR status` validates the
+expanded path).
