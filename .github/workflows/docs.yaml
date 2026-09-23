@@ -1,0 +1,30 @@
+name: Docs
+
+# Checks that relative links and #anchors in the Markdown files resolve.
+# Offline only: external URLs are not fetched, so the check can't flake on
+# someone else's site being down.
+
+on:
+  push:
+    branches: [main]
+    paths: ['**.md', '.github/workflows/docs.yaml']
+  pull_request:
+    branches: [main]
+    paths: ['**.md', '.github/workflows/docs.yaml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress './**/*.md'

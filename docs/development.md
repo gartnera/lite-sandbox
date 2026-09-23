@@ -16,6 +16,12 @@ go test ./...              # Run all tests
 go test -v ./tool/...      # Run tool package tests with verbose output
 ```
 
+The `Docs` workflow runs [lychee](https://github.com/lycheeverse/lychee) on every Markdown file to check relative links and `#anchor` fragments (offline; external URLs aren't fetched). To run the same check locally:
+
+```bash
+lychee --offline --include-fragments './**/*.md'
+```
+
 ## Releasing
 
 **Every push to `main` is tagged and released** by `.github/workflows/release.yaml`. It builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). Every asset gets a signed build-provenance attestation, and releases are published as immutable. No manual steps are needed.
