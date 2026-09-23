@@ -51,6 +51,11 @@ func TestValidate_AllowedGitSubcommands(t *testing.T) {
 		{"git config get-urlmatch", "git config --get-urlmatch http https://example.com"},
 		{"git config -l", "git config -l"},
 		{"git reflog", "git reflog"},
+		{"git grep", "git grep -n foo"},
+		{"git grep pathspec", `git grep -nE "claude-|opus|model" -- ':!*.lock'`},
+		{"git grep -e dash pattern", "git grep -e -O"},
+		{"git grep pattern after --", "git grep -e foo -- -Ofile"},
+		{"git grep no pager", "git grep --no-open-files-in-pager foo"},
 		{"bare git", "git"},
 		{"git version", "git --version"},
 		{"git help", "git --help"},
@@ -114,6 +119,13 @@ func TestValidate_BlockedGitSubcommands(t *testing.T) {
 		// Always blocked
 		{"git hook", "git hook run pre-commit", `git subcommand "hook" is not allowed`},
 		{"git filter-branch", "git filter-branch --env-filter 'echo'", `git subcommand "filter-branch" is not allowed`},
+		// git grep -O runs a pager command on the matching files
+		{"git grep -O", "git grep -O foo", `git grep flag "-O" is not allowed`},
+		{"git grep -O attached", "git grep -Osh foo", `git grep flag "-Osh" is not allowed`},
+		{"git grep -O bundled", "git grep -nOsh foo", `git grep flag "-nOsh" is not allowed`},
+		{"git grep long", "git grep --open-files-in-pager=sh foo", `git grep flag "--open-files-in-pager=sh" is not allowed`},
+		{"git grep long prefix", "git grep --open=sh foo", `git grep flag "--open=sh" is not allowed`},
+		{"git grep after global flag", "git -C . grep -O foo", `git grep flag "-O" is not allowed`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -467,5 +479,27 @@ func TestValidate_GitRemoteSubcommand(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
 			}
 		})
+	}
+}
+
+// git grep really runs, and a -O that only appears after expansion is still
+// caught at runtime, where the static validator saw nothing but a parameter.
+func TestExecute_GitGrep(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSandbox()
+	if _, err := executeInDirWithSandbox(t, s, dir, "git init -q && echo 'model: opus' > f.txt && git add f.txt"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	out, err := executeInDirWithSandbox(t, s, dir, `git grep -nE "claude-|opus" -- ':!*.lock'`)
+	if err != nil {
+		t.Fatalf("git grep: %v", err)
+	}
+	if !strings.Contains(out, "f.txt:1:model: opus") {
+		t.Errorf("unexpected git grep output: %q", out)
+	}
+
+	_, err = executeInDirWithSandbox(t, s, dir, `O=-Osh; git grep $O opus`)
+	if err == nil || !strings.Contains(err.Error(), `git grep flag "-Osh" is not allowed`) {
+		t.Fatalf("expected expanded -O to be rejected, got %v", err)
 	}
 }

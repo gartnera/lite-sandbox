@@ -15,6 +15,7 @@ var gitLocalReadSubcommands = map[string]bool{
 	"diff":       true,
 	"show":       true,
 	"blame":      true,
+	"grep":       true,
 	"branch":     true,
 	"tag":        true,
 	"shortlog":   true,
@@ -172,6 +173,8 @@ func validateGitArgs(args []*syntax.Word, gitCfg *config.GitConfig) error {
 			if !gitCfg.GitLocalWrite() {
 				return validateGitConfigReadOnlyArgs(args)
 			}
+		case "grep":
+			return validateGitGrepArgs(args)
 		}
 		return nil
 	}
@@ -287,6 +290,32 @@ func validateGitTagArgs(args []*syntax.Word) error {
 		}
 		if reason, blocked := blockedGitTagFlags[lit]; blocked {
 			return fmt.Errorf("git tag flag %q is not allowed: %s", lit, reason)
+		}
+	}
+	return nil
+}
+
+// validateGitGrepArgs blocks git grep's -O/--open-files-in-pager, which runs
+// an arbitrary command (the optional value, or core.pager) on the matching
+// files. git accepts the short form bundled with other short flags (-nO,
+// -iOvim) and any unambiguous prefix of the long form (--open), so both are
+// matched loosely; a false positive like -eOops can be spelled -e Oops.
+func validateGitGrepArgs(args []*syntax.Word) error {
+	rest := argsAfterToken(args, "grep")
+	for i := 0; i < len(rest); i++ {
+		lit := rest[i].Lit()
+		switch {
+		case lit == "--":
+			return nil
+		case lit == "-e":
+			i++ // the next token is a pattern, which may start with "-"
+		case strings.HasPrefix(lit, "--"):
+			name, _, _ := strings.Cut(lit[2:], "=")
+			if name != "" && strings.HasPrefix("open-files-in-pager", name) {
+				return fmt.Errorf("git grep flag %q is not allowed: runs a pager command on matching files", lit)
+			}
+		case strings.HasPrefix(lit, "-") && strings.Contains(lit[1:], "O"):
+			return fmt.Errorf("git grep flag %q is not allowed: -O runs a pager command on matching files", lit)
 		}
 	}
 	return nil
