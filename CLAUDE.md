@@ -10,7 +10,7 @@ go test ./...                    # Run default suite (OS-sandbox-runtime tests s
 go test -v ./tool/...            # Run tool package tests with verbose output
 go test -run TestValidate ./tool/... # Run a specific test
 go run . serve-mcp               # Start MCP server over stdio
-LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode binaries (pinned, auto-downloaded to e2e/mockedserver/.bin) through the installer against a mock model; no API key
+LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v  # Agent e2e: drives real Crush/Codex/Claude Code/opencode/Grok Build binaries (pinned, auto-downloaded to e2e/mockedserver/.bin) through the installer against a mock model; no API key
 cd e2e/claude && uv run pytest -v # Real-model e2e (Claude Agent SDK; needs an API key)
 
 # Tests that exercise the real OS sandbox (bwrap on Linux / sandbox-exec on macOS)
@@ -21,7 +21,7 @@ go build -o lite-sandbox && OS_SANDBOX_TESTS=1 go test ./...  # Linux needs bubb
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code, Codex, opencode, and Crush (autodetecting which are installed on the host; pass names like `install codex` to select explicitly) to route shell commands through it; `lite-sandbox launch <agent>` (Claude Code only for now) is the non-persistent counterpart, passing the same configuration on the agent's command line for a single run instead of writing it to disk (`cmd/launch.go`, sharing the policy in `cmd/claude_setup.go` with the installer); `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary.
+This is an MCP (Model Context Protocol) server that gives AI coding agents shell access with layered security validation. It registers four tools: `bash` (execute a command, optionally in the background), plus `bash_output`, `kill_shell`, and `list_shells` for managing background processes. `lite-sandbox install` configures Claude Code, Codex, opencode, Crush, and Grok Build (autodetecting which are installed on the host; pass names like `install codex` to select explicitly) to route shell commands through it; `lite-sandbox launch <agent>` (Claude Code only for now) is the non-persistent counterpart, passing the same configuration on the agent's command line for a single run instead of writing it to disk (`cmd/launch.go`, sharing the policy in `cmd/claude_setup.go` with the installer); `lite-sandbox hook` provides an optional PreToolUse hook that confines the built-in file tools to the same path boundary. Codex and Grok Build speak the same hook protocol; Grok's tools have their own names and argument keys (`internal/hook/grok.go`), its events are told apart by their camelCase `hookEventName` key, and its deny reasons are kept under the 256 characters Grok passes to the model.
 
 **Command flow:** MCP request → `cmd/serve.go` → `Sandbox.Execute()` in `tool/bash_sandboxed/`, which parses the command into a bash AST (`mvdan.cc/sh/v3`), statically validates it, then executes it via the `mvdan.cc/sh` interpreter (NOT `bash -c`) with runtime hooks that re-validate after variable expansion. When the OS sandbox is enabled, commands are additionally dispatched to a long-lived sandboxed worker process (`os_sandbox/`).
 
@@ -52,14 +52,14 @@ The whitelist is not read-only: path-scoped write commands (`cp`, `mv`, `rm`, `s
 
 ## Testing
 
-After making complex changes (new commands, validation logic, security rules, installer changes), run the e2e suite in addition to unit tests. It drives the real Crush, Codex, Claude Code, and opencode binaries through `lite-sandbox install` and a non-interactive run, with `e2e/mockedserver/mockmodel` (one server speaking the OpenAI chat-completions, OpenAI Responses, and Anthropic Messages APIs) standing in for the LLM — so it needs no API key and behaves identically locally and in CI:
+After making complex changes (new commands, validation logic, security rules, installer changes), run the e2e suite in addition to unit tests. It drives the real Crush, Codex, Claude Code, opencode, and Grok Build binaries through `lite-sandbox install` and a non-interactive run, with `e2e/mockedserver/mockmodel` (one server speaking the OpenAI chat-completions, OpenAI Responses, and Anthropic Messages APIs) standing in for the LLM — so it needs no API key and behaves identically locally and in CI:
 
 ```bash
 LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v            # all agents
 LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run TestCodex
 ```
 
-The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` downloads all three into `e2e/mockedserver/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests, and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` / `E2E_OPENCODE_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
+The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` downloads all of them into `e2e/mockedserver/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests, and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` / `E2E_OPENCODE_VERSION` / `E2E_GROK_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
 
 `e2e/claude` is the complementary real-model suite: it sends real prompts to Claude via the Agent SDK (API key required) and checks Claude actually chooses the sandbox tool over built-in Bash — behavior the mock cannot exercise:
 

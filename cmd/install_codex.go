@@ -176,6 +176,17 @@ func configureCodexMCPServer(configTomlPath, binPath string, alwaysLoad bool) er
 		block += `omit_tools_from = ["deferred"]` + "\n"
 	}
 
+	return upsertTOMLTable(configTomlPath, header, block)
+}
+
+// upsertTOMLTable writes block — a table whose first line is header, followed
+// by key = value lines — into the TOML file at path. The file is edited as text
+// rather than parsed so the user's existing tables, ordering, and comments are
+// preserved: an existing table under header is replaced in place, otherwise the
+// block is appended (or becomes the whole file). Idempotent. Shared by the
+// Codex and Grok installers, whose config.toml files hold [mcp_servers.<name>]
+// tables in the same shape.
+func upsertTOMLTable(configTomlPath, header, block string) error {
 	data, err := os.ReadFile(configTomlPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -188,7 +199,7 @@ func configureCodexMCPServer(configTomlPath, binPath string, alwaysLoad bool) er
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
-	// Locate an existing [mcp_servers.lite-sandbox] table header.
+	// Locate an existing table under header.
 	start := -1
 	for i, ln := range lines {
 		if strings.TrimSpace(ln) == header {
@@ -203,10 +214,10 @@ func configureCodexMCPServer(configTomlPath, binPath string, alwaysLoad bool) er
 
 	// Present: replace only our contiguous table body in place. Our table is a
 	// run of key=value lines, so it ends at the first line that isn't part of it:
-	// a blank line, a comment (which includes our managed hook block's marker),
-	// or any table header. Stopping there — rather than scanning to the next
+	// a blank line, a comment (which includes our managed blocks' markers), or
+	// any table header. Stopping there — rather than scanning to the next
 	// top-level header — preserves blank lines, comments, and any user-authored
-	// [mcp_servers.lite-sandbox.*] sub-table that follows.
+	// sub-table (e.g. [mcp_servers.lite-sandbox.env]) that follows.
 	end := len(lines)
 	for i := start + 1; i < len(lines); i++ {
 		t := strings.TrimSpace(lines[i])

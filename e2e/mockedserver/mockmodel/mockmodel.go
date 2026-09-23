@@ -27,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -52,6 +53,10 @@ type Script struct {
 	// SideText is the reply to requests that offer no tools (e.g. title
 	// generation). Defaults to "mock".
 	SideText string
+	// SideTools names tools that only side requests offer: a request whose
+	// tools are all in this list is a side request too (Grok Build generates
+	// the session title by offering a lone session_title tool).
+	SideTools []string
 }
 
 // DefaultFinalText is the FinalText used when Script.FinalText is nil: it
@@ -83,11 +88,27 @@ type Turn struct {
 	// Final reports that the mock answered this turn with FinalText, i.e. every
 	// scripted call had a result in the transcript.
 	Final bool
+	// Side reports a request that offered only Script.SideTools.
+	Side bool
 }
 
 // IsAgentTurn reports whether the request offered tools, i.e. was the agent's
 // own turn rather than a side request.
-func (t Turn) IsAgentTurn() bool { return len(t.Tools) > 0 }
+func (t Turn) IsAgentTurn() bool { return len(t.Tools) > 0 && !t.Side }
+
+// onlySideTools reports whether every tool offered is one of side (and at
+// least one was offered).
+func onlySideTools(tools map[string]bool, side []string) bool {
+	if len(tools) == 0 || len(side) == 0 {
+		return false
+	}
+	for name := range tools {
+		if !slices.Contains(side, name) {
+			return false
+		}
+	}
+	return true
+}
 
 // Server is a running mock model endpoint.
 type Server struct {
@@ -210,7 +231,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("mock: bad %s request: %v", p.name(), err), http.StatusBadRequest)
 		return
 	}
-	turn := Turn{Protocol: p.name(), Tools: req.tools, ToolResults: req.results, Text: req.text}
+	turn := Turn{Protocol: p.name(), Tools: req.tools, ToolResults: req.results, Text: req.text,
+		Side: onlySideTools(req.tools, s.script.SideTools)}
 	results := req.results
 
 	var rep reply

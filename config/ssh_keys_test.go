@@ -15,6 +15,7 @@ func sshHome(t *testing.T) (home string, keys []string) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	sshDir := filepath.Join(home, ".ssh")

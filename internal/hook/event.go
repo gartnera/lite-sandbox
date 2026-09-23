@@ -46,6 +46,16 @@ type Event struct {
 	AgentID   string `json:"agent_id,omitempty"`
 	AgentType string `json:"agent_type,omitempty"`
 
+	// GrokEventName is Grok Build's own camelCase event key ("pre_tool_use"),
+	// sent alongside the Claude-compatible hook_event_name. Claude Code and
+	// Codex never send it, so it identifies an event from Grok (see FromGrok).
+	GrokEventName string `json:"hookEventName,omitempty"`
+
+	// ToolInputTruncated is Grok's flag for a tool input over its 128 KiB hook
+	// payload limit. Grok then sends a clipped JSON string in place of the
+	// input object, so the arguments cannot be decoded.
+	ToolInputTruncated bool `json:"toolInputTruncated,omitempty"`
+
 	// RawToolInput is the verbatim tool_input object, retained so callers can
 	// inspect fields we do not explicitly model.
 	RawToolInput json.RawMessage `json:"tool_input"`
@@ -54,6 +64,10 @@ type Event struct {
 	// determined by ToolName (see parseToolInput). nil for unmodeled tools.
 	ToolInput ToolInput `json:"-"`
 }
+
+// FromGrok reports whether the event was sent by Grok Build, whose tool names
+// (and MCP tool naming) differ from Claude Code's.
+func (e *Event) FromGrok() bool { return e.GrokEventName != "" }
 
 // ToolInput is implemented by every typed tool argument struct. Tool reports
 // the canonical tool name and Describe returns a short human/AI readable

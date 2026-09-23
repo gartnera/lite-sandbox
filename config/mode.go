@@ -168,6 +168,10 @@ func DefaultDeniedReadPaths() []DeniedPath {
 	if codex := codexHome(home); dirExists(codex) {
 		out = append(out, file(filepath.Join(codex, "auth.json")))
 	}
+	if grok := GrokHome(home); dirExists(grok) {
+		// The sign-in tokens and the MCP servers' OAuth tokens (plaintext).
+		out = append(out, file(filepath.Join(grok, "auth.json")), file(filepath.Join(grok, "mcp_credentials.json")))
+	}
 	return append(out, SSHPrivateKeyEntries(home)...)
 }
 
@@ -256,6 +260,26 @@ func DefaultDeniedWritePaths() []DeniedPath {
 			file(filepath.Join(cr, "crushrc")),
 			file(filepath.Join(cr, "crush.json")),
 			file(filepath.Join(cr, "CRUSH.md")),
+		)
+	}
+	// Grok Build: its config (MCP server, permission rules), the hook
+	// directory and the files that add or disable hooks, the rules directory
+	// holding the usage directive, and what else it loads and runs.
+	if grok := GrokHome(home); dirExists(grok) {
+		out = append(out,
+			file(filepath.Join(grok, "config.toml")),
+			file(filepath.Join(grok, "requirements.toml")),
+			file(filepath.Join(grok, "managed_config.toml")),
+			file(filepath.Join(grok, "sandbox.toml")),
+			file(filepath.Join(grok, "trusted_folders.toml")),
+			file(filepath.Join(grok, "lsp.json")),
+			dir(filepath.Join(grok, "hooks")),
+			file(filepath.Join(grok, "hooks-paths")),
+			file(filepath.Join(grok, "disabled-hooks")),
+			dir(filepath.Join(grok, "rules")),
+			dir(filepath.Join(grok, "skills")),
+			dir(filepath.Join(grok, "agents")),
+			dir(filepath.Join(grok, "plugins")),
 		)
 	}
 	return out
@@ -427,6 +451,16 @@ func codexHome(home string) string {
 		return d
 	}
 	return filepath.Join(home, ".codex")
+}
+
+// GrokHome mirrors Grok Build's own resolution of its config directory:
+// $GROK_HOME when set, otherwise ~/.grok. The Grok installer resolves it
+// through here too, so it and the deny lists always agree.
+func GrokHome(home string) string {
+	if d := os.Getenv("GROK_HOME"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".grok")
 }
 
 func xdgConfigHome(home string) string {
