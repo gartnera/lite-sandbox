@@ -33,15 +33,15 @@ var mcpToolPermissions = []string{
 }
 
 var installCmd = &cobra.Command{
-	Use:   "install [claude|codex|opencode|crush ...]",
-	Short: "Configure installed agent CLIs (Claude Code, Codex, opencode, Crush) to use lite-sandbox",
+	Use:   "install [claude|codex|opencode|crush|grok ...]",
+	Short: "Configure installed agent CLIs (Claude Code, Codex, opencode, Crush, Grok Build) to use lite-sandbox",
 	Long: `Configures AI coding agents to route shell commands through lite-sandbox.
 
 With no arguments, autodetects which supported agent CLIs are installed on this
 host — their binary is on PATH or their config directory exists — and configures
 every detected one. Pass agent names to configure an explicit set instead:
 
-  lite-sandbox install                 # autodetect claude / codex / opencode / crush
+  lite-sandbox install                 # autodetect claude / codex / opencode / crush / grok
   lite-sandbox install claude codex    # configure exactly these
 
 Per agent:
@@ -66,14 +66,22 @@ Per agent:
              ~/.config/crush/crushrc (or the legacy crush.json, whichever
              exists; honoring CRUSH_GLOBAL_CONFIG / XDG_CONFIG_HOME), and adds
              a usage directive to ~/.config/crush/CRUSH.md
+  grok     — registers the MCP server in ~/.grok/config.toml with permission
+             rules that auto-allow its tools and deny the built-in shell,
+             writes a PreToolUse hook to ~/.grok/hooks/lite-sandbox.json that
+             redirects the built-in shell and confines read_file / grep /
+             list_dir / search_replace / write to the sandbox's paths (always:
+             --with-tool-hook is implied), and adds a usage directive to
+             ~/.grok/rules/lite-sandbox.md (all honoring GROK_HOME)
 
 With --with-tool-hook, registers a PreToolUse hook that governs the built-in
 tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
 message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
 sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
 matching the boundaries the bash tool enforces. Applies to claude and codex;
-opencode has no compatible hook protocol and Crush's built-in tools are not
-governed by the hook, so the flag is a no-op for those two.
+grok always gets it; opencode has no compatible hook protocol and Crush's
+built-in tools are not governed by the hook, so the flag is a no-op for those
+two.
 
 With --bash-ast-hook-mode, the MCP server is NOT configured. Instead, the PreToolUse
 hook statically parses each built-in Bash command's AST and checks it against the
@@ -82,8 +90,9 @@ otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
 enforcement, only this up-front static check — so it is a weaker guarantee than
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
-governs only Bash. Applies to claude and codex; opencode and crush are skipped
-in this mode since the check requires a hook over their built-in shell.
+governs only Bash. Applies to claude, codex and grok (which still confines its
+file tools); opencode and crush are skipped in this mode since the check
+requires a hook over their built-in shell.
 
 The sandbox's own config (lite-sandbox config path) is left strict by default:
 a first install creates it with only audit: true, so the mode stays at its
@@ -101,9 +110,10 @@ deferral so they are present in the model's initial tool list rather than loaded
 on demand — the built-in shell is denied/redirected, so the sandbox bash tool is
 needed on essentially every turn. For claude it sets alwaysLoad on the MCP server
 entry; for codex it sets omit_tools_from = ["deferred"]. Pass --always-load=false
-to let the tools be deferred. The flag is a no-op for opencode and crush, and
+to let the tools be deferred. The flag is a no-op for opencode, crush and grok
+(Grok always reaches MCP tools through its search_tool / use_tool pair), and
 in --bash-ast-hook-mode (which does not configure the MCP server).`,
-	ValidArgs: []string{"claude", "codex", "opencode", "crush"},
+	ValidArgs: []string{"claude", "codex", "opencode", "crush", "grok"},
 	Args:      cobra.OnlyValidArgs,
 	RunE:      runInstall,
 }
@@ -151,6 +161,7 @@ func installTargets() []installTarget {
 		{"codex", "OpenAI Codex CLI", detectCodex, runInstallCodex},
 		{"opencode", "opencode", detectOpencode, runInstallOpencode},
 		{"crush", "Crush", detectCrush, runInstallCrush},
+		{"grok", "Grok Build", detectGrok, runInstallGrok},
 	}
 }
 
@@ -232,7 +243,7 @@ func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
 		for _, arg := range args {
 			i := slices.IndexFunc(all, func(t installTarget) bool { return t.name == arg })
 			if i == -1 {
-				return nil, false, fmt.Errorf("unknown agent %q (supported: claude, codex, opencode, crush)", arg)
+				return nil, false, fmt.Errorf("unknown agent %q (supported: claude, codex, opencode, crush, grok)", arg)
 			}
 			if slices.ContainsFunc(targets, func(t installTarget) bool { return t.name == arg }) {
 				continue
@@ -249,7 +260,7 @@ func resolveInstallTargets(args []string) ([]installTarget, bool, error) {
 		}
 	}
 	if len(detected) == 0 {
-		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, opencode, or crush binary on PATH and no ~/.claude (or $CLAUDE_CONFIG_DIR), ~/.codex, ~/.config/opencode, or ~/.config/crush directory) — name one explicitly, e.g. `lite-sandbox install claude`")
+		return nil, false, fmt.Errorf("no supported agent CLI detected (no claude, codex, opencode, crush, or grok binary on PATH and no ~/.claude (or $CLAUDE_CONFIG_DIR), ~/.codex, ~/.config/opencode, ~/.config/crush, or ~/.grok directory) — name one explicitly, e.g. `lite-sandbox install claude`")
 	}
 	return detected, true, nil
 }

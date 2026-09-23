@@ -256,3 +256,23 @@ func TestGivesUpWithoutResults(t *testing.T) {
 		t.Error("giving up must not count as the answer turn")
 	}
 }
+
+// TestSideTools checks a request offering only Script.SideTools (Grok Build's
+// session_title) is answered as a side request: it takes no scripted call and
+// is not an agent turn.
+func TestSideTools(t *testing.T) {
+	srv := Start(Script{ToolCalls: []ToolCall{{Name: "x", Arguments: map[string]any{}}}, SideTools: []string{"session_title"}})
+	defer srv.Close()
+	c := clients["chat"]
+	body := post(t, srv.BaseURL+c.path, c.request(false, []any{c.tool("session_title")}, []any{}))
+	if c.hasCall(body, "x", "{}") || !c.hasText(body, "mock") {
+		t.Errorf("side request got a scripted call instead of SideText: %s", body)
+	}
+	if n := len(srv.AgentTurns()); n != 0 {
+		t.Errorf("side request counted as %d agent turn(s)", n)
+	}
+	body = post(t, srv.BaseURL+c.path, c.request(false, []any{c.tool("x"), c.tool("session_title")}, []any{}))
+	if !c.hasCall(body, "x", "{}") {
+		t.Errorf("agent turn offering a side tool among others did not get the scripted call: %s", body)
+	}
+}

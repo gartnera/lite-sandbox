@@ -13,13 +13,14 @@ Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHu
 
 The default is the strictest mode: only whitelisted commands run, and code-execution runtimes are opt-in. To start looser and tighten over time, see [docs/adoption.md](docs/adoption.md).
 
-`install` detects which supported agent CLIs are installed (**Claude Code**, **OpenAI Codex CLI**, **opencode**, and **Crush**), by looking for the binary on `PATH` or the config directory. For each one it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a directive telling the agent to use the sandbox for shell commands. Name agents to configure only those:
+`install` detects which supported agent CLIs are installed (**Claude Code**, **OpenAI Codex CLI**, **opencode**, **Crush**, and **Grok Build**), by looking for the binary on `PATH` or the config directory. For each one it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a directive telling the agent to use the sandbox for shell commands. Name agents to configure only those:
 
 ```bash
-lite-sandbox install                       # autodetect claude / codex / opencode / crush
+lite-sandbox install                       # autodetect claude / codex / opencode / crush / grok
 lite-sandbox install codex                 # configure only Codex
 lite-sandbox install claude opencode       # configure exactly these
 lite-sandbox install codex --with-tool-hook # also confine reads/writes (incl. apply_patch) to the sandbox paths
+lite-sandbox install grok                  # Grok Build: its file tools are always confined to the sandbox paths
 ```
 
 To try the sandbox without changing any agent configuration, use `launch`. It runs the agent sandboxed for one session and doesn't touch your setup.

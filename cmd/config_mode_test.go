@@ -59,6 +59,7 @@ func TestConfigModeCmd_ShowLiftedBuiltins(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

@@ -311,7 +311,8 @@ instead. There are two kinds:
   or file; a non-root process gets `EACCES`): `~/.aws` (unless
   `aws.allow_raw_credentials`), `~/.gnupg`, `~/.netrc`, `~/.kube`, `~/.pypirc`,
   `~/.config/gh`, `~/Library/Keychains`, and the agents' own credentials
-  (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`). The
+  (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`,
+  `~/.grok/auth.json`, `~/.grok/mcp_credentials.json`). The
   SSH private keys in `~/.ssh` (every file there except `known_hosts`,
   `config`, `authorized_keys`, and `*.pub`, detected by name) are also on this
   list, one entry per key. The two credential masks (the SSH keys, and `~/.aws`
@@ -325,8 +326,10 @@ instead. There are two kinds:
   config file, audit log, and mask cache, plus the settings and instruction
   files of each *installed* agent (`~/.claude/settings.json`,
   `~/.claude/{skills,agents,commands,plugins}`, `~/.codex/config.toml`,
-  `~/.codex/prompts`, opencode's and Crush's configs). Agent entries are listed
-  only when that agent's config directory exists.
+  `~/.codex/prompts`, opencode's and Crush's configs, and Grok Build's
+  `config.toml`, `hooks/`, `disabled-hooks`, `rules/`, and the other files in
+  `~/.grok` that decide what it loads). Agent entries are listed only when that
+  agent's config directory exists.
 
 On Linux, a missing deny-listed directory is created (mode 0700) so it can be
 masked. A missing deny-listed file can't be masked without creating an empty

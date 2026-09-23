@@ -73,6 +73,9 @@ func startModel(t *testing.T, calls []mockmodel.ToolCall) *mockmodel.Server {
 	model := mockmodel.Start(mockmodel.Script{
 		ToolCalls: calls,
 		FinalText: func(results []string) string { return finalPrefix + strings.TrimSpace(results[len(results)-1]) },
+		// Grok Build names the session by offering a lone session_title tool;
+		// that request must not take the first scripted call.
+		SideTools: []string{"session_title"},
 	})
 	t.Cleanup(model.Close)
 	return model

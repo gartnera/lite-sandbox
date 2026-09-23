@@ -443,7 +443,7 @@ func TestClaudeHookPlan(t *testing.T) {
 }
 
 // setupDetectionEnv points every detection input (PATH, HOME, CLAUDE_CONFIG_DIR,
-// CODEX_HOME, CRUSH_GLOBAL_CONFIG, XDG_CONFIG_HOME) at empty temp directories so
+// CODEX_HOME, CRUSH_GLOBAL_CONFIG, XDG_CONFIG_HOME, GROK_HOME) at empty temp directories so
 // no real CLI on the test host leaks into the result. It returns the fake home
 // and PATH directories.
 func setupDetectionEnv(t *testing.T) (homeDir, pathDir string) {
@@ -456,6 +456,7 @@ func setupDetectionEnv(t *testing.T) (homeDir, pathDir string) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CRUSH_GLOBAL_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GROK_HOME", "")
 	return homeDir, pathDir
 }
 
@@ -496,13 +497,15 @@ func TestResolveInstallTargetsAutodetect(t *testing.T) {
 	t.Setenv("CODEX_HOME", codexDir)
 	// CRUSH_GLOBAL_CONFIG detection.
 	t.Setenv("CRUSH_GLOBAL_CONFIG", t.TempDir())
+	// GROK_HOME detection.
+	t.Setenv("GROK_HOME", t.TempDir())
 
 	targets, _, err = resolveInstallTargets(nil)
 	if err != nil {
 		t.Fatalf("resolveInstallTargets failed: %v", err)
 	}
-	if !slices.Equal(targetNames(targets), []string{"claude", "codex", "opencode", "crush"}) {
-		t.Errorf("expected [claude codex opencode crush], got %v", targetNames(targets))
+	if !slices.Equal(targetNames(targets), []string{"claude", "codex", "opencode", "crush", "grok"}) {
+		t.Errorf("expected [claude codex opencode crush grok], got %v", targetNames(targets))
 	}
 }
 

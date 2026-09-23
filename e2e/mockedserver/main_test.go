@@ -1,6 +1,7 @@
 package mockedserver
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,8 +30,8 @@ const e2eEnv = "LITE_SANDBOX_E2E"
 // for every subprocess so `lite-sandbox install` autodetection and the agents'
 // own PATH lookups (e.g. `crush --version`) find them.
 var bins struct {
-	sandbox, crush, codex, claude, opencode string
-	pathDirs                                []string
+	sandbox, crush, codex, claude, opencode, grok string
+	pathDirs                                      []string
 }
 
 func TestMain(m *testing.M) {
@@ -57,8 +58,8 @@ func requireE2E(t *testing.T) {
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
 // setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION /
-// E2E_OPENCODE_VERSION for one run — never re-downloads a version that is
-// already there.
+// E2E_OPENCODE_VERSION / E2E_GROK_VERSION for one run — never re-downloads a
+// version that is already there.
 func provision() error {
 	binDir := os.Getenv("E2E_BIN_DIR")
 	if binDir == "" {
@@ -78,20 +79,23 @@ func provision() error {
 		return fmt.Errorf("go build lite-sandbox: %v\n%s", err, out)
 	}
 
-	// The three installs are independent downloads; run them concurrently.
+	// The installs are independent downloads; run them concurrently.
 	crushVersion := versionFromEnv("E2E_CRUSH_VERSION", CrushVersion)
 	codexVersion := versionFromEnv("E2E_CODEX_VERSION", CodexVersion)
 	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
 	opencodeVersion := versionFromEnv("E2E_OPENCODE_VERSION", OpencodeVersion)
+	grokVersion := versionFromEnv("E2E_GROK_VERSION", GrokVersion)
 	crushDir := filepath.Join(agentsDir, "crush", crushVersion)
 	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
 	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
 	opencodeDir := filepath.Join(agentsDir, "opencode", opencodeVersion)
+	grokDir := filepath.Join(agentsDir, "grok", grokVersion)
 	var g errgroup.Group
 	bins.crush = filepath.Join(crushDir, "crush")
 	bins.codex = filepath.Join(codexDir, "codex")
 	bins.claude = filepath.Join(claudeDir, "claude")
 	bins.opencode = filepath.Join(opencodeDir, "opencode")
+	bins.grok = filepath.Join(grokDir, "grok")
 	g.Go(func() error {
 		return ensureInstalled(bins.crush, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
 	})
@@ -104,17 +108,20 @@ func provision() error {
 	g.Go(func() error {
 		return ensureInstalled(bins.opencode, "opencode "+opencodeVersion, func() error { return installOpencode(opencodeDir, opencodeVersion) })
 	})
+	g.Go(func() error {
+		return ensureInstalled(bins.grok, "grok "+grokVersion, func() error { return installGrok(grokDir, grokVersion) })
+	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
-	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode)}
-	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode} {
+	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode), filepath.Dir(bins.grok)}
+	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode, bins.grok} {
 		if _, err := os.Stat(b); err != nil {
 			return fmt.Errorf("provisioned binary missing: %w", err)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion)
+	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s, grok %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion, grokVersion)
 	return nil
 }
 
@@ -277,6 +284,37 @@ func installClaudeCode(dir, version string) error {
 		return fmt.Errorf("claude-code %s/%s checksum mismatch: got %s, manifest says %s", version, platform, got, want)
 	}
 	return nil
+}
+
+// grokReleases are the download bases of Grok Build's distribution, the ones
+// https://x.ai/cli/install.sh uses: the x.ai front first, then the bucket
+// behind it. Each version publishes grok-<version>-<os>-<arch>, plain and
+// gzip-compressed. No checksum is published alongside.
+var grokReleases = []string{"https://x.ai/cli", "https://storage.googleapis.com/grok-build-public-artifacts/cli"}
+
+// installGrok downloads the Grok Build binary for version and this OS/arch
+// into dir.
+func installGrok(dir, version string) error {
+	goos := map[string]string{"linux": "linux", "darwin": "macos"}[runtime.GOOS]
+	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
+	if goos == "" || arch == "" {
+		return fmt.Errorf("no grok release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	var errs []error
+	for _, base := range grokReleases {
+		body, err := fetch(fmt.Sprintf("%s/grok-%s-%s-%s.gz", base, version, goos, arch))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		defer body.Close()
+		gz, err := gzip.NewReader(body)
+		if err != nil {
+			return fmt.Errorf("grok %s: %w", version, err)
+		}
+		return writeExecutable(filepath.Join(dir, "grok"), gz)
+	}
+	return errors.Join(errs...)
 }
 
 // isMusl reports whether this Linux host uses musl rather than glibc, the way

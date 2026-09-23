@@ -117,6 +117,7 @@ func TestDefaultDeniedPaths(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", configPath)
@@ -169,12 +170,13 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 
 	// No agent installed: none of their paths are listed (so none get created).
 	for _, p := range deniedPathStrings(append(DefaultDeniedReadPaths(), DefaultDeniedWritePaths()...)) {
-		if strings.Contains(p, ".claude") || strings.Contains(p, ".codex") || strings.Contains(p, "opencode") || strings.Contains(p, "crush") {
+		if strings.Contains(p, ".claude") || strings.Contains(p, ".codex") || strings.Contains(p, "opencode") || strings.Contains(p, "crush") || strings.Contains(p, ".grok") {
 			t.Errorf("agent path %s listed without the agent installed", p)
 		}
 	}
@@ -199,23 +201,24 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 
 func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 	root := t.TempDir()
-	cc, cx, xdg := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "xdg")
-	for _, d := range []string{cc, cx, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
+	cc, cx, gk, xdg := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "gk"), filepath.Join(root, "xdg")
+	for _, d := range []string{cc, cx, gk, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", cc)
 	t.Setenv("CODEX_HOME", cx)
+	t.Setenv("GROK_HOME", gk)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	read := deniedPathStrings(DefaultDeniedReadPaths())
-	for _, want := range []string{cc + "/.claude.json", cc + "/.credentials.json", cx + "/auth.json", xdg + "/gh"} {
+	for _, want := range []string{cc + "/.claude.json", cc + "/.credentials.json", cx + "/auth.json", gk + "/auth.json", gk + "/mcp_credentials.json", xdg + "/gh"} {
 		if !slices.Contains(read, want) {
 			t.Errorf("read-denied defaults missing %s: %v", want, read)
 		}
 	}
 	write := deniedPathStrings(DefaultDeniedWritePaths())
-	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", xdg + "/opencode/opencode.json", xdg + "/crush/crushrc", xdg + "/git/config"} {
+	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/crush/crushrc", xdg + "/git/config"} {
 		if !slices.Contains(write, want) {
 			t.Errorf("write-denied defaults missing %s: %v", want, write)
 		}

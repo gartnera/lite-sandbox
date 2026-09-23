@@ -36,17 +36,17 @@ It downloads the archive for this OS/arch, verifies it against the release's `ch
 lite-sandbox install
 ```
 
-With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), and [Crush](#crush)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`). Name agents to configure only those:
+With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), [Crush](#crush), and [Grok Build](#grok-build)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`, `grok`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`, `~/.grok`/`$GROK_HOME`). Name agents to configure only those:
 
 ```bash
-lite-sandbox install                  # autodetect claude / codex / opencode / crush
+lite-sandbox install                  # autodetect claude / codex / opencode / crush / grok
 lite-sandbox install codex            # configure only Codex
 lite-sandbox install claude opencode  # configure exactly these
 ```
 
 `install` also sets up lite-sandbox's own config (`lite-sandbox config path`). A **first-time** config is created with only `audit: true`, so the mode is the `allowlist` default and validation findings are logged for `lite-sandbox audit report`. An **existing** config is left alone. To start in a looser mode, pass `--mode denylist` (or `open`). `denylist` also enables the OS sandbox if `os_sandbox` was never set and bubblewrap (Linux) or sandbox-exec (macOS) passes a preflight check. See [Incremental adoption](adoption.md).
 
-The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude` and `codex`, which share lite-sandbox's PreToolUse hook protocol. opencode has no compatible hook protocol, and lite-sandbox's hook doesn't govern Crush's built-in tools, so `--with-tool-hook` does nothing for those two and `--bash-ast-hook-mode` skips them.
+The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude`, `codex`, and `grok`, which share lite-sandbox's PreToolUse hook protocol (for `grok`, `--with-tool-hook` is always on). opencode has no compatible hook protocol, and lite-sandbox's hook doesn't govern Crush's built-in tools, so `--with-tool-hook` does nothing for those two and `--bash-ast-hook-mode` skips them.
 
 ## Temporary setup: `lite-sandbox launch`
 
@@ -138,7 +138,7 @@ To let the sandbox tools be deferred like any other MCP server, pass `--always-l
 lite-sandbox install claude --always-load=false
 ```
 
-Codex works the same way. Newer Codex models defer MCP tools behind Codex's `tool_search` by default, so `install codex` sets `omit_tools_from = ["deferred"]` on its server table, which keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag does nothing for opencode and Crush, or in `--bash-ast-hook-mode` (which doesn't configure the MCP server).
+Codex works the same way. Newer Codex models defer MCP tools behind Codex's `tool_search` by default, so `install codex` sets `omit_tools_from = ["deferred"]` on its server table, which keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag does nothing for opencode, Crush, and Grok Build (which always reaches MCP tools through its `search_tool`/`use_tool` pair), or in `--bash-ast-hook-mode` (which doesn't configure the MCP server).
 
 Restart the agent after running the install command.
 
@@ -316,6 +316,76 @@ ALWAYS use the `mcp_lite-sandbox_bash` tool for running shell commands. The buil
 
 Restart Crush after making these changes.
 
+## Grok Build
+
+To configure [Grok Build](https://x.ai/cli) (xAI's `grok` CLI), run the install (autodetected, or named explicitly):
+
+```bash
+lite-sandbox install grok
+```
+
+This edits Grok's **user** config in `~/.grok` (honoring `$GROK_HOME`):
+
+1. Registers the MCP server under `[mcp_servers.lite-sandbox]` in `config.toml`. Grok names MCP tools `<server>__<tool>` and doesn't list them to the model directly: the model calls `use_tool` with `tool_name` `lite-sandbox__bash`.
+2. Adds two `[[permission.rules]]` to `config.toml`: one allows the sandbox's tools (`tool = "mcp"`, `pattern = "lite-sandbox__*"`), and one denies the built-in shell (`tool = "bash"`). The allow rule is required: a hook's `allow` doesn't skip Grok's approval prompt, and headless `grok -p` stops at a prompt it can't answer. The rules live in a marked managed block. If your `[permission]` section already defines `rules = [...]` inline, which `[[permission.rules]]` tables can't extend, the installer leaves the file alone and prints the rules for you to add by hand.
+3. Writes a `PreToolUse` hook to `hooks/lite-sandbox.json`. Hooks in `~/.grok/hooks` are always trusted, unlike project hooks. The hook redirects the built-in shell tools (`run_terminal_command`, `monitor`) to `lite-sandbox__bash`. It also confines Grok's file tools to the sandbox's paths: `read_file`, `grep`, and `list_dir` to the readable paths, `search_replace` and `write` to the writable paths. The same goes for the variants other toolsets use (`hashline_*`, `apply_patch`, and the opencode-style `read`/`edit`/`glob`) and for local image paths passed to `image_edit`, `image_to_video`, and `reference_to_video`, which Grok reads and uploads. Unlike Claude Code, **this is always on** (`--with-tool-hook` is implied). Grok treats `read_file`, `grep`, and `list_dir` as read-only and runs them anywhere on disk without a prompt, so the hook is the only thing confining them.
+4. Writes a usage directive to `rules/lite-sandbox.md`. Grok loads it in every project, whatever the folder trust.
+
+Re-running the install (including to switch modes) is idempotent. The MCP table is rewritten in place, the permission block is replaced, and the hook and rules files are owned outright. `--bash-ast-hook-mode` works too: the hook AST-checks `run_terminal_command` in place instead of redirecting it, the shell deny rule is dropped, and no MCP server or directive is configured. The file tools stay confined.
+
+Things to know about Grok's hook runner:
+
+- **It fails open.** A hook that crashes or times out doesn't block the call. The installer sets a 30-second timeout (Grok's default is 5) and adds the shell deny rule as a backstop that holds even when the hook doesn't answer.
+- **It truncates large inputs.** A tool input over 128 KiB reaches the hook as a clipped string with no usable path or command. For the tools it governs, the hook denies such a call instead of deferring (except in `open` mode) and tells the model to split it, e.g. a large `write` into a smaller write plus edits.
+- **It clips deny reasons to 256 characters** before the model sees them, so lite-sandbox sends Grok shorter denials than Claude Code gets, with the verdict and the fix first. The audit log keeps the full reason.
+- **It also loads Claude Code's config** by default: hooks and permissions from `~/.claude/settings.json`, MCP servers from `~/.claude.json`, and `~/.claude/CLAUDE.md`. A Claude Code install of lite-sandbox therefore also applies to Grok. The hook understands Grok's tool names whichever file registered it. If the two agents were installed in different modes, both hooks run and the first denial wins, and a default Claude Code install's `Bash` deny rule blocks Grok's shell too, even under `install grok --bash-ast-hook-mode`. Set `[compat.claude] hooks = false` (or `mcps`, `agents`) in `~/.grok/config.toml` to stop Grok reading them.
+
+Grok's own sandbox mode (`grok --sandbox workspace|read-only|strict`, Landlock on Linux and Seatbelt on macOS) is a separate, optional layer. It applies to the Grok process and everything it spawns, including `lite-sandbox serve-mcp` and the hook. The installer doesn't turn it on.
+
+### Manual Grok Build setup
+
+Add this to `~/.grok/config.toml` (replace the path with your built binary):
+
+```toml
+[mcp_servers.lite-sandbox]
+command = "/path/to/lite-sandbox"
+args = ["serve-mcp"]
+
+[[permission.rules]]
+action = "allow"
+tool = "mcp"
+pattern = "lite-sandbox__*"
+
+[[permission.rules]]
+action = "deny"
+tool = "bash"
+```
+
+Then create `~/.grok/hooks/lite-sandbox.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "run_terminal_command|run_terminal_cmd|bash|monitor|read_file|hashline_read|read|grep|hashline_grep|grep_files|list_dir|glob|search_replace|hashline_edit|edit|write|image_edit|image_to_video|reference_to_video|apply_patch",
+        "hooks": [
+          {"type": "command", "command": "/path/to/lite-sandbox hook", "timeout": 30}
+        ]
+      }
+    ]
+  }
+}
+```
+
+A plain `|`-list matcher is an exact match on each name in Grok, not a regex. Finally, add a directive to `~/.grok/rules/lite-sandbox.md`:
+
+```markdown
+For every shell command, run it with the `lite-sandbox__bash` MCP tool: call `use_tool` with `tool_name` "lite-sandbox__bash" and `tool_input` {"command": "<the command>"}. The built-in shell tools are blocked and will not run.
+```
+
+Restart Grok after making these changes; `/hooks` lists the loaded hook.
+
 ## Manual Claude Code setup
 
 ### 1. Add the MCP server
@@ -390,7 +460,7 @@ ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The buil
 
 ## Built-in tool boundaries
 
-The bash tool confines shell commands to the sandbox's readable and writable paths, but Claude Code's **built-in tools** bypass the sandbox. The built-in `Bash` tool runs unvalidated shell, and `Read`/`Write`/`Edit`/`NotebookEdit` (plus the `Grep`/`Glob` path argument) can read and write anywhere, so an agent could read `~/.ssh/id_rsa` or write outside the project through them. The optional tool hook closes that gap.
+The bash tool confines shell commands to the sandbox's readable and writable paths, but Claude Code's **built-in tools** bypass the sandbox. (This section is about Claude Code. Codex and Grok Build get the same hook; see [OpenAI Codex CLI](#openai-codex-cli) and [Grok Build](#grok-build) for their tool names.) The built-in `Bash` tool runs unvalidated shell, and `Read`/`Write`/`Edit`/`NotebookEdit` (plus the `Grep`/`Glob` path argument) can read and write anywhere, so an agent could read `~/.ssh/id_rsa` or write outside the project through them. The optional tool hook closes that gap.
 
 Enable it at install time:
 
