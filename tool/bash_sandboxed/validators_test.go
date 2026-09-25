@@ -361,21 +361,49 @@ func TestValidate_BlockedTarFlags(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"tar extract", "tar -xf archive.tar", "tar flag '-x' is not allowed"},
 		{"tar create", "tar -cf archive.tar .", "tar flag '-c' is not allowed"},
 		{"tar append", "tar -rf archive.tar file", "tar flag '-r' is not allowed"},
 		{"tar update", "tar -uf archive.tar file", "tar flag '-u' is not allowed"},
+		{"tar catenate", "tar -Af archive.tar other.tar", "tar flag '-A' is not allowed"},
 		{"tar delete", "tar --delete -f archive.tar file", `tar flag "--delete" is not allowed`},
-		{"tar extract long", "tar --extract -f archive.tar", `tar flag "--extract" is not allowed`},
-		{"tar get long", "tar --get -f archive.tar", `tar flag "--get" is not allowed`},
 		{"tar create long", "tar --create -f archive.tar .", `tar flag "--create" is not allowed`},
+		{"tar create abbreviated", "tar --cre -f archive.tar .", `tar flag "--cre" is not allowed`},
 		{"tar append long", "tar --append -f archive.tar file", `tar flag "--append" is not allowed`},
 		{"tar update long", "tar --update -f archive.tar file", `tar flag "--update" is not allowed`},
-		{"tar extract combined", "tar -xzf archive.tar.gz", "tar flag '-x' is not allowed"},
-		{"tar old style extract", "tar xf archive.tar", "tar flag 'x' is not allowed"},
 		{"tar old style create", "tar czf archive.tar.gz .", "tar flag 'c' is not allowed"},
-		{"tar no mode flag", "tar -f archive.tar", "tar is only allowed in list mode"},
-		{"tar verbose only", "tar -v", "tar is only allowed in list mode"},
+		{"tar no mode flag", "tar -f archive.tar", "tar is only allowed in list (-t/--list) or extract"},
+		{"tar verbose only", "tar -v", "tar is only allowed in list (-t/--list) or extract"},
+		// Options that run programs, in list mode as well as extract.
+		{"tar compress program short", "tar -tf archive.tar -I prog", "tar flag '-I' is not allowed"},
+		{"tar compress program long", "tar -tf archive.tar --use-compress-program=prog", `tar flag "--use-compress-program=prog" is not allowed`},
+		{"tar compress program abbreviated", "tar -tf archive.tar --use-comp=prog", `tar flag "--use-comp=prog" is not allowed`},
+		{"tar checkpoint action", "tar -tf archive.tar --checkpoint-action=exec=prog", `tar flag "--checkpoint-action=exec=prog" is not allowed`},
+		{"tar to-command", "tar -xf archive.tar --to-command=prog", `tar flag "--to-command=prog" is not allowed`},
+		{"tar to-command abbreviated", "tar -xf archive.tar --to-com=prog", `tar flag "--to-com=prog" is not allowed`},
+		{"tar info script", "tar -xf archive.tar -F script", "tar flag '-F' is not allowed"},
+		{"tar new volume script", "tar -xf archive.tar --new-volume-script=script", "is not allowed"},
+		{"tar rsh command", "tar -tf host:archive.tar --rsh-command=prog", "is not allowed"},
+		{"tar multi volume", "tar -xMf archive.tar", "tar flag '-M' is not allowed"},
+		{"tar index file", "tar -xvf archive.tar --index-file=/tmp/out", "is not allowed"},
+		// Options that let entries escape the extraction directory.
+		{"tar absolute names", "tar -xPf archive.tar", "tar flag '-P' is not allowed"},
+		{"tar absolute names long", "tar -xf archive.tar --absolute-names", "is not allowed"},
+		{"tar absolute paths bsdtar", "tar -xf archive.tar --absolute-paths", "is not allowed"},
+		{"tar overwrite follows symlinks", "tar -xf archive.tar --overwrite", "is not allowed"},
+		{"tar keep directory symlink", "tar -xf archive.tar --keep-directory-symlink", "is not allowed"},
+		{"tar transform", "tar -xf archive.tar --transform=s,^,/etc/,", "is not allowed"},
+		{"tar bsdtar substitution", "tar -xf archive.tar -s /^/etc/", "tar flag '-s' is not allowed"},
+		{"tar files from", "tar -xf archive.tar -T list.txt", "tar flag '-T' is not allowed"},
+		{"tar files from long", "tar -xf archive.tar --files-from=list.txt", "is not allowed"},
+		{"tar one top level", "tar -xf archive.tar --one-top-level=/etc", "is not allowed"},
+		{"tar incremental", "tar -xGf archive.tar", "tar flag '-G' is not allowed"},
+		// Options GNU tar and bsdtar parse differently.
+		{"tar ambiguous L", "tar -xLC/etc -f archive.tar", "tar flag '-L' is not allowed"},
+		{"tar ambiguous H", "tar -xHf archive.tar", "tar flag '-H' is not allowed"},
+		{"tar option-looking value", "tar -xf archive.tar -C -foo", "looks like an option"},
+		{"tar remote archive", "tar -tf host:archive.tar", "remote archive"},
+		{"tar remote archive user", "tar -xf user@host:/archive.tar", "remote archive"},
+		{"tar multiple -C", "tar -xf archive.tar -C a -C b", "at most one -C"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -400,9 +428,9 @@ func TestValidate_BlockedUnzipFlags(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"unzip extract default", "unzip archive.zip", "unzip is only allowed with"},
-		{"unzip with dir", "unzip -d /tmp archive.zip", "unzip is only allowed with"},
-		{"unzip overwrite", "unzip -o archive.zip", "unzip is only allowed with"},
+		{"unzip parent dirs", "unzip -: archive.zip", "unzip flag '-:' is not allowed"},
+		{"unzip parent dirs combined", "unzip -o: archive.zip", "unzip flag '-:' is not allowed"},
+		{"unzip timestamp archive", "unzip -T archive.zip", "unzip flag '-T' is not allowed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

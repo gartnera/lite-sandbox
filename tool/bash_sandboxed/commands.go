@@ -163,9 +163,12 @@ var allowedCommands = map[string]bool{
 	"bzcat": true,
 	"xzcat": true,
 
-	// Archive inspection (read-only, with arg validators for tar/unzip/ar)
+	// Archive inspection, extraction, and zip creation (arg validators for
+	// tar/unzip/zip/ar; what tar/unzip extract into and the archive zip writes
+	// are write-checked, see validators_archive.go)
 	"tar":     true,
 	"unzip":   true,
+	"zip":     true,
 	"zipinfo": true,
 	"ar":      true,
 
@@ -289,6 +292,7 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"find":   validateFindArgs,
 	"tar":    validateTarArgs,
 	"unzip":  validateUnzipArgs,
+	"zip":    validateZipArgs,
 	"ar":     validateArArgs,
 	"rm":     validateRmArgs,
 	"sed":    validateSedArgs,

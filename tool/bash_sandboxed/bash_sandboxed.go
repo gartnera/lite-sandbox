@@ -1017,6 +1017,13 @@ var blockedEnvVars = map[string]string{
 	"ENV":             "auto-sourced script injection",
 	"CDPATH":          "unexpected directory resolution",
 	"PROMPT_COMMAND":  "arbitrary command execution",
+	// Option injection into the archive tools, past their argument validators.
+	"TAR_OPTIONS": "injects tar options",
+	"TAPE":        "selects tar's default archive, which may be remote",
+	"UNZIP":       "injects unzip options",
+	"UNZIPOPT":    "injects unzip options",
+	"ZIPOPT":      "injects zip options",
+	"ZIP":         "injects zip options",
 }
 
 // validateAssigns checks that none of the assignments target a blocked environment variable.
@@ -1025,9 +1032,18 @@ func validateAssigns(assigns []*syntax.Assign) error {
 		if a.Name == nil {
 			continue
 		}
-		if reason, blocked := blockedEnvVars[a.Name.Value]; blocked {
-			return fmt.Errorf("setting %s is not allowed: %s", a.Name.Value, reason)
+		if err := blockedEnvVarError(a.Name.Value); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// blockedEnvVarError returns the error for assigning a blocked environment
+// variable, or nil when name may be set.
+func blockedEnvVarError(name string) error {
+	if reason, blocked := blockedEnvVars[name]; blocked {
+		return fmt.Errorf("setting %s is not allowed: %s", name, reason)
 	}
 	return nil
 }

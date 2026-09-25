@@ -33,7 +33,7 @@ const (
 	// resolves outside the readable/writable boundary, or inside .git.
 	rulePathBoundary rule = "path_boundary"
 	// ruleArgValidator: a per-command argument validator rejected the
-	// invocation (find -delete, tar -x, git push, publish flags, ...).
+	// invocation (find -delete, tar -c, git push, publish flags, ...).
 	ruleArgValidator rule = "argument_validator"
 	// ruleStructural: a construct the sandbox does not run at all — blocked
 	// redirection forms, coprocesses, protected environment assignments, shell
