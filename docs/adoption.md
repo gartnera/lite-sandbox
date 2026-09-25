@@ -25,7 +25,7 @@ os_sandbox: true    # bubblewrap / sandbox-exec worker
 | Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; runtimes opt-in |
 | Denied commands (`commands` entries with `allow: false`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
 | Path arguments and redirections outside the project | run | blocked | blocked |
-| `git push`, `pnpm publish`, `find -delete`, `tar -x`, … | run | blocked | blocked |
+| `git push`, `pnpm publish`, `find -delete`, `tar -c`, … | run | blocked | blocked |
 | Network tools (`curl`, `wget`, `nc`) | run | run | blocked |
 | OS sandbox writes | off | `$HOME` writable, deny lists masked | project dir + configured paths only |
 | Assumes | evaluating | a cooperative agent | untrusted input |
@@ -45,7 +45,7 @@ without configuration. It still enforces scope and protects shared state:
   rejected, including after variable expansion.
 - The per-command validators still apply: `git push` (unless
   `git.remote_write`), `pnpm publish`, `cargo publish`, `find -delete`,
-  `tar -x`, `find -exec`, and the other blocked flags.
+  `tar -c`, `find -exec`, and the other blocked flags.
 - The [command deny list](configuration.md#denied-commands) still applies and
   overrides every allowed command. Its built-in entries stop the agent from
   running the sandbox's own `config`/`install`/`update`/`hook` subcommands to

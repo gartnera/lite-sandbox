@@ -75,13 +75,24 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 			return true
 		}
 		cmdName := callExpr.Args[0].Lit()
-		if err := validateCommandArgPaths(cmdName, wordLits(callExpr.Args), workDir, sets.forCommand(cmdName)); err != nil {
+		if err := validateCommandPaths(cmdName, wordLits(callExpr.Args), workDir, sets); err != nil {
 			validationErr = err
 			return false
 		}
 		return true
 	})
 	return validationErr
+}
+
+// validateCommandPaths checks every path a single command touches: its
+// path-like arguments (against the read or write set, per writeCommands) and,
+// for tar, unzip, and zip, what they write (against the write set, see
+// validateArchiveWrites).
+func validateCommandPaths(cmdName string, args []string, workDir string, sets resolvedPathSets) error {
+	if err := validateCommandArgPaths(cmdName, args, workDir, sets.forCommand(cmdName)); err != nil {
+		return err
+	}
+	return validateArchiveWrites(cmdName, args, workDir, sets.write)
 }
 
 // validateCommandArgPaths checks the path-like arguments of a single command
@@ -598,8 +609,7 @@ func validateExpandedPaths(args []string, workDir string, sets resolvedPathSets)
 	if len(args) == 0 {
 		return nil
 	}
-	cmdName := args[0]
-	return validateCommandArgPaths(cmdName, args, workDir, sets.forCommand(cmdName))
+	return validateCommandPaths(args[0], args, workDir, sets)
 }
 
 // validateOpenPath checks a file path before the interpreter opens it (for

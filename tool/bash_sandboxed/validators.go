@@ -488,16 +488,27 @@ func envCommandIndex(lits, assignLits []string) int {
 // whitelist. env execs COMMAND as a child that never re-enters the sandbox
 // interpreter, so without this an otherwise-blocked command (curl, sh -c, ...)
 // would run unvalidated. With no COMMAND, env merely prints the environment,
-// which is safe.
+// which is safe. Its NAME=VALUE operands are held to the same blocked
+// variables as a shell assignment (FOO=bar cmd), which they are equivalent to.
 func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 	// wordLeadingLits handles assignment values that are non-literal expansions
 	// (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
-	idx := envCommandIndex(wordLits(args), wordLeadingLits(args))
+	assignLits := wordLeadingLits(args)
+	idx := envCommandIndex(wordLits(args), assignLits)
 	if idx == wrapperRejected {
 		return errEnvSplitString()
 	}
 	if idx < 0 {
 		return nil
+	}
+	for _, lit := range assignLits[1:idx] {
+		if !isEnvAssignment(lit) {
+			continue
+		}
+		name, _, _ := strings.Cut(lit, "=")
+		if err := blockedEnvVarError(name); err != nil {
+			return err
+		}
 	}
 	return validateSubCommand(s, args[idx:])
 }
@@ -640,104 +651,6 @@ func sliceWrappedCommand(args []string, idx int) []string {
 		return nil
 	}
 	return args[idx:]
-}
-
-// blockedTarOps lists tar operation flags that are not read-only.
-var blockedTarOps = map[byte]string{
-	'x': "extracts files",
-	'c': "creates archives",
-	'r': "appends to archives",
-	'u': "updates archives",
-}
-
-// validateTarArgs ensures tar is invoked in list mode only (-t/--list).
-// Blocks extract (-x), create (-c), append (-r), update (-u), and --delete.
-func validateTarArgs(_ *Sandbox, args []*syntax.Word) error {
-	hasListMode := false
-	for _, arg := range args[1:] { // skip command name
-		lit := arg.Lit()
-		if lit == "" {
-			continue
-		}
-		// Check long options
-		if lit == "--list" {
-			hasListMode = true
-			continue
-		}
-		if lit == "--extract" || lit == "--get" {
-			return fmt.Errorf("tar flag %q is not allowed: extracts files", lit)
-		}
-		if lit == "--create" {
-			return fmt.Errorf("tar flag %q is not allowed: creates archives", lit)
-		}
-		if lit == "--append" {
-			return fmt.Errorf("tar flag %q is not allowed: appends to archives", lit)
-		}
-		if lit == "--update" {
-			return fmt.Errorf("tar flag %q is not allowed: updates archives", lit)
-		}
-		if lit == "--delete" {
-			return fmt.Errorf("tar flag %q is not allowed: deletes from archives", lit)
-		}
-		// Check short options: could be combined like -tzf or standalone like -t
-		if len(lit) > 0 && lit[0] == '-' && !strings.HasPrefix(lit, "--") {
-			flags := lit[1:]
-			for i := 0; i < len(flags); i++ {
-				if reason, blocked := blockedTarOps[flags[i]]; blocked {
-					return fmt.Errorf("tar flag '-%c' is not allowed: %s", flags[i], reason)
-				}
-				if flags[i] == 't' {
-					hasListMode = true
-				}
-			}
-			continue
-		}
-		// Handle old-style tar flags without leading dash (e.g., "tf", "tzf")
-		// These are common: tar tf archive.tar, tar tzf archive.tar.gz
-		if len(lit) > 0 && lit[0] != '-' && arg == args[1] {
-			// First non-command argument without dash — could be old-style flags
-			for i := 0; i < len(lit); i++ {
-				if reason, blocked := blockedTarOps[lit[i]]; blocked {
-					return fmt.Errorf("tar flag '%c' is not allowed: %s", lit[i], reason)
-				}
-				if lit[i] == 't' {
-					hasListMode = true
-				}
-			}
-		}
-	}
-	if !hasListMode {
-		return fmt.Errorf("tar is only allowed in list mode (-t/--list)")
-	}
-	return nil
-}
-
-// validateUnzipArgs ensures unzip is invoked in list/test mode only.
-// Requires -l (list), -Z (zipinfo mode), or -t (test integrity).
-func validateUnzipArgs(_ *Sandbox, args []*syntax.Word) error {
-	hasReadOnlyFlag := false
-	for _, arg := range args[1:] {
-		lit := arg.Lit()
-		if lit == "" {
-			continue
-		}
-		if lit == "-l" || lit == "-Z" || lit == "-t" {
-			hasReadOnlyFlag = true
-		}
-		// Check for combined flags like -lv
-		if len(lit) > 1 && lit[0] == '-' && !strings.HasPrefix(lit, "--") {
-			flags := lit[1:]
-			for i := 0; i < len(flags); i++ {
-				if flags[i] == 'l' || flags[i] == 'Z' || flags[i] == 't' {
-					hasReadOnlyFlag = true
-				}
-			}
-		}
-	}
-	if !hasReadOnlyFlag {
-		return fmt.Errorf("unzip is only allowed with -l (list), -Z (zipinfo), or -t (test) flags")
-	}
-	return nil
 }
 
 // blockedArOps lists ar operation flags that are not read-only.
