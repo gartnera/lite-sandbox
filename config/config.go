@@ -571,20 +571,8 @@ func Load() (*Config, error) {
 		}
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	if err := cfg.validateModes(); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	if err := cfg.validatePaths(); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	if err := cfg.validateCommands(); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-	if err := cfg.validateProfiles(); err != nil {
+	cfg, err := Parse(data)
+	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	// The deprecated runtimes section is migrated on load and the result
@@ -594,13 +582,13 @@ func Load() (*Config, error) {
 	// the next load.
 	if cfg.UsesDeprecatedRuntimes() {
 		n := cfg.MigrateRuntimes()
-		if err := writeConfigFile(p, &cfg); err != nil {
+		if err := writeConfigFile(p, cfg); err != nil {
 			slog.Warn("migrated the deprecated runtimes section to profiles, but could not write it back", "path", p, "error", err)
 		} else {
 			slog.Info("migrated the deprecated runtimes section to profiles", "path", p, "entries", n)
 		}
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // LoadForDirectory loads the config and resolves it for dir, applying any
@@ -660,6 +648,33 @@ func writeConfigFile(p string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
+	return writeFileAtomic(p, data)
+}
+
+// SaveRaw replaces the config file with data exactly as given — comments and
+// layout included — creating the directory if needed. Unlike Save it does not
+// re-encode a Config, so it is for callers holding text a person wrote (`config
+// edit`); they must have checked it with ParseStrict first. The write is
+// atomic, like the runtimes migration's, so the MCP server's watcher never
+// reloads a half-written file.
+func SaveRaw(data []byte) error {
+	p, err := Path()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+	if err := writeFileAtomic(p, data); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic replaces the file at p with data via a temp file renamed
+// over it. A symlinked file is written through to its target, so a dotfile
+// manager's link stays a link. An existing file keeps its mode.
+func writeFileAtomic(p string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		p = resolved
 	}

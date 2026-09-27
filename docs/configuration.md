@@ -199,7 +199,19 @@ in `allowlist` mode, also admits the command past the whitelist.
 ```bash
 lite-sandbox config path    # print the config file path
 lite-sandbox config show    # show the current configuration
+lite-sandbox config edit    # open the config file in $VISUAL / $EDITOR (default vi)
 ```
+
+`config edit` works on a temporary copy and writes it back — verbatim, comments
+included — only if it is a valid config. On top of the checks every load applies
+(an unknown mode, profile, or profile option; a malformed `paths` or `commands`
+entry), it rejects keys the config does not define, which are almost always typos
+(`os_sandbx`, `git.remote_wirte`), a second YAML document, and overrides that could
+never apply (no `path`, two overrides for the same path, nested `overrides`). A
+rejected edit reopens with the error at the top of the file; decline and the config
+is left untouched, with your edit kept in the temporary file it names. It also
+refuses to overwrite the config if something else changed it while the editor was
+open.
 
 Each section has its own subcommand, shown with the section below
 ([`commands`](#commands), [`paths`](#paths), [`git`](#git-support), …).
