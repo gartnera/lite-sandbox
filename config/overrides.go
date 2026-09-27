@@ -10,7 +10,7 @@ import (
 
 // DirectoryOverride changes parts of the configuration for commands whose
 // working directory is at (or under) Path. It embeds a full Config, so an
-// override can set any section — aws, docker, runtimes, readable/writable paths,
+// override can set any section — aws, docker, profiles, readable/writable paths,
 // os_sandbox, and so on — not just one. Path supports ~ expansion. When a
 // directory matches more than one override the most specific (longest) Path wins.
 // A nested Overrides list on an override is ignored.

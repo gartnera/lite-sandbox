@@ -488,8 +488,8 @@ func TestPythonUnsupportedFeaturesExplainThemselves(t *testing.T) {
 			// see the way out will reach for pip next.
 			for _, wantHatch := range []string{
 				"commands allow python3",
-				"runtimes uv enable",
-				"runtimes montypython disable",
+				"profiles enable uv",
+				"profiles disable montypython",
 			} {
 				if !strings.Contains(combined, wantHatch) {
 					t.Errorf("message does not offer the opt-out %q:\n%s", wantHatch, combined)
@@ -592,10 +592,8 @@ func TestPythonRuntimeToggle(t *testing.T) {
 		}
 	})
 
-	t.Run("enabled when other runtimes are configured", func(t *testing.T) {
-		s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-			Go: &config.GoConfig{Enabled: boolPtr(true)},
-		})
+	t.Run("enabled when other profiles are configured", func(t *testing.T) {
+		s := newTestSandboxWithProfiles("go")
 		defer s.Close()
 		if out, err := runPython(t, s, dir, `python3 -c "print('on')"`); err != nil {
 			t.Fatalf("python should stay enabled: %v (output %q)", err, out)
@@ -603,25 +601,21 @@ func TestPythonRuntimeToggle(t *testing.T) {
 	})
 
 	t.Run("disabled by config", func(t *testing.T) {
-		s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-			MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(false)},
-		})
+		s := newTestSandboxWithConfig(&config.Config{Profiles: []config.ProfileEntry{{Name: "montypython", Enabled: boolPtr(false)}}})
 		defer s.Close()
 		for _, cmd := range []string{`python3 -c "print(1)"`, `python -c "print(1)"`} {
 			_, err := runPython(t, s, dir, cmd)
 			if err == nil {
 				t.Fatalf("%s should be rejected when the runtime is disabled", cmd)
 			}
-			if !strings.Contains(err.Error(), "runtimes.montypython.enabled is disabled") {
+			if !strings.Contains(err.Error(), "the montypython profile is not enabled") {
 				t.Fatalf("expected the config key in the error, got %v", err)
 			}
 		}
 	})
 
 	t.Run("explicitly enabled", func(t *testing.T) {
-		s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-			MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(true)},
-		})
+		s := newTestSandboxWithConfig(&config.Config{Profiles: []config.ProfileEntry{{Name: "montypython", Enabled: boolPtr(true)}}})
 		defer s.Close()
 		if out, err := runPython(t, s, dir, `python3 -c "print('on')"`); err != nil {
 			t.Fatalf("unexpected error: %v (output %q)", err, out)
@@ -632,9 +626,7 @@ func TestPythonRuntimeToggle(t *testing.T) {
 // TestPythonDeniedInsideWrappers checks the disabled switch is not escapable
 // through the wrappers that run other commands.
 func TestPythonDeniedInsideWrappers(t *testing.T) {
-	s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-		MontyPython: &config.MontyPythonConfig{Enabled: boolPtr(false)},
-	})
+	s := newTestSandboxWithConfig(&config.Config{Profiles: []config.ProfileEntry{{Name: "montypython", Enabled: boolPtr(false)}}})
 	defer s.Close()
 	dir := t.TempDir()
 
@@ -782,7 +774,7 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 	t.Run("a bare extra_commands entry runs the real interpreter", func(t *testing.T) {
 		s := NewSandbox()
 		defer s.Close()
-		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
+		s.updateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
 		out, err := runPython(t, s, dir, realOnly)
 		if err != nil {
 			t.Fatalf("unexpected error: %v (output %q)", err, out)
@@ -799,7 +791,7 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 		// unwrapped.
 		s := NewSandbox()
 		defer s.Close()
-		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
+		s.updateConfig(&config.Config{ExtraCommands: []string{"python3"}}, dir)
 		out, err := runPython(t, s, dir, "echo x | xargs "+realOnly)
 		if err != nil {
 			t.Fatalf("unexpected error: %v (output %q)", err, out)
@@ -814,7 +806,7 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 		// checked against that restriction.
 		s := NewSandbox()
 		defer s.Close()
-		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
+		s.updateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
 		if _, err := runPython(t, s, dir, "echo x | xargs python3 -c \"print(1)\""); err == nil {
 			t.Fatal("a restricted entry should not let a wrapper reach the host interpreter")
 		}
@@ -823,7 +815,7 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 	t.Run("a subcommand-restricted entry only covers matching invocations", func(t *testing.T) {
 		s := NewSandbox()
 		defer s.Close()
-		s.UpdateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
+		s.updateConfig(&config.Config{ExtraCommands: []string{"python3 real.py"}}, dir)
 
 		if err := os.WriteFile(filepath.Join(dir, "real.py"),
 			[]byte("import sys\nprint('real' if hasattr(sys, 'executable') else 'monty')\n"), 0o644); err != nil {
@@ -1338,13 +1330,11 @@ func TestPythonHeredoc(t *testing.T) {
 	})
 }
 
-// TestPythonInlineOnly covers runtimes.montypython.inline_only: monty keeps
+// TestPythonInlineOnly covers the montypython profile's inline_only option: monty keeps
 // serving the code an agent writes inline, and stops standing in for CPython
 // on a project's own .py files, which it may not be able to run faithfully.
 func TestPythonInlineOnly(t *testing.T) {
-	s := newTestSandboxWithRuntimesConfig(&config.RuntimesConfig{
-		MontyPython: &config.MontyPythonConfig{InlineOnly: boolPtr(true)},
-	})
+	s := newTestSandboxWithConfig(&config.Config{Profiles: []config.ProfileEntry{{Name: "montypython", Options: map[string]bool{"inline_only": true}}}})
 	defer s.Close()
 
 	dir := t.TempDir()

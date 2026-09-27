@@ -218,7 +218,7 @@ func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 	cwd := t.TempDir()
 	// "bash" as a bare extra command routes through the executeRaw path, which
 	// runs the background command in its own process group.
-	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
 
 	pidFile := filepath.Join(cwd, "child.pid")
 	// Fork a long-lived grandchild, record its pid, then wait so the command
@@ -279,7 +279,7 @@ func TestCloseShutsDownBackgroundProcesses(t *testing.T) {
 	}
 	s := NewSandbox()
 	cwd := t.TempDir()
-	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
 
 	pidFile := filepath.Join(cwd, "child.pid")
 	command := "bash -c 'sleep 300 & echo $! > " + pidFile + "; wait'"
@@ -352,7 +352,7 @@ func TestBackgroundKillIsGraceful(t *testing.T) {
 	}
 	s := NewSandbox()
 	cwd := t.TempDir()
-	s.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
+	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
 
 	marker := filepath.Join(cwd, "termed")
 	ready := filepath.Join(cwd, "ready")

@@ -489,7 +489,7 @@ func TestExecuteSource(t *testing.T) {
 func TestValidateCommand_ScriptWithSource(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
@@ -1004,7 +1004,7 @@ func TestExecuteScript_BareExtraCommandSkipsContentValidation(t *testing.T) {
 	os.WriteFile(scriptPath, []byte("#!/bin/bash\necho wrapped-$1\n"), 0755)
 
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"./wrapper.sh"},
 	}, dir)
 
@@ -1042,7 +1042,7 @@ func TestExecuteScript_BareExtraCommandBypassesBlockedBody(t *testing.T) {
 	os.WriteFile(scriptPath, []byte(body), 0755)
 
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"./wrapper.sh"},
 	}, dir)
 
@@ -1071,7 +1071,7 @@ func TestExecuteBash_BareExtraCommandScriptBypassesBlockedBody(t *testing.T) {
 	os.WriteFile(scriptPath, []byte(body), 0755)
 
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"./wrapper.sh"},
 	}, dir)
 
@@ -1105,7 +1105,7 @@ func TestExecuteScript_NonBareExtraCommandStillValidatesBody(t *testing.T) {
 	os.WriteFile(scriptPath, []byte("#!/bin/bash\ndocker run foo\n"), 0755)
 
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"./wrapper.sh build"},
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),

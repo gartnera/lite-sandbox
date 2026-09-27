@@ -204,8 +204,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 }
 
 // sandboxPaths computes the read- and write-allowed path lists for a command
-// executed from cwd, combining the working directory, detected runtime paths,
-// user-configured paths, the Claude Code scratchpad root (claudeScratchpadPath),
+// executed from cwd, combining the working directory, the configured paths
+// (profiles' included), the Claude Code scratchpad root (claudeScratchpadPath),
 // the per-user system temp dir (systemTempPath), and any git worktree parent.
 // Writable paths are also
 // readable, so they are folded into the read set. This is the single source of
@@ -220,8 +220,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 // them — Deno especially, since scoping --allow-write to an internal path would
 // hand executed code a trivial sandbox workaround.
 func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, writePaths []string) {
-	readPaths = append([]string{cwd}, sandbox.RuntimeReadPaths()...)
-	readPaths = append(readPaths, sandbox.ConfigReadPaths()...)
+	readPaths = append([]string{cwd}, sandbox.ConfigReadPaths()...)
 	readPaths = append(readPaths, sandbox.ConfigWritePaths()...)
 	writePaths = append([]string{cwd}, sandbox.ConfigWritePaths()...)
 	if scratch := claudeScratchpadPath(); scratch != "" {
@@ -356,7 +355,7 @@ func runServe() error {
 		slog.Warn("failed to load config, using defaults", "error", err)
 	} else {
 		sandbox.UpdateConfig(cfg, cwd)
-		slog.Info("loaded config", "allowed_commands", cfg.ExtraCommandList(), "unsandboxed_commands", cfg.UnsandboxedCommandList(), "denied_commands", cfg.EffectiveDeniedCommands())
+		slog.Info("loaded config", "profiles", profileNames(cfg), "allowed_commands", cfg.ExtraCommandList(), "unsandboxed_commands", cfg.UnsandboxedCommandList(), "denied_commands", cfg.EffectiveDeniedCommands())
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -394,11 +393,12 @@ func runServe() error {
 
 	go func() {
 		err := config.Watch(ctx, func(newCfg *config.Config) {
-			// Watch hands back the raw reloaded config; resolve it for cwd once so
-			// the sandbox and IMDS below both see the effective config.
-			newCfg = newCfg.ForDirectory(cwd)
+			// Watch hands back the raw reloaded config; resolve it for cwd and
+			// merge it into its one paths and commands lists once, so the sandbox
+			// and IMDS below both see the effective config.
+			newCfg = newCfg.ForDirectory(cwd).Effective()
 			sandbox.UpdateConfig(newCfg, cwd)
-			slog.Info("reloaded config", "allowed_commands", newCfg.ExtraCommandList(), "unsandboxed_commands", newCfg.UnsandboxedCommandList(), "denied_commands", newCfg.EffectiveDeniedCommands())
+			slog.Info("reloaded config", "profiles", profileNames(newCfg), "allowed_commands", newCfg.ExtraCommandList(), "unsandboxed_commands", newCfg.UnsandboxedCommandList(), "denied_commands", newCfg.EffectiveDeniedCommands())
 
 			// Start, stop, or restart the IMDS server to match the new AWS settings.
 			if err := imdsLC.apply(newCfg.AWS); err != nil {
@@ -412,4 +412,13 @@ func runServe() error {
 
 	s := newMCPServer(sandbox)
 	return server.ServeStdio(s)
+}
+
+// profileNames lists the enabled profiles, for the config log lines.
+func profileNames(cfg *config.Config) []string {
+	var out []string
+	for _, p := range cfg.EnabledProfiles() {
+		out = append(out, p.Name)
+	}
+	return out
 }

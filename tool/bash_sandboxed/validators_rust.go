@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -45,8 +44,9 @@ var cargoInstallValueFlags = map[string]bool{
 	"-j":           true,
 }
 
-// validateCargoArgs validates cargo commands according to the runtime config.
-func validateCargoArgs(args []*syntax.Word, rustCfg *config.RustConfig) error {
+// validateCargoArgs validates cargo commands. publishAllowed reports whether
+// the config allows `cargo publish`.
+func validateCargoArgs(args []*syntax.Word, publishAllowed bool) error {
 	subcommand, _, err := findSubcommand("cargo", args, cargoGlobalValueFlags)
 	if err != nil {
 		return err
@@ -58,7 +58,7 @@ func validateCargoArgs(args []*syntax.Word, rustCfg *config.RustConfig) error {
 
 	// Check if publish is explicitly blocked
 	if subcommand == "publish" {
-		return publishGate("cargo", "runtimes.rust.publish", rustCfg.RustPublish())
+		return publishGate("cargo", publishAllowed)
 	}
 
 	// Check for other blocked subcommands

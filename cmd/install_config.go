@@ -149,7 +149,7 @@ func modeSummary(m config.Mode) string {
 	case config.ModeDenylist:
 		return "any program may run; paths stay inside the project, git push/publish stay blocked"
 	default:
-		return "only whitelisted commands run; runtimes are opt-in"
+		return "only whitelisted commands run; toolchain profiles are opt-in"
 	}
 }
 

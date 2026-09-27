@@ -36,8 +36,8 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 			if err := configCmdRun(t, gitSetCmd, "remote_write", "true"); err != nil {
 				t.Fatalf("git set: %v", err)
 			}
-			if err := configCmdRun(t, goRuntimeEnableCmd); err != nil {
-				t.Fatalf("runtimes go enable: %v", err)
+			if err := configCmdRun(t, configProfilesEnableCmd, "go"); err != nil {
+				t.Fatalf("profiles enable go: %v", err)
 			}
 			if err := configCmdRun(t, configLocalBinaryExecutionEnableCmd); err != nil {
 				t.Fatalf("local-binary-execution enable: %v", err)
@@ -57,7 +57,7 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 	}
 
 	// Nothing landed in the base config.
-	if cfg.Git != nil || cfg.Runtimes != nil || cfg.LocalBinaryExecution != nil ||
+	if cfg.Git != nil || cfg.Profiles != nil || cfg.LocalBinaryExecution != nil ||
 		cfg.RejectRedundantCd != nil || cfg.Audit != nil {
 		t.Fatalf("base config changed: %+v", cfg)
 	}
@@ -71,8 +71,8 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 	if !scoped.Git.GitRemoteWrite() {
 		t.Error("git.remote_write should be on for the directory")
 	}
-	if !scoped.Runtimes.Go.GoEnabled() {
-		t.Error("runtimes.go should be on for the directory")
+	if !scoped.ProfileEnabled("go") {
+		t.Error("the go profile should be on for the directory")
 	}
 	if !scoped.LocalBinaryExecution.IsEnabled() {
 		t.Error("local_binary_execution should be on for the directory")
@@ -86,7 +86,7 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 
 	// Elsewhere the defaults still apply.
 	other := cfg.ForDirectory("/work/other")
-	if other.Git.GitRemoteWrite() || other.Runtimes != nil || other.AuditEnabled() {
+	if other.Git.GitRemoteWrite() || other.ProfileEnabled("go") || other.AuditEnabled() {
 		t.Errorf("override leaked outside %s: %+v", dir, other)
 	}
 }

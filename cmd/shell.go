@@ -67,7 +67,7 @@ func runShell() error {
 
 	// Pin allowed paths to the initial working directory so cd can't escape the sandbox.
 	startDir := workDir
-	readPaths := append([]string{startDir}, sandbox.RuntimeReadPaths()...)
+	readPaths := append([]string{startDir}, sandbox.ConfigReadPaths()...)
 	writePaths := []string{startDir}
 
 	// Start docker proxy if docker is enabled and usable, validating bind mounts

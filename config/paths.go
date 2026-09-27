@@ -35,6 +35,11 @@ type PathEntry struct {
 	Read     *bool  `yaml:"read,omitempty"`
 	Write    *bool  `yaml:"write,omitempty"`
 	Internal bool   `yaml:"internal,omitempty"`
+	// Profile names the profile an entry was expanded from (see
+	// Config.Effective); it is never read from or written to the file. A
+	// profile's grant widens the boundary like any other, but never lifts a
+	// built-in denial: only a grant the user wrote does that.
+	Profile string `yaml:"-"`
 }
 
 // GrantsRead reports whether the entry explicitly grants read access
@@ -150,30 +155,46 @@ func (c *Config) pathsWhere(legacy func(*Config) []string, pred func(PathEntry) 
 	return out
 }
 
+// GrantsAgentRead reports whether the entry grants the agent read access: a
+// read grant that is not internal. (A write grant implies read, but is
+// reported by GrantsAgentWrite.)
+func (e PathEntry) GrantsAgentRead() bool { return e.GrantsRead() && !e.Internal }
+
+// GrantsAgentWrite reports whether the entry grants the agent write access.
+func (e PathEntry) GrantsAgentWrite() bool { return e.GrantsWrite() && !e.Internal }
+
+// GrantsInternalRead reports whether the entry grants read access at the OS
+// sandbox layer only.
+func (e PathEntry) GrantsInternalRead() bool { return e.GrantsRead() && e.Internal }
+
+// GrantsInternalWrite reports whether the entry grants write access at the OS
+// sandbox layer only.
+func (e PathEntry) GrantsInternalWrite() bool { return e.GrantsWrite() && e.Internal }
+
 // ReadablePathList returns every path granted read access to the agent (not
 // internal), as written: the paths entries with read: true plus the deprecated
 // readable_paths list. Writable paths are readable too but are listed by
 // WritablePathList, as they always were.
 func (c *Config) ReadablePathList() []string {
-	return c.pathsWhere(func(c *Config) []string { return c.ReadablePaths }, func(e PathEntry) bool { return e.GrantsRead() && !e.Internal })
+	return c.pathsWhere(func(c *Config) []string { return c.ReadablePaths }, PathEntry.GrantsAgentRead)
 }
 
 // WritablePathList returns every path granted write access to the agent (not
 // internal), as written.
 func (c *Config) WritablePathList() []string {
-	return c.pathsWhere(func(c *Config) []string { return c.WritablePaths }, func(e PathEntry) bool { return e.GrantsWrite() && !e.Internal })
+	return c.pathsWhere(func(c *Config) []string { return c.WritablePaths }, PathEntry.GrantsAgentWrite)
 }
 
 // InternalReadablePathList returns every path granted read access at the OS
 // sandbox layer only, as written.
 func (c *Config) InternalReadablePathList() []string {
-	return c.pathsWhere(func(c *Config) []string { return c.InternalReadablePaths }, func(e PathEntry) bool { return e.GrantsRead() && e.Internal })
+	return c.pathsWhere(func(c *Config) []string { return c.InternalReadablePaths }, PathEntry.GrantsInternalRead)
 }
 
 // InternalWritablePathList returns every path granted write access at the OS
 // sandbox layer only, as written.
 func (c *Config) InternalWritablePathList() []string {
-	return c.pathsWhere(func(c *Config) []string { return c.InternalWritablePaths }, func(e PathEntry) bool { return e.GrantsWrite() && e.Internal })
+	return c.pathsWhere(func(c *Config) []string { return c.InternalWritablePaths }, PathEntry.GrantsInternalWrite)
 }
 
 // DeniedReadPathList returns the user-added read-denied paths, as written

@@ -1,7 +1,7 @@
 # Incremental adoption: opting out, then tightening back
 
 A fresh install runs in **allowlist** mode: only whitelisted commands run,
-code-execution runtimes are opt-in, and the OS sandbox (when enabled) confines
+toolchain profiles are opt-in, and the OS sandbox (when enabled) confines
 writes to the project. That suits untrusted input, but it also means the first
 session on a new project can stall on `npm test` or `python3`.
 
@@ -22,7 +22,7 @@ os_sandbox: true    # bubblewrap / sandbox-exec worker
 
 | | `open` | `denylist` | `allowlist` |
 |---|---|---|---|
-| Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; runtimes opt-in |
+| Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; toolchain profiles opt-in |
 | Denied commands (`commands` entries with `allow: false`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
 | Path arguments and redirections outside the project | run | blocked | blocked |
 | `git push`, `pnpm publish`, `find -delete`, `tar -c`, … | run | blocked | blocked |
@@ -67,7 +67,7 @@ against prompt injection, where content the agent reads tells it to escape:
 AST layer never saw, unless the OS sandbox masks that file.
 
 **`allowlist`** is the default and where incremental adoption ends up. The
-cost is configuration: a new project usually needs a few `runtimes … enable`
+cost is configuration: a new project usually needs a few `profiles enable …`
 or `commands allow` lines, and the audit report tells you which ones in
 advance.
 
@@ -92,8 +92,8 @@ Not blocked, but would be in a stricter mode (cost of stepping up):
 Suggested config changes (most findings first):
      28  lite-sandbox config commands allow npm
          "npm" is not on the allowlist
-     11  lite-sandbox config runtimes go enable
-         "go" needs the go runtime
+     11  lite-sandbox config profiles enable go
+         "go": its profile is not enabled
       3  lite-sandbox config paths allow /work/shared-lib
          paths under this directory were outside the boundary
 ```

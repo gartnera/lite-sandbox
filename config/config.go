@@ -68,50 +68,6 @@ func (g *GitConfig) AllowsWorktreeParent() bool {
 	return *g.AllowWorktreeParent
 }
 
-// GoConfig controls granular Go runtime permission levels.
-type GoConfig struct {
-	Enabled  *bool `yaml:"enabled,omitempty"`
-	Generate *bool `yaml:"generate,omitempty"`
-}
-
-// GoEnabled returns whether go commands are allowed (default: false).
-func (g *GoConfig) GoEnabled() bool {
-	if g == nil || g.Enabled == nil {
-		return false
-	}
-	return *g.Enabled
-}
-
-// GoGenerate returns whether go generate is allowed (default: false).
-func (g *GoConfig) GoGenerate() bool {
-	if g == nil || g.Generate == nil {
-		return false
-	}
-	return *g.Generate
-}
-
-// PnpmConfig controls granular pnpm runtime permission levels.
-type PnpmConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-	Publish *bool `yaml:"publish,omitempty"`
-}
-
-// PnpmEnabled returns whether pnpm commands are allowed (default: false).
-func (p *PnpmConfig) PnpmEnabled() bool {
-	if p == nil || p.Enabled == nil {
-		return false
-	}
-	return *p.Enabled
-}
-
-// PnpmPublish returns whether pnpm publish is allowed (default: false).
-func (p *PnpmConfig) PnpmPublish() bool {
-	if p == nil || p.Publish == nil {
-		return false
-	}
-	return *p.Publish
-}
-
 // AWSConfig controls AWS CLI permissions and credential delivery method.
 // Two modes:
 //  1. allow_raw_credentials: true - AWS CLI reads from ~/.aws/credentials directly (no blocking)
@@ -360,185 +316,12 @@ func (l *LocalBinaryExecutionConfig) IsEnabled() bool {
 	return *l.Enabled
 }
 
-// RustConfig controls granular Rust runtime permission levels.
-type RustConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-	Publish *bool `yaml:"publish,omitempty"`
-}
-
-// RustEnabled returns whether cargo/rustc commands are allowed (default: false).
-func (r *RustConfig) RustEnabled() bool {
-	if r == nil || r.Enabled == nil {
-		return false
-	}
-	return *r.Enabled
-}
-
-// RustPublish returns whether cargo publish is allowed (default: false).
-func (r *RustConfig) RustPublish() bool {
-	if r == nil || r.Publish == nil {
-		return false
-	}
-	return *r.Publish
-}
-
-// DenoConfig controls granular Deno runtime permission levels.
-type DenoConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-	Publish *bool `yaml:"publish,omitempty"`
-	// AutoSandbox, when enabled, automatically injects --allow-read and
-	// --allow-write flags scoped to the sandbox's allowed paths into deno
-	// commands, so Deno's own permission model mirrors the sandbox filesystem
-	// policy.
-	AutoSandbox *bool `yaml:"auto_sandbox,omitempty"`
-	// AllowNetwork controls whether deno commands may open outbound network
-	// sockets (--allow-net). When false (default), the sandbox forces
-	// --deny-net so the invoker cannot grant socket access via --allow-net or
-	// --allow-all. This is enforced whenever deno is enabled, independent of
-	// auto_sandbox.
-	AllowNetwork *bool `yaml:"allow_network,omitempty"`
-	// AllowImport controls whether deno may fetch remote modules
-	// (--allow-import, plus the CLI fetch subcommands cache/add/install). Deno
-	// allows imports from a default host allowlist (deno.land/jsr.io/...) out of
-	// the box, so this defaults to true. When false, the sandbox forces
-	// --deny-import on code-executing subcommands and blocks the fetch
-	// subcommands, independent of auto_sandbox.
-	AllowImport *bool `yaml:"allow_import,omitempty"`
-}
-
-// DenoEnabled returns whether deno commands are allowed (default: false).
-func (d *DenoConfig) DenoEnabled() bool {
-	if d == nil || d.Enabled == nil {
-		return false
-	}
-	return *d.Enabled
-}
-
-// DenoPublish returns whether deno publish is allowed (default: false).
-func (d *DenoConfig) DenoPublish() bool {
-	if d == nil || d.Publish == nil {
-		return false
-	}
-	return *d.Publish
-}
-
-// DenoAutoSandbox returns whether deno commands should have --allow-read and
-// --allow-write automatically configured from the sandbox paths (default: true).
-// Deno runs with no permissions by default, so auto-sandbox grants read/write
-// scoped to the sandbox paths and runs non-interactively out of the box.
-func (d *DenoConfig) DenoAutoSandbox() bool {
-	if d == nil || d.AutoSandbox == nil {
-		return true
-	}
-	return *d.AutoSandbox
-}
-
-// DenoAllowNetwork returns whether deno commands may open network sockets
-// (default: false). When false, the sandbox forces --deny-net.
-func (d *DenoConfig) DenoAllowNetwork() bool {
-	if d == nil || d.AllowNetwork == nil {
-		return false
-	}
-	return *d.AllowNetwork
-}
-
-// DenoAllowImport returns whether deno may fetch remote modules (default: true).
-// When false, the sandbox forces --deny-import and blocks the fetch
-// subcommands (cache/add/install).
-func (d *DenoConfig) DenoAllowImport() bool {
-	if d == nil || d.AllowImport == nil {
-		return true
-	}
-	return *d.AllowImport
-}
-
-// FlutterConfig controls the Flutter/Dart/fvm runtime. When enabled, the
-// flutter, dart, and fvm commands are permitted and the paths those tools read
-// and write (the fvm SDK cache, the pub cache, the Flutter SDK, and the
-// Flutter/Dart config directories) are automatically detected and made
-// accessible, mirroring the Go runtime's GOPATH/GOCACHE handling.
-type FlutterConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-}
-
-// FlutterEnabled returns whether flutter/dart/fvm commands are allowed
-// (default: false).
-func (f *FlutterConfig) FlutterEnabled() bool {
-	if f == nil || f.Enabled == nil {
-		return false
-	}
-	return *f.Enabled
-}
-
-// UvConfig controls granular uv (Python package manager) runtime permissions.
-type UvConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-	Publish *bool `yaml:"publish,omitempty"`
-}
-
-// UvEnabled returns whether uv/uvx commands are allowed (default: false).
-func (u *UvConfig) UvEnabled() bool {
-	if u == nil || u.Enabled == nil {
-		return false
-	}
-	return *u.Enabled
-}
-
-// UvPublish returns whether uv publish is allowed (default: false).
-func (u *UvConfig) UvPublish() bool {
-	if u == nil || u.Publish == nil {
-		return false
-	}
-	return *u.Publish
-}
-
-// MontyPythonConfig controls the embedded Python (monty) runtime.
-//
-// Unlike the other runtimes this one is enabled by default. There is nothing to
-// install or detect — the interpreter is a WebAssembly blob compiled into the
-// lite-sandbox binary — and it is more contained than the commands already on
-// the whitelist: no network, no environment, no ambient filesystem access, and
-// every file it touches is checked against the same readable/writable paths
-// that bound bash. Set enabled: false to turn it off, after which python and
-// python3 are rejected like any other command that is not allowed.
-type MontyPythonConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-	// InlineOnly restricts monty to programs the agent wrote inline — `-c` and
-	// stdin (a heredoc or a pipe) — and refuses a script *file*.
-	//
-	// The point is that the two cases fail differently. A snippet an agent just
-	// composed is written against whatever the interpreter provides, and if it
-	// hits one of monty's walls the error says so. A project's own .py file was
-	// written for CPython: it imports third-party packages monty does not have,
-	// and where monty's subset diverges it can produce a plausible wrong answer
-	// rather than an error. Turning this on keeps the interpreter for the first
-	// case and makes the second say so, instead of running a file that was
-	// never meant for it.
-	//
-	// Nothing falls through to the host interpreter as a result — refusing is
-	// the whole behavior. To run real CPython, enable the uv runtime and use
-	// `uv run`, or allow python as a `commands` entry.
-	InlineOnly *bool `yaml:"inline_only,omitempty"`
-}
-
-// MontyPythonEnabled returns whether python/python3 are allowed (default: true).
-func (p *MontyPythonConfig) MontyPythonEnabled() bool {
-	if p == nil || p.Enabled == nil {
-		return true
-	}
-	return *p.Enabled
-}
-
-// MontyPythonInlineOnly reports whether monty is limited to inline programs
-// (-c and stdin), refusing script files (default: false).
-func (p *MontyPythonConfig) MontyPythonInlineOnly() bool {
-	if p == nil || p.InlineOnly == nil {
-		return false
-	}
-	return *p.InlineOnly
-}
-
-// RuntimesConfig controls code execution runtime permissions.
+// RuntimesConfig is the deprecated `runtimes` section, replaced by `profiles`
+// (see ProfileEntry and MigrateRuntimes). It still loads: each runtime's
+// enabled flag reads as its profile's, deno's and montypython's settings as
+// the profile's options, and go.generate / <x>.publish as commands entries
+// allowing "go generate" / "<tool> publish". Load rewrites it that way
+// (MigrateRuntimes), in the file as well, and nothing writes it any more.
 type RuntimesConfig struct {
 	Go          *GoConfig          `yaml:"go,omitempty"`
 	Pnpm        *PnpmConfig        `yaml:"pnpm,omitempty"`
@@ -547,6 +330,50 @@ type RuntimesConfig struct {
 	Flutter     *FlutterConfig     `yaml:"flutter,omitempty"`
 	Uv          *UvConfig          `yaml:"uv,omitempty"`
 	MontyPython *MontyPythonConfig `yaml:"montypython,omitempty"`
+}
+
+// GoConfig is the deprecated runtimes.go section.
+type GoConfig struct {
+	Enabled  *bool `yaml:"enabled,omitempty"`
+	Generate *bool `yaml:"generate,omitempty"`
+}
+
+// PnpmConfig is the deprecated runtimes.pnpm section.
+type PnpmConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+}
+
+// RustConfig is the deprecated runtimes.rust section.
+type RustConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+}
+
+// DenoConfig is the deprecated runtimes.deno section.
+type DenoConfig struct {
+	Enabled      *bool `yaml:"enabled,omitempty"`
+	Publish      *bool `yaml:"publish,omitempty"`
+	AutoSandbox  *bool `yaml:"auto_sandbox,omitempty"`
+	AllowNetwork *bool `yaml:"allow_network,omitempty"`
+	AllowImport  *bool `yaml:"allow_import,omitempty"`
+}
+
+// FlutterConfig is the deprecated runtimes.flutter section.
+type FlutterConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// UvConfig is the deprecated runtimes.uv section.
+type UvConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+	Publish *bool `yaml:"publish,omitempty"`
+}
+
+// MontyPythonConfig is the deprecated runtimes.montypython section.
+type MontyPythonConfig struct {
+	Enabled    *bool `yaml:"enabled,omitempty"`
+	InlineOnly *bool `yaml:"inline_only,omitempty"`
 }
 
 // Config holds all user configuration. New fields can be added over time;
@@ -618,14 +445,22 @@ type Config struct {
 	// the agent-visible boundary.
 	//
 	// Deprecated: use Paths entries with internal: true.
-	InternalReadablePaths []string                    `yaml:"internal_readable_paths,omitempty"`
-	InternalWritablePaths []string                    `yaml:"internal_writable_paths,omitempty"`
-	Git                   *GitConfig                  `yaml:"git,omitempty"`
-	Runtimes              *RuntimesConfig             `yaml:"runtimes,omitempty"`
-	AWS                   *AWSConfig                  `yaml:"aws,omitempty"`
-	Docker                *DockerConfig               `yaml:"docker,omitempty"`
-	LocalBinaryExecution  *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
-	OSSandbox             *bool                       `yaml:"os_sandbox,omitempty"`
+	InternalReadablePaths []string   `yaml:"internal_readable_paths,omitempty"`
+	InternalWritablePaths []string   `yaml:"internal_writable_paths,omitempty"`
+	Git                   *GitConfig `yaml:"git,omitempty"`
+	// Profiles enables the built-in toolchain presets (go, rust, uv, ...),
+	// each a set of commands and paths; see Profile and ProfileEntry.
+	Profiles []ProfileEntry `yaml:"profiles,omitempty"`
+	// Runtimes is the deprecated spelling of Profiles; see RuntimesConfig.
+	// Load migrates it (on disk too), so it is only ever set on a config built
+	// in code.
+	//
+	// Deprecated: use Profiles.
+	Runtimes             *RuntimesConfig             `yaml:"runtimes,omitempty"`
+	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
+	Docker               *DockerConfig               `yaml:"docker,omitempty"`
+	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
+	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
 	// RejectRedundantCd, when enabled (the default), rejects a command that
 	// begins by cd-ing into the working directory it already runs in — the
 	// `cd /abs/path/to/repo && ...` prefix agents habitually emit even though the
@@ -639,6 +474,10 @@ type Config struct {
 	// match wins. Resolve the effective config for a directory with ForDirectory.
 	// Any section can be overridden, not just AWS.
 	Overrides []DirectoryOverride `yaml:"overrides,omitempty"`
+
+	// effective marks a config returned by Effective, whose Paths and Commands
+	// already hold every statement (profiles and deprecated keys included).
+	effective bool
 }
 
 // ExpandPath expands ~ and resolves p to an absolute path (so "." and other
@@ -716,8 +555,10 @@ func Path() (string, error) {
 	return filepath.Join(dir, appName, "config.yaml"), nil
 }
 
-// Load reads and parses the config file. If the file does not exist,
-// a zero-value Config is returned with no error.
+// Load reads and parses the config file. A deprecated runtimes section is
+// migrated to profiles (see MigrateRuntimes) and the file rewritten in the new
+// form. If the file does not exist, a zero-value Config is returned with no
+// error.
 func Load() (*Config, error) {
 	p, err := Path()
 	if err != nil {
@@ -743,17 +584,46 @@ func Load() (*Config, error) {
 	if err := cfg.validateCommands(); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	if err := cfg.validateProfiles(); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// The deprecated runtimes section is migrated on load and the result
+	// written back, once: the rewrite is exact (see MigrateRuntimes), so
+	// nothing downstream ever sees the old section. A config that cannot be
+	// written (a read-only dotfile) still loads migrated, and is retried on
+	// the next load.
+	if cfg.UsesDeprecatedRuntimes() {
+		n := cfg.MigrateRuntimes()
+		if err := writeConfigFile(p, &cfg); err != nil {
+			slog.Warn("migrated the deprecated runtimes section to profiles, but could not write it back", "path", p, "error", err)
+		} else {
+			slog.Info("migrated the deprecated runtimes section to profiles", "path", p, "entries", n)
+		}
+	}
 	return &cfg, nil
 }
 
 // LoadForDirectory loads the config and resolves it for dir, applying any
-// per-directory overrides (see Config.ForDirectory) so the returned config is the
-// effective one for commands run in dir. Callers that operate from a single
+// per-directory overrides (see Config.ForDirectory) and merging profiles and
+// deprecated keys into the one paths and commands lists (see Config.Effective),
+// so the returned config is the effective one for commands run in dir. Callers that operate from a single
 // working directory should use this instead of Load()+ForDirectory, so the merge
 // happens once at load and every subsystem is handed an already-resolved config —
 // none has to know overrides exist. Returns a zero-value config (resolved) when
 // no file exists, matching Load.
 func LoadForDirectory(dir string) (*Config, error) {
+	cfg, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.ForDirectory(dir).Effective(), nil
+}
+
+// LoadSettingsForDirectory is LoadForDirectory without the Effective merge:
+// the config as written, resolved for dir. It is for callers that only read a
+// setting (the mode, the audit flag) and never hand the config to the sandbox,
+// so they skip the profile path detection Effective runs.
+func LoadSettingsForDirectory(dir string) (*Config, error) {
 	cfg, err := Load()
 	if err != nil {
 		return nil, err
@@ -776,6 +646,48 @@ func Save(cfg *Config) error {
 	}
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
+}
+
+// writeConfigFile replaces the config file at p with cfg atomically (a temp
+// file renamed over it), for the migration Load writes back: Load runs in
+// every hook process and in the MCP server's watcher, and none of them may
+// ever read a half-written file. A symlinked config is written through to its
+// target, so a dotfile manager's link stays a link. The file keeps its mode.
+func writeConfigFile(p string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(p); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, p); err != nil {
+		os.Remove(tmpName)
+		return err
 	}
 	return nil
 }

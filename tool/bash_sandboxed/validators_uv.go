@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -28,14 +27,16 @@ var uvGlobalValueFlags = map[string]bool{
 	"--allow-insecure-host": true,
 }
 
-// validateUvArgs validates uv commands according to the runtime config. uv is a
+// validateUvArgs validates uv commands; publishAllowed reports whether the
+// config allows `uv publish`. uv is a
 // code-execution runtime like Go/Deno: running Python code and fetching
 // packages is core to normal use and is contained by the OS sandbox, so those
 // are permitted. Only shared-state and self-modifying operations are gated:
-//   - `uv publish` uploads distributions to an index (behind runtimes.uv.publish)
+//   - `uv publish` uploads distributions to an index (behind a "uv publish"
+//     commands entry)
 //   - `uv self update` rewrites the uv executable in place (always blocked,
 //     mirroring `deno upgrade`)
-func validateUvArgs(args []*syntax.Word, uvCfg *config.UvConfig) error {
+func validateUvArgs(args []*syntax.Word, publishAllowed bool) error {
 	subcommand, subcommandIdx, err := findSubcommand("uv", args, uvGlobalValueFlags)
 	if err != nil {
 		return err
@@ -47,7 +48,7 @@ func validateUvArgs(args []*syntax.Word, uvCfg *config.UvConfig) error {
 
 	switch subcommand {
 	case "publish":
-		return publishGate("uv", "runtimes.uv.publish", uvCfg.UvPublish())
+		return publishGate("uv", publishAllowed)
 	case "self":
 		return validateUvSelfArgs(args[subcommandIdx+1:])
 	}

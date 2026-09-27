@@ -24,8 +24,9 @@ var configModeCmd = &cobra.Command{
              flags, ...), and under the OS sandbox the home directory is writable
              with credential and config paths masked. Assumes a cooperative
              agent; the opt-out for incremental adoption (docs/adoption.md).
-  allowlist  Only whitelisted commands run and code-execution runtimes are
-             opt-in. The posture for untrusted input, and the default.
+  allowlist  Only whitelisted commands run and toolchain profiles (go, rust,
+             uv, ...) are opt-in. The posture for untrusted input, and the
+             default.
 
 Turn on auditing alongside any mode (lite-sandbox config audit enable) to see
 what the next stricter mode would block before switching to it.`,

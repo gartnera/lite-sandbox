@@ -76,7 +76,7 @@ func TestOSSandboxDenylistPosture(t *testing.T) {
 
 	s := NewSandbox()
 	on := true
-	s.UpdateConfig(&config.Config{Mode: "denylist", OSSandbox: &on}, workDir)
+	s.updateConfig(&config.Config{Mode: "denylist", OSSandbox: &on}, workDir)
 	defer s.Close()
 	paths := []string{workDir}
 
@@ -146,7 +146,7 @@ func TestOSSandboxAllowlistPostureUnchanged(t *testing.T) {
 	}
 	s := NewSandbox()
 	on := true
-	s.UpdateConfig(&config.Config{Mode: "allowlist", OSSandbox: &on}, workDir)
+	s.updateConfig(&config.Config{Mode: "allowlist", OSSandbox: &on}, workDir)
 	defer s.Close()
 
 	// touch is whitelisted; the path is inside $HOME but outside workDir, so

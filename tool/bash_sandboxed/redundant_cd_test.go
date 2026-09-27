@@ -93,7 +93,7 @@ func TestRedundantCd_DefaultOnViaValidateCommand(t *testing.T) {
 func TestRedundantCd_Disabled(t *testing.T) {
 	workDir := t.TempDir()
 	s := newTestSandbox()
-	s.UpdateConfig(&config.Config{RejectRedundantCd: boolPtr(false)}, workDir)
+	s.updateConfig(&config.Config{RejectRedundantCd: boolPtr(false)}, workDir)
 
 	err := s.ValidateCommand("cd "+workDir+" && echo hi", workDir, []string{workDir}, []string{workDir})
 	if err != nil {

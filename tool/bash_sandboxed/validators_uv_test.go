@@ -11,7 +11,7 @@ func TestValidateUvArgs(t *testing.T) {
 	tests := []struct {
 		name      string
 		command   string
-		uvCfg     *config.UvConfig
+		allow     bool
 		wantErr   bool
 		errSubstr string
 	}{
@@ -19,61 +19,51 @@ func TestValidateUvArgs(t *testing.T) {
 		{
 			name:    "uv sync allowed",
 			command: "uv sync",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv add allowed",
 			command: "uv add requests",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv run allowed",
 			command: "uv run main.py",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv pip install allowed",
 			command: "uv pip install flask",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv venv allowed",
 			command: "uv venv",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv lock allowed",
 			command: "uv lock",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv build allowed",
 			command: "uv build",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv tool install allowed",
 			command: "uv tool install ruff",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv python install allowed",
 			command: "uv python install 3.12",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv cache dir allowed",
 			command: "uv cache dir",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 
@@ -81,43 +71,38 @@ func TestValidateUvArgs(t *testing.T) {
 		{
 			name:      "uv publish blocked by default",
 			command:   "uv publish",
-			uvCfg:     &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
-			errSubstr: "runtimes.uv.publish is disabled",
+			errSubstr: "uv publish is not allowed",
 		},
 		{
 			name:      "uv publish blocked when publish=false",
 			command:   "uv publish",
-			uvCfg:     &config.UvConfig{Enabled: boolPtr(true), Publish: boolPtr(false)},
 			wantErr:   true,
-			errSubstr: "runtimes.uv.publish is disabled",
+			errSubstr: "uv publish is not allowed",
 		},
 		{
 			name:    "uv publish allowed when publish=true",
 			command: "uv publish",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true), Publish: boolPtr(true)},
+			allow:   true,
 			wantErr: false,
 		},
 		{
 			name:      "uv publish behind global flag still blocked",
 			command:   "uv --directory ./dist publish",
-			uvCfg:     &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
-			errSubstr: "runtimes.uv.publish is disabled",
+			errSubstr: "uv publish is not allowed",
 		},
 
 		// self update gating
 		{
 			name:      "uv self update blocked",
 			command:   "uv self update",
-			uvCfg:     &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
 			errSubstr: "modifies the uv executable",
 		},
 		{
 			name:    "uv self version allowed",
 			command: "uv self version",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 
@@ -125,13 +110,11 @@ func TestValidateUvArgs(t *testing.T) {
 		{
 			name:    "bare uv command allowed",
 			command: "uv",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "uv with only flags allowed",
 			command: "uv --version",
-			uvCfg:   &config.UvConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 	}
@@ -152,7 +135,7 @@ func TestValidateUvArgs(t *testing.T) {
 				return true
 			})
 
-			err = validateUvArgs(args, tt.uvCfg)
+			err = validateUvArgs(args, tt.allow)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("expected error containing %q, got nil", tt.errSubstr)
@@ -174,48 +157,48 @@ func TestValidateUvCommandGating(t *testing.T) {
 	tests := []struct {
 		name      string
 		command   string
-		runtimes  *config.RuntimesConfig
+		profiles  []config.ProfileEntry
 		wantErr   bool
 		errSubstr string
 	}{
 		{
 			name:     "uv allowed when enabled",
 			command:  "uv sync",
-			runtimes: &config.RuntimesConfig{Uv: &config.UvConfig{Enabled: boolPtr(true)}},
+			profiles: []config.ProfileEntry{{Name: "uv"}},
 			wantErr:  false,
 		},
 		{
 			name:      "uv blocked when disabled",
 			command:   "uv sync",
-			runtimes:  &config.RuntimesConfig{Uv: &config.UvConfig{Enabled: boolPtr(false)}},
+			profiles:  []config.ProfileEntry{{Name: "uv", Enabled: boolPtr(false)}},
 			wantErr:   true,
-			errSubstr: `command "uv" is not allowed (runtimes.uv.enabled is disabled)`,
+			errSubstr: `command "uv" is not allowed (the uv profile is not enabled)`,
 		},
 		{
 			name:      "uv blocked by default",
 			command:   "uv sync",
-			runtimes:  nil,
+			profiles:  nil,
 			wantErr:   true,
-			errSubstr: `command "uv" is not allowed (runtimes.uv.enabled is disabled)`,
+			errSubstr: `command "uv" is not allowed (the uv profile is not enabled)`,
 		},
 		{
 			name:     "uvx allowed when enabled",
 			command:  "uvx ruff check",
-			runtimes: &config.RuntimesConfig{Uv: &config.UvConfig{Enabled: boolPtr(true)}},
+			profiles: []config.ProfileEntry{{Name: "uv"}},
 			wantErr:  false,
 		},
 		{
 			name:      "uvx blocked by default",
 			command:   "uvx ruff check",
-			runtimes:  nil,
+			profiles:  nil,
 			wantErr:   true,
-			errSubstr: `command "uvx" is not allowed (runtimes.uv.enabled is disabled)`,
+			errSubstr: `command "uvx" is not allowed (the uv profile is not enabled)`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestSandboxWithRuntimesConfig(tt.runtimes)
+			s := newTestSandboxWithConfig(&config.Config{Profiles: tt.profiles})
 			f, err := ParseBash(tt.command)
 			if err != nil {
 				t.Fatalf("failed to parse command: %v", err)

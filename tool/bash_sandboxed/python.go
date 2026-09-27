@@ -78,7 +78,7 @@ type pythonInvocation struct {
 	// set by `-m py_compile`. See checkPythonSyntax.
 	syntaxCheck []string
 	// scriptFile is the path the program was read from, empty when it came in
-	// inline (-c or stdin). It is what runtimes.montypython.inline_only keys
+	// inline (-c or stdin). It is what the montypython profile's inline_only option keys
 	// off; see the refusal in parsePythonArgs.
 	scriptFile string
 }
@@ -89,7 +89,7 @@ type pythonInvocation struct {
 // the caller can read it through the path boundary; it is not called for -c or
 // stdin.
 //
-// inlineOnly is runtimes.montypython.inline_only: with it set, only a program
+// inlineOnly is the montypython profile's inline_only option: with it set, only a program
 // supplied inline (-c, or stdin via a heredoc or pipe) runs, and a script file
 // is refused before it is even read. `-m py_compile` and -V still work — they
 // answer a question about a file rather than running one.
@@ -157,7 +157,7 @@ func parsePythonArgs(args []string, stdin io.Reader, inlineOnly bool, readScript
 		default:
 			if inlineOnly {
 				return nil, fmt.Errorf("python: running a script file is disabled "+
-					"(runtimes.montypython.inline_only is set), because %s A .py file written "+
+					"(the montypython profile's inline_only option is set), because %s A .py file written "+
 					"for CPython can import packages monty does not have, or hit a corner of "+
 					"the language where its subset diverges. Pass the code inline instead "+
 					"(python3 -c '...', or python3 - <<'PY' ... PY), or:\n%s",
@@ -215,10 +215,7 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 	fs := newMontyFS(hc.Dir, sets)
 	defer fs.close()
 
-	var inlineOnly bool
-	if cfg := s.getConfig(); cfg.Runtimes != nil {
-		inlineOnly = cfg.Runtimes.MontyPython.MontyPythonInlineOnly()
-	}
+	inlineOnly := s.getConfig().ProfileOption("montypython", "inline_only")
 
 	inv, err := parsePythonArgs(args, hc.Stdin, inlineOnly, func(path string) (string, error) {
 		// A script file is a file access like any other: it answers to the
@@ -345,9 +342,9 @@ const pythonEscapeHatches = "To run the real python on this machine instead:\n" 
 	"  lite-sandbox config commands allow python3\n" +
 	"  (python then bypasses sandbox command validation, like any allowed command)\n" +
 	"Or run real CPython under uv, which stays sandboxed:\n" +
-	"  lite-sandbox config runtimes uv enable   # then: uv run script.py\n" +
+	"  lite-sandbox config profiles enable uv   # then: uv run script.py\n" +
 	"To turn the built-in interpreter off entirely:\n" +
-	"  lite-sandbox config runtimes montypython disable"
+	"  lite-sandbox config profiles disable montypython"
 
 // pythonIsMontyNote names the interpreter. Kept separate from the escape
 // hatches so a message can lead with whichever half fits its failure.

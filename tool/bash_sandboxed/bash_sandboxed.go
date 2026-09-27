@@ -2,7 +2,6 @@ package bash_sandboxed
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -106,14 +105,12 @@ type Sandbox struct {
 	// worker (e.g. /var/run/docker.sock) so the proxy is the only reachable
 	// daemon and cannot be bypassed.
 	dockerMaskPaths []string
-	// runtimeReadPaths is the lazily computed result of detectRuntimeBinds for
-	// the current config; runtimeDetected marks it as valid. Detection spawns
-	// subprocesses (go, pnpm), so it is deferred until a caller actually needs
-	// the paths rather than run eagerly on every UpdateConfig.
-	runtimeReadPaths []string
-	runtimeDetected  bool
-	worker           *os_sandbox.Worker
-	workerWorkDir    string
+	// whitelistedCommands are the commands the config's commands list adds to
+	// the whitelist (each enabled profile's, see config.Config.Effective). They
+	// are validated like the built-in allowedCommands, unlike an allow.
+	whitelistedCommands map[string]bool
+	worker              *os_sandbox.Worker
+	workerWorkDir       string
 	// argValidators holds a reference to commandArgValidators so that
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
@@ -133,31 +130,33 @@ type Sandbox struct {
 	monty   *montygo.Runner
 }
 
-// NewSandbox creates a Sandbox with no extra commands.
+// NewSandbox creates a Sandbox with the default configuration: no extra
+// commands, and only the default-on profiles.
 func NewSandbox() *Sandbox {
-	cfg := &config.Config{}
-	return &Sandbox{
-		cfg:           cfg,
+	s := &Sandbox{
+		cfg:           &config.Config{},
 		argValidators: commandArgValidators,
 		bg:            newBackgroundManager(),
-		// The built-in deny entries hold before any config is loaded, so a
-		// sandbox that never sees UpdateConfig (or one whose config failed to
-		// load) still refuses the self-protection commands.
-		deniedCommands: parseDeniedCommands(cfg.EffectiveDeniedCommands()),
 	}
+	// The built-in deny entries and default profiles hold before any config is
+	// loaded, so a sandbox that never sees another UpdateConfig (or one whose
+	// config failed to load) still refuses the self-protection commands.
+	s.UpdateConfig((&config.Config{}).Effective(), "")
+	return s
 }
 
 // UpdateConfig replaces the sandbox configuration with the provided config.
 //
-// cfg must already be resolved for workDir by the caller (via
-// config.LoadForDirectory or Config.ForDirectory): per-directory overrides are
-// merged once at the entrypoint and the effective config injected here, so the
-// sandbox — like every other subsystem — applies it verbatim and never has to
-// know overrides exist. workDir is still needed to anchor bare script paths and
-// the OS-sandbox worker's working directory.
+// cfg must be the effective config for workDir (config.LoadForDirectory, or
+// Config.ForDirectory followed by Config.Effective): per-directory overrides,
+// profiles, and the deprecated keys are all merged by the caller into the one
+// Paths and one Commands list, and the sandbox — like every other subsystem —
+// applies those lists verbatim, never having to know where an entry came
+// from. workDir is still needed to anchor bare script paths and the
+// OS-sandbox worker's working directory.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
-	extraList, unsandboxedList := cfg.ExtraCommandList(), cfg.UnsandboxedCommandList()
-	m := make(map[string]bool, len(extraList)+len(unsandboxedList))
+	m := make(map[string]bool, len(cfg.Commands))
+	whitelisted := make(map[string]bool)
 	sub := make(map[string][][]string)
 	bare := make(map[string]bool)
 	bareScripts := make(map[string]bool)
@@ -196,11 +195,21 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			}
 		}
 	}
-	for _, c := range extraList {
-		processEntry(c, false)
-	}
-	for _, c := range unsandboxedList {
-		processEntry(c, true)
+	// One pass over the commands list: a profile's allow of a bare name
+	// whitelists the command (routed to the host when it is no_sandbox), any
+	// other allow is an escape hatch (no_sandbox recorded with it), and
+	// denials are collected by EffectiveDeniedCommands below.
+	for _, e := range cfg.Commands {
+		switch {
+		case !e.Allows():
+		case e.Whitelists():
+			whitelisted[e.Text()] = true
+			if e.NoSandbox {
+				unsandboxedBare[e.Text()] = true
+			}
+		default:
+			processEntry(e.Command, e.NoSandbox)
+		}
 	}
 	s.mu.Lock()
 	// The OS sandbox toggle and the AWS credential mask are read straight off
@@ -223,6 +232,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		s.audit = nil
 	}
 	s.extraCommands = m
+	s.whitelistedCommands = whitelisted
 	s.extraSubCommands = sub
 	s.bareExtraCommands = bare
 	s.bareExtraScriptPaths = bareScripts
@@ -231,17 +241,11 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.unsandboxedSub = unsandboxedSub
 	s.deniedCommands = parseDeniedCommands(cfg.EffectiveDeniedCommands())
 
-	// Invalidate lazily computed state derived from the previous config.
-	// Runtime paths (GOPATH, GOCACHE, pnpm store, ...) are detected on first
-	// use via RuntimeReadPaths, since detection spawns subprocesses.
-	s.runtimeReadPaths = nil
-	s.runtimeDetected = false
-
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
 
 	// Close any live worker on every config update: the AWS credential mask,
-	// writable_paths, worktree-parent grant, runtime binds, and more are all
+	// writable paths, worktree-parent grant, profile paths, and more are all
 	// baked into the worker's mount setup / SBPL profile at start time, so a
 	// stale worker would keep enforcing the old policy. Rather than tracking
 	// which of those inputs changed, recycle unconditionally — UpdateConfig only
@@ -518,51 +522,22 @@ func dedupeMaskPaths(sockets []string) []string {
 	return out
 }
 
-// RuntimeReadPaths returns the detected runtime paths that should be
-// readable (but not writable) by sandboxed commands. These include paths
-// like GOPATH, GOCACHE, and pnpm store directories.
-//
-// Detection runs lazily on first use (it spawns subprocesses) and the result
-// is cached until the next UpdateConfig. Concurrent first calls may detect
-// twice; both store the same result.
-func (s *Sandbox) RuntimeReadPaths() []string {
-	s.mu.RLock()
-	if s.runtimeDetected {
-		paths := s.runtimeReadPaths
-		s.mu.RUnlock()
-		return paths
-	}
-	runtimes := s.cfg.Runtimes
-	s.mu.RUnlock()
-
-	paths := detectRuntimeBinds(runtimes)
-
-	s.mu.Lock()
-	// Only cache if the config didn't change while detection ran without the
-	// lock held; a stale result must not outlive an UpdateConfig.
-	if s.cfg.Runtimes == runtimes {
-		s.runtimeReadPaths = paths
-		s.runtimeDetected = true
-	}
-	s.mu.Unlock()
-	return paths
-}
-
-// ConfigReadPaths returns the user-configured readable paths (with ~ expanded).
+// ConfigReadPaths returns the configured readable paths (with ~ expanded):
+// the read grants of the paths list, a profile's included.
 func (s *Sandbox) ConfigReadPaths() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.ExpandedReadablePaths()
 }
 
-// ConfigWritePaths returns the user-configured writable paths (with ~ expanded).
+// ConfigWritePaths returns the configured writable paths (with ~ expanded).
 func (s *Sandbox) ConfigWritePaths() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.ExpandedWritablePaths()
 }
 
-// ConfigInternalReadPaths returns the user-configured internal readable paths
+// ConfigInternalReadPaths returns the configured internal readable paths
 // (with ~ expanded). These apply only to the OS sandbox worker: they are never
 // folded into the AST/interpreter read paths, so the agent cannot read them
 // directly and Deno's injected --allow-read never includes them.
@@ -572,7 +547,7 @@ func (s *Sandbox) ConfigInternalReadPaths() []string {
 	return s.cfg.ExpandedInternalReadablePaths()
 }
 
-// ConfigInternalWritePaths returns the user-configured internal writable paths
+// ConfigInternalWritePaths returns the configured internal writable paths
 // (with ~ expanded). These apply only to the OS sandbox worker: they are never
 // folded into the AST/interpreter write paths, so the agent cannot write them
 // directly and Deno's injected --allow-write never includes them.
@@ -605,381 +580,6 @@ func (s *Sandbox) Close() error {
 		return s.worker.Close()
 	}
 	return nil
-}
-
-// detectRuntimeBinds detects paths needed by enabled runtimes and returns them
-// as a list of directories to bind mount as writable in the OS sandbox.
-func detectRuntimeBinds(runtimes *config.RuntimesConfig) []string {
-	if runtimes == nil {
-		return nil
-	}
-
-	var binds []string
-
-	// Detect Go paths if Go runtime is enabled. Detection shells out to
-	// `go env`, so results are persisted across processes (see runtime_cache.go).
-	if runtimes.Go != nil && runtimes.Go.GoEnabled() {
-		goBinds := cachedDetect("go", []string{"GOPATH", "GOCACHE", "GOENV", "HOME"}, detectGoBinds)
-		binds = append(binds, goBinds...)
-	}
-
-	// Detect pnpm paths if pnpm runtime is enabled. `pnpm store path` boots
-	// node and costs hundreds of milliseconds, so it is cached persistently.
-	if runtimes.Pnpm != nil && runtimes.Pnpm.PnpmEnabled() {
-		pnpmBinds := cachedDetect("pnpm", []string{"PNPM_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "HOME"}, detectPnpmBinds)
-		binds = append(binds, pnpmBinds...)
-	}
-
-	// Detect Rust paths if Rust runtime is enabled
-	if runtimes.Rust != nil && runtimes.Rust.RustEnabled() {
-		rustBinds := detectRustBinds()
-		binds = append(binds, rustBinds...)
-	}
-
-	// Detect Deno paths if Deno runtime is enabled
-	if runtimes.Deno != nil && runtimes.Deno.DenoEnabled() {
-		denoBinds := detectDenoBinds()
-		binds = append(binds, denoBinds...)
-	}
-
-	// Detect Flutter/Dart/fvm paths if the Flutter runtime is enabled
-	if runtimes.Flutter != nil && runtimes.Flutter.FlutterEnabled() {
-		flutterBinds := detectFlutterBinds()
-		binds = append(binds, flutterBinds...)
-	}
-
-	// Detect uv paths if uv runtime is enabled. `uv cache dir` (and friends)
-	// shell out, so results are persisted across processes (see runtime_cache.go).
-	if runtimes.Uv != nil && runtimes.Uv.UvEnabled() {
-		uvBinds := cachedDetect("uv", []string{
-			"UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR",
-			"XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_BIN_HOME", "HOME",
-		}, detectUvBinds)
-		binds = append(binds, uvBinds...)
-	}
-
-	return binds
-}
-
-// detectGoBinds detects Go environment paths that need to be writable.
-// Returns GOPATH and GOCACHE (build cache) directories.
-func detectGoBinds() []string {
-	cmd := exec.Command("go", "env", "GOPATH", "GOCACHE")
-	output, err := cmd.Output()
-	if err != nil {
-		slog.Warn("failed to detect Go paths", "error", err)
-		return nil
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var paths []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && line != "off" {
-			paths = append(paths, line)
-		}
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected Go runtime paths", "paths", paths)
-	}
-
-	return paths
-}
-
-// detectPnpmBinds detects pnpm paths that need to be writable.
-// Returns the pnpm store directory (downloaded packages) and the pnpm cache
-// directory (registry metadata and the `pnpm dlx` cache), which live in
-// separate trees (e.g. ~/Library/pnpm/store vs ~/Library/Caches/pnpm on
-// macOS). Without the cache dir bound, pnpm invoked inside the sandbox — e.g.
-// by a lefthook job or package script — fails with EPERM creating its cache.
-func detectPnpmBinds() []string {
-	var paths []string
-
-	cmd := exec.Command("pnpm", "store", "path")
-	output, err := cmd.Output()
-	if err != nil {
-		slog.Warn("failed to detect pnpm store path", "error", err)
-	} else if storePath := strings.TrimSpace(string(output)); storePath != "" {
-		paths = append(paths, storePath)
-	}
-
-	// `pnpm config get cache-dir` prints "undefined" when the setting is
-	// unset; pnpm then defaults to the OS cache dir joined with "pnpm".
-	// pnpm creates cache subdirs lazily, so materialize the directory up
-	// front — a bind-mount source must exist for the OS sandbox to mount it.
-	cacheDir := ""
-	if output, err := exec.Command("pnpm", "config", "get", "cache-dir").Output(); err != nil {
-		slog.Warn("failed to detect pnpm cache dir", "error", err)
-	} else {
-		cacheDir = strings.TrimSpace(string(output))
-	}
-	if cacheDir == "" || cacheDir == "undefined" {
-		if userCache, err := os.UserCacheDir(); err == nil {
-			cacheDir = filepath.Join(userCache, "pnpm")
-		} else {
-			cacheDir = ""
-		}
-	}
-	if p := ensureDir(cacheDir); p != "" {
-		paths = append(paths, p)
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected pnpm runtime paths", "paths", paths)
-	}
-	return paths
-}
-
-// existingHomeSubdir resolves a runtime directory that is configured by an
-// environment variable and otherwise defaults to a subdirectory of the user's
-// home. It returns "" when the variable is unset and no home directory can be
-// resolved, or when the resulting directory does not exist — unlike the caches
-// materialized by ensureDir, these are never created here, so a toolchain that
-// is not installed contributes no bind.
-func existingHomeSubdir(envVar, homeSubdir string) string {
-	dir := os.Getenv(envVar)
-	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = home + "/" + homeSubdir
-		}
-	}
-	if dir == "" {
-		return ""
-	}
-	if _, err := os.Stat(dir); err != nil {
-		return ""
-	}
-	return dir
-}
-
-// detectRustBinds detects Rust/Cargo paths that need to be writable.
-// Returns CARGO_HOME (registry, git) and RUSTUP_HOME directories.
-func detectRustBinds() []string {
-	var paths []string
-
-	// CARGO_HOME defaults to ~/.cargo; RUSTUP_HOME defaults to ~/.rustup.
-	for _, d := range []struct{ envVar, homeSubdir string }{
-		{"CARGO_HOME", ".cargo"},
-		{"RUSTUP_HOME", ".rustup"},
-	} {
-		if p := existingHomeSubdir(d.envVar, d.homeSubdir); p != "" {
-			paths = append(paths, p)
-		}
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected Rust runtime paths", "paths", paths)
-	}
-
-	return paths
-}
-
-// detectDenoBinds detects Deno paths that need to be writable.
-// Returns DENO_DIR (module/npm cache) and DENO_INSTALL_ROOT (global scripts
-// installed via `deno install -g`).
-//
-// Unlike the other runtimes, deno creates its cache lazily on first run, so
-// these directories frequently do not exist yet. We create them up front: a
-// bind mount source must exist for the OS sandbox to mount it writable, and
-// the sandbox cannot create the directory itself (its parent is not bound), so
-// without this the very first `deno run` would fail to populate its cache.
-func detectDenoBinds() []string {
-	var paths []string
-
-	// Detect DENO_DIR (module and npm cache). Defaults to the OS cache dir
-	// joined with "deno" (e.g. ~/.cache/deno on Linux).
-	denoDir := os.Getenv("DENO_DIR")
-	if denoDir == "" {
-		if cacheDir, err := os.UserCacheDir(); err == nil {
-			denoDir = filepath.Join(cacheDir, "deno")
-		}
-	}
-	if p := ensureDir(denoDir); p != "" {
-		paths = append(paths, p)
-	}
-
-	// Detect DENO_INSTALL_ROOT (global executables). Defaults to ~/.deno.
-	installRoot := os.Getenv("DENO_INSTALL_ROOT")
-	if installRoot == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			installRoot = filepath.Join(home, ".deno")
-		}
-	}
-	if p := ensureDir(installRoot); p != "" {
-		paths = append(paths, p)
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected Deno runtime paths", "paths", paths)
-	}
-
-	return paths
-}
-
-// detectUvBinds detects the uv (Python package manager) paths that need to be
-// writable. uv downloads and builds wheels into its cache, installs Python
-// interpreters, and stores tool environments; all live outside the working
-// directory, so they must be bound in for uv to function under the OS sandbox:
-//   - `uv cache dir`  — the package/wheel cache (default ~/.cache/uv)
-//   - `uv python dir` — uv-managed Python interpreters (default ~/.local/share/uv/python)
-//   - `uv tool dir`   — tool environments from `uv tool install` (default ~/.local/share/uv/tools)
-//
-// The tool *bin* directory (`uv tool dir --bin`, default ~/.local/bin) is
-// deliberately NOT bound: it lives on the user's PATH, so binding it writable
-// would let a sandboxed command install executables that persist and run
-// outside the sandbox boundary. `uv tool install` therefore cannot place its
-// launcher and fails, which is the intended restriction; `uvx` (ephemeral tool
-// runs cached under `uv cache dir`) still works.
-//
-// Like Deno, uv creates these lazily on first use, so they frequently do not
-// exist yet. We create them up front because a bind-mount source must exist for
-// the OS sandbox to mount it, and the sandbox cannot create the directory
-// itself (its parent is not bound).
-func detectUvBinds() []string {
-	var paths []string
-	seen := map[string]bool{}
-	for _, sub := range [][]string{
-		{"cache", "dir"},
-		{"python", "dir"},
-		{"tool", "dir"},
-	} {
-		cmd := exec.Command("uv", sub...)
-		output, err := cmd.Output()
-		if err != nil {
-			slog.Warn("failed to detect uv path", "subcommand", strings.Join(sub, " "), "error", err)
-			continue
-		}
-		dir := strings.TrimSpace(string(output))
-		if p := ensureDir(dir); p != "" && !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
-		}
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected uv runtime paths", "paths", paths)
-	}
-
-	return paths
-}
-
-// ensureDir creates dir (and parents) if needed and returns it, or "" if dir
-// is empty or cannot be created. Used to materialize runtime cache directories
-// so they exist as bind-mount sources for the OS sandbox.
-func ensureDir(dir string) string {
-	if dir == "" {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		slog.Warn("failed to create runtime directory", "path", dir, "error", err)
-		return ""
-	}
-	return dir
-}
-
-// detectFlutterBinds detects the paths that Flutter, Dart, and fvm read and
-// write, so the sandbox can grant access to them automatically (mirroring the
-// Go runtime's GOPATH/GOCACHE handling). The paths are:
-//
-//   - the fvm cache (FVM_CACHE_PATH / legacy FVM_HOME, default ~/fvm), where fvm
-//     stores each managed Flutter SDK version;
-//   - the pub cache (PUB_CACHE, default ~/.pub-cache), where Dart/Flutter
-//     packages are downloaded;
-//   - the active Flutter SDK root (FLUTTER_ROOT, or resolved from a flutter
-//     binary on PATH), which Flutter writes to under bin/cache;
-//   - the Flutter/Dart config directories, where the tools persist settings.
-//
-// Like the caches for other runtimes these directories are frequently created
-// lazily on first run, so cache directories are materialized up front (a bind
-// mount source must exist for the OS sandbox to mount it). Only directories that
-// exist (or can be created) are returned, so a partial toolchain still works.
-func detectFlutterBinds() []string {
-	var paths []string
-	home, _ := os.UserHomeDir()
-
-	// fvm cache: FVM_CACHE_PATH is the current override, FVM_HOME the legacy one.
-	fvmCache := cmp.Or(os.Getenv("FVM_CACHE_PATH"), os.Getenv("FVM_HOME"))
-	if fvmCache == "" && home != "" {
-		fvmCache = filepath.Join(home, "fvm")
-	}
-	if p := ensureDir(fvmCache); p != "" {
-		paths = append(paths, p)
-	}
-
-	// pub cache: PUB_CACHE overrides the default ~/.pub-cache.
-	pubCache := os.Getenv("PUB_CACHE")
-	if pubCache == "" && home != "" {
-		pubCache = filepath.Join(home, ".pub-cache")
-	}
-	if p := ensureDir(pubCache); p != "" {
-		paths = append(paths, p)
-	}
-
-	// Active Flutter SDK root (for a non-fvm global install). fvm-managed SDKs
-	// live under the fvm cache above, or the project's .fvm/flutter_sdk symlink,
-	// which is already under the working directory.
-	if sdk := detectFlutterSDKRoot(); sdk != "" {
-		paths = append(paths, sdk)
-	}
-
-	// Config directories where Flutter and Dart persist settings and analytics
-	// state. These already exist on a configured machine; create them so the
-	// tools can write on a fresh one.
-	if home != "" {
-		for _, rel := range []string{
-			filepath.Join(".config", "flutter"),
-			filepath.Join(".config", "dart"),
-			".flutter",
-			".dart",
-		} {
-			if p := ensureDir(filepath.Join(home, rel)); p != "" {
-				paths = append(paths, p)
-			}
-		}
-	}
-
-	if len(paths) > 0 {
-		slog.Info("detected Flutter runtime paths", "paths", paths)
-	}
-	return paths
-}
-
-// detectFlutterSDKRoot returns the root directory of the active Flutter SDK, or
-// "" if it cannot be located. FLUTTER_ROOT wins when set; otherwise a flutter
-// binary on PATH is resolved (following symlinks) to <root>/bin/flutter and the
-// grandparent is returned. The candidate is only accepted when it looks like a
-// Flutter SDK checkout (it contains a packages directory), so a stray binary in
-// a system directory like /usr/bin never widens access to /usr.
-func detectFlutterSDKRoot() string {
-	if root := os.Getenv("FLUTTER_ROOT"); root != "" {
-		if isFlutterSDKRoot(root) {
-			return root
-		}
-	}
-	bin, err := exec.LookPath("flutter")
-	if err != nil {
-		return ""
-	}
-	if resolved, err := filepath.EvalSymlinks(bin); err == nil {
-		bin = resolved
-	}
-	root := filepath.Dir(filepath.Dir(bin))
-	if isFlutterSDKRoot(root) {
-		return root
-	}
-	return ""
-}
-
-// isFlutterSDKRoot reports whether dir looks like a Flutter SDK checkout. Every
-// SDK ships a top-level packages directory alongside bin/, which distinguishes a
-// real SDK from an ordinary bin directory such as /usr/bin.
-func isFlutterSDKRoot(dir string) bool {
-	if dir == "" {
-		return false
-	}
-	info, err := os.Stat(filepath.Join(dir, "packages"))
-	return err == nil && info.IsDir()
 }
 
 // ParseBash parses a command string as bash and returns the AST.
@@ -1261,7 +861,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					// OS sandbox is active, where they are contained to sandbox-spawned
 					// processes.
 					osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
-					if !allowedCommands[cmdName] && !inExtra && !declaredFuncs[cmdName] && !osOnly {
+					if !s.commandWhitelisted(cmdName) && !inExtra && !declaredFuncs[cmdName] && !osOnly {
 						// Whitelist and local-binary gates: allowlist-only rules, so
 						// in denylist/open mode this records the finding and moves on.
 						var gateErr error
@@ -1279,12 +879,8 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					// Skip per-command validators for commands allowed via extra_commands —
 					// the user has explicitly opted in to those commands.
 					if !inExtra {
-						// Runtime enable gate first (allowlist-only), then the
-						// command's own argument validator, which applies in every
+						// The command's own argument validator applies in every
 						// enforcing mode.
-						if fail(layerStatic, ruleRuntimeDisabled, s.runtimeDisabledError(cmdName)) {
-							return false
-						}
 						if validator, ok := commandArgValidators[cmdName]; ok {
 							if fail(layerStatic, ruleArgValidator, validator(s, n.Args)) {
 								return false
@@ -2037,26 +1633,25 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	}
 	s.mu.Unlock()
 
-	// Resolve the worker's writable extra binds outside the lock; runtime
-	// detection may run lazily here. The worker is writable in the working
-	// directory by default; every other directory a command may legitimately
-	// write to must be added here or the OS sandbox denies the write (EPERM)
-	// even though the Go validator permitted it.
-	extraBinds := s.RuntimeReadPaths()
+	// The worker is writable in the working directory by default; every other
+	// directory a command may legitimately write to must be added here or the
+	// OS sandbox denies the write (EPERM) even though the Go validator
+	// permitted it.
+	//
+	// Write grants are enforced by the Go validator via Execute(...,
+	// writeAllowedPaths), but that only gates the interpreter — the OS sandbox
+	// worker has its own profile. Without adding them here, a write the
+	// validator allows is still denied by bwrap/seatbelt with EPERM.
+	extraBinds := s.ConfigWritePaths()
 
-	// User-configured writable_paths are enforced by the Go validator via
-	// Execute(..., writeAllowedPaths), but that only gates the interpreter — the
-	// OS sandbox worker has its own profile. Without adding them here, a write
-	// the validator allows is still denied by bwrap/seatbelt with EPERM.
-	extraBinds = append(extraBinds, s.ConfigWritePaths()...)
-
-	// internal_writable_paths are the inverse: the OS sandbox worker allows the
-	// writes (so spawned programs can reach their own data, e.g. ~/.cache), but
-	// the paths are deliberately NOT part of the interpreter's write set, so the
-	// agent's direct writes there are still rejected at the AST/runtime layer.
+	// Internal write grants are the inverse: the OS sandbox worker allows the
+	// writes (so spawned programs can reach their own data — a profile's build
+	// cache, a tool's ~/.cache), but the paths are deliberately NOT part of the
+	// interpreter's write set, so the agent's direct writes there are still
+	// rejected at the AST/runtime layer.
 	extraBinds = append(extraBinds, s.ConfigInternalWritePaths()...)
 
-	// internal_readable_paths likewise only reach the worker (as read-only
+	// Internal read grants likewise only reach the worker (as read-only
 	// binds); reads inside the OS sandbox are broadly allowed already, so this
 	// mainly re-exposes host paths hidden by the worker's /tmp overlay.
 	roBinds := s.ConfigInternalReadPaths()

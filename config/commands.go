@@ -39,10 +39,33 @@ type CommandEntry struct {
 	Command   string `yaml:"command"`
 	Allow     *bool  `yaml:"allow,omitempty"`
 	NoSandbox bool   `yaml:"no_sandbox,omitempty"`
+	// Profile names the profile an entry was expanded from (see
+	// Config.Effective); it is never read from or written to the file. A
+	// profile's allow of a bare command name whitelists the command rather
+	// than opening an escape hatch: the command keeps its argument validators
+	// and is never run via real bash, so it is listed by
+	// WhitelistedCommandList, not ExtraCommandList. Every other field, and an
+	// allow with arguments, means what it means in the config.
+	Profile string `yaml:"-"`
 }
 
 // Allows reports whether the entry allows the command (allow: true).
 func (e CommandEntry) Allows() bool { return e.Allow != nil && *e.Allow }
+
+// Whitelists reports whether the entry is a profile's allow of a bare command
+// name, which adds the command to the whitelist (validated) instead of
+// allowing it past validation.
+func (e CommandEntry) Whitelists() bool {
+	return e.Allows() && e.Profile != "" && len(strings.Fields(e.Command)) == 1
+}
+
+// escapeHatch reports whether the entry is an allow that admits invocations
+// past validation: every allow but a profile's whitelisting.
+func (e CommandEntry) escapeHatch() bool { return e.Allows() && !e.Whitelists() }
+
+// userAllow reports whether the entry is an allow the user wrote, the only
+// kind that lifts a built-in denial.
+func (e CommandEntry) userAllow() bool { return e.Allows() && e.Profile == "" }
 
 // Denies reports whether the entry denies the command (allow: false).
 func (e CommandEntry) Denies() bool { return e.Allow != nil && !*e.Allow }
@@ -136,17 +159,29 @@ func (c *Config) commandsWhere(legacy func(*Config) []string, pred func(CommandE
 
 // ExtraCommandList returns every command allowed inside the sandbox, as
 // written: the commands entries with allow: true and no no_sandbox, plus the
-// deprecated extra_commands list. Commands allowed with no_sandbox are listed
+// deprecated extra_commands list and the allows the deprecated runtimes
+// section implies ("cargo publish" for runtimes.rust.publish, ...). A
+// profile's whitelisting entries are not listed (see WhitelistedCommandList). Commands allowed with no_sandbox are listed
 // by UnsandboxedCommandList instead, as the two lists always were distinct.
 func (c *Config) ExtraCommandList() []string {
-	return c.commandsWhere(func(c *Config) []string { return c.ExtraCommands }, func(e CommandEntry) bool { return e.Allows() && !e.NoSandbox })
+	return c.commandsWhere(func(c *Config) []string {
+		return append(append([]string(nil), c.ExtraCommands...), c.legacyRuntimeAllowedCommands()...)
+	}, func(e CommandEntry) bool { return e.escapeHatch() && !e.NoSandbox })
 }
 
 // UnsandboxedCommandList returns every command allowed to run on the host,
 // outside the OS sandbox, as written: the commands entries with allow: true
 // and no_sandbox: true, plus the deprecated unsandboxed_commands list.
 func (c *Config) UnsandboxedCommandList() []string {
-	return c.commandsWhere(func(c *Config) []string { return c.UnsandboxedCommands }, func(e CommandEntry) bool { return e.Allows() && e.NoSandbox })
+	return c.commandsWhere(func(c *Config) []string { return c.UnsandboxedCommands }, func(e CommandEntry) bool { return e.escapeHatch() && e.NoSandbox })
+}
+
+// WhitelistedCommandList returns the commands the enabled profiles add to the
+// whitelist: the allows Effective expanded into the commands list. Unlike
+// the commands ExtraCommandList returns, these are still validated like any
+// whitelisted command. Empty for a config WithProfiles has not expanded.
+func (c *Config) WhitelistedCommandList() []string {
+	return c.commandsWhere(func(*Config) []string { return nil }, CommandEntry.Whitelists)
 }
 
 // DeniedCommandList returns the user-added deny entries, as written and
@@ -173,7 +208,7 @@ func (c *Config) LiftedDeniedCommands() []string {
 	entries := c.AllCommandEntries()
 	for _, d := range DefaultDeniedCommands() {
 		for _, e := range entries {
-			if e.Allows() && e.SameCommand(d) {
+			if e.userAllow() && e.SameCommand(d) {
 				out = append(out, d)
 				break
 			}
@@ -291,12 +326,14 @@ func (c *Config) LegacyCommandEntries() []CommandEntry {
 
 // AllCommandEntries returns every command statement in c in the new form: the
 // commands entries followed by the deprecated lists converted with
-// LegacyCommandEntries.
+// LegacyCommandEntries, then the allows the deprecated runtimes section
+// implies (which MigrateRuntimes, not MigrateCommands, rewrites).
 func (c *Config) AllCommandEntries() []CommandEntry {
 	if c == nil {
 		return nil
 	}
-	return append(append([]CommandEntry(nil), c.Commands...), c.LegacyCommandEntries()...)
+	out := append(append([]CommandEntry(nil), c.Commands...), c.LegacyCommandEntries()...)
+	return append(out, c.legacyRuntimeCommandEntries()...)
 }
 
 // UsesDeprecatedCommandKeys reports whether the base config or any override
