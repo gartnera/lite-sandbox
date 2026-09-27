@@ -137,6 +137,7 @@ Commands run under a generated SBPL (Scheme-based Profile Language) profile via
 above, the macOS backend has:
 
 - **Signal confinement**: the profile denies signaling processes outside the worker's own process group, so a sandboxed `kill`/`pkill` can't reach host processes.
+- **Processes started by system services are not confined**: the sandbox applies to the worker's own process tree. A process that launchd or another daemon starts on a command's behalf is outside that tree. The notable case is the iOS Simulator: CoreSimulator launches simulator apps and tests, and they can write anywhere the user can. The [xcode profile](profiles.md#xcode) therefore refuses simulator and device runs (`xcodebuild test` off the Mac, `simctl spawn`/`launch`/`install`, `devicectl`) unless its `allow_devices` option is set.
 
 **Relationship to AST validation:**
 

@@ -347,3 +347,33 @@ func TestProfileCatalog_EntriesAreConfigEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileNoSandboxOption(t *testing.T) {
+	xcode, _ := LookupProfile("xcode")
+	off := &Config{Profiles: []ProfileEntry{{Name: "xcode"}}}
+	on := &Config{Profiles: []ProfileEntry{{Name: "xcode", Options: map[string]bool{"no_sandbox": true}}}}
+	for _, e := range off.ProfileCommandEntries(xcode) {
+		if e.NoSandbox {
+			t.Errorf("%s: no_sandbox set with the option off", e.Command)
+		}
+	}
+	for _, e := range on.ProfileCommandEntries(xcode) {
+		if !e.NoSandbox || !e.Whitelists() {
+			t.Errorf("%s: want a whitelisting no_sandbox entry, got %+v", e.Command, e)
+		}
+	}
+	var hosted []string
+	for _, e := range on.Effective().Commands {
+		if e.Profile == "xcode" && e.NoSandbox {
+			hosted = append(hosted, e.Command)
+		}
+	}
+	if len(hosted) != len(xcode.Commands) {
+		t.Errorf("Effective no_sandbox xcode entries = %v, want all of %v", hosted, xcode.CommandNames())
+	}
+	// A profile without the option ignores it.
+	goProfile, _ := LookupProfile("go")
+	if e := (&Config{}).ProfileCommandEntries(goProfile); e[0].NoSandbox {
+		t.Errorf("go entries marked no_sandbox: %+v", e)
+	}
+}

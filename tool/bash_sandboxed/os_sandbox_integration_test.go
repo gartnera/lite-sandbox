@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -549,4 +550,105 @@ build-backend = "hatchling.build"
 			t.Errorf("launcher escaped the sandbox to %s", launcher)
 		}
 	})
+}
+
+// TestOSSandboxXcodeProfile verifies SwiftPM builds and runs a package under the
+// OS sandbox with the xcode profile. On macOS this depends on the injected
+// --disable-sandbox: SwiftPM compiles the manifest under a sandbox-exec of its
+// own, which macOS refuses inside the worker's ("sandbox_apply: Operation not
+// permitted"), and on every platform on SwiftPM's caches being granted.
+func TestOSSandboxXcodeProfile(t *testing.T) {
+	requireOSSandbox(t)
+	if _, err := exec.LookPath("swift"); err != nil {
+		t.Skip("swift not installed")
+	}
+	tmpDir := t.TempDir()
+	files := map[string]string{
+		"Package.swift":            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"hello\", targets: [.executableTarget(name: \"hello\")])\n",
+		"Sources/hello/main.swift": "print(\"hello from swift\")\n",
+	}
+	for name, body := range files {
+		path := filepath.Join(tmpDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// With no_sandbox the commands run on the host instead, where nothing
+	// is injected and SwiftPM applies its own sandbox.
+	for _, noSandbox := range []bool{false, true} {
+		t.Run(fmt.Sprintf("no_sandbox=%v", noSandbox), func(t *testing.T) {
+			s := NewSandbox()
+			enabled := true
+			s.updateConfig(&config.Config{
+				OSSandbox: &enabled,
+				Profiles:  []config.ProfileEntry{{Name: "xcode", Options: map[string]bool{"no_sandbox": noSandbox}}},
+			}, tmpDir)
+			defer s.Close()
+
+			output, err := s.Execute(context.Background(), "swift run hello", tmpDir, []string{tmpDir}, []string{tmpDir})
+			if err != nil {
+				t.Fatalf("swift run failed: %v, output: %s", err, output)
+			}
+			if !contains(output, "hello from swift") {
+				t.Errorf("expected greeting in output, got: %s", output)
+			}
+		})
+	}
+}
+
+// TestOSSandboxXcodegen verifies xcodegen generates a project under the OS
+// sandbox with the xcode profile — its --use-cache cache (~/.xcodegen) is
+// granted — while a spec's preGenCommand, which xcodegen runs as a shell
+// command, stays confined to the sandbox's writable paths.
+func TestOSSandboxXcodegen(t *testing.T) {
+	requireOSSandbox(t)
+	if _, err := exec.LookPath("xcodegen"); err != nil {
+		t.Skip("xcodegen not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(home, fmt.Sprintf(".lite-sandbox-xcodegen-escape-%d", os.Getpid()))
+	os.Remove(escape)
+	t.Cleanup(func() { os.Remove(escape) })
+
+	tmpDir := t.TempDir()
+	// The first touch proves the command ran; the second must be refused.
+	spec := "name: Hello\noptions:\n  preGenCommand: touch pregen-ran; touch " + escape + " || true\ntargets:\n  Hello:\n    type: tool\n    platform: macOS\n    sources: [Sources]\n"
+	if err := os.MkdirAll(filepath.Join(tmpDir, "Sources"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "Sources", "main.swift"), []byte("print(\"hi\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "project.yml"), []byte(spec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewSandbox()
+	enabled := true
+	s.updateConfig(&config.Config{
+		OSSandbox: &enabled,
+		Profiles:  []config.ProfileEntry{{Name: "xcode"}},
+	}, tmpDir)
+	defer s.Close()
+
+	output, err := s.Execute(context.Background(), "xcodegen generate --use-cache", tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("xcodegen generate failed: %v, output: %s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "Hello.xcodeproj", "project.pbxproj")); err != nil {
+		t.Errorf("expected Hello.xcodeproj to be generated: %v, output: %s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "pregen-ran")); err != nil {
+		t.Errorf("preGenCommand did not run: %v, output: %s", err, output)
+	}
+	if _, err := os.Stat(escape); err == nil {
+		t.Errorf("preGenCommand wrote %s outside the sandbox", escape)
+	}
 }

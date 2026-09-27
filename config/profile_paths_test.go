@@ -116,3 +116,88 @@ func mustMkdir(t *testing.T, dir string) {
 		t.Fatalf("failed to create dir %q", dir)
 	}
 }
+
+func TestXcodeBindsFor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	darwin := xcodeBindsFor("darwin", func(string) bool { t.Fatal("darwin must not look for tools"); return false })
+	want := []string{
+		filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData"),
+		filepath.Join(home, "Library", "Developer", "Xcode", "Archives"),
+		filepath.Join(home, "Library", "Caches", "org.swift.swiftpm"),
+		filepath.Join(home, "Library", "org.swift.swiftpm"),
+		filepath.Join(home, ".xcodegen"),
+	}
+	if !slices.Equal(darwin, want) {
+		t.Errorf("darwin = %v, want %v", darwin, want)
+	}
+	for _, p := range darwin {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s was created; sandbox-exec does not need it to exist", p)
+		}
+	}
+
+	// The legacy ~/.swiftpm is added only when it exists.
+	if err := os.Mkdir(filepath.Join(home, ".swiftpm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := xcodeBindsFor("darwin", nil); !slices.Contains(got, filepath.Join(home, ".swiftpm")) {
+		t.Errorf("darwin with ~/.swiftpm = %v, want it included", got)
+	}
+
+	if got := xcodeBindsFor("linux", func(string) bool { return false }); got != nil {
+		t.Errorf("linux without swift or xcodegen = %v, want nil (bubblewrap would create them)", got)
+	}
+	linux := xcodeBindsFor("linux", func(string) bool { return true })
+	want = []string{filepath.Join(home, ".cache", "org.swift.swiftpm"), filepath.Join(home, ".swiftpm"), filepath.Join(home, ".xcodegen")}
+	if !slices.Equal(linux, want) {
+		t.Errorf("linux = %v, want %v", linux, want)
+	}
+	if got := xcodeBindsFor("linux", func(tool string) bool { return tool == "xcodegen" }); !slices.Equal(got, []string{filepath.Join(home, ".xcodegen")}) {
+		t.Errorf("linux with only xcodegen = %v", got)
+	}
+}
+
+func TestDetectXcodeDeveloperDir(t *testing.T) {
+	fakeDeveloperDir := func(tool string) string {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "usr", "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "usr", "bin", tool), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	xcode := fakeDeveloperDir("xcodebuild")
+	clt := fakeDeveloperDir("clang")
+
+	link := filepath.Join(t.TempDir(), "xcode_select_link")
+	if err := os.Symlink(clt, link); err != nil {
+		t.Fatal(err)
+	}
+	old := xcodeSelectLink
+	xcodeSelectLink = link
+	t.Cleanup(func() { xcodeSelectLink = old })
+
+	t.Setenv("DEVELOPER_DIR", "")
+	if got := detectXcodeDeveloperDir(); got != clt {
+		t.Errorf("from the xcode-select link = %q, want %q", got, clt)
+	}
+	t.Setenv("DEVELOPER_DIR", xcode)
+	if got := detectXcodeDeveloperDir(); got != xcode {
+		t.Errorf("DEVELOPER_DIR = %q, want %q", got, xcode)
+	}
+	// A DEVELOPER_DIR that holds no developer tools must not widen what the
+	// agent may read; the link is used instead.
+	t.Setenv("DEVELOPER_DIR", t.TempDir())
+	if got := detectXcodeDeveloperDir(); got != clt {
+		t.Errorf("bogus DEVELOPER_DIR = %q, want the link's %q", got, clt)
+	}
+	xcodeSelectLink = filepath.Join(t.TempDir(), "missing")
+	if got := detectXcodeDeveloperDir(); got != "" {
+		t.Errorf("no developer dir = %q, want empty", got)
+	}
+}

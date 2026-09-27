@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -328,4 +329,115 @@ func isFlutterSDKRoot(dir string) bool {
 	}
 	info, err := os.Stat(filepath.Join(dir, "packages"))
 	return err == nil && info.IsDir()
+}
+
+// detectXcodeBinds returns the directories Xcode's build tools and SwiftPM
+// write outside the project, for the xcode profile. On macOS:
+//
+//   - ~/Library/Developer/Xcode/DerivedData, xcodebuild's build products,
+//     index, logs, and the checkouts of a project's Swift packages;
+//   - ~/Library/Developer/Xcode/Archives, where `xcodebuild archive` puts the
+//     .xcarchive;
+//   - ~/Library/Caches/org.swift.swiftpm (repository and manifest caches) and
+//     ~/Library/org.swift.swiftpm (configuration and fingerprints), SwiftPM's
+//     user-level state for both `swift build` and xcodebuild's package support;
+//   - ~/.swiftpm when it exists, where older SwiftPM kept that state;
+//   - ~/.xcodegen, where `xcodegen generate --use-cache` keeps its cache.
+//
+// None are created: sandbox-exec does not need a rule's path to exist, and
+// Xcode makes them on first use. On Linux there is no Xcode, only a Swift
+// toolchain, whose SwiftPM keeps its state in ~/.cache/org.swift.swiftpm and
+// ~/.swiftpm; bubblewrap has to create a bind's source, so those are returned
+// only when swift is installed, and ~/.xcodegen only when xcodegen is, so a
+// host without them gets nothing created.
+//
+// DerivedData can be moved in Xcode's settings; a moved one needs a paths
+// grant, or `-derivedDataPath` inside the project.
+func detectXcodeBinds() []string {
+	return xcodeBindsFor(runtime.GOOS, func(tool string) bool {
+		_, err := exec.LookPath(tool)
+		return err == nil
+	})
+}
+
+func xcodeBindsFor(goos string, installed func(tool string) bool) []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	var paths []string
+	switch goos {
+	case "darwin":
+		paths = []string{
+			filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData"),
+			filepath.Join(home, "Library", "Developer", "Xcode", "Archives"),
+			filepath.Join(home, "Library", "Caches", "org.swift.swiftpm"),
+			filepath.Join(home, "Library", "org.swift.swiftpm"),
+			filepath.Join(home, ".xcodegen"),
+		}
+		if p := existingHomeSubdir("", ".swiftpm"); p != "" {
+			paths = append(paths, p)
+		}
+	case "linux":
+		if installed("swift") {
+			cache := os.Getenv("XDG_CACHE_HOME")
+			if cache == "" {
+				cache = filepath.Join(home, ".cache")
+			}
+			paths = append(paths,
+				filepath.Join(cache, "org.swift.swiftpm"),
+				filepath.Join(home, ".swiftpm"),
+			)
+		}
+		if installed("xcodegen") {
+			paths = append(paths, filepath.Join(home, ".xcodegen"))
+		}
+	}
+	if len(paths) > 0 {
+		slog.Info("detected Xcode profile paths", "paths", paths)
+	}
+	return paths
+}
+
+// xcodeSelectLink is the symlink `xcode-select --switch` points at the active
+// developer directory. A var so tests can aim it elsewhere.
+var xcodeSelectLink = "/var/db/xcode_select_link"
+
+// detectXcodeDeveloperDir returns the active developer directory — an
+// Xcode.app's Contents/Developer or /Library/Developer/CommandLineTools — or
+// "" when there is none. DEVELOPER_DIR wins, as it does for xcrun; otherwise
+// the xcode-select link is read, without running xcode-select. A candidate is
+// accepted only when it holds the developer tools (usr/bin/xcodebuild in an
+// Xcode, usr/bin/clang in the Command Line Tools), so a stray DEVELOPER_DIR
+// cannot widen what the agent may read to an arbitrary directory.
+func detectXcodeDeveloperDir() string {
+	for _, dir := range []string{os.Getenv("DEVELOPER_DIR"), readLink(xcodeSelectLink)} {
+		if isXcodeDeveloperDir(dir) {
+			return dir
+		}
+	}
+	return ""
+}
+
+func readLink(path string) string {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return ""
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return target
+}
+
+func isXcodeDeveloperDir(dir string) bool {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return false
+	}
+	for _, tool := range []string{"xcodebuild", "clang"} {
+		if info, err := os.Stat(filepath.Join(dir, "usr", "bin", tool)); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
 }

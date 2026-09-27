@@ -1,7 +1,7 @@
 # Toolchain Profiles
 
 A profile is a built-in preset of **commands** and **paths** for one toolchain:
-`go`, `pnpm`, `rust`, `deno`, `flutter`, `uv`, and `montypython`. Profiles are
+`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, and `montypython`. Profiles are
 off by default and enabled one at a time:
 
 ```yaml
@@ -236,6 +236,95 @@ Like Go, Rust, and Deno, Flutter runs arbitrary code, so it is contained by the
 OS sandbox confining writes to the working directory and the detected paths,
 not by argument validation. Once enabled, all `flutter`/`dart`/`fvm`
 subcommands are allowed.
+
+## Xcode
+
+The `xcode` profile whitelists `xcodebuild`, `xcrun`, `swift`, `swiftc`,
+`xcode-select`, and [XcodeGen](https://github.com/yonaskolb/XcodeGen)'s
+`xcodegen`, and has two options:
+
+```bash
+lite-sandbox config profiles enable xcode
+lite-sandbox config profiles set xcode allow_devices true      # optional: simulators and devices
+lite-sandbox config profiles set xcode no_sandbox true         # optional: run on the host (see below)
+lite-sandbox config commands allow "swift package-registry publish"   # optional
+```
+
+For example:
+
+```bash
+xcodebuild -list
+xcodebuild -scheme App -destination 'generic/platform=iOS Simulator' build
+xcodebuild -scheme App -destination 'platform=macOS' test
+xcodebuild -scheme App -archivePath build/App.xcarchive archive
+swift build && swift test
+xcrun simctl list devices
+xcodegen generate --use-cache
+```
+
+The profile grants, writable at the OS sandbox layer:
+
+- **DerivedData**: `~/Library/Developer/Xcode/DerivedData`, xcodebuild's build
+  products, index, logs, and the checkouts of a project's Swift packages. If
+  you moved DerivedData in Xcode's settings, grant the new location with a
+  `paths` entry, or pass `-derivedDataPath` inside the project.
+- **Archives**: `~/Library/Developer/Xcode/Archives`.
+- **XcodeGen**: `~/.xcodegen`, where `xcodegen generate --use-cache` keeps its
+  cache. A spec's `preGenCommand`/`postGenCommand` are shell commands xcodegen
+  runs, so they are confined by the OS sandbox like a build script.
+- **SwiftPM**: `~/Library/Caches/org.swift.swiftpm` and
+  `~/Library/org.swift.swiftpm`, plus `~/.swiftpm` if it exists. On Linux, where
+  only `swift` applies, `~/.cache/org.swift.swiftpm` and `~/.swiftpm`.
+
+It also grants the active developer directory (`DEVELOPER_DIR`, else the one
+`xcode-select` points at) **readable** only, so the agent can read SDK headers.
+
+SwiftPM normally compiles package manifests and runs plugins under a
+`sandbox-exec` of its own. macOS refuses to start one inside the OS sandbox
+(`sandbox_apply: Operation not permitted`), which breaks every package
+resolution. When a command runs in the OS sandbox, lite-sandbox therefore
+turns SwiftPM's sandbox off (`--disable-sandbox` for `swift build`/`test`/
+`run`/`package`, `-IDEPackageSupportDisableManifestSandbox=YES` for
+`xcodebuild`), since the OS sandbox already confines the manifest and plugins.
+The flag only reaches the invocation the agent types, so a `swift build` run
+by a Makefile or a build-phase script fails with that error. SwiftPM has no
+environment variable for it.
+
+The `no_sandbox` option (`lite-sandbox config profiles set xcode no_sandbox true`)
+runs the profile's commands on the host instead, the way `no_sandbox` does on
+a `commands` entry. Nothing is injected, so SwiftPM and Xcode sandbox
+manifests, plugins, and macros themselves, and nested invocations work. The
+commands are still validated. Everything else they run, though, is not
+confined: SwiftPM's sandbox covers only manifests and plugins, so the code
+`swift test`/`swift run` build and run, and Xcode's tests and build scripts,
+run with the user's full access. The option applies to the profile's own
+commands: `xcrun swift` runs on the host, while `xcrun clang` (or `xcrun curl`)
+stays in the OS sandbox.
+
+Restrictions:
+- **Simulators and devices** (`allow_devices`, off by default): CoreSimulator,
+  not the command, launches the processes that run in a simulator, so a test
+  there runs **outside the OS sandbox** and can write anywhere you can. Without
+  the option, `xcodebuild test`/`test-without-building` needs an explicit
+  `-destination 'platform=macOS'` (Mac tests run under the OS sandbox),
+  `xcrun simctl` allows only the read-only subcommands (`list`, `getenv`,
+  `listapps`, `appinfo`, `get_app_container`, `bootstatus`, `help`), and
+  `xcrun devicectl` is refused. Building for a simulator is always allowed.
+- `xcodebuild -exportArchive`, `-exportNotarizedApp`, `-allowProvisioningUpdates`,
+  `-allowProvisioningDeviceRegistration`, and the App Store Connect
+  `-authenticationKey*` options are blocked: they act on your developer account
+  or upload to Apple.
+- `xcodebuild -license`, `-runFirstLaunch`, and the platform/component
+  downloads and imports are blocked, as are `xcode-select` options other than
+  `-p`/`--version`: they change the whole host.
+- `xcrun` runs any tool by name, and falls back to `PATH` (`xcrun curl` runs
+  `/usr/bin/curl`), so the tool it runs is validated as if you had typed it:
+  `xcrun git push` is refused like `git push`, and `xcrun curl` like `curl`. The
+  compilers, linkers, and binary and asset tools of the toolchain (`clang`,
+  `ld`, `lipo`, `actool`, `xcresulttool`, ...) are allowed. `notarytool`,
+  `altool`, `iTMSTransporter`, and `stapler` are blocked.
+- `swift package-registry publish` and `login` need a `commands` entry because
+  they use your registry credentials.
 
 ## uv
 

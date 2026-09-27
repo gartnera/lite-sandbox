@@ -79,6 +79,19 @@ func toolchainDirs(detect func() []string) func() []PathEntry {
 	}
 }
 
+// xcodePaths is the xcode profile's paths: its caches as toolchainDirs, plus a
+// read grant on the active developer directory so the agent can read the
+// SDKs' headers and the toolchain's man pages. Nothing writes there, so it
+// gets no write grant.
+func xcodePaths() []PathEntry {
+	out := toolchainDirs(detectXcodeBinds)()
+	if dir := detectXcodeDeveloperDir(); dir != "" {
+		yes := true
+		out = append(out, PathEntry{Path: dir, Read: &yes})
+	}
+	return out
+}
+
 // ProfileOption is one boolean setting of a profile.
 type ProfileOption struct {
 	Name        string
@@ -128,6 +141,16 @@ var builtinProfiles = []Profile{
 		Description: "Flutter, Dart, and fvm; the fvm and pub caches, the SDK, and their config dirs",
 		Commands:    whitelist("flutter", "dart", "fvm"),
 		paths:       toolchainDirs(detectFlutterBinds),
+	},
+	{
+		Name:        "xcode",
+		Description: "Xcode, Swift, and XcodeGen; DerivedData, Archives, SwiftPM's and XcodeGen's caches, and the developer dir (read-only)",
+		Commands:    whitelist("xcodebuild", "xcrun", "swift", "swiftc", "xcode-select", "xcodegen"),
+		Options: []ProfileOption{
+			{Name: "allow_devices", Default: false, Description: "let xcodebuild test and simctl run code on simulators and devices, which CoreSimulator starts outside the OS sandbox"},
+			{Name: noSandboxOption, Default: false, Description: "run the commands on the host, outside the OS sandbox, where SwiftPM and Xcode can sandbox manifests and plugins themselves (builds, tests, and build scripts are then unconfined)"},
+		},
+		paths: xcodePaths,
 	},
 	{
 		Name:        "uv",
@@ -229,6 +252,26 @@ func (p Profile) CommandEntries() []CommandEntry {
 	for i := range out {
 		out[i].Command = out[i].Text()
 		out[i].Profile = p.Name
+	}
+	return out
+}
+
+// noSandboxOption is the profile option that runs a profile's commands on the
+// host, outside the OS sandbox: it sets no_sandbox on every one of the
+// profile's commands entries, as a user's commands entry would. The commands
+// stay whitelisted and validated. Only a profile that declares the option has
+// it.
+const noSandboxOption = "no_sandbox"
+
+// ProfileCommandEntries returns p's commands entries as this config enables
+// them: CommandEntries, with no_sandbox set on each when the profile's
+// no_sandbox option is on.
+func (c *Config) ProfileCommandEntries(p Profile) []CommandEntry {
+	out := p.CommandEntries()
+	if _, ok := p.Option(noSandboxOption); ok && c.ProfileOption(p.Name, noSandboxOption) {
+		for i := range out {
+			out[i].NoSandbox = true
+		}
 	}
 	return out
 }
