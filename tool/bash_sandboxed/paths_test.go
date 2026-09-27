@@ -181,6 +181,10 @@ func TestValidatePaths_Allowed(t *testing.T) {
 		name    string
 		command string
 	}{
+		{"diff against /dev/null", "diff /dev/null file.txt"},
+		{"cat /dev/null", "cat /dev/null"},
+		{"cp from /dev/null", "cp /dev/null empty.txt"},
+		{"git diff --no-index /dev/null", "git diff --no-index /dev/null file.txt"},
 		{"cut -d/ delimiter", "cut -d/ -f1-2 file.txt"},
 		{"sort -t/ separator", "sort -t/ -k1 file.txt"},
 		{"sed address range expr", "sed -n '/UpgradeOldLoadoutMessage/,/^}/p' file.go"},
@@ -237,7 +241,7 @@ func TestValidatePaths_Blocked(t *testing.T) {
 		{"stat outside", "stat /etc/hosts", "outside allowed directories"},
 		{"head outside", "head -5 /etc/hosts", "outside allowed directories"},
 		{"du outside", "du -sh /tmp", "outside allowed directories"},
-		{"diff outside", "diff /dev/null /dev/null", "outside allowed directories"},
+		{"diff outside", "diff /etc/hosts /etc/hosts", "outside allowed directories"},
 		{"short flag embedded path", "grep -f/etc/passwd pattern", "outside allowed directories"},
 		{"long flag embedded path", "grep --file=/etc/passwd pattern", "outside allowed directories"},
 		{"short flag dot dot", "grep -f../../etc/passwd pattern", "outside allowed directories"},
@@ -888,4 +892,27 @@ func TestAllowedPathUnderSymlinkedAncestor(t *testing.T) {
 			t.Fatal("a path outside the grant was allowed")
 		}
 	})
+}
+
+// TestBashSandboxed_DevNullArgument checks that /dev/null is usable as a
+// command argument, not just as a redirect target, through both the static
+// and the runtime (post-expansion) path checks.
+func TestBashSandboxed_DevNullArgument(t *testing.T) {
+	workDir := t.TempDir()
+	os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("hello\n"), 0o644)
+	for _, cmd := range []string{
+		"cat /dev/null",
+		"N=/dev/null; cat $N",
+		"cp /dev/null empty.txt",
+		"diff /dev/null file.txt || true",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			if _, err := NewSandbox().Execute(context.Background(), cmd, workDir, []string{workDir}, []string{workDir}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+	if fi, err := os.Stat(filepath.Join(workDir, "empty.txt")); err != nil || fi.Size() != 0 {
+		t.Fatalf("expected empty.txt to be an empty file, got %v, %v", fi, err)
+	}
 }
