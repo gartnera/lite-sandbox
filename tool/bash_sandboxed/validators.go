@@ -76,16 +76,6 @@ func argsAfterToken(args []*syntax.Word, token string) []*syntax.Word {
 	return nil
 }
 
-// publishGate reports the shared "publishing is gated" error for a runtime's
-// publish subcommand (pnpm/cargo/uv/deno), or nil when allowed is true. tool
-// and configKey keep each runtime's message byte-identical to its own wording.
-func publishGate(tool, configKey string, allowed bool) error {
-	if !allowed {
-		return fmt.Errorf("%s publish is not allowed (%s is disabled)", tool, configKey)
-	}
-	return nil
-}
-
 // validateRgArgs checks that rg --pre (preprocessor) references only
 // whitelisted commands. --pre executes COMMAND for each file searched,
 // so the command is validated recursively against the allowlist.
@@ -241,21 +231,16 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName))
 	}
 	extra := s.getExtraCommands()
-	// The whitelist and runtime gates are allowlist-only rules. A wrapped
+	// The whitelist is an allowlist-only rule. A wrapped
 	// command that fails them is returned tagged so the reporting site can
 	// treat it as advisory in denylist/open mode; its own validator is then
 	// skipped, but the wrapper's path arguments are still boundary-checked by
 	// the generic path pass.
-	if !allowedCommands[cmdName] && !extra[cmdName] {
+	if !s.commandWhitelisted(cmdName) && !extra[cmdName] {
 		if s.enforcesAllowlist() {
 			return commandNotAllowed(cmdName)
 		}
 		return nil
-	}
-	if err := s.runtimeDisabledError(cmdName); err != nil {
-		if s.enforcesAllowlist() {
-			return err
-		}
 	}
 	if validator, ok := s.argValidators[cmdName]; ok {
 		if err := validator(s, args); err != nil {

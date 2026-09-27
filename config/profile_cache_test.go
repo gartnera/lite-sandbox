@@ -1,4 +1,4 @@
-package bash_sandboxed
+package config
 
 import (
 	"encoding/json"

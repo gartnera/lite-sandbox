@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -23,24 +22,25 @@ var blockedDenoSubcommands = map[string]string{
 // denoFetchSubcommands perform remote module/package fetches as a CLI
 // operation (not as a runtime import in executed code), so an injected
 // --deny-import does not stop them. They are gated at validation time behind
-// runtimes.deno.allow_import instead.
+// the deno profile's allow_import option instead.
 var denoFetchSubcommands = map[string]bool{
 	"cache":   true,
 	"add":     true,
 	"install": true,
 }
 
-// validateDenoArgs validates deno commands according to the runtime config.
+// validateDenoArgs validates deno commands. publishAllowed reports whether the
+// config allows `deno publish`; allowImport is the deno profile's option.
 //
 // Deno is itself a permissioned runtime: `deno run` only gains filesystem,
 // network, or env access when granted explicit --allow-* flags, and the OS
 // sandbox confines whatever access is granted. We therefore allow the usual
 // development subcommands (run, test, check, fmt, lint, bench, task, compile,
 // add, install, etc.) and gate the operations that reach shared state or the
-// network: `deno publish` (JSR registry) behind runtimes.deno.publish, `deno
+// network: `deno publish` (JSR registry) behind a "deno publish" commands entry, `deno
 // upgrade` (self-modifying binary) unconditionally, and the remote-fetch
-// subcommands behind runtimes.deno.allow_import.
-func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
+// subcommands behind the allow_import option.
+func validateDenoArgs(args []*syntax.Word, publishAllowed, allowImport bool) error {
 	// Find the subcommand, skipping global flags. Deno's global flags (-q,
 	// --quiet, --unstable, --version, etc.) do not take separate value
 	// arguments, hence the nil value-flag set.
@@ -55,7 +55,7 @@ func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
 
 	// Gate publish behind the publish permission (affects the JSR registry).
 	if subcommand == "publish" {
-		return publishGate("deno", "runtimes.deno.publish", denoCfg.DenoPublish())
+		return publishGate("deno", publishAllowed)
 	}
 
 	// Check for other blocked subcommands.
@@ -66,8 +66,8 @@ func validateDenoArgs(args []*syntax.Word, denoCfg *config.DenoConfig) error {
 	// Gate remote-fetch subcommands behind allow_import. These fetch at the CLI
 	// level, so the runtime --deny-import injected for code-executing
 	// subcommands cannot stop them; blocking the subcommand is the only lever.
-	if denoFetchSubcommands[subcommand] && !denoCfg.DenoAllowImport() {
-		return fmt.Errorf("deno %s is not allowed (runtimes.deno.allow_import is disabled)", subcommand)
+	if denoFetchSubcommands[subcommand] && !allowImport {
+		return fmt.Errorf("deno %s is not allowed (the deno profile's allow_import option is off)", subcommand)
 	}
 
 	// All other subcommands are allowed (run, test, bench, check, fmt, lint,

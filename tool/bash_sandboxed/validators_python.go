@@ -7,25 +7,29 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// validatePythonArgs gates `python`/`python3` on the Python runtime switch and
-// rejects the argv shapes monty cannot serve, early and with a message that
-// names the real reason.
+// validatePythonArgs is the montypython profile's hook: it refuses
+// `python`/`python3` when the profile is off and rejects the argv shapes monty
+// cannot serve, early and with a message that names the real reason.
 //
-// Unlike the other runtimes this one defaults to ON: there is nothing to detect
+// Unlike the other profiles this one defaults to ON: there is nothing to detect
 // or install (the interpreter is a wasm blob embedded in the binary), and monty
 // is more contained than the commands already on the whitelist — it has no
 // network, no environment, no ambient filesystem, and every file it touches
 // goes through the sandbox's own path boundary. The switch exists so it can be
 // turned off, not because it needs to be turned on.
 //
+// The off check reads the whitelist the config's commands list built, so it
+// holds in denylist mode too, where the whitelist itself is not enforced: an
+// unlisted python would otherwise still reach monty, which is the only python
+// there is unless an allow sends it to the host (and an allow skips this hook).
+//
 // This is a static pass. executePython re-derives everything it needs from the
 // expanded argv, and the runtime layer re-runs this validator (python is not in
 // runtimeValidatorSkip), so nothing here is load-bearing for security; it is
 // here to fail fast with a good message.
 func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
-	cfg := s.getConfig()
-	if cfg.Runtimes != nil && !cfg.Runtimes.MontyPython.MontyPythonEnabled() {
-		return fmt.Errorf("command %q is not allowed (runtimes.montypython.enabled is disabled)", wordOrDefault(args, 0, "python"))
+	if name := wordOrDefault(args, 0, "python"); !s.commandWhitelisted(name) {
+		return fmt.Errorf("command %q is not allowed (the montypython profile is disabled)", name)
 	}
 
 	lits := wordLits(args)

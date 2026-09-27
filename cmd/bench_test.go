@@ -34,11 +34,9 @@ func benchEvent(b *testing.B, json string) *hook.Event {
 }
 
 const benchRuntimesConfig = `
-runtimes:
-  go:
-    enabled: true
-  pnpm:
-    enabled: true
+profiles:
+  - go
+  - pnpm
 git:
   allow_worktree_parent: true
 `
@@ -56,7 +54,7 @@ func bashEventJSON(cwd string) string {
 }
 
 // BenchmarkHookEvaluateRead measures the hook's path-policy evaluation for a
-// Read inside cwd with no runtimes configured.
+// Read inside cwd with no profiles enabled.
 func BenchmarkHookEvaluateRead(b *testing.B) {
 	writeBenchConfig(b, "{}")
 	cwd, _ := os.Getwd()
@@ -69,8 +67,9 @@ func BenchmarkHookEvaluateRead(b *testing.B) {
 	}
 }
 
-// BenchmarkHookEvaluateReadRuntimes is the same evaluation with go and pnpm
-// runtimes enabled — the configuration that triggers runtime path detection.
+// BenchmarkHookEvaluateReadRuntimes is the same evaluation with the go and
+// pnpm profiles enabled — the configuration that triggers profile path
+// detection.
 func BenchmarkHookEvaluateReadRuntimes(b *testing.B) {
 	writeBenchConfig(b, benchRuntimesConfig)
 	cwd, _ := os.Getwd()
@@ -84,7 +83,7 @@ func BenchmarkHookEvaluateReadRuntimes(b *testing.B) {
 }
 
 // BenchmarkHookValidateBash measures --validate-bash evaluation of a typical
-// pipeline with no runtimes configured.
+// pipeline with no profiles enabled.
 func BenchmarkHookValidateBash(b *testing.B) {
 	writeBenchConfig(b, "{}")
 	cwd, _ := os.Getwd()
@@ -97,7 +96,7 @@ func BenchmarkHookValidateBash(b *testing.B) {
 	}
 }
 
-// BenchmarkHookValidateBashRuntimes is the same with runtimes enabled.
+// BenchmarkHookValidateBashRuntimes is the same with profiles enabled.
 func BenchmarkHookValidateBashRuntimes(b *testing.B) {
 	writeBenchConfig(b, benchRuntimesConfig)
 	cwd, _ := os.Getwd()

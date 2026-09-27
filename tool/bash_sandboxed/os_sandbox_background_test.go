@@ -17,7 +17,7 @@ func newOSSandboxForTest(t *testing.T, workDir string) *Sandbox {
 	t.Helper()
 	s := NewSandbox()
 	enabled := true
-	s.UpdateConfig(&config.Config{OSSandbox: &enabled}, workDir)
+	s.updateConfig(&config.Config{OSSandbox: &enabled}, workDir)
 	t.Cleanup(func() { s.Close() })
 	return s
 }

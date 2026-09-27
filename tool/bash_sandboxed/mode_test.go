@@ -21,7 +21,7 @@ func newModeSandbox(t *testing.T, mode config.Mode, workDir string) (*Sandbox, s
 	t.Setenv("LITE_SANDBOX_AUDIT_LOG", logPath)
 	on := true
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{Mode: string(mode), Audit: &on}, workDir)
+	s.updateConfig(&config.Config{Mode: string(mode), Audit: &on}, workDir)
 	t.Cleanup(func() { s.Close() })
 	return s, logPath
 }
@@ -42,7 +42,6 @@ func TestRule_BlockedIn(t *testing.T) {
 		allowlist bool
 	}{
 		{ruleCommandWhitelist, false, false, true},
-		{ruleRuntimeDisabled, false, false, true},
 		{ruleLocalBinary, false, false, true},
 		{ruleCommandDenylist, false, true, true},
 		{rulePathBoundary, false, true, true},
@@ -146,17 +145,17 @@ func TestDenylistMode_KeepsBoundaryAndValidators(t *testing.T) {
 	}
 }
 
-func TestDenylistMode_RuntimeGatesAdvisory(t *testing.T) {
+func TestDenylistMode_ProfileGatesAdvisory(t *testing.T) {
 	workDir := t.TempDir()
 	s, logPath := newModeSandbox(t, config.ModeDenylist, workDir)
 	paths := []string{workDir}
 
-	// go is whitelisted but runtime-gated; in denylist it validates without the
-	// runtime being enabled...
+	// go comes from the go profile; in denylist it validates without the
+	// profile being enabled...
 	if err := s.ValidateCommand("go test ./...", workDir, paths, paths); err != nil {
 		t.Fatalf("go should validate in denylist mode: %v", err)
 	}
-	// ...while the runtime's own shared-state checks still apply.
+	// ...while the profile's hooks (its shared-state checks) still apply.
 	if err := s.ValidateCommand("pnpm publish", workDir, paths, paths); err == nil || !strings.Contains(err.Error(), "publish") {
 		t.Fatalf("pnpm publish should still be rejected in denylist mode, got %v", err)
 	}
@@ -172,12 +171,12 @@ func TestDenylistMode_RuntimeGatesAdvisory(t *testing.T) {
 	recs := readAudit(t, logPath)
 	var sawGo bool
 	for _, r := range recs {
-		if r.Rule == string(ruleRuntimeDisabled) && r.Subject == "go" && !r.Blocked {
+		if r.Rule == string(ruleCommandWhitelist) && r.Subject == "go" && !r.Blocked {
 			sawGo = true
 		}
 	}
 	if !sawGo {
-		t.Errorf("expected an advisory runtime_disabled record for go: %+v", recs)
+		t.Errorf("expected an advisory command_whitelist record for go: %+v", recs)
 	}
 }
 
@@ -230,7 +229,7 @@ func TestAllowlistMode_UnchangedAndHinted(t *testing.T) {
 		t.Errorf("agent-facing denial must not advertise a mode change: %q", err)
 	}
 	_, err = s.Execute(context.Background(), "go test ./...", workDir, paths, paths)
-	if err == nil || !strings.Contains(err.Error(), "runtimes go enable") {
+	if err == nil || !strings.Contains(err.Error(), "profiles enable go") {
 		t.Errorf("go error should hint the enable command: %v", err)
 	}
 	_, err = s.Execute(context.Background(), "./run.sh", workDir, paths, paths)
@@ -293,7 +292,7 @@ func TestAudit_OffWritesNothing(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	t.Setenv("LITE_SANDBOX_AUDIT_LOG", logPath)
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{Mode: "open"}, workDir)
+	s.updateConfig(&config.Config{Mode: "open"}, workDir)
 	defer s.Close()
 	if _, err := s.Execute(context.Background(), "true", workDir, []string{workDir}, []string{workDir}); err != nil {
 		t.Fatal(err)
@@ -304,11 +303,11 @@ func TestAudit_OffWritesNothing(t *testing.T) {
 
 	// Toggling audit on via a config reload starts logging; off again stops it.
 	on := true
-	s.UpdateConfig(&config.Config{Mode: "open", Audit: &on}, workDir)
+	s.updateConfig(&config.Config{Mode: "open", Audit: &on}, workDir)
 	if s.auditLogger() == nil {
 		t.Fatal("audit logger should be set after enabling")
 	}
-	s.UpdateConfig(&config.Config{Mode: "open"}, workDir)
+	s.updateConfig(&config.Config{Mode: "open"}, workDir)
 	if s.auditLogger() != nil {
 		t.Fatal("audit logger should be dropped after disabling")
 	}
@@ -345,7 +344,7 @@ func TestAllowlistMode_ShebangGate(t *testing.T) {
 	workDir := t.TempDir()
 	s, _ := newModeSandbox(t, config.ModeAllowlist, workDir)
 	on := true
-	s.UpdateConfig(&config.Config{Mode: "allowlist", Audit: &on, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &on}}, workDir)
+	s.updateConfig(&config.Config{Mode: "allowlist", Audit: &on, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &on}}, workDir)
 	paths := []string{workDir}
 
 	perl := filepath.Join(workDir, "run.pl")
@@ -372,7 +371,7 @@ func TestAllowlistMode_ShebangGate(t *testing.T) {
 	// A subcommand-restricted extra_commands entry allows the invocation but is
 	// not an opt-out of the local-binary gate.
 	off := false
-	s.UpdateConfig(&config.Config{Mode: "allowlist", Audit: &on, ExtraCommands: []string{"./gradlew build"}, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &off}}, workDir)
+	s.updateConfig(&config.Config{Mode: "allowlist", Audit: &on, ExtraCommands: []string{"./gradlew build"}, LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: &off}}, workDir)
 	gradlew := filepath.Join(workDir, "gradlew")
 	if err := os.WriteFile(gradlew, []byte("#!/bin/sh\necho built\n"), 0o755); err != nil {
 		t.Fatal(err)

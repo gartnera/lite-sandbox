@@ -2,9 +2,7 @@ package bash_sandboxed
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -179,24 +177,10 @@ var allowedCommands = map[string]bool{
 	"bash": true,
 	"sh":   true,
 
-	// Runtimes (config-gated, validated by commandArgValidators)
-	"go":      true,
-	"gofmt":   true,
-	"pnpm":    true,
-	"cargo":   true,
-	"rustc":   true,
-	"deno":    true,
-	"flutter": true,
-	"dart":    true,
-	"fvm":     true,
-	"uv":      true,
-	"uvx":     true,
-
-	// Python, served by the embedded monty interpreter rather than any python
-	// on PATH (dispatched in ExecHandler, see python.go). Unlike the runtimes
-	// above this one is on by default; runtimes.montypython.enabled turns it off.
-	"python":  true,
-	"python3": true,
+	// The toolchains (go, cargo, uv, ...) and python are not listed here: each
+	// comes from a profile (config/profiles.go), which adds its commands to
+	// the whitelist through the config's commands list when it is enabled.
+	// Their validators are the profile's hooks, in profiles.go.
 
 	// Cloud CLI tools (config-gated, credentials via IMDS)
 	"aws": true,
@@ -281,149 +265,27 @@ var writeCommands = map[string]bool{
 // commandArgValidators is a registry of per-command argument validation functions.
 // Commands with dangerous flags (e.g., find -exec, find -delete) register a
 // validator here to block those flags while still allowing the command itself.
-// Validators receive the *Sandbox so they can access config (e.g., runtimes, git).
+// Validators receive the *Sandbox so they can access config (e.g., profile options, git).
 var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	"awk":    validateAwkArgs,
-	"bash":   validateBashArgs,
-	"sh":     validateBashArgs,
-	"source": validateSourceArgs,
-	".":      validateSourceArgs,
-	"rg":     validateRgArgs,
-	"find":   validateFindArgs,
-	"tar":    validateTarArgs,
-	"unzip":  validateUnzipArgs,
-	"zip":    validateZipArgs,
-	"ar":     validateArArgs,
-	"rm":     validateRmArgs,
-	"sed":    validateSedArgs,
-	"git":    validateGitCommand,
-	"go":     runtimeGate("go", "runtimes.go.enabled", goRuntimeEnabled, validateGoRuntimeArgs),
-	// gofmt is the standalone formatter binary, gated behind the Go runtime.
-	// It is a pure source formatter with no code-execution path, so beyond the
-	// runtime check there are no arguments to validate; its only side effect
-	// (-w writing files in place) is confined by the OS sandbox like go fmt.
-	"gofmt": runtimeGate("gofmt", "runtimes.go.enabled", goRuntimeEnabled, nil),
-	"pnpm":  runtimeGate("pnpm", "runtimes.pnpm.enabled", pnpmRuntimeEnabled, validatePnpmRuntimeArgs),
-	"cargo": runtimeGate("cargo", "runtimes.rust.enabled", rustRuntimeEnabled, validateCargoRuntimeArgs),
-	"rustc": runtimeGate("rustc", "runtimes.rust.enabled", rustRuntimeEnabled, nil),
-	"deno":  runtimeGate("deno", "runtimes.deno.enabled", denoRuntimeEnabled, validateDenoRuntimeArgs),
-	// flutter/dart/fvm are code-execution runtimes (like go/cargo/deno): their
-	// containment relies on the OS sandbox rather than argument validation, so
-	// once the runtime is enabled all subcommands are permitted. dart ships
-	// with the Flutter SDK and fvm proxies both against a cached SDK version,
-	// so one switch covers all three; the paths they read and write (SDK cache,
-	// pub cache, config dirs) are made accessible via detectFlutterBinds.
-	"flutter": runtimeGate("flutter", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
-	"dart":    runtimeGate("dart", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
-	"fvm":     runtimeGate("fvm", "runtimes.flutter.enabled", flutterRuntimeEnabled, nil),
-	"uv":      runtimeGate("uv", "runtimes.uv.enabled", uvRuntimeEnabled, validateUvRuntimeArgs),
-	// uvx is an alias of `uv tool run`: it takes a tool name rather than a uv
-	// subcommand, so beyond the runtime check there is nothing to gate —
-	// running the tool is confined by the OS sandbox like `uv run`.
-	"uvx":     runtimeGate("uvx", "runtimes.uv.enabled", uvRuntimeEnabled, nil),
-	"python":  validatePythonArgs,
-	"python3": validatePythonArgs,
+	"awk":     validateAwkArgs,
+	"bash":    validateBashArgs,
+	"sh":      validateBashArgs,
+	"source":  validateSourceArgs,
+	".":       validateSourceArgs,
+	"rg":      validateRgArgs,
+	"find":    validateFindArgs,
+	"tar":     validateTarArgs,
+	"unzip":   validateUnzipArgs,
+	"zip":     validateZipArgs,
+	"ar":      validateArArgs,
+	"rm":      validateRmArgs,
+	"sed":     validateSedArgs,
+	"git":     validateGitCommand,
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
 	"xargs":   validateXargsArgs,
 	"env":     validateEnvArgs,
 	"timeout": validateTimeoutArgs,
-}
-
-// runtimeGateInfo describes a config-gated runtime command: which config
-// switch enables it and how to read that switch. Sites consult runtimeGates
-// (via Sandbox.runtimeDisabledError) before running the command's validator, so
-// the enable check is mode-aware: enforced in allowlist mode, advisory (audited,
-// then ignored) in denylist and open mode.
-type runtimeGateInfo struct {
-	configKey string
-	enabled   func(*config.RuntimesConfig) bool
-}
-
-// runtimeGates is populated by runtimeGate as commandArgValidators is built.
-var runtimeGates = map[string]runtimeGateInfo{}
-
-// runtimeGate registers name as a config-gated runtime command and returns the
-// validator that runs the runtime's own argument checks. The enable switch
-// itself is NOT checked here — callers do that first through
-// runtimeDisabledError, so it can be gated on the mode and audited — which is
-// also why validate must tolerate a nil runtime section: in denylist mode the
-// runtime may run without ever having been configured.
-//
-// name is the command as it appears in error messages and configKey the config
-// field the user must set. validate may be nil when there is nothing further to
-// check. Every per-runtime accessor (GoGenerate, PnpmPublish, ...) is nil-safe
-// on its section, so validate runs safely against an unconfigured runtime.
-func runtimeGate(
-	name, configKey string,
-	enabled func(*config.RuntimesConfig) bool,
-	validate func(*config.RuntimesConfig, []*syntax.Word) error,
-) func(*Sandbox, []*syntax.Word) error {
-	runtimeGates[name] = runtimeGateInfo{configKey: configKey, enabled: enabled}
-	return func(s *Sandbox, args []*syntax.Word) error {
-		if validate == nil {
-			return nil
-		}
-		rt := s.getConfig().Runtimes
-		if rt == nil {
-			rt = &config.RuntimesConfig{}
-		}
-		return validate(rt, args)
-	}
-}
-
-// runtimeDisabledError returns the tagged runtime-disabled error when name is a
-// config-gated runtime command whose runtime is not enabled, and nil otherwise
-// (not gated, or enabled). Callers pass it through Sandbox.report so it is
-// enforced only in allowlist mode.
-func (s *Sandbox) runtimeDisabledError(name string) error {
-	info, ok := runtimeGates[name]
-	if !ok {
-		return nil
-	}
-	cfg := s.getConfig()
-	if cfg.Runtimes != nil && info.enabled(cfg.Runtimes) {
-		return nil
-	}
-	// runtimes.<x>.enabled -> `lite-sandbox config runtimes <x> enable`
-	fix, hint := "", ""
-	if k, ok := strings.CutPrefix(info.configKey, "runtimes."); ok {
-		if rt, ok := strings.CutSuffix(k, ".enabled"); ok {
-			fix = fmt.Sprintf("lite-sandbox config runtimes %s enable", rt)
-			hint = fmt.Sprintf("; the user can enable it with `%s`", fix)
-		}
-	}
-	return tagRuleFix(ruleRuntimeDisabled, name, fix, fmt.Errorf("command %q is not allowed (%s is disabled)%s", name, info.configKey, hint))
-}
-
-// Runtime enable accessors and argument-validation adapters used by runtimeGate.
-// Each accessor is nil-safe on its runtime section (see runtimeGate).
-
-func goRuntimeEnabled(r *config.RuntimesConfig) bool      { return r.Go.GoEnabled() }
-func pnpmRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Pnpm.PnpmEnabled() }
-func rustRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Rust.RustEnabled() }
-func denoRuntimeEnabled(r *config.RuntimesConfig) bool    { return r.Deno.DenoEnabled() }
-func flutterRuntimeEnabled(r *config.RuntimesConfig) bool { return r.Flutter.FlutterEnabled() }
-func uvRuntimeEnabled(r *config.RuntimesConfig) bool      { return r.Uv.UvEnabled() }
-
-func validateGoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
-	return validateGoArgs(args, r.Go)
-}
-
-func validatePnpmRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
-	return validatePnpmArgs(args, r.Pnpm)
-}
-
-func validateCargoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
-	return validateCargoArgs(args, r.Rust)
-}
-
-func validateDenoRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
-	return validateDenoArgs(args, r.Deno)
-}
-
-func validateUvRuntimeArgs(r *config.RuntimesConfig, args []*syntax.Word) error {
-	return validateUvArgs(args, r.Uv)
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {

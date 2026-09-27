@@ -16,11 +16,9 @@ import (
 type rule string
 
 const (
-	// ruleCommandWhitelist: the command is not on the allowlist. Allowlist only.
+	// ruleCommandWhitelist: the command is not on the allowlist — the built-in
+	// whitelist plus the commands of the enabled profiles. Allowlist only.
 	ruleCommandWhitelist rule = "command_whitelist"
-	// ruleRuntimeDisabled: a code-execution runtime (go, pnpm, cargo, deno,
-	// flutter, uv) is not enabled in config. Allowlist only.
-	ruleRuntimeDisabled rule = "runtime_disabled"
 	// ruleLocalBinary: direct execution of a path (./script, /path/bin) without
 	// local_binary_execution enabled. Allowlist only.
 	ruleLocalBinary rule = "local_binary"
@@ -49,7 +47,7 @@ const (
 // a command may touch* and is enforced in denylist mode too.
 func (r rule) allowlistOnly() bool {
 	switch r {
-	case ruleCommandWhitelist, ruleRuntimeDisabled, ruleLocalBinary:
+	case ruleCommandWhitelist, ruleLocalBinary:
 		return true
 	}
 	return false
@@ -218,6 +216,13 @@ func (s *Sandbox) enforcesAllowlist() bool {
 // relays to the user, so it names only the narrow remedy — never a mode
 // change, which is the user's decision to make from the audit report.
 func commandNotAllowed(name string) error {
+	// A toolchain command comes from a profile: enabling the profile whitelists
+	// it with its validators, which is the remedy to offer rather than an allow
+	// that would skip them.
+	if profiles := config.ProfilesForCommand(name); len(profiles) > 0 {
+		fix := "lite-sandbox config profiles enable " + profiles[0]
+		return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed (the %s profile is not enabled); the user can enable it with `%s`", name, profiles[0], fix))
+	}
 	fix := fmt.Sprintf("lite-sandbox config commands allow %s", name)
 	return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed; the user can allow it with `%s`", name, fix))
 }

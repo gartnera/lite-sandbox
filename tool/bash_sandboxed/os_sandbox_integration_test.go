@@ -26,7 +26,7 @@ func TestOSSandboxBasicExecution(t *testing.T) {
 	cfg := &config.Config{
 		OSSandbox: &enabled,
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// Run a real external command (cat) so the execution actually routes through
@@ -56,7 +56,7 @@ func TestOSSandboxFileIsolation(t *testing.T) {
 	cfg := &config.Config{
 		OSSandbox: &enabled,
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// Try to write outside workdir - should fail
@@ -94,7 +94,7 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 	cfg := &config.Config{
 		OSSandbox: &enabled,
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// Run a real external command (cat) concurrently so each execution actually
@@ -145,7 +145,7 @@ func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 		OSSandbox:     &enabled,
 		ExtraCommands: []string{"bash"},
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// Process substitution would be rejected by the AST validator; it only
@@ -206,7 +206,7 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 
 	// Control: as a bare extra_commands entry the write is confined and fails.
 	confined := NewSandbox()
-	confined.UpdateConfig(&config.Config{OSSandbox: &enabled, ExtraCommands: []string{"bash"}}, tmpDir)
+	confined.updateConfig(&config.Config{OSSandbox: &enabled, ExtraCommands: []string{"bash"}}, tmpDir)
 	defer confined.Close()
 	if output, err := confined.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err == nil {
 		t.Errorf("expected confined write outside workdir to fail, got success. output: %s", output)
@@ -217,7 +217,7 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 
 	// Unsandboxed: the same command runs on the host and the write succeeds.
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{OSSandbox: &enabled, UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	s.updateConfig(&config.Config{OSSandbox: &enabled, UnsandboxedCommands: []string{"bash"}}, tmpDir)
 	defer s.Close()
 	if output, err := s.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
 		t.Fatalf("expected unsandboxed write outside workdir to succeed, got error: %v, output: %s", err, output)
@@ -251,7 +251,7 @@ func TestOSSandboxInternalWritablePaths(t *testing.T) {
 
 	enabled := true
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		OSSandbox:             &enabled,
 		ExtraCommands:         []string{"bash"},
 		InternalWritablePaths: []string{internalDir},
@@ -298,7 +298,7 @@ func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
 		OSSandbox:     &enabled,
 		ExtraCommands: []string{"bash"},
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	restrictedPath := "/root/testfile"
@@ -322,18 +322,13 @@ func TestOSSandboxGoRuntime(t *testing.T) {
 
 	s := NewSandbox()
 
-	// Enable OS sandbox and Go runtime
+	// Enable OS sandbox and the go profile
 	enabled := true
-	goEnabled := true
 	cfg := &config.Config{
 		OSSandbox: &enabled,
-		Runtimes: &config.RuntimesConfig{
-			Go: &config.GoConfig{
-				Enabled: &goEnabled,
-			},
-		},
+		Profiles:  []config.ProfileEntry{{Name: "go"}},
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// Create a simple Go module
@@ -473,16 +468,11 @@ func TestOSSandboxUvRuntime(t *testing.T) {
 	s := NewSandbox()
 
 	enabled := true
-	uvEnabled := true
 	cfg := &config.Config{
 		OSSandbox: &enabled,
-		Runtimes: &config.RuntimesConfig{
-			Uv: &config.UvConfig{
-				Enabled: &uvEnabled,
-			},
-		},
+		Profiles:  []config.ProfileEntry{{Name: "uv"}},
 	}
-	s.UpdateConfig(cfg, tmpDir)
+	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
 	// uv venv writes the virtual environment into the working directory and

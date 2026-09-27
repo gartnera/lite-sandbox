@@ -418,6 +418,26 @@ override it writes only that override's own entries, since the base's are
 inherited per path. That is the one case where the result is wider than
 before, because a deprecated list there replaced the base's outright.
 
+## Profiles
+
+```yaml
+profiles:
+  - go
+  - name: deno
+    options:
+      allow_network: true
+```
+
+A profile is a built-in preset of `commands` and `paths` entries for one
+toolchain (`go`, `pnpm`, `rust`, `deno`, `flutter`, `uv`, and the default-on
+`montypython`), merged into the lists described above before the sandbox sees
+them. Its entries mean what yours do, except that a profile's allow of a
+command name whitelists it (its validators still run) instead of skipping
+validation; its toolchain directories are agent-readable and writable only at
+the OS sandbox layer. `lite-sandbox config profiles show <name>` prints what a
+profile contributes.
+See [Toolchain profiles](profiles.md).
+
 ## Redundant `cd` rejection
 
 Agents often prefix commands with `cd /abs/path/to/repo && ...` even though
@@ -467,7 +487,7 @@ a restricted one (`./gradlew build`) does not lift this gate.
 The top-level `overrides` list changes configuration for specific working
 directories. Each entry pairs a `path` with config sections that replace the
 base for commands run **at or under** that path. Any section can be
-overridden: `aws`, `docker`, `runtimes`, `paths`, `os_sandbox`, and the rest.
+overridden: `aws`, `docker`, `profiles`, `paths`, `os_sandbox`, and the rest.
 
 ```yaml
 os_sandbox: true
@@ -537,9 +557,8 @@ Resolution rules:
   ```yaml
   overrides:
     - path: ~/workspace/github.com/acme/haystack   # the checkout
-      runtimes:
-        go:
-          enabled: true
+      profiles:
+        - go
   ```
 
   ```console
@@ -548,7 +567,7 @@ Resolution rules:
   /Users/alex/.superconductor/worktrees/haystack/sc-vortex-d091   85bf9a8 [feature]
   ```
 
-  Commands run in `sc-vortex-d091` get the same `runtimes.go.enabled` as the
+  Commands run in `sc-vortex-d091` get the same `go` profile as the
   checkout. An override matching the worktree itself (or a directory above it)
   still wins; inheritance only applies when nothing matches directly, so a
   worktree can always be configured separately. This shares *settings*, not
@@ -565,7 +584,7 @@ can be scoped to one directory without editing the file:
 lite-sandbox config commands allow npm --dir .            # only in this repo
 lite-sandbox config paths allow ~/work/acme/out --write --dir ~/work/acme
 lite-sandbox config mode set denylist --dir ~/work/new    # only under that path
-lite-sandbox config runtimes go enable --dir ~/work/acme
+lite-sandbox config profiles enable go --dir ~/work/acme
 lite-sandbox config docker disable --dir ~/work/untrusted
 lite-sandbox config aws force-profile acme-dev --dir ~/work/acme
 ```

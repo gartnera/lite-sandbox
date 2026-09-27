@@ -147,7 +147,7 @@ func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
 	if !event.ToolInputTruncated && event.ToolInput != nil {
 		return nil
 	}
-	if cfg, _ := config.LoadForDirectory(eventCWD(event)); cfg.EffectiveMode() == config.ModeOpen {
+	if cfg, _ := config.LoadSettingsForDirectory(eventCWD(event)); cfg.EffectiveMode() == config.ModeOpen {
 		return nil
 	}
 	if event.ToolInputTruncated {
@@ -240,7 +240,7 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	// command runs — and the built-in Bash tool has no runtime layer and no OS
 	// sandbox worker behind it. Defer to Claude Code's normal permission flow
 	// instead: the static checks that did apply were still enforced above.
-	if cfg, _ := config.LoadForDirectory(cwd); cfg.EffectiveMode() != config.ModeAllowlist {
+	if cfg, _ := config.LoadSettingsForDirectory(cwd); cfg.EffectiveMode() != config.ModeAllowlist {
 		return nil
 	}
 	return hook.NewDecision(hook.DecisionAllow, "Validated by lite-sandbox: command passed the sandbox AST whitelist and path boundaries.")
@@ -325,8 +325,8 @@ func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *
 // access and returns a deny Decision if it is outside — or, for writes, inside a
 // .git directory — otherwise nil (in bounds; defer). `what` describes the action
 // for the deny message. It does the cheap boundary check (cwd + configured
-// paths) before the full computation that may run runtime detection or shell out
-// to git, so common in-project accesses stay cheap. sb must be configured for cwd.
+// paths, profiles' included) before the full computation that may shell out to
+// git, so common in-project accesses stay cheap. sb must be configured for cwd.
 //
 // compact selects the short form of the deny reason for Grok Build, which
 // clips a hook's reason to 256 characters before the model sees it: the
@@ -353,8 +353,8 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write, c
 		return hook.NewDecision(hook.DecisionDeny, reason)
 	}
 
-	// Cheap boundary first: cwd plus the user-configured paths cover the vast
-	// majority of accesses and need no runtime detection or git invocation.
+	// Cheap boundary first: cwd plus the configured paths cover the vast
+	// majority of accesses and need no git invocation.
 	cheap := append([]string{cwd}, sb.ConfigWritePaths()...)
 	if !write {
 		cheap = append(cheap, sb.ConfigReadPaths()...)
@@ -363,8 +363,8 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write, c
 		return nil
 	}
 
-	// Outside the cheap set: compute the full boundary, which adds detected
-	// runtime paths (read side) and the worktree parent before deciding.
+	// Outside the cheap set: compute the full boundary, which adds the temp
+	// and scratchpad roots and the worktree parent before deciding.
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 	allowed := readPaths
 	boundary := "readable"
@@ -409,7 +409,7 @@ func boundaryDenial(sb *bash_sandboxed.Sandbox, cwd, what, path string, write, c
 // auditing is on and reports whether the current mode enforces it. In open mode
 // nothing is enforced, so the caller defers instead of denying.
 func auditHookFinding(cwd, tool, resolved, reason string) bool {
-	cfg, _ := config.LoadForDirectory(cwd)
+	cfg, _ := config.LoadSettingsForDirectory(cwd)
 	mode := cfg.EffectiveMode()
 	blocked := mode != config.ModeOpen
 	if cfg.AuditEnabled() {

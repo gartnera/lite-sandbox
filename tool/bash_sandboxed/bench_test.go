@@ -51,21 +51,18 @@ func BenchmarkExecuteEcho(b *testing.B) {
 }
 
 // BenchmarkUpdateConfigRuntimes measures applying a config with go and pnpm
-// runtimes enabled — the path both the MCP server (startup/reload) and the
+// profiles enabled — the path both the MCP server (startup/reload) and the
 // hook (every invocation) go through.
 func BenchmarkUpdateConfigRuntimes(b *testing.B) {
 	cfg := &config.Config{
-		Runtimes: &config.RuntimesConfig{
-			Go:   &config.GoConfig{Enabled: boolPtr(true)},
-			Pnpm: &config.PnpmConfig{Enabled: boolPtr(true)},
-		},
+		Profiles: []config.ProfileEntry{{Name: "go"}, {Name: "pnpm"}},
 	}
 	cwd, _ := os.Getwd()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s := NewSandbox()
-		s.UpdateConfig(cfg, cwd)
-		s.RuntimeReadPaths()
+		s.updateConfig(cfg, cwd)
+		s.ConfigReadPaths()
 		s.Close()
 	}
 }
@@ -74,7 +71,7 @@ func BenchmarkUpdateConfigRuntimes(b *testing.B) {
 // server performs on every bash tool call when allow_worktree_parent is set.
 func BenchmarkWorktreeParentPath(b *testing.B) {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		Git: &config.GitConfig{AllowWorktreeParent: boolPtr(true)},
 	}, "")
 	cwd, _ := os.Getwd()

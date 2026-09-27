@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -14,8 +13,9 @@ var goGlobalValueFlags = map[string]bool{
 	"-C": true,
 }
 
-// validateGoArgs validates go commands according to the runtime config.
-func validateGoArgs(args []*syntax.Word, goCfg *config.GoConfig) error {
+// validateGoArgs validates go commands. generateAllowed reports whether the
+// config allows `go generate` (a commands entry for it).
+func validateGoArgs(args []*syntax.Word, generateAllowed bool) error {
 	subcommand, _, err := findSubcommand("go", args, goGlobalValueFlags)
 	if err != nil {
 		return err
@@ -26,10 +26,10 @@ func validateGoArgs(args []*syntax.Word, goCfg *config.GoConfig) error {
 	}
 
 	// go generate runs arbitrary shell commands from //go:generate directives,
-	// so it is gated behind its own permission.
+	// so it takes a commands entry of its own beyond the go profile.
 	if subcommand == "generate" {
-		if !goCfg.GoGenerate() {
-			return fmt.Errorf("go generate is not allowed (runtimes.go.generate is disabled)")
+		if !generateAllowed {
+			return fmt.Errorf("go generate is not allowed; the user can allow it with `lite-sandbox config commands allow \"go generate\"`")
 		}
 		return nil
 	}

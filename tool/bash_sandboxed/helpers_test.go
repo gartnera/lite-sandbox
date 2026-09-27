@@ -32,14 +32,7 @@ func boolPtr(b bool) *bool {
 // newTestSandboxWithGitConfig returns a Sandbox configured with the given GitConfig.
 func newTestSandboxWithGitConfig(gitCfg *config.GitConfig) *Sandbox {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{Git: gitCfg}, "")
-	return s
-}
-
-// newTestSandboxWithRuntimesConfig returns a Sandbox configured with the given RuntimesConfig.
-func newTestSandboxWithRuntimesConfig(runtimesCfg *config.RuntimesConfig) *Sandbox {
-	s := NewSandbox()
-	s.UpdateConfig(&config.Config{Runtimes: runtimesCfg}, "")
+	s.updateConfig(&config.Config{Git: gitCfg}, "")
 	return s
 }
 
@@ -48,17 +41,44 @@ func newTestSandboxWithRuntimesConfig(runtimesCfg *config.RuntimesConfig) *Sandb
 // spawned until a command is actually executed).
 func newTestSandboxWithOSSandbox() *Sandbox {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{OSSandbox: boolPtr(true)}, "")
+	s.updateConfig(&config.Config{OSSandbox: boolPtr(true)}, "")
 	return s
 }
 
 // newTestSandboxWithLocalBinaryExecution returns a Sandbox with local binary execution enabled.
 func newTestSandboxWithLocalBinaryExecution() *Sandbox {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
 	}, "")
+	return s
+}
+
+// updateConfig hands cfg to UpdateConfig the way production does: merged into
+// its one paths and commands list first (config.Config.Effective), so a test
+// may write a config with profiles or deprecated keys and the sandbox sees what
+// it would see from config.LoadForDirectory.
+func (s *Sandbox) updateConfig(cfg *config.Config, workDir string) {
+	s.UpdateConfig(cfg.Effective(), workDir)
+}
+
+// newTestSandboxWithProfiles returns a Sandbox with the named profiles enabled.
+func newTestSandboxWithProfiles(names ...string) *Sandbox {
+	cfg := &config.Config{}
+	for _, n := range names {
+		cfg.Profiles = append(cfg.Profiles, config.ProfileEntry{Name: n})
+	}
+	s := NewSandbox()
+	s.updateConfig(cfg, "")
+	return s
+}
+
+// newTestSandboxWithConfig returns a Sandbox configured with cfg (merged the
+// way production merges it; see updateConfig).
+func newTestSandboxWithConfig(cfg *config.Config) *Sandbox {
+	s := NewSandbox()
+	s.updateConfig(cfg, "")
 	return s
 }

@@ -166,7 +166,7 @@ func launchMode() config.Mode {
 	if err != nil {
 		return "unknown"
 	}
-	cfg, err := config.LoadForDirectory(wd)
+	cfg, err := config.LoadSettingsForDirectory(wd)
 	if err != nil || cfg == nil {
 		return "unknown"
 	}

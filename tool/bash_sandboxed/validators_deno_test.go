@@ -3,101 +3,87 @@ package bash_sandboxed
 import (
 	"testing"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestValidateDenoArgs(t *testing.T) {
 	tests := []struct {
-		name      string
-		command   string
-		denoCfg   *config.DenoConfig
-		wantErr   bool
-		errSubstr string
+		name       string
+		command    string
+		publish    bool
+		denyImport bool
+		wantErr    bool
+		errSubstr  string
 	}{
 		// Basic allowed commands
 		{
 			name:    "deno run allowed",
 			command: "deno run main.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno run with allow flags allowed",
 			command: "deno run --allow-read --allow-net main.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno test allowed",
 			command: "deno test",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno check allowed",
 			command: "deno check main.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno fmt allowed",
 			command: "deno fmt",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno lint allowed",
 			command: "deno lint",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno bench allowed",
 			command: "deno bench",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno task allowed",
 			command: "deno task build",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno add allowed",
 			command: "deno add jsr:@std/path",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno remove allowed",
 			command: "deno remove @std/path",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno install allowed",
 			command: "deno install",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno compile allowed",
 			command: "deno compile main.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno info allowed",
 			command: "deno info",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:      "deno eval blocked (implicit all-permissions, unconfinable)",
 			command:   "deno eval 'console.log(1)'",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
 			errSubstr: "not allowed",
 		},
@@ -106,27 +92,25 @@ func TestValidateDenoArgs(t *testing.T) {
 		{
 			name:      "deno publish blocked by default",
 			command:   "deno publish",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
-			errSubstr: "runtimes.deno.publish is disabled",
+			errSubstr: "deno publish is not allowed",
 		},
 		{
 			name:      "deno publish blocked when publish=false",
 			command:   "deno publish",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(false)},
 			wantErr:   true,
-			errSubstr: "runtimes.deno.publish is disabled",
+			errSubstr: "deno publish is not allowed",
 		},
 		{
 			name:    "deno publish allowed when publish=true",
 			command: "deno publish",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)},
+			publish: true,
 			wantErr: false,
 		},
 		{
 			name:    "deno publish with flags allowed when publish=true",
 			command: "deno publish --dry-run",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)},
+			publish: true,
 			wantErr: false,
 		},
 
@@ -134,57 +118,53 @@ func TestValidateDenoArgs(t *testing.T) {
 		{
 			name:      "deno upgrade blocked",
 			command:   "deno upgrade",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr:   true,
 			errSubstr: "not allowed",
 		},
 
 		// Fetch subcommands gated behind allow_import
 		{
-			name:      "deno cache blocked when allow_import disabled",
-			command:   "deno cache https://example.com/mod.ts",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
-			wantErr:   true,
-			errSubstr: "runtimes.deno.allow_import is disabled",
+			name:       "deno cache blocked when allow_import disabled",
+			command:    "deno cache https://example.com/mod.ts",
+			denyImport: true,
+			wantErr:    true,
+			errSubstr:  "allow_import option is off",
 		},
 		{
-			name:      "deno add blocked when allow_import disabled",
-			command:   "deno add jsr:@std/path",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
-			wantErr:   true,
-			errSubstr: "runtimes.deno.allow_import is disabled",
+			name:       "deno add blocked when allow_import disabled",
+			command:    "deno add jsr:@std/path",
+			denyImport: true,
+			wantErr:    true,
+			errSubstr:  "allow_import option is off",
 		},
 		{
-			name:      "deno install blocked when allow_import disabled",
-			command:   "deno install",
-			denoCfg:   &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
-			wantErr:   true,
-			errSubstr: "runtimes.deno.allow_import is disabled",
+			name:       "deno install blocked when allow_import disabled",
+			command:    "deno install",
+			denyImport: true,
+			wantErr:    true,
+			errSubstr:  "allow_import option is off",
 		},
 		{
 			name:    "deno cache allowed when allow_import enabled (default)",
 			command: "deno cache https://example.com/mod.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
-			name:    "deno run not gated by allow_import (handled via injected deny-import)",
-			command: "deno run main.ts",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)},
-			wantErr: false,
+			name:       "deno run not gated by allow_import (handled via injected deny-import)",
+			command:    "deno run main.ts",
+			denyImport: true,
+			wantErr:    false,
 		},
 
 		// Edge cases
 		{
 			name:    "bare deno command allowed",
 			command: "deno",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 		{
 			name:    "deno with only flags allowed",
 			command: "deno --version",
-			denoCfg: &config.DenoConfig{Enabled: boolPtr(true)},
 			wantErr: false,
 		},
 	}
@@ -205,7 +185,7 @@ func TestValidateDenoArgs(t *testing.T) {
 				return true
 			})
 
-			err = validateDenoArgs(args, tt.denoCfg)
+			err = validateDenoArgs(args, tt.publish, !tt.denyImport)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("expected error containing %q, got nil", tt.errSubstr)
@@ -433,46 +413,6 @@ func TestApplyDenoSandbox(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Fatalf("got %v, want %v", got, tt.want)
 				}
-			}
-		})
-	}
-}
-
-func TestDenoConfig(t *testing.T) {
-	tests := []struct {
-		name        string
-		cfg         *config.DenoConfig
-		wantEnabled bool
-		wantPublish bool
-		wantAuto    bool
-		wantNetwork bool
-		wantImport  bool
-	}{
-		// auto_sandbox and allow_import default to true; the rest default to false.
-		{"nil config", nil, false, false, true, false, true},
-		{"empty config", &config.DenoConfig{}, false, false, true, false, true},
-		{"enabled", &config.DenoConfig{Enabled: boolPtr(true)}, true, false, true, false, true},
-		{"enabled with publish", &config.DenoConfig{Enabled: boolPtr(true), Publish: boolPtr(true)}, true, true, true, false, true},
-		{"auto_sandbox disabled", &config.DenoConfig{Enabled: boolPtr(true), AutoSandbox: boolPtr(false)}, true, false, false, false, true},
-		{"network allowed", &config.DenoConfig{Enabled: boolPtr(true), AllowNetwork: boolPtr(true)}, true, false, true, true, true},
-		{"import disabled", &config.DenoConfig{Enabled: boolPtr(true), AllowImport: boolPtr(false)}, true, false, true, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.DenoEnabled(); got != tt.wantEnabled {
-				t.Errorf("DenoEnabled() = %v, want %v", got, tt.wantEnabled)
-			}
-			if got := tt.cfg.DenoPublish(); got != tt.wantPublish {
-				t.Errorf("DenoPublish() = %v, want %v", got, tt.wantPublish)
-			}
-			if got := tt.cfg.DenoAutoSandbox(); got != tt.wantAuto {
-				t.Errorf("DenoAutoSandbox() = %v, want %v", got, tt.wantAuto)
-			}
-			if got := tt.cfg.DenoAllowNetwork(); got != tt.wantNetwork {
-				t.Errorf("DenoAllowNetwork() = %v, want %v", got, tt.wantNetwork)
-			}
-			if got := tt.cfg.DenoAllowImport(); got != tt.wantImport {
-				t.Errorf("DenoAllowImport() = %v, want %v", got, tt.wantImport)
 			}
 		})
 	}

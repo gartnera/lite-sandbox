@@ -17,7 +17,7 @@ func newDenySandbox(t *testing.T, mode config.Mode, workDir string, cfg config.C
 	on := true
 	cfg.Mode = string(mode)
 	cfg.Audit = &on
-	s.UpdateConfig(&cfg, workDir)
+	s.updateConfig(&cfg, workDir)
 	return s, logPath
 }
 
@@ -223,7 +223,7 @@ func TestDeniedCommands_PrefixScope(t *testing.T) {
 
 func TestDeniedCommands_Matching(t *testing.T) {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{DeniedCommands: []string{"curl", "gh  auth  login"}}, t.TempDir())
+	s.updateConfig(&config.Config{DeniedCommands: []string{"curl", "gh  auth  login"}}, t.TempDir())
 
 	cases := []struct {
 		name  string

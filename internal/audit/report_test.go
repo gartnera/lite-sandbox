@@ -23,22 +23,23 @@ func TestBuildReport(t *testing.T) {
 		{Rule: "command_whitelist", Subject: "npm", Command: "npm run build", Fix: "lite-sandbox config commands allow npm", WouldBlockIn: []string{"allowlist"}},
 		{Rule: "local_binary", Subject: "./run.sh", Fix: "lite-sandbox config local-binary-execution enable", Blocked: true, WouldBlockIn: []string{"allowlist"}},
 		{Rule: "runtime_disabled", Subject: "go", Fix: "lite-sandbox config runtimes go enable", WouldBlockIn: []string{"allowlist"}},
+		{Rule: "command_whitelist", Subject: "cargo", Fix: "lite-sandbox config profiles enable rust", WouldBlockIn: []string{"allowlist"}},
 		{Rule: "path_boundary", Subject: filepath.Join(dir, "a.txt"), Blocked: true, WouldBlockIn: []string{"denylist", "allowlist"}},
 		{Rule: "path_boundary", Subject: dir, Blocked: true, WouldBlockIn: []string{"denylist", "allowlist"}},
 	}
 	rep := BuildReport(recs, Options{Top: 10})
 
-	if rep.Records != 6 {
+	if rep.Records != 7 {
 		t.Errorf("records = %d", rep.Records)
 	}
 	if rep.Blocked["path_boundary"] != 2 || rep.Blocked["local_binary"] != 1 {
 		t.Errorf("blocked = %v", rep.Blocked)
 	}
-	if rep.WouldBlock["allowlist"] != 3 {
+	if rep.WouldBlock["allowlist"] != 4 {
 		t.Errorf("would_block = %v", rep.WouldBlock)
 	}
 	subj := rep.Subjects["command_whitelist"]
-	if len(subj) != 1 || subj[0].Subject != "npm" || subj[0].Count != 2 || subj[0].Example != "npm test" {
+	if len(subj) != 2 || subj[0].Subject != "npm" || subj[0].Count != 2 || subj[0].Example != "npm test" {
 		t.Errorf("subjects = %+v", subj)
 	}
 
@@ -46,6 +47,7 @@ func TestBuildReport(t *testing.T) {
 		"lite-sandbox config commands allow npm":            2,
 		"lite-sandbox config local-binary-execution enable": 1,
 		"lite-sandbox config runtimes go enable":            1,
+		"lite-sandbox config profiles enable rust":          1,
 		"lite-sandbox config paths allow " + dir:            2,
 	}
 	got := map[string]int{}
@@ -63,8 +65,12 @@ func TestBuildReport(t *testing.T) {
 	if rep.Suggestions[0].Count < rep.Suggestions[len(rep.Suggestions)-1].Count {
 		t.Errorf("suggestions not sorted by count: %+v", rep.Suggestions)
 	}
-	// The bare-entry caveat rides along with every commands-allow suggestion.
+	// The bare-entry caveat rides along with every commands-allow suggestion;
+	// a profile suggestion says the profile is off instead.
 	for _, s := range rep.Suggestions {
+		if strings.Contains(s.Command, "profiles enable") && (s.Reason != `"cargo": its profile is not enabled`) {
+			t.Errorf("profile suggestion reason = %q", s.Reason)
+		}
 		if strings.Contains(s.Command, "commands allow") && !strings.Contains(s.Reason, "skips validation") {
 			t.Errorf("commands-allow suggestion lacks the caveat: %+v", s)
 		}

@@ -25,7 +25,7 @@ const (
 	// escapes and secret reads without breaking developer tooling.
 	ModeDenylist Mode = "denylist"
 	// ModeAllowlist is the original behavior: only whitelisted commands run,
-	// code-execution runtimes are opt-in, and the OS sandbox confines writes to
+	// toolchain profiles are opt-in, and the OS sandbox confines writes to
 	// the working directory plus configured paths. This is the posture for
 	// untrusted input, where the agent may be steered by content it reads.
 	ModeAllowlist Mode = "allowlist"
@@ -392,11 +392,12 @@ func (c *Config) splitDefaults(defaults []DeniedPath, lifts func(PathEntry) bool
 
 // liftsRead reports whether a paths entry grants read access (a write grant
 // implies read), which lifts a read denial on its path.
-func liftsRead(e PathEntry) bool { return e.GrantsRead() || e.GrantsWrite() }
+func liftsRead(e PathEntry) bool { return e.Profile == "" && (e.GrantsRead() || e.GrantsWrite()) }
 
 // liftsWrite reports whether a paths entry grants write access, which lifts a
-// write denial on its path.
-func liftsWrite(e PathEntry) bool { return e.GrantsWrite() }
+// write denial on its path. Like liftsRead, only a grant the user wrote lifts:
+// a profile's preset paths never open a built-in denial.
+func liftsWrite(e PathEntry) bool { return e.Profile == "" && e.GrantsWrite() }
 
 // DeniedEntriesLiftedBy returns the built-in deny-list entries that a paths
 // grant on p lifts, for the CLI to say so when it records one.

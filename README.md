@@ -11,7 +11,7 @@ lite-sandbox install                                 # Configure every detected 
 
 Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHub release](https://github.com/gartnera/lite-sandbox/releases). `lite-sandbox update` upgrades an installed binary to the latest release, and `lite-sandbox version` shows the current one.
 
-The default is the strictest mode: only whitelisted commands run, and code-execution runtimes are opt-in. To start looser and tighten over time, see [docs/adoption.md](docs/adoption.md).
+The default is the strictest mode: only whitelisted commands run, and toolchain profiles (Go, Rust, uv, ...) are opt-in. To start looser and tighten over time, see [docs/adoption.md](docs/adoption.md).
 
 `install` detects which supported agent CLIs are installed (**Claude Code**, **OpenAI Codex CLI**, **opencode**, **Crush**, and **Grok Build**), by looking for the binary on `PATH` or the config directory. For each one it registers the MCP server, auto-allows the sandbox tools, blocks the built-in shell tool, and adds a directive telling the agent to use the sandbox for shell commands. Name agents to configure only those:
 
@@ -36,7 +36,7 @@ All agents share one sandbox config file. See [docs/installation.md](docs/instal
 - **[Incremental adoption](docs/adoption.md)**: the other enforcement modes, audit reports, and tightening over time.
 - **[Installation](docs/installation.md)**: getting and updating the binary, automatic and manual agent setup, built-in tool boundaries, and hook modes.
 - **[Configuration](docs/configuration.md)**: the config file, CLI management, readable/writable paths, and git support.
-- **[Runtime support](docs/runtimes.md)**: the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, and uv.
+- **[Toolchain profiles](docs/profiles.md)**: the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, Flutter, and uv.
 - **[AWS & Docker access](docs/aws-and-docker.md)**: brokered AWS credentials and the filtering Docker proxy.
 - **[Background processes](docs/background-processes.md)**: running and managing long-lived commands.
 - **[Security model](docs/security.md)**: validation layers, the optional OS sandbox, and known limitations.

@@ -372,7 +372,7 @@ func TestUpdateConfig_AppliesResolvedSections(t *testing.T) {
 	}
 
 	s := NewSandbox()
-	s.UpdateConfig(cfg.ForDirectory(workDir), workDir)
+	s.updateConfig(cfg.ForDirectory(workDir), workDir)
 
 	// writable_paths override replaces the base for this directory.
 	got := s.ConfigWritePaths()
@@ -390,7 +390,7 @@ func TestUpdateConfig_AppliesResolvedSections(t *testing.T) {
 
 	// A directory outside the override falls back to the base config.
 	other := t.TempDir()
-	s.UpdateConfig(cfg.ForDirectory(other), other)
+	s.updateConfig(cfg.ForDirectory(other), other)
 	if got := s.ConfigWritePaths(); !slices.Equal(got, []string{"/base-only"}) {
 		t.Errorf("outside override, ConfigWritePaths() = %v, want [/base-only]", got)
 	}
@@ -404,7 +404,7 @@ func TestBashSandboxed_AWSListProfilesInterception(t *testing.T) {
 
 	s := NewSandbox()
 	// force_profile enables the aws command (passes static validation).
-	s.UpdateConfig(&config.Config{AWS: &config.AWSConfig{ForceProfile: "ro"}}, workDir)
+	s.updateConfig(&config.Config{AWS: &config.AWSConfig{ForceProfile: "ro"}}, workDir)
 	s.SetIMDSEndpoint("http://ro/")
 	s.SetIMDSProfiles(map[string]IMDSTarget{
 		"ro":  {Endpoint: "http://ro/"},
@@ -691,7 +691,7 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"javac", "javac Main.java", `command "javac" is not allowed`},
 		{"gcc", "gcc -o a a.c", `command "gcc" is not allowed`},
 		{"g++", "g++ -o a a.cpp", `command "g++" is not allowed`},
-		{"rustc", "rustc main.rs", `command "rustc" is not allowed (runtimes.rust.enabled is disabled)`},
+		{"rustc", "rustc main.rs", `command "rustc" is not allowed (the rust profile is not enabled)`},
 		{"make", "make all", `command "make" is not allowed`},
 
 		// Package managers (arbitrary code execution via install scripts)
@@ -700,8 +700,8 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"yarn", "yarn install", `command "yarn" is not allowed`},
 		{"pip", "pip install requests", `command "pip" is not allowed`},
 		{"pip3", "pip3 install requests", `command "pip3" is not allowed`},
-		{"cargo", "cargo build", `command "cargo" is not allowed (runtimes.rust.enabled is disabled)`},
-		{"deno", "deno run main.ts", `command "deno" is not allowed (runtimes.deno.enabled is disabled)`},
+		{"cargo", "cargo build", `command "cargo" is not allowed (the rust profile is not enabled)`},
+		{"deno", "deno run main.ts", `command "deno" is not allowed (the deno profile is not enabled)`},
 
 		// Networking (data exfiltration / remote code fetch)
 		{"curl", "curl https://example.com", `command "curl" is not allowed`},
@@ -969,13 +969,13 @@ func TestValidate_ExtraCommands(t *testing.T) {
 	}
 
 	// After adding curl as an extra command, it should be allowed
-	s.UpdateConfig(&config.Config{ExtraCommands: []string{"curl"}}, "")
+	s.updateConfig(&config.Config{ExtraCommands: []string{"curl"}}, "")
 	if err := s.validate(f); err != nil {
 		t.Fatalf("expected curl to be allowed with extra commands, got: %v", err)
 	}
 
 	// After clearing extra commands, curl should be blocked again
-	s.UpdateConfig(&config.Config{}, "")
+	s.updateConfig(&config.Config{}, "")
 	if err := s.validate(f); err == nil {
 		t.Fatal("expected curl to be blocked after clearing extra commands")
 	}
@@ -995,13 +995,13 @@ func TestValidate_UnsandboxedCommands(t *testing.T) {
 
 	// unsandboxed_commands entries are treated like extra_commands for
 	// validation: adding curl allows it.
-	s.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"curl"}}, "")
+	s.updateConfig(&config.Config{UnsandboxedCommands: []string{"curl"}}, "")
 	if err := s.validate(f); err != nil {
 		t.Fatalf("expected curl to be allowed via unsandboxed commands, got: %v", err)
 	}
 
 	// Clearing the list blocks it again.
-	s.UpdateConfig(&config.Config{}, "")
+	s.updateConfig(&config.Config{}, "")
 	if err := s.validate(f); err == nil {
 		t.Fatal("expected curl to be blocked after clearing unsandboxed commands")
 	}
@@ -1009,7 +1009,7 @@ func TestValidate_UnsandboxedCommands(t *testing.T) {
 
 func TestIsUnsandboxedInvocation(t *testing.T) {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands:       []string{"wget"},
 		UnsandboxedCommands: []string{"curl", "git push"},
 	}, "")
@@ -1033,7 +1033,7 @@ func TestIsUnsandboxedInvocation(t *testing.T) {
 
 func TestExecIsUnsandboxed(t *testing.T) {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands:       []string{"wget"},
 		UnsandboxedCommands: []string{"curl", "git push"},
 	}, "")
@@ -1126,7 +1126,7 @@ func TestUnsandboxedCommand_SkipsDockerProxy_RawPath(t *testing.T) {
 	// Control: a bare extra_commands entry (no OS sandbox) gets the proxy
 	// DOCKER_HOST injected.
 	extra := NewSandbox()
-	extra.UpdateConfig(&config.Config{ExtraCommands: []string{"bash"}}, tmpDir)
+	extra.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, tmpDir)
 	extra.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, err := extra.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
@@ -1138,7 +1138,7 @@ func TestUnsandboxedCommand_SkipsDockerProxy_RawPath(t *testing.T) {
 
 	// Unsandboxed: the same bare entry runs on the host without the proxy.
 	uns := NewSandbox()
-	uns.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	uns.updateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
 	uns.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, err = uns.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
@@ -1161,7 +1161,7 @@ func TestUnsandboxedCommand_SkipsDockerProxy_InterpPath(t *testing.T) {
 	// A leading "true &&" forces the compound through the interpreter rather than
 	// the bare raw fast path.
 	extra := NewSandbox()
-	extra.UpdateConfig(&config.Config{ExtraCommands: []string{"printenv"}}, tmpDir)
+	extra.updateConfig(&config.Config{ExtraCommands: []string{"printenv"}}, tmpDir)
 	extra.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, _ := extra.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if !strings.Contains(out, proxy) {
@@ -1171,7 +1171,7 @@ func TestUnsandboxedCommand_SkipsDockerProxy_InterpPath(t *testing.T) {
 	// Unsandboxed printenv runs on the host without the proxy DOCKER_HOST
 	// injected, so the variable is unset (printenv prints nothing).
 	uns := NewSandbox()
-	uns.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
+	uns.updateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
 	uns.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, _ = uns.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if strings.Contains(out, proxy) {
@@ -1190,7 +1190,7 @@ func TestUnsandboxedCommand_PreservesHostDockerHost(t *testing.T) {
 	// Raw path: a bare unsandboxed entry should see the host's own DOCKER_HOST,
 	// not the proxy socket.
 	raw := NewSandbox()
-	raw.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	raw.updateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
 	raw.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, err := raw.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
@@ -1203,7 +1203,7 @@ func TestUnsandboxedCommand_PreservesHostDockerHost(t *testing.T) {
 	// Interp path: printenv run on the host should likewise report the host
 	// DOCKER_HOST rather than the proxy.
 	interpS := NewSandbox()
-	interpS.UpdateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
+	interpS.updateConfig(&config.Config{UnsandboxedCommands: []string{"printenv"}}, tmpDir)
 	interpS.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, _ = interpS.Execute(context.Background(), `true && printenv DOCKER_HOST`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if !strings.Contains(out, hostDocker) {
@@ -1224,14 +1224,14 @@ func TestValidate_DockerRequiresProxy(t *testing.T) {
 	enabled := true
 	// Enabled but no OS sandbox and not allow_unsandboxed → rejected: only the
 	// OS sandbox can mask the real socket and make the proxy unbypassable.
-	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	s.updateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled}}, "")
 	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "without the OS sandbox") {
 		t.Fatalf("expected OS-sandbox requirement, got: %v", err)
 	}
 
 	// allow_unsandboxed lifts the OS-sandbox requirement, but the proxy must
 	// still be wired in (fail closed).
-	s.UpdateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled, AllowUnsandboxed: &enabled}}, "")
+	s.updateConfig(&config.Config{Docker: &config.DockerConfig{Enabled: &enabled, AllowUnsandboxed: &enabled}}, "")
 	if err := s.validate(f); err == nil || !strings.Contains(err.Error(), "docker proxy is not running") {
 		t.Fatalf("expected proxy-not-running rejection, got: %v", err)
 	}
@@ -1243,13 +1243,13 @@ func TestValidate_DockerRequiresProxy(t *testing.T) {
 	}
 
 	// The OS sandbox alone satisfies the requirement (no allow_unsandboxed needed).
-	s.UpdateConfig(&config.Config{OSSandbox: &enabled, Docker: &config.DockerConfig{Enabled: &enabled}}, "")
+	s.updateConfig(&config.Config{OSSandbox: &enabled, Docker: &config.DockerConfig{Enabled: &enabled}}, "")
 	if err := s.validate(f); err != nil {
 		t.Fatalf("expected docker allowed under OS sandbox, got: %v", err)
 	}
 
 	// Disabled in config → rejected regardless of sandbox/proxy state.
-	s.UpdateConfig(&config.Config{}, "")
+	s.updateConfig(&config.Config{}, "")
 	if err := s.validate(f); err == nil {
 		t.Fatal("expected docker blocked when docker is disabled")
 	}
@@ -1363,7 +1363,7 @@ func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSandbox()
-			s.UpdateConfig(&config.Config{ExtraCommands: tt.extraCmds}, "")
+			s.updateConfig(&config.Config{ExtraCommands: tt.extraCmds}, "")
 			f, err := ParseBash(tt.command)
 			if err != nil {
 				t.Fatalf("parse error: %v", err)
@@ -1386,14 +1386,11 @@ func TestValidate_ExtraCommandsSubcommand(t *testing.T) {
 }
 
 func TestValidate_ExtraCommandsSkipsValidators(t *testing.T) {
-	// pnpm dlx is blocked by the pnpm runtime validator when pnpm is enabled.
+	// pnpm dlx is blocked by the pnpm profile's validator when pnpm is enabled.
 	// Adding "pnpm dlx" to extra_commands should bypass that validator entirely.
-	pnpmEnabled := &config.RuntimesConfig{
-		Pnpm: &config.PnpmConfig{Enabled: boolPtr(true)},
-	}
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
-		Runtimes:      pnpmEnabled,
+	s.updateConfig(&config.Config{
+		Profiles:      []config.ProfileEntry{{Name: "pnpm"}},
 		ExtraCommands: []string{"pnpm dlx"},
 	}, "")
 
@@ -1412,7 +1409,7 @@ func TestValidate_ExtraCommandsSubcommandStillValidatesOtherSubcommands(t *testi
 	// Use remote_read=false so git fetch is blocked by the validator.
 	remoteFalse := false
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		Git:           &config.GitConfig{RemoteRead: &remoteFalse},
 		ExtraCommands: []string{"git push"},
 	}, "")
@@ -1463,7 +1460,7 @@ func TestFirstCommandWord(t *testing.T) {
 
 func TestIsExtraCommandInvocation(t *testing.T) {
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"fvm", "fvm flutter test", "pnpx prettier"},
 	}, "")
 
@@ -1514,7 +1511,7 @@ func TestBareExtraScriptPath_CdThenInvoke(t *testing.T) {
 	}
 
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands:        []string{"./sub/foo.sh"},
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: boolPtr(true)},
 	}, workDir)
@@ -1547,7 +1544,7 @@ func TestBareExtraScriptPath_CdThenInvoke(t *testing.T) {
 func TestExecute_ExtraCommandBypassesParsing(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"echo"},
 	}, "")
 
@@ -1565,7 +1562,7 @@ func TestExecute_ExtraCommandBypassesParsing(t *testing.T) {
 func TestValidateCommand_ExtraCommandBypass(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"fvm"},
 	}, "")
 
@@ -1581,7 +1578,7 @@ func TestValidate_BareExtraCommandInsideSubshell(t *testing.T) {
 	// the bare entry must win so that "fvm flutter test ..." passes validation
 	// even when appearing inside a command substitution or complex command.
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ExtraCommands: []string{"fvm", "fvm flutter test"},
 	}, "")
 
@@ -1620,7 +1617,7 @@ func TestConfigPaths(t *testing.T) {
 	}
 
 	// After UpdateConfig with paths
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		ReadablePaths:         []string{"/tmp/readable"},
 		WritablePaths:         []string{"/tmp/writable"},
 		InternalReadablePaths: []string{"/tmp/internal-readable"},
@@ -1640,7 +1637,7 @@ func TestConfigPaths(t *testing.T) {
 	}
 
 	// After clearing config
-	s.UpdateConfig(&config.Config{}, "")
+	s.updateConfig(&config.Config{}, "")
 	if got := s.ConfigReadPaths(); got != nil {
 		t.Fatalf("expected nil after clearing, got %v", got)
 	}
@@ -1687,7 +1684,7 @@ func TestValidateCommand(t *testing.T) {
 func TestValidateCommand_ScriptWithBlockedCommand(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
@@ -1719,7 +1716,7 @@ func TestValidateCommand_ScriptWithBlockedCommand(t *testing.T) {
 func TestValidateCommand_ScriptWithAllowedCommands(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
@@ -1743,7 +1740,7 @@ func TestValidateCommand_ScriptWithAllowedCommands(t *testing.T) {
 func TestValidateCommand_ScriptNotFound(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
@@ -1759,7 +1756,7 @@ func TestValidateCommand_ScriptNotFound(t *testing.T) {
 func TestValidateCommand_NestedScriptWithBlockedCommand(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},
@@ -1785,7 +1782,7 @@ func TestValidateCommand_NestedScriptWithBlockedCommand(t *testing.T) {
 func TestValidateCommand_BashWithFlags(t *testing.T) {
 	workDir := t.TempDir()
 	s := NewSandbox()
-	s.UpdateConfig(&config.Config{
+	s.updateConfig(&config.Config{
 		LocalBinaryExecution: &config.LocalBinaryExecutionConfig{
 			Enabled: boolPtr(true),
 		},

@@ -176,7 +176,12 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 				continue
 			}
 			reason := fmt.Sprintf("%q: %s", subj, ruleReason(rule))
-			if rule == "command_whitelist" {
+			switch {
+			case rule == "command_whitelist" && strings.HasPrefix(a.fix, "lite-sandbox config profiles enable "):
+				// A toolchain command: enabling its profile whitelists it with
+				// its validators, so there is no bare-allow caveat to add.
+				reason = fmt.Sprintf("%q: its profile is not enabled", subj)
+			case rule == "command_whitelist":
 				reason += " (a bare commands entry skips validation; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
 			}
 			add(a.fix, reason, a.count)
@@ -220,7 +225,7 @@ func ruleReason(rule string) string {
 	switch rule {
 	case "command_whitelist":
 		return "not on the allowlist"
-	case "runtime_disabled":
+	case "runtime_disabled": // logs written before profiles replaced runtimes
 		return "its runtime is not enabled"
 	case "local_binary":
 		return "direct execution of a path"

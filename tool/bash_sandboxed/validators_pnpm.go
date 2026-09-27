@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -17,8 +16,9 @@ var pnpmGlobalValueFlags = map[string]bool{
 	"--workspace-root": true,
 }
 
-// validatePnpmArgs validates pnpm commands according to the runtime config.
-func validatePnpmArgs(args []*syntax.Word, pnpmCfg *config.PnpmConfig) error {
+// validatePnpmArgs validates pnpm commands. publishAllowed reports whether the
+// config allows `pnpm publish`.
+func validatePnpmArgs(args []*syntax.Word, publishAllowed bool) error {
 	subcommand, _, err := findSubcommand("pnpm", args, pnpmGlobalValueFlags)
 	if err != nil {
 		return err
@@ -29,9 +29,9 @@ func validatePnpmArgs(args []*syntax.Word, pnpmCfg *config.PnpmConfig) error {
 	}
 
 	// pnpm publish pushes packages to the npm registry (shared state), so it is
-	// gated behind its own permission.
+	// gated behind its own commands entry.
 	if subcommand == "publish" {
-		return publishGate("pnpm", "runtimes.pnpm.publish", pnpmCfg.PnpmPublish())
+		return publishGate("pnpm", publishAllowed)
 	}
 
 	// Validate specific subcommands. `pnpm exec` needs no validation of its own:

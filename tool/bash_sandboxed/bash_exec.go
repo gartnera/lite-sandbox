@@ -11,7 +11,6 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 
-	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -585,7 +584,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	// Process-control commands (kill, pkill) are permitted only when
 	// the OS sandbox is active, where they are contained.
 	osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-	if !allowedCommands[cmdName] && !extra[cmdName] && !osOnly {
+	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly {
 		// Whitelist and local-binary gates are allowlist-only rules: in
 		// denylist/open mode the finding is audited and the command runs.
 		var gateErr error
@@ -603,26 +602,26 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	// Runtime per-command argument validation on the fully expanded
 	// argv (bash/sh/awk are skipped: they are dispatched to dedicated
 	// executors below that re-validate their contents).
-	if err := s.runtimeArgValidator(ctx, cmdName, args, extra); err != nil {
+	if err := s.runtimeArgValidator(ctx, cmdName, args); err != nil {
 		return err
 	}
-	// Configure deno's permission flags to mirror the sandbox policy.
-	// The runtime gate (deno enabled) is enforced earlier by the AST
-	// validator in allowlist mode; in denylist mode deno may run without
-	// a configured section, in which case the DenoConfig defaults apply
+	// Configure deno's permission flags to mirror the sandbox policy, from
+	// the deno profile's options. The whitelist (deno profile enabled) is
+	// enforced earlier in allowlist mode; in denylist mode deno may run with
+	// the profile off, in which case the options' defaults apply
 	// (auto-sandbox on, network denied). Network and import denials are
 	// applied independent of auto_sandbox so the policy holds even when
 	// filesystem auto-scoping is off.
 	if cmdName == "deno" {
-		var d *config.DenoConfig
-		if cfg := s.getConfig(); cfg.Runtimes != nil {
-			d = cfg.Runtimes.Deno
-		}
+		cfg := s.getConfig()
 		// Deno needs real directories for --allow-read/-write, so strip
 		// any descendants-only "/*" markers down to their base subtree.
 		denoRead := stripNestedOnlyMarkers(readAllowedPaths)
 		denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
-		args = applyDenoSandbox(args, denoRead, denoWrite, d.DenoAutoSandbox(), d.DenoAllowNetwork(), d.DenoAllowImport())
+		args = applyDenoSandbox(args, denoRead, denoWrite,
+			cfg.ProfileOption("deno", "auto_sandbox"),
+			cfg.ProfileOption("deno", "allow_network"),
+			cfg.ProfileOption("deno", "allow_import"))
 	}
 	switch cmdName {
 	case "awk":
@@ -707,19 +706,15 @@ var runtimeValidatorSkip = map[string]bool{
 // handlers. Static validation already runs these validators for statically
 // named commands; this is the enforcement layer for a dynamically-named one
 // (e.g. "$CMD push" resolving to git), whose real name and arguments are only
-// concrete at runtime. It also re-applies the runtime-enable gates for
-// config-gated runtimes. extra_commands are user-opted-in and bypass
-// validation, matching static; runtimeValidatorSkip commands are dispatched to
-// dedicated executors that re-validate their contents instead. extra is the
-// caller's already-read extra-commands snapshot, so both checks in a handler
-// see one consistent view of the config.
-func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string, extra map[string]bool) error {
-	if extra[name] || runtimeValidatorSkip[name] {
+// concrete at runtime. An invocation a commands allow admits is user-opted-in
+// and bypasses validation, matching static — and, as there, a restricted allow
+// ("cargo publish") admits only the invocations it names, so the rest of the
+// command's invocations keep their validator; runtimeValidatorSkip commands
+// are dispatched to dedicated executors that re-validate their contents
+// instead. args is the full argv.
+func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
+	if s.extraAllowsArgs(name, args[1:]) || runtimeValidatorSkip[name] {
 		return nil
-	}
-	// Runtime enable gate (allowlist-only) before the command's own validator.
-	if err := s.report(ctx, layerRuntime, ruleRuntimeDisabled, s.runtimeDisabledError(name)); err != nil {
-		return err
 	}
 	validator, ok := commandArgValidators[name]
 	if !ok {
@@ -762,19 +757,18 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			// misleading "not allowed"; agents fall back to pkill.
 			if len(args) > 0 && interp.IsBuiltin(args[0]) {
 				name := args[0]
-				extra := s.getExtraCommands()
 				if entry, denied := s.deniedCommand(name, args[1:]); denied {
 					if err := s.report(ctx, layerRuntime, ruleCommandDenylist, commandDeniedError(name, entry)); err != nil {
 						return nil, err
 					}
 				}
 				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
-				if !allowedCommands[name] && !extra[name] && !osOnly {
+				if !s.commandWhitelisted(name) && !s.extraAllowsArgs(name, args[1:]) && !osOnly {
 					if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(name)); err != nil {
 						return nil, err
 					}
 				}
-				if err := s.runtimeArgValidator(ctx, name, args, extra); err != nil {
+				if err := s.runtimeArgValidator(ctx, name, args); err != nil {
 					return nil, err
 				}
 			}
