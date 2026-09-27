@@ -88,10 +88,15 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 	if isWrite {
 		allowed = m.sets.write
 	}
+	resolved := ResolvePath(path, m.workDir)
+	// checkPathBoundary admits /dev/null, but every OS call here is performed
+	// under an os.Root of an allowed directory, which cannot reach it.
+	if resolved == os.DevNull {
+		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
+	}
 	if err := checkPathBoundary(path, path, m.workDir, isWrite, allowed); err != nil {
 		return nil, "", err
 	}
-	resolved := ResolvePath(path, m.workDir)
 
 	// checkPathBoundary lets a non-existent absolute path through on the read
 	// side so that reading a missing file reports "no such file" rather than a

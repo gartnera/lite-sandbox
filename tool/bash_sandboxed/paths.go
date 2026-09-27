@@ -164,8 +164,14 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 // it is likely a URL path argument (e.g., /v3/api/endpoint?query=value passed
 // to curl) rather than a real filesystem path, and can't be read from disk
 // anyway. Relative paths are always validated to prevent traversal attempts.
+// /dev/null is always allowed, for reads and writes alike: reading it yields
+// nothing and writing it discards, so it exposes nothing (e.g. `diff /dev/null
+// new.txt`, `cp /dev/null empty.txt`).
 func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
 	resolved := ResolvePath(path, workDir)
+	if resolved == os.DevNull {
+		return nil
+	}
 	if !isWrite && filepath.IsAbs(path) && !pathExistsLocally(resolved) {
 		return nil
 	}
