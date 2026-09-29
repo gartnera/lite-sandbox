@@ -228,7 +228,7 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 		return commandDeniedError(cmdName, entry)
 	}
 	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
-		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout)", cmdName))
+		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, xcrun)", cmdName))
 	}
 	extra := s.getExtraCommands()
 	// The whitelist is an allowlist-only rule. A wrapped
@@ -585,9 +585,10 @@ var wrapperUnwrappers = map[string]func([]string) []string{
 	"timeout": unwrapTimeoutArgs,
 	"env":     unwrapEnvArgs,
 	"xargs":   unwrapXargsArgs,
+	"xcrun":   unwrapXcrunArgs,
 }
 
-// unwrapWrapperArgs repeatedly strips leading wrapper commands (timeout, env,
+// unwrapWrapperArgs repeatedly strips leading wrapper commands (timeout, env, xcrun,
 // xargs) to expose the real command being run, so unsandboxed routing evaluates
 // the wrapped command rather than the wrapper. Returns the innermost args
 // (command name first); returns args unchanged when there is no wrapper, or nil

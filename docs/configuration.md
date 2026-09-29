@@ -441,7 +441,7 @@ profiles:
 ```
 
 A profile is a built-in preset of `commands` and `paths` entries for one
-toolchain (`go`, `pnpm`, `rust`, `deno`, `flutter`, `uv`, and the default-on
+toolchain (`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, and the default-on
 `montypython`), merged into the lists described above before the sandbox sees
 them. Its entries mean what yours do, except that a profile's allow of a
 command name whitelists it (its validators still run) instead of skipping

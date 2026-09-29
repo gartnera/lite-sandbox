@@ -623,6 +623,12 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			cfg.ProfileOption("deno", "allow_network"),
 			cfg.ProfileOption("deno", "allow_import"))
 	}
+	// SwiftPM (under swift and xcodebuild) sandboxes package manifests with a
+	// sandbox-exec of its own, which macOS refuses inside the worker's; turn
+	// it off where the worker's sandbox confines them instead.
+	if useOSSandbox && (cmdName == "swift" || cmdName == "xcodebuild" || cmdName == "xcrun") && !s.execIsUnsandboxed(ctx, args) {
+		args = xcodeDisableNestedSandbox(args)
+	}
 	switch cmdName {
 	case "awk":
 		return executeAwk(ctx, args)

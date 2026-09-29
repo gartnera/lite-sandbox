@@ -81,7 +81,7 @@ var configProfilesShowCmd = &cobra.Command{
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 3, ' ', 0)
 		fmt.Fprintln(w, "commands:")
-		for _, e := range p.CommandEntries() {
+		for _, e := range cfg.ProfileCommandEntries(p) {
 			what := e.Describe()
 			if e.Whitelists() {
 				what = "whitelisted (validated)"

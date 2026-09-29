@@ -13,9 +13,10 @@ import (
 // hook runs whenever its command runs, whitelisted or not: in denylist mode an
 // unlisted `go run pkg@latest` is still refused.
 //
-// Commands with nothing to validate (gofmt, rustc, flutter/dart/fvm, uvx) have
-// no hook: gofmt is a pure formatter, rustc compiles what it is given, the
-// Flutter tools and uvx run code the OS sandbox confines like `go test`.
+// Commands with nothing to validate (gofmt, rustc, swiftc, flutter/dart/fvm,
+// uvx) have no hook: gofmt is a pure formatter, rustc and swiftc compile what
+// they are given, the Flutter tools and uvx run code the OS sandbox confines
+// like `go test`.
 var profileHooks = map[string]func(s *Sandbox, args []*syntax.Word) error{
 	// go generate runs the shell commands in //go:generate directives.
 	"go": func(s *Sandbox, args []*syntax.Word) error {
@@ -35,6 +36,14 @@ var profileHooks = map[string]func(s *Sandbox, args []*syntax.Word) error{
 	},
 	"python":  validatePythonArgs,
 	"python3": validatePythonArgs,
+	// The xcode profile's tools (validators_xcode.go). swiftc compiles what
+	// it is given, like rustc, so it has no hook; nor has xcodegen, whose
+	// spec's preGenCommand/postGenCommand run under the OS sandbox like a
+	// build script.
+	"xcodebuild":   validateXcodebuildArgs,
+	"xcrun":        validateXcrunArgs,
+	"swift":        validateSwiftArgs,
+	"xcode-select": validateXcodeSelectArgs,
 }
 
 func init() {
