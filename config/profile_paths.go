@@ -347,7 +347,9 @@ func isFlutterSDKRoot(dir string) bool {
 // None are created: sandbox-exec does not need a rule's path to exist, and
 // Xcode makes them on first use. On Linux there is no Xcode, only a Swift
 // toolchain, whose SwiftPM keeps its state in ~/.cache/org.swift.swiftpm and
-// ~/.swiftpm; bubblewrap has to create a bind's source, so those are returned
+// ~/.swiftpm ($XDG_CONFIG_HOME/swiftpm when that is set), and whose swiftc
+// writes clang's module cache to ~/.cache/clang/ModuleCache even to compile a
+// package manifest; bubblewrap has to create a bind's source, so those are returned
 // only when swift is installed, and ~/.xcodegen only when xcodegen is, so a
 // host without them gets nothing created.
 //
@@ -384,9 +386,15 @@ func xcodeBindsFor(goos string, installed func(tool string) bool) []string {
 			if cache == "" {
 				cache = filepath.Join(home, ".cache")
 			}
+			// SwiftPM's dotSwiftPM moves under XDG_CONFIG_HOME when it is set.
+			dotSwiftPM := filepath.Join(home, ".swiftpm")
+			if config := os.Getenv("XDG_CONFIG_HOME"); config != "" {
+				dotSwiftPM = filepath.Join(config, "swiftpm")
+			}
 			paths = append(paths,
 				filepath.Join(cache, "org.swift.swiftpm"),
-				filepath.Join(home, ".swiftpm"),
+				filepath.Join(cache, "clang", "ModuleCache"),
+				dotSwiftPM,
 			)
 		}
 		if installed("xcodegen") {

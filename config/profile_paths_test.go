@@ -121,6 +121,7 @@ func TestXcodeBindsFor(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	darwin := xcodeBindsFor("darwin", func(string) bool { t.Fatal("darwin must not look for tools"); return false })
 	want := []string{
@@ -151,9 +152,19 @@ func TestXcodeBindsFor(t *testing.T) {
 		t.Errorf("linux without swift or xcodegen = %v, want nil (bubblewrap would create them)", got)
 	}
 	linux := xcodeBindsFor("linux", func(string) bool { return true })
-	want = []string{filepath.Join(home, ".cache", "org.swift.swiftpm"), filepath.Join(home, ".swiftpm"), filepath.Join(home, ".xcodegen")}
+	want = []string{
+		filepath.Join(home, ".cache", "org.swift.swiftpm"),
+		filepath.Join(home, ".cache", "clang", "ModuleCache"),
+		filepath.Join(home, ".swiftpm"),
+		filepath.Join(home, ".xcodegen"),
+	}
 	if !slices.Equal(linux, want) {
 		t.Errorf("linux = %v, want %v", linux, want)
+	}
+	// SwiftPM keeps its state under XDG_CONFIG_HOME when that is set.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	if got := xcodeBindsFor("linux", func(string) bool { return true }); !slices.Contains(got, filepath.Join(home, "cfg", "swiftpm")) || slices.Contains(got, filepath.Join(home, ".swiftpm")) {
+		t.Errorf("linux with XDG_CONFIG_HOME = %v, want $XDG_CONFIG_HOME/swiftpm in place of ~/.swiftpm", got)
 	}
 	if got := xcodeBindsFor("linux", func(tool string) bool { return tool == "xcodegen" }); !slices.Equal(got, []string{filepath.Join(home, ".xcodegen")}) {
 		t.Errorf("linux with only xcodegen = %v", got)

@@ -274,7 +274,10 @@ The profile grants, writable at the OS sandbox layer:
   runs, so they are confined by the OS sandbox like a build script.
 - **SwiftPM**: `~/Library/Caches/org.swift.swiftpm` and
   `~/Library/org.swift.swiftpm`, plus `~/.swiftpm` if it exists. On Linux, where
-  only `swift` applies, `~/.cache/org.swift.swiftpm` and `~/.swiftpm`.
+  only `swift` applies, `~/.cache/org.swift.swiftpm` and `~/.swiftpm`
+  (`$XDG_CONFIG_HOME/swiftpm` when `XDG_CONFIG_HOME` is set), plus clang's
+  module cache `~/.cache/clang/ModuleCache`, which `swiftc` writes even to
+  compile a package manifest.
 
 It also grants the active developer directory (`DEVELOPER_DIR`, else the one
 `xcode-select` points at) **readable** only, so the agent can read SDK headers.
