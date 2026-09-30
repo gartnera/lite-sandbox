@@ -116,7 +116,7 @@ type Sandbox struct {
 	// without creating a package-level initialization cycle.
 	argValidators map[string]func(s *Sandbox, args []*syntax.Word) error
 	// bg tracks background ("run_in_background") processes started via
-	// ExecuteBackground, mirroring the Claude Code Bash/BashOutput/KillShell tools.
+	// ExecuteBackground, mirroring the Claude Code Bash/KillShell tools.
 	bg *backgroundManager
 	// audit receives every validation finding (see Sandbox.report) while the
 	// config's audit flag is on; nil otherwise. Managed by UpdateConfig.
@@ -562,6 +562,7 @@ func (s *Sandbox) ConfigInternalWritePaths() []string {
 func (s *Sandbox) Close() error {
 	if s.bg != nil {
 		s.bg.killAll()
+		s.bg.removeOutputDir()
 	}
 
 	// The monty runtime has its own lock (see python.go), so release it
@@ -1655,6 +1656,20 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	// binds); reads inside the OS sandbox are broadly allowed already, so this
 	// mainly re-exposes host paths hidden by the worker's /tmp overlay.
 	roBinds := s.ConfigInternalReadPaths()
+
+	// Background commands' output files live under BackgroundOutputRoot,
+	// which on Linux sits under the /tmp the worker overlays with its own
+	// tmpfs. Like the other internal write grants, the worker gets it
+	// writable while the interpreter's write set leaves it out (the agent
+	// only gets a read grant, via sandboxPaths), so a sandboxed `cat` or
+	// `tail` of an output file sees the host's file. Created now if need be:
+	// the bind needs it to exist when the worker starts, and output
+	// directories created inside it later show through the bind.
+	if root := BackgroundOutputRoot(); ensureOutputRoot(root) == nil {
+		extraBinds = append(extraBinds, root)
+	} else {
+		slog.Warn("background output directory unavailable to the sandbox worker", "path", root)
+	}
 
 	// Same for the main worktree when the session runs in a linked git worktree
 	// with git.allow_worktree_parent: git writes index/lock files under the main

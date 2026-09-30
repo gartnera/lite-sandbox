@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,15 +46,27 @@ func TestOSSandboxBackgroundExecuteAndOutput(t *testing.T) {
 		t.Fatalf("expected completed status, got %q", st)
 	}
 
-	res, err := s.BackgroundOutput(proc.ID, "")
+	data, err := os.ReadFile(proc.OutputPath)
 	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
+		t.Fatalf("read output file: %v", err)
 	}
-	if !strings.Contains(res.Output, "sandbox-bg") {
-		t.Fatalf("expected output to contain greeting, got %q", res.Output)
+	if !strings.Contains(string(data), "sandbox-bg") {
+		t.Fatalf("expected output to contain greeting, got %q", data)
 	}
-	if res.ExitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", res.ExitCode)
+	if code := s.ListBackground()[0].ExitCode; code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+
+	// The agent reads the output file through the sandbox itself: the worker
+	// sees the host's file (on Linux, through a bind over its private /tmp)
+	// and the read passes validation with the output root granted.
+	readPaths := []string{tmpDir, BackgroundOutputReadPath()}
+	out, err := s.Execute(context.Background(), "cat "+proc.OutputPath, tmpDir, readPaths, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("reading output file through the sandbox: %v", err)
+	}
+	if !strings.Contains(out, "sandbox-bg") {
+		t.Fatalf("expected sandboxed cat of output file to show greeting, got %q", out)
 	}
 }
 
@@ -72,14 +85,17 @@ func TestOSSandboxBackgroundKill(t *testing.T) {
 	}
 
 	// Wait until it is actually producing output through the sandbox.
+	readOut := func() string {
+		data, err := os.ReadFile(proc.OutputPath)
+		if err != nil {
+			t.Fatalf("read output file: %v", err)
+		}
+		return string(data)
+	}
 	sawTick := false
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		res, err := s.BackgroundOutput(proc.ID, "")
-		if err != nil {
-			t.Fatalf("BackgroundOutput failed: %v", err)
-		}
-		if strings.Contains(res.Output, "tick") {
+		if strings.Contains(readOut(), "tick") {
 			sawTick = true
 			break
 		}
@@ -98,13 +114,9 @@ func TestOSSandboxBackgroundKill(t *testing.T) {
 
 	// After the kill settles, output must stop growing — the sandboxed process
 	// (and the sleep it spawns) is gone.
-	_, _ = s.BackgroundOutput(proc.ID, "") // drain anything buffered
+	before := readOut()
 	time.Sleep(1500 * time.Millisecond)
-	res, err := s.BackgroundOutput(proc.ID, "")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
-	}
-	if strings.TrimSpace(res.Output) != "" {
-		t.Fatalf("expected no new output after kill, got %q", res.Output)
+	if after := readOut(); after != before {
+		t.Fatalf("expected no new output after kill, got %q", after[len(before):])
 	}
 }

@@ -27,7 +27,6 @@ const builtinBashPermission = "Bash"
 
 var mcpToolPermissions = []string{
 	"mcp__lite-sandbox__bash",
-	"mcp__lite-sandbox__bash_output",
 	"mcp__lite-sandbox__kill_shell",
 	"mcp__lite-sandbox__list_shells",
 }
@@ -527,8 +526,8 @@ func configurePermissions(claudeDir string, plan claudePlan) error {
 
 	want := plan.claudePermissions()
 	// Auto-allow every sandbox tool — the bash tool plus the background-process
-	// management tools (bash_output, kill_shell, list_shells) — so polling and
-	// stopping background commands never triggers a permission prompt.
+	// management tools (kill_shell, list_shells) — so checking on and stopping
+	// background commands never triggers a permission prompt.
 	for _, allowPermission := range want.Allow {
 		if !slices.Contains(allow, allowPermission) {
 			allow = append(allow, allowPermission)

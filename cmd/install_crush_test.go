@@ -21,7 +21,7 @@ func TestConfigureCrushRCNewFile(t *testing.T) {
 		crushBlockStart,
 		"mcp add lite-sandbox --type stdio --command /usr/local/bin/lite-sandbox --args serve-mcp\n",
 		"permissions deny bash\n",
-		"permissions allow mcp_lite-sandbox_bash mcp_lite-sandbox_bash_output mcp_lite-sandbox_kill_shell mcp_lite-sandbox_list_shells\n",
+		"permissions allow mcp_lite-sandbox_bash mcp_lite-sandbox_kill_shell mcp_lite-sandbox_list_shells\n",
 		crushBlockEnd,
 	} {
 		if !strings.Contains(content, want) {
@@ -193,7 +193,7 @@ func TestConfigureCrushJSONPreservesExistingAndIsIdempotent(t *testing.T) {
 	if got := rawStrings(t, cfg, "options", "disabled_tools"); strings.Join(got, ",") != "sourcegraph,bash" {
 		t.Errorf("disabled_tools not extended exactly once, got %v", got)
 	}
-	want := "view,mcp_lite-sandbox_bash,mcp_lite-sandbox_bash_output,mcp_lite-sandbox_kill_shell,mcp_lite-sandbox_list_shells"
+	want := "view,mcp_lite-sandbox_bash,mcp_lite-sandbox_kill_shell,mcp_lite-sandbox_list_shells"
 	if got := rawStrings(t, cfg, "permissions", "allowed_tools"); strings.Join(got, ",") != want {
 		t.Errorf("allowed_tools not extended without duplicates, got %v", got)
 	}

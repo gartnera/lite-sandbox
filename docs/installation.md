@@ -88,7 +88,7 @@ Because it configures one session rather than every project, `launch` is stricte
 
 For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`):
 1. Adds the MCP server to `~/.claude.json` (user-scoped) with `"alwaysLoad": true` (see [`--always-load`](#always-load) below)
-2. Adds allow rules for the lite-sandbox MCP tools (`bash`, `bash_output`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
+2. Adds allow rules for the lite-sandbox MCP tools (`bash`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools. Subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow.
 4. Adds a usage directive to `~/.claude/CLAUDE.md`
 
@@ -218,7 +218,7 @@ lite-sandbox install opencode
 This edits opencode's **global** config and rules in `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`):
 
 1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json` (or `opencode.jsonc`, whichever exists)
-2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked (replacing any existing granular `bash` rule), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_bash_output`, ...) never prompt
+2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked (replacing any existing granular `bash` rule), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_list_shells`, ...) never prompt
 3. Adds a usage directive to `AGENTS.md`
 
 All other keys are preserved, and re-running is idempotent. `opencode.json` (plain JSON) and `opencode.jsonc` (JSONC, with comments and trailing commas) are both edited in place; comments and formatting in a `.jsonc` file are preserved. If both exist, `opencode.json` is edited; if neither exists, a new `opencode.json` is created. To configure it by hand, see below.
@@ -265,7 +265,7 @@ lite-sandbox install crush
 This edits Crush's **global** config in `~/.config/crush` (honoring `$XDG_CONFIG_HOME` and `$CRUSH_GLOBAL_CONFIG`):
 
 1. Registers the MCP server as `lite-sandbox` (stdio, `lite-sandbox serve-mcp`). Crush names MCP tools `mcp_<server>_<tool>`, so the sandbox shell appears as `mcp_lite-sandbox_bash`.
-2. Removes the built-in `bash` tool from the model's tool list with `permissions deny bash` (Crush's `options.disabled_tools`), and auto-allows the sandbox's tools (`mcp_lite-sandbox_bash`, `mcp_lite-sandbox_bash_output`, `mcp_lite-sandbox_kill_shell`, `mcp_lite-sandbox_list_shells`) with `permissions allow` (`permissions.allowed_tools`) so they never prompt
+2. Removes the built-in `bash` tool from the model's tool list with `permissions deny bash` (Crush's `options.disabled_tools`), and auto-allows the sandbox's tools (`mcp_lite-sandbox_bash`, `mcp_lite-sandbox_kill_shell`, `mcp_lite-sandbox_list_shells`) with `permissions allow` (`permissions.allowed_tools`) so they never prompt
 3. Adds a usage directive to `CRUSH.md`, the global context file Crush loads into every session
 
 Crush reads and merges two global config files: `crushrc` (Crush's current Bash-based format, introduced in v0.88.0) takes precedence over the deprecated `crush.json`. The installer edits whichever exists, `crushrc` if both do. If neither exists it creates a `crushrc`, or a `crush.json` if `crush --version` reports a release older than v0.88.0. In a `crushrc`, the settings go in a marked managed block at the end of the file, so `mcp add` overrides any earlier definition of the same server. In `crush.json`, the `mcp.lite-sandbox`, `options.disabled_tools`, and `permissions.allowed_tools` entries are edited in place. All other content is preserved and re-running is idempotent.
@@ -279,7 +279,7 @@ Add this to `~/.config/crush/crushrc` (replace the path with your built binary):
 ```bash
 mcp add lite-sandbox --type stdio --command /path/to/lite-sandbox --args serve-mcp
 permissions deny bash
-permissions allow mcp_lite-sandbox_bash mcp_lite-sandbox_bash_output mcp_lite-sandbox_kill_shell mcp_lite-sandbox_list_shells
+permissions allow mcp_lite-sandbox_bash mcp_lite-sandbox_kill_shell mcp_lite-sandbox_list_shells
 ```
 
 Or, for the legacy JSON config (`~/.config/crush/crush.json`, required on Crush releases before v0.88.0):
@@ -300,7 +300,6 @@ Or, for the legacy JSON config (`~/.config/crush/crush.json`, required on Crush 
   "permissions": {
     "allowed_tools": [
       "mcp_lite-sandbox_bash",
-      "mcp_lite-sandbox_bash_output",
       "mcp_lite-sandbox_kill_shell",
       "mcp_lite-sandbox_list_shells"
     ]
@@ -414,7 +413,6 @@ Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandb
   "permissions": {
     "allow": [
       "mcp__lite-sandbox__bash",
-      "mcp__lite-sandbox__bash_output",
       "mcp__lite-sandbox__kill_shell",
       "mcp__lite-sandbox__list_shells"
     ],
@@ -425,9 +423,8 @@ Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandb
 }
 ```
 
-The `bash_output`, `kill_shell`, and `list_shells` entries cover the
-background-process tools, so polling and stopping background commands don't
-prompt either.
+The `kill_shell` and `list_shells` entries cover the background-process
+tools, so checking on and stopping background commands don't prompt either.
 
 Without the `Bash` deny, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 

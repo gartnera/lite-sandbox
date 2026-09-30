@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,8 +31,29 @@ func waitForStatus(t *testing.T, p *BackgroundProcess, deadline time.Duration, w
 	return p.Status()
 }
 
-func TestBackgroundExecuteAndOutput(t *testing.T) {
+// readOutput returns the current content of a background process's output file.
+func readOutput(t *testing.T, p *BackgroundProcess) string {
+	t.Helper()
+	data, err := os.ReadFile(p.OutputPath)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	return string(data)
+}
+
+// newBackgroundTestSandbox returns a test sandbox whose background output files
+// live under a per-test directory, closed (killing its processes and removing
+// the output directory) when the test ends.
+func newBackgroundTestSandbox(t *testing.T) *Sandbox {
+	t.Helper()
 	s := newTestSandbox()
+	s.bg.outputRoot = filepath.Join(t.TempDir(), "bg-root")
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestBackgroundExecuteAndOutput(t *testing.T) {
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
 	proc, err := s.ExecuteBackground("echo hello && echo world", cwd, []string{cwd}, []string{cwd})
@@ -46,82 +68,63 @@ func TestBackgroundExecuteAndOutput(t *testing.T) {
 		t.Fatalf("expected completed status, got %q", st)
 	}
 
-	res, err := s.BackgroundOutput(proc.ID, "")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
+	if out := readOutput(t, proc); out != "hello\nworld\n" {
+		t.Fatalf("expected output file to hold hello and world, got %q", out)
 	}
-	if res.Status != "completed" {
-		t.Fatalf("expected completed status, got %q", res.Status)
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", res.ExitCode)
-	}
-	if !strings.Contains(res.Output, "hello") || !strings.Contains(res.Output, "world") {
-		t.Fatalf("expected output to contain hello and world, got %q", res.Output)
+	list := s.ListBackground()
+	if len(list) != 1 || list[0].ExitCode != 0 || list[0].OutputPath != proc.OutputPath {
+		t.Fatalf("unexpected list entry: %+v", list)
 	}
 }
 
-func TestBackgroundOutputIncremental(t *testing.T) {
-	s := newTestSandbox()
+// TestBackgroundOutputStreams verifies output reaches the file while the
+// process is still running, not only once it exits.
+func TestBackgroundOutputStreams(t *testing.T) {
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
-	proc, err := s.ExecuteBackground("echo first; sleep 0.3; echo second", cwd, []string{cwd}, []string{cwd})
+	proc, err := s.ExecuteBackground("echo first; sleep 30", cwd, []string{cwd}, []string{cwd})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)
 	}
-
-	// Give the first echo time to land but not the second.
-	time.Sleep(100 * time.Millisecond)
-	res1, err := s.BackgroundOutput(proc.ID, "")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(readOutput(t, proc), "first") {
+		time.Sleep(10 * time.Millisecond)
 	}
-	if !strings.Contains(res1.Output, "first") {
-		t.Fatalf("expected first read to contain 'first', got %q", res1.Output)
+	if out := readOutput(t, proc); out != "first\n" {
+		t.Fatalf("expected streamed output, got %q", out)
 	}
-	if strings.Contains(res1.Output, "second") {
-		t.Fatalf("did not expect 'second' yet, got %q", res1.Output)
-	}
-
-	waitForStatus(t, proc, 2*time.Second, "completed", "failed")
-
-	res2, err := s.BackgroundOutput(proc.ID, "")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
-	}
-	// Second read should only contain new output.
-	if strings.Contains(res2.Output, "first") {
-		t.Fatalf("second read should not repeat 'first', got %q", res2.Output)
-	}
-	if !strings.Contains(res2.Output, "second") {
-		t.Fatalf("expected second read to contain 'second', got %q", res2.Output)
+	if st := proc.Status(); st != "running" {
+		t.Fatalf("expected running status, got %q", st)
 	}
 }
 
-func TestBackgroundOutputFilter(t *testing.T) {
-	s := newTestSandbox()
+// TestBackgroundOutputStderr verifies stderr lands in the same file.
+func TestBackgroundOutputStderr(t *testing.T) {
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
-	proc, err := s.ExecuteBackground("echo apple; echo banana; echo apricot", cwd, []string{cwd}, []string{cwd})
+	proc, err := s.ExecuteBackground("echo oops >&2; exit 3", cwd, []string{cwd}, []string{cwd})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)
 	}
-	waitForStatus(t, proc, 2*time.Second, "completed", "failed")
-
-	res, err := s.BackgroundOutput(proc.ID, "^ap")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
+	if st := waitForStatus(t, proc, 2*time.Second, "completed", "failed"); st != "failed" {
+		t.Fatalf("expected failed status, got %q", st)
 	}
-	if strings.Contains(res.Output, "banana") {
-		t.Fatalf("filter should have excluded banana, got %q", res.Output)
+	if out := readOutput(t, proc); out != "oops\n" {
+		t.Fatalf("expected stderr in output file, got %q", out)
 	}
-	if !strings.Contains(res.Output, "apple") || !strings.Contains(res.Output, "apricot") {
-		t.Fatalf("filter should have kept apple and apricot, got %q", res.Output)
+	if list := s.ListBackground(); list[0].ExitCode != 3 {
+		t.Fatalf("expected exit code 3, got %d", list[0].ExitCode)
 	}
 }
 
-func TestBackgroundOutputInvalidFilter(t *testing.T) {
+// TestBackgroundOutputDirRemovedOnClose verifies shutdown deletes the output
+// files, and that the root is created private to the user.
+func TestBackgroundOutputDirRemovedOnClose(t *testing.T) {
 	s := newTestSandbox()
+	root := filepath.Join(t.TempDir(), "bg-root")
+	s.bg.outputRoot = root
 	cwd := t.TempDir()
 
 	proc, err := s.ExecuteBackground("echo hi", cwd, []string{cwd}, []string{cwd})
@@ -129,14 +132,72 @@ func TestBackgroundOutputInvalidFilter(t *testing.T) {
 		t.Fatalf("ExecuteBackground failed: %v", err)
 	}
 	waitForStatus(t, proc, 2*time.Second, "completed", "failed")
+	if filepath.Dir(filepath.Dir(proc.OutputPath)) != root {
+		t.Fatalf("output file %q not under root %q", proc.OutputPath, root)
+	}
+	fi, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat root: %v", err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("expected root mode 0700, got %v", fi.Mode().Perm())
+	}
 
-	if _, err := s.BackgroundOutput(proc.ID, "("); err == nil {
-		t.Fatal("expected error for invalid filter regex")
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(proc.OutputPath)); !os.IsNotExist(err) {
+		t.Fatalf("expected output dir removed on Close, got %v", err)
+	}
+}
+
+// TestBackgroundOutputRootRejectsSymlink verifies a root planted as a symlink
+// (another user in a shared /tmp) is refused rather than followed.
+func TestBackgroundOutputRootRejectsSymlink(t *testing.T) {
+	s := newTestSandbox()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "bg-root")
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	s.bg.outputRoot = root
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := s.ExecuteBackground("echo hi", dir, []string{dir}, []string{dir}); err == nil {
+		t.Fatal("expected a symlinked output root to be refused")
+	}
+}
+
+// TestSweepStaleOutputDirs verifies directories of dead servers are removed
+// and live ones (this process) kept.
+func TestSweepStaleOutputDirs(t *testing.T) {
+	root := t.TempDir()
+	// A pid far above any pid_max is never running.
+	stale := filepath.Join(root, "bg-2147483000-abc")
+	live := filepath.Join(root, fmt.Sprintf("bg-%d-abc", os.Getpid()))
+	other := filepath.Join(root, "unrelated")
+	for _, d := range []string{stale, live, other} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepStaleOutputDirs(root)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("expected stale dir removed, got %v", err)
+	}
+	for _, d := range []string{live, other} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("expected %s kept, got %v", d, err)
+		}
 	}
 }
 
 func TestBackgroundKill(t *testing.T) {
-	s := newTestSandbox()
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
 	proc, err := s.ExecuteBackground("sleep 30", cwd, []string{cwd}, []string{cwd})
@@ -162,7 +223,7 @@ func TestBackgroundKill(t *testing.T) {
 }
 
 func TestBackgroundValidationError(t *testing.T) {
-	s := newTestSandbox()
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
 	// perl is not in the allowlist; validation should fail synchronously.
@@ -174,16 +235,13 @@ func TestBackgroundValidationError(t *testing.T) {
 func TestBackgroundUnknownID(t *testing.T) {
 	s := newTestSandbox()
 
-	if _, err := s.BackgroundOutput("bash_999", ""); err == nil {
-		t.Fatal("expected error for unknown bash_output id")
-	}
 	if err := s.KillBackground("bash_999"); err == nil {
 		t.Fatal("expected error for unknown kill id")
 	}
 }
 
 func TestListBackground(t *testing.T) {
-	s := newTestSandbox()
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
 	proc, err := s.ExecuteBackground("echo listed", cwd, []string{cwd}, []string{cwd})
@@ -382,7 +440,7 @@ func TestBackgroundKillIsGraceful(t *testing.T) {
 }
 
 func TestBackgroundKilledExitCode(t *testing.T) {
-	s := newTestSandbox()
+	s := newBackgroundTestSandbox(t)
 	cwd := t.TempDir()
 
 	proc, err := s.ExecuteBackground("sleep 30", cwd, []string{cwd}, []string{cwd})
@@ -394,10 +452,7 @@ func TestBackgroundKilledExitCode(t *testing.T) {
 	}
 	waitForStatus(t, proc, 5*time.Second, "killed")
 
-	res, err := s.BackgroundOutput(proc.ID, "")
-	if err != nil {
-		t.Fatalf("BackgroundOutput failed: %v", err)
-	}
+	res := s.ListBackground()[0]
 	if res.Status != "killed" {
 		t.Fatalf("expected killed status, got %q", res.Status)
 	}
@@ -408,40 +463,32 @@ func TestBackgroundKilledExitCode(t *testing.T) {
 	}
 }
 
-// TestStreamBufferLineAlignedRead verifies the filter never sees a line split
-// across two reads: a partial line is held back until its newline arrives.
-func TestStreamBufferLineAlignedRead(t *testing.T) {
-	b := newStreamBuffer(1 << 20)
+// TestOutputFileCapCompaction verifies that exceeding the cap keeps the most
+// recent output behind a truncation marker.
+func TestOutputFileCapCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.log")
+	o, err := createOutputFile(path, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Write([]byte("0123456789"))
+	o.Write([]byte("ABCDEFGHIJ")) // exactly at the cap: no compaction
+	o.Write([]byte("xyz"))        // exceeds it: keep the last 10 bytes
+	got, _ := os.ReadFile(path)
+	if want := outputTruncatedMarker + "DEFGHIJxyz"; string(got) != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 
-	b.Write([]byte("ERR"))
-	if got := b.read(true); got != "" {
-		t.Fatalf("expected empty read while line is incomplete, got %q", got)
+	// A single write larger than half the cap keeps its own tail.
+	o.Write([]byte("abcdefghijklmnopqrstuvwxyz"))
+	got, _ = os.ReadFile(path)
+	if want := outputTruncatedMarker + "qrstuvwxyz"; string(got) != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
-	b.Write([]byte("OR: boom\nnext"))
-	if got := b.read(true); got != "ERROR: boom\n" {
-		t.Fatalf("expected the completed line, got %q", got)
-	}
-	// "next" has no newline yet -> still held back.
-	if got := b.read(true); got != "" {
-		t.Fatalf("expected partial line to be held, got %q", got)
-	}
-	// Process done: flush everything including the unterminated tail.
-	if got := b.read(false); got != "next" {
-		t.Fatalf("expected final flush of partial line, got %q", got)
-	}
-}
 
-func TestStreamBufferCapTruncation(t *testing.T) {
-	b := newStreamBuffer(10)
-	b.Write([]byte("0123456789"))
-	b.Write([]byte("ABCDE")) // exceeds cap; oldest dropped
-
-	got := b.readNew()
-	if got != "56789ABCDE" {
-		t.Fatalf("expected trailing 10 bytes, got %q", got)
-	}
-	// Subsequent read with no new writes returns empty.
-	if more := b.readNew(); more != "" {
-		t.Fatalf("expected empty incremental read, got %q", more)
+	// Writes after Close are dropped, not errors.
+	o.Close()
+	if n, err := o.Write([]byte("late")); err != nil || n != 4 {
+		t.Fatalf("write after close: n=%d err=%v", n, err)
 	}
 }

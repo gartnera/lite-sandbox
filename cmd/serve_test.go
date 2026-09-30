@@ -116,10 +116,14 @@ func TestListTools(t *testing.T) {
 	for _, tool := range tools.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"bash", "bash_output", "kill_shell", "list_shells"} {
+	for _, want := range []string{"bash", "kill_shell", "list_shells"} {
 		if !got[want] {
 			t.Fatalf("expected tool %q to be registered, got tools %v", want, got)
 		}
+	}
+	// Background output is read from its file with the bash tool instead.
+	if got["bash_output"] {
+		t.Fatal("bash_output should no longer be registered")
 	}
 }
 
@@ -339,29 +343,50 @@ func TestBashBackground_OutputAndStatus(t *testing.T) {
 		t.Fatalf("expected success starting background, got error: %q", text)
 	}
 	id := extractShellID(t, text)
+	path := extractOutputPath(t, text)
 
-	// Poll bash_output until the process completes.
-	var out string
+	// Poll list_shells until the process completes.
+	var listOut string
 	for i := 0; i < 200; i++ {
-		var isErr bool
-		out, isErr = callTextTool(t, c, "bash_output", map[string]any{"bash_id": id})
-		if isErr {
-			t.Fatalf("bash_output returned error: %q", out)
-		}
-		if strings.Contains(out, "<status>completed</status>") {
+		listOut, _ = callTextTool(t, c, "list_shells", nil)
+		if strings.Contains(listOut, id+"\tcompleted") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if !strings.Contains(listOut, id+"\tcompleted (exit 0)\t"+path) {
+		t.Fatalf("expected list_shells to show %q completed with exit 0 and its output file, got %q", id, listOut)
+	}
+
+	// The output file is readable through the sandboxed bash tool itself.
+	out, isErr := callTextTool(t, c, "bash", map[string]any{"command": "cat " + path})
+	if isErr {
+		t.Fatalf("reading the output file through the bash tool failed: %q", out)
+	}
 	if !strings.Contains(out, "background-hello") {
 		t.Fatalf("expected background output to contain greeting, got %q", out)
 	}
-	if !strings.Contains(out, "<status>completed</status>") {
-		t.Fatalf("expected completed status, got %q", out)
+
+	// The grant is read-only for the agent: writing the file is rejected.
+	out, isErr = callTextTool(t, c, "bash", map[string]any{"command": "echo tampered > " + path})
+	if !isErr {
+		t.Fatalf("expected writing the output file through the bash tool to be rejected, got %q", out)
 	}
-	if !strings.Contains(out, "<exit_code>0</exit_code>") {
-		t.Fatalf("expected exit code 0, got %q", out)
+}
+
+func extractOutputPath(t *testing.T, s string) string {
+	t.Helper()
+	const prefix = "being written to "
+	start := strings.Index(s, prefix)
+	if start < 0 {
+		t.Fatalf("could not find output path in %q", s)
 	}
+	rest := s[start+len(prefix):]
+	end := strings.Index(rest, ";")
+	if end < 0 {
+		t.Fatalf("could not parse output path in %q", s)
+	}
+	return rest[:end]
 }
 
 func TestBashBackground_Kill(t *testing.T) {
@@ -404,15 +429,6 @@ func TestBashBackground_ValidationError(t *testing.T) {
 	})
 	if !isErr {
 		t.Fatalf("expected validation error for disallowed background command, got %q", text)
-	}
-}
-
-func TestBashOutput_UnknownID(t *testing.T) {
-	c := setupClient(t)
-
-	text, isErr := callTextTool(t, c, "bash_output", map[string]any{"bash_id": "bash_404"})
-	if !isErr {
-		t.Fatalf("expected error for unknown id, got %q", text)
 	}
 }
 
