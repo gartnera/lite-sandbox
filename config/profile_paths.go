@@ -407,6 +407,22 @@ func xcodeBindsFor(goos string, installed func(tool string) bool) []string {
 	return paths
 }
 
+// xcodeSimulatorDataFor returns where CoreSimulator keeps the simulators'
+// data on goos: ~/Library/Developer/CoreSimulator/Devices, one directory per
+// simulator holding its device.plist and its data volume (app containers,
+// preferences, the simulated home directory). Only macOS has simulators.
+// Nothing is created: sandbox-exec does not need a rule's path to exist.
+func xcodeSimulatorDataFor(goos string) []string {
+	if goos != "darwin" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	return []string{filepath.Join(home, "Library", "Developer", "CoreSimulator", "Devices")}
+}
+
 // xcodeSelectLink is the symlink `xcode-select --switch` points at the active
 // developer directory. A var so tests can aim it elsewhere.
 var xcodeSelectLink = "/var/db/xcode_select_link"

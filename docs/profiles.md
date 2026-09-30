@@ -279,6 +279,13 @@ The profile grants, writable at the OS sandbox layer:
   module cache `~/.cache/clang/ModuleCache`, which `swiftc` writes even to
   compile a package manifest.
 
+It grants the simulators' data, `~/Library/Developer/CoreSimulator/Devices`,
+**readable and writable by the agent**, so it can inspect and seed an app's
+container (the directory `xcrun simctl get_app_container` prints) without
+`allow_devices`. Apps and tests on a simulator run outside the OS sandbox, so
+anything written there is read by processes the sandbox does not confine once a
+simulator runs them.
+
 It also grants the active developer directory (`DEVELOPER_DIR`, else the one
 `xcode-select` points at) **readable** only, so the agent can read SDK headers.
 

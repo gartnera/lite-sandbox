@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -79,14 +80,19 @@ func toolchainDirs(detect func() []string) func() []PathEntry {
 	}
 }
 
-// xcodePaths is the xcode profile's paths: its caches as toolchainDirs, plus a
-// read grant on the active developer directory so the agent can read the
-// SDKs' headers and the toolchain's man pages. Nothing writes there, so it
+// xcodePaths is the xcode profile's paths: its caches as toolchainDirs, a
+// read and write grant on the simulators' data so the agent can inspect and
+// seed an app's container (the path `xcrun simctl get_app_container` prints),
+// plus a read grant on the active developer directory so the agent can read
+// the SDKs' headers and the toolchain's man pages. Nothing writes there, so it
 // gets no write grant.
 func xcodePaths() []PathEntry {
 	out := toolchainDirs(detectXcodeBinds)()
+	yes := true
+	for _, dir := range xcodeSimulatorDataFor(runtime.GOOS) {
+		out = append(out, PathEntry{Path: dir, Read: &yes, Write: &yes})
+	}
 	if dir := detectXcodeDeveloperDir(); dir != "" {
-		yes := true
 		out = append(out, PathEntry{Path: dir, Read: &yes})
 	}
 	return out
@@ -144,7 +150,7 @@ var builtinProfiles = []Profile{
 	},
 	{
 		Name:        "xcode",
-		Description: "Xcode, Swift, and XcodeGen; DerivedData, Archives, SwiftPM's and XcodeGen's caches, and the developer dir (read-only)",
+		Description: "Xcode, Swift, and XcodeGen; DerivedData, Archives, SwiftPM's and XcodeGen's caches, the simulators' data, and the developer dir (read-only)",
 		Commands:    whitelist("xcodebuild", "xcrun", "swift", "swiftc", "xcode-select", "xcodegen"),
 		Options: []ProfileOption{
 			{Name: "allow_devices", Default: false, Description: "let xcodebuild test and simctl run code on simulators and devices, which CoreSimulator starts outside the OS sandbox"},
