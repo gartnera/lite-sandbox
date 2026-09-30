@@ -21,7 +21,8 @@ the agent reads it with the `bash` tool like any other file (`tail -n 50`,
 `grep ERROR`, `wc -l`). That directory is a read grant for the bash tool and
 the file-tool hook, and an internal write grant for the OS sandbox worker
 (bound writable into it; on Linux the worker's `/tmp` is otherwise private),
-so the agent's own commands cannot write there. The root is created
+so the agent's own commands cannot write there. (On macOS the root sits inside
+the per-user `$TMPDIR`, which is already granted read+write on its own.) The root is created
 `0700` and is refused if it is a symlink or owned by another user. Each output
 file is capped at 32 MiB: past the cap it is compacted to its most recent half
 behind a `[lite-sandbox: output exceeded the size cap; ...]` line.

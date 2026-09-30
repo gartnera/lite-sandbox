@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -367,7 +368,12 @@ func TestBashBackground_OutputAndStatus(t *testing.T) {
 		t.Fatalf("expected background output to contain greeting, got %q", out)
 	}
 
-	// The grant is read-only for the agent: writing the file is rejected.
+	// The grant itself is read-only: writing the file is rejected — unless the
+	// root sits inside the per-user system temp dir, which is already granted
+	// read+write on its own (macOS's $TMPDIR).
+	if tmp := systemTempPath(); tmp != "" && strings.HasPrefix(path, tmp+string(filepath.Separator)) {
+		return
+	}
 	out, isErr = callTextTool(t, c, "bash", map[string]any{"command": "echo tampered > " + path})
 	if !isErr {
 		t.Fatalf("expected writing the output file through the bash tool to be rejected, got %q", out)
