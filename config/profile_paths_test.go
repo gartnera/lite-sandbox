@@ -171,6 +171,22 @@ func TestXcodeBindsFor(t *testing.T) {
 	}
 }
 
+func TestXcodeSimulatorDataFor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	want := []string{filepath.Join(home, "Library", "Developer", "CoreSimulator", "Devices")}
+	if got := xcodeSimulatorDataFor("darwin"); !slices.Equal(got, want) {
+		t.Errorf("darwin = %v, want %v", got, want)
+	}
+	if _, err := os.Stat(want[0]); err == nil {
+		t.Errorf("%s was created; sandbox-exec does not need it to exist", want[0])
+	}
+	if got := xcodeSimulatorDataFor("linux"); got != nil {
+		t.Errorf("linux = %v, want nil (there are no simulators)", got)
+	}
+}
+
 func TestDetectXcodeDeveloperDir(t *testing.T) {
 	fakeDeveloperDir := func(tool string) string {
 		dir := t.TempDir()
