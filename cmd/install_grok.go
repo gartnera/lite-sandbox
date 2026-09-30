@@ -24,8 +24,8 @@ const grokServerName = "lite-sandbox"
 // calls them through use_tool with the qualified name.
 const grokUseToolHint = "run it with the `lite-sandbox__bash` MCP tool: call `use_tool` with " +
 	"`tool_name` \"lite-sandbox__bash\" and `tool_input` {\"command\": \"<the command>\"} " +
-	"(add \"run_in_background\": true for long-running commands; `lite-sandbox__bash_output`, " +
-	"`lite-sandbox__kill_shell` and `lite-sandbox__list_shells` manage background shells)."
+	"(add \"run_in_background\": true for long-running commands: the result names a file their output " +
+	"is written to, and `lite-sandbox__list_shells` and `lite-sandbox__kill_shell` manage background shells)."
 
 // grokRedirectHint is the short form of grokUseToolHint for the hook's deny
 // reason, which Grok clips to 256 characters.

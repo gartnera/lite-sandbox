@@ -46,7 +46,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 	bashTool := mcp.NewTool(
 		"bash",
-		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id you can poll with the bash_output tool and stop with the kill_shell tool."),
+		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id and the path of a file its output is written to. Read that file with this tool (e.g. `tail -n 50 <file>`), check whether the command has finished with the list_shells tool, and stop it with the kill_shell tool."),
 		mcp.WithString("command",
 			mcp.Description("The bash command to execute"),
 			mcp.Required(),
@@ -103,8 +103,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			msg := fmt.Sprintf(
-				"Started background process with shell id %q.\nUse the bash_output tool (bash_id=%q) to read its output and the kill_shell tool (shell_id=%q) to stop it.",
-				proc.ID, proc.ID, proc.ID,
+				"Started background process with shell id %q.\nIts output is being written to %s; read it with this tool (e.g. `tail -n 50 %s`). Use the list_shells tool to see whether it has finished and its exit code, and the kill_shell tool (shell_id=%q) to stop it.",
+				proc.ID, proc.OutputPath, proc.OutputPath, proc.ID,
 			)
 			return mcp.NewToolResultText(msg), nil
 		}
@@ -119,44 +119,6 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 		}
 
 		return mcp.NewToolResultText(output), nil
-	})
-
-	bashOutputTool := mcp.NewTool(
-		"bash_output",
-		mcp.WithDescription("Retrieve output from a background command started with the bash tool (run_in_background=true). Returns only the output produced since the previous call, along with the process status (running, completed, failed, or killed) and exit code."),
-		mcp.WithString("bash_id",
-			mcp.Description("The shell id returned when the background command was started"),
-			mcp.Required(),
-		),
-		mcp.WithString("filter",
-			mcp.Description("Optional regular expression; only output lines matching it are returned"),
-		),
-	)
-
-	s.AddTool(bashOutputTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		bashID, err := request.RequireString("bash_id")
-		if err != nil {
-			return mcp.NewToolResultError("missing required parameter: bash_id"), nil
-		}
-		filter := ""
-		if args, ok := request.Params.Arguments.(map[string]any); ok {
-			if v, ok := args["filter"].(string); ok {
-				filter = v
-			}
-		}
-
-		res, err := sandbox.BackgroundOutput(bashID, filter)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-
-		var b strings.Builder
-		fmt.Fprintf(&b, "<status>%s</status>\n", res.Status)
-		if res.Done {
-			fmt.Fprintf(&b, "<exit_code>%d</exit_code>\n", res.ExitCode)
-		}
-		fmt.Fprintf(&b, "<output>\n%s</output>", res.Output)
-		return mcp.NewToolResultText(b.String()), nil
 	})
 
 	killShellTool := mcp.NewTool(
@@ -181,7 +143,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 	listShellsTool := mcp.NewTool(
 		"list_shells",
-		mcp.WithDescription("List all background commands started with the bash tool (run_in_background=true), with their shell id, status, and exit code."),
+		mcp.WithDescription("List all background commands started with the bash tool (run_in_background=true), with their shell id, status (running, completed, failed, or killed), exit code once finished, and output file."),
 	)
 
 	s.AddTool(listShellsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -195,7 +157,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 			if p.Status != "running" {
 				fmt.Fprintf(&b, " (exit %d)", p.ExitCode)
 			}
-			fmt.Fprintf(&b, "\t%s\n", p.Command)
+			fmt.Fprintf(&b, "\t%s\t%s\n", p.OutputPath, p.Command)
 		}
 		return mcp.NewToolResultText(strings.TrimRight(b.String(), "\n")), nil
 	})
@@ -206,8 +168,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 // sandboxPaths computes the read- and write-allowed path lists for a command
 // executed from cwd, combining the working directory, the configured paths
 // (profiles' included), the Claude Code scratchpad root (claudeScratchpadPath),
-// the per-user system temp dir (systemTempPath), and any git worktree parent.
-// Writable paths are also
+// the per-user system temp dir (systemTempPath), any git worktree parent, and
+// (read-only) the background output directory. Writable paths are also
 // readable, so they are folded into the read set. This is the single source of
 // truth shared with the PreToolUse hook (cmd/hook.go) so the bash tool and the
 // built-in file tools enforce the same boundary.
@@ -234,6 +196,12 @@ func sandboxPaths(sandbox *bash_sandboxed.Sandbox, cwd string) (readPaths, write
 	if parent := sandbox.WorktreeParentPath(cwd); parent != "" {
 		readPaths = append(readPaths, parent)
 		writePaths = append(writePaths, parent)
+	}
+	// Read-only: background commands' output files, which the agent reads
+	// with the bash tool or the built-in file tools in place of a dedicated
+	// output tool.
+	if bgOut := bash_sandboxed.BackgroundOutputReadPath(); bgOut != "" {
+		readPaths = append(readPaths, bgOut)
 	}
 	return readPaths, writePaths
 }

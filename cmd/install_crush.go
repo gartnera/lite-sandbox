@@ -24,7 +24,6 @@ const crushServerName = "lite-sandbox"
 // newMCPServer.
 var crushToolPermissions = []string{
 	"mcp_" + crushServerName + "_bash",
-	"mcp_" + crushServerName + "_bash_output",
 	"mcp_" + crushServerName + "_kill_shell",
 	"mcp_" + crushServerName + "_list_shells",
 }

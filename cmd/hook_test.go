@@ -332,7 +332,6 @@ func TestEvaluateMCPToolAllow(t *testing.T) {
 
 	for _, tool := range []string{
 		"mcp__lite-sandbox__bash",
-		"mcp__lite-sandbox__bash_output",
 		"mcp__lite-sandbox__kill_shell",
 		"mcp__lite-sandbox__list_shells",
 	} {

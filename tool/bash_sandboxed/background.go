@@ -1,95 +1,192 @@
 package bash_sandboxed
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// maxBackgroundOutputBytes caps the amount of output retained per background
-// process. Long-running, chatty commands (e.g. dev servers, log tailers) could
-// otherwise grow unbounded; once the cap is reached the oldest bytes are
-// dropped so the most recent output is always available.
-const maxBackgroundOutputBytes = 1 << 20 // 1 MiB
+// maxBackgroundOutputBytes caps the size of each background process's output
+// file. Long-running, chatty commands (e.g. dev servers, log tailers) could
+// otherwise grow it without bound; once the cap is reached the file is
+// compacted to its most recent half (see outputFile.compact), so the latest
+// output is always available.
+const maxBackgroundOutputBytes = 32 << 20 // 32 MiB
 
-// streamBuffer is a goroutine-safe, capped output buffer with an incremental
-// read cursor. Background processes write into it continuously while callers
-// drain only the bytes produced since their last read (mirroring the Claude
-// Code BashOutput tool, which returns new output each call).
-type streamBuffer struct {
-	mu        sync.Mutex
-	buf       []byte
-	discarded int // total bytes dropped from the front due to the cap
-	readPos   int // absolute offset of the next unread byte
-	cap       int
+// outputTruncatedMarker opens an output file whose earlier content was
+// discarded by the size cap.
+const outputTruncatedMarker = "[lite-sandbox: output exceeded the size cap; earlier output was discarded]\n"
+
+// BackgroundOutputRoot is the per-user directory holding the output files of
+// background commands: each MCP server writes into its own bg-<pid>-* subdirectory
+// (removed when the server shuts down) one <shell id>.log per command. It lives
+// under os.TempDir() — shared /tmp on Linux, the per-user $TMPDIR on macOS — so
+// it is uid-scoped and created 0700.
+func BackgroundOutputRoot() string {
+	return filepath.Join(os.TempDir(), "lite-sandbox-"+strconv.Itoa(os.Getuid()))
 }
 
-func newStreamBuffer(cap int) *streamBuffer {
-	return &streamBuffer{cap: cap}
-}
-
-// Write appends p, dropping the oldest bytes if the cap would be exceeded.
-func (b *streamBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.buf = append(b.buf, p...)
-	if b.cap > 0 && len(b.buf) > b.cap {
-		drop := len(b.buf) - b.cap
-		b.buf = b.buf[drop:]
-		b.discarded += drop
+// BackgroundOutputReadPath returns BackgroundOutputRoot when it exists as a
+// directory this user owns and no one else can access, and "" otherwise. It is
+// the form callers grant as a readable path, so the agent can read output files
+// with the bash tool and the built-in file tools: a root another user planted in
+// a shared /tmp (a symlink, or a directory they own) is never granted, since the
+// grant would follow it wherever it points.
+func BackgroundOutputReadPath() string {
+	root := BackgroundOutputRoot()
+	if checkOutputRoot(root) != nil {
+		return ""
 	}
-	return len(p), nil
+	return root
 }
 
-// readNew returns all output produced since the previous read and advances the
-// read cursor.
-func (b *streamBuffer) readNew() string {
-	return b.read(false)
+// checkOutputRoot verifies root is a real directory (not a symlink) owned by
+// this user with no group or other permissions.
+func checkOutputRoot(root string) error {
+	fi, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is owned by another user", root)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is accessible to other users (mode %v)", root, fi.Mode().Perm())
+	}
+	return nil
 }
 
-// read returns output produced since the previous read and advances the cursor.
-// When holdPartial is true, a trailing line that has not yet been terminated by
-// a newline is left unread (the cursor stops after the last newline), so callers
-// that match against whole lines never see a line split across two reads. If no
-// complete line is available, it returns "" and consumes nothing.
-func (b *streamBuffer) read(holdPartial bool) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	start := b.readPos - b.discarded
-	if start < 0 {
-		start = 0
+// ensureOutputRoot creates root (0700) if needed and verifies it.
+func ensureOutputRoot(root string) error {
+	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("failed to create background output directory: %w", err)
 	}
-	if start > len(b.buf) {
-		start = len(b.buf)
+	if err := checkOutputRoot(root); err != nil {
+		return fmt.Errorf("refusing background output directory: %w", err)
 	}
-	avail := b.buf[start:]
-	end := len(avail)
-	if holdPartial {
-		nl := bytes.LastIndexByte(avail, '\n')
-		if nl < 0 {
-			return "" // no complete line yet; leave everything for next read
+	return nil
+}
+
+// sweepStaleOutputDirs removes the output directories of MCP servers that are
+// no longer running — ones killed before they could clean up after themselves
+// (SIGKILL, a crash). The directory name carries the owning server's pid.
+func sweepStaleOutputDirs(root string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		rest, ok := strings.CutPrefix(e.Name(), "bg-")
+		if !ok || !e.IsDir() {
+			continue
 		}
-		end = nl + 1
+		pidStr, _, _ := strings.Cut(rest, "-")
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			os.RemoveAll(filepath.Join(root, e.Name()))
+		}
 	}
-	out := string(avail[:end])
-	b.readPos = b.discarded + start + end
-	return out
+}
+
+// outputFile is the goroutine-safe, size-capped writer a background process's
+// stdout and stderr are written to. Writes after Close are dropped, so a runner
+// abandoned after a kill cannot fail on a closed file.
+type outputFile struct {
+	mu     sync.Mutex
+	f      *os.File
+	size   int64
+	cap    int64
+	closed bool
+}
+
+func createOutputFile(path string, cap int64) (*outputFile, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create background output file: %w", err)
+	}
+	return &outputFile{f: f, cap: cap}, nil
+}
+
+// Write appends p, compacting the file first if the cap would be exceeded.
+func (o *outputFile) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return len(p), nil
+	}
+	if o.cap > 0 && o.size+int64(len(p)) > o.cap {
+		if err := o.compact(p); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	n, err := o.f.Write(p)
+	o.size += int64(n)
+	return n, err
+}
+
+// compact rewrites the file as the truncation marker followed by the most
+// recent cap/2 bytes of its content plus p. Keeping half (rather than exactly
+// cap) leaves room for new output, so a chatty process compacts rarely.
+func (o *outputFile) compact(p []byte) error {
+	keep := o.cap / 2
+	var tail []byte
+	if int64(len(p)) >= keep {
+		tail = p[int64(len(p))-keep:]
+	} else {
+		fromFile := min(keep-int64(len(p)), o.size)
+		tail = make([]byte, fromFile, fromFile+int64(len(p)))
+		if _, err := o.f.ReadAt(tail, o.size-fromFile); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		tail = append(tail, p...)
+	}
+	if err := o.f.Truncate(0); err != nil {
+		return err
+	}
+	// O_APPEND puts these writes at the new end of the file, offset 0.
+	n, err := o.f.Write(append([]byte(outputTruncatedMarker), tail...))
+	o.size = int64(n)
+	return err
+}
+
+// Close closes the file; later writes are dropped.
+func (o *outputFile) Close() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return nil
+	}
+	o.closed = true
+	return o.f.Close()
 }
 
 // BackgroundProcess represents a single command launched in the background.
 type BackgroundProcess struct {
 	ID      string
 	Command string
+	// OutputPath is the file the process's stdout and stderr are written to.
+	OutputPath string
 
-	output *streamBuffer
+	output *outputFile
 	cancel context.CancelFunc
 
 	mu       sync.Mutex
@@ -120,22 +217,13 @@ func (p *BackgroundProcess) statusLocked() string {
 	return "completed"
 }
 
-// BackgroundOutputResult is a snapshot returned by BackgroundOutput.
-type BackgroundOutputResult struct {
-	ID       string
-	Command  string
-	Status   string
-	Done     bool
-	ExitCode int
-	Output   string
-}
-
 // BackgroundStatus is a lightweight summary used when listing processes.
 type BackgroundStatus struct {
-	ID       string
-	Command  string
-	Status   string
-	ExitCode int
+	ID         string
+	Command    string
+	Status     string
+	ExitCode   int
+	OutputPath string
 }
 
 // backgroundManager owns the set of live background processes.
@@ -156,6 +244,12 @@ type backgroundManager struct {
 	// shutdown (killAll) can wait for each to finish tearing down its OS process
 	// before the MCP server exits, rather than orphaning it.
 	wg sync.WaitGroup
+
+	// outputRoot is the parent of outputDir (BackgroundOutputRoot); outputDir
+	// is this manager's own subdirectory, created on the first background
+	// command and removed by removeOutputDir. Guarded by mu.
+	outputRoot string
+	outputDir  string
 }
 
 func newBackgroundManager() *backgroundManager {
@@ -164,27 +258,69 @@ func newBackgroundManager() *backgroundManager {
 		procs:        make(map[string]*BackgroundProcess),
 		parentCtx:    ctx,
 		parentCancel: cancel,
+		outputRoot:   BackgroundOutputRoot(),
 	}
 }
 
-// create registers a new process and returns it together with the context its
-// goroutine should run under. The context derives from parentCtx (so shutdown
-// cancels it) and its cancel is stored on the process before it becomes
-// reachable, so a concurrent get/kill can never observe a nil cancel.
-func (m *backgroundManager) create(command string) (*BackgroundProcess, context.Context) {
+// outputDirLocked returns this manager's output directory, creating it (and
+// sweeping directories left behind by dead servers) on first use. m.mu must
+// be held.
+func (m *backgroundManager) outputDirLocked() (string, error) {
+	if m.outputDir != "" {
+		return m.outputDir, nil
+	}
+	if err := ensureOutputRoot(m.outputRoot); err != nil {
+		return "", err
+	}
+	sweepStaleOutputDirs(m.outputRoot)
+	dir, err := os.MkdirTemp(m.outputRoot, fmt.Sprintf("bg-%d-", os.Getpid()))
+	if err != nil {
+		return "", fmt.Errorf("failed to create background output directory: %w", err)
+	}
+	m.outputDir = dir
+	return dir, nil
+}
+
+// removeOutputDir deletes the output directory and every output file in it.
+// Called on shutdown, after killAll.
+func (m *backgroundManager) removeOutputDir() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.outputDir != "" {
+		os.RemoveAll(m.outputDir)
+		m.outputDir = ""
+	}
+}
+
+// create registers a new process, with its output file, and returns it
+// together with the context its goroutine should run under. The context derives
+// from parentCtx (so shutdown cancels it) and its cancel is stored on the process
+// before it becomes reachable, so a concurrent get/kill can never observe a nil
+// cancel.
+func (m *backgroundManager) create(command string) (*BackgroundProcess, context.Context, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dir, err := m.outputDirLocked()
+	if err != nil {
+		return nil, nil, err
+	}
 	m.counter++
 	id := fmt.Sprintf("bash_%d", m.counter)
+	path := filepath.Join(dir, id+".log")
+	out, err := createOutputFile(path, maxBackgroundOutputBytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	ctx, cancel := context.WithCancel(m.parentCtx)
 	p := &BackgroundProcess{
-		ID:      id,
-		Command: command,
-		output:  newStreamBuffer(maxBackgroundOutputBytes),
-		cancel:  cancel,
+		ID:         id,
+		Command:    command,
+		OutputPath: path,
+		output:     out,
+		cancel:     cancel,
 	}
 	m.procs[id] = p
-	return p, ctx
+	return p, ctx, nil
 }
 
 func (m *backgroundManager) get(id string) (*BackgroundProcess, bool) {
@@ -271,8 +407,9 @@ func exitCodeFromErr(err error, killed bool) int {
 // ExecuteBackground validates a command, then launches it in the background and
 // returns immediately with a handle. Validation errors are returned
 // synchronously; runtime failures are recorded on the returned process and
-// surfaced later via BackgroundOutput. This mirrors the Claude Code Bash tool's
-// run_in_background option.
+// surfaced later via ListBackground. The command's stdout and stderr are
+// written to the process's OutputPath, which the agent reads like any other
+// file. This mirrors the Claude Code Bash tool's run_in_background option.
 func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
 	isExtra := s.isExtraCommandInvocation(command)
 	forceHost := s.isUnsandboxedInvocation(command)
@@ -292,7 +429,10 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	// create derives the run context from the manager's shared parent (so
 	// shutdown cancels it) and stores its cancel before the process becomes
 	// reachable. Cancellation is driven by KillBackground / Close.
-	proc, ctx := s.bg.create(command)
+	proc, ctx, err := s.bg.create(command)
+	if err != nil {
+		return nil, err
+	}
 	ctx = withAuditScope(ctx, command, workDir, "bash")
 
 	// Track the runner goroutine so shutdown (killAll) can wait for it to finish
@@ -302,6 +442,9 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	go func() {
 		defer s.bg.wg.Done()
 		defer proc.cancel()
+		// Runs before cancel: the terminal state is recorded by then, and any
+		// write from a runner abandoned after a kill is dropped.
+		defer proc.output.Close()
 
 		// Run in an inner goroutine so a runner that hangs after cancellation
 		// (mvdan.cc/sh pipelines can block on non-context-aware io.Pipe copies
@@ -336,46 +479,6 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	return proc, nil
 }
 
-// BackgroundOutput returns the output produced by the given background process
-// since the previous call, along with its current status. An optional filter
-// is applied as a regular expression that retains only matching output lines.
-func (s *Sandbox) BackgroundOutput(id string, filter string) (*BackgroundOutputResult, error) {
-	p, ok := s.bg.get(id)
-	if !ok {
-		return nil, fmt.Errorf("no background process with id %q", id)
-	}
-
-	var re *regexp.Regexp
-	if filter != "" {
-		var err error
-		re, err = regexp.Compile(filter)
-		if err != nil {
-			return nil, fmt.Errorf("invalid filter regex: %w", err)
-		}
-	}
-
-	// When filtering a still-running process, hold back any trailing partial
-	// line so a line is never split across two reads (which would make it miss
-	// the filter). Once the process is done there is no more output coming, so
-	// flush everything including a final unterminated line.
-	holdPartial := re != nil && p.Status() == "running"
-	output := p.output.read(holdPartial)
-	if re != nil {
-		output = filterLines(output, re)
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return &BackgroundOutputResult{
-		ID:       p.ID,
-		Command:  p.Command,
-		Status:   p.statusLocked(),
-		Done:     p.done,
-		ExitCode: p.exitCode,
-		Output:   output,
-	}, nil
-}
-
 // KillBackground stops a running background process. It returns an error if the
 // id is unknown or the process has already exited.
 func (s *Sandbox) KillBackground(id string) error {
@@ -406,27 +509,13 @@ func (s *Sandbox) ListBackground() []BackgroundStatus {
 	for _, p := range procs {
 		p.mu.Lock()
 		out = append(out, BackgroundStatus{
-			ID:       p.ID,
-			Command:  p.Command,
-			Status:   p.statusLocked(),
-			ExitCode: p.exitCode,
+			ID:         p.ID,
+			Command:    p.Command,
+			Status:     p.statusLocked(),
+			ExitCode:   p.exitCode,
+			OutputPath: p.OutputPath,
 		})
 		p.mu.Unlock()
 	}
 	return out
-}
-
-// filterLines returns only the lines of s that match re, preserving order.
-func filterLines(s string, re *regexp.Regexp) string {
-	if s == "" {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if re.MatchString(line) {
-			kept = append(kept, line)
-		}
-	}
-	return strings.Join(kept, "\n")
 }

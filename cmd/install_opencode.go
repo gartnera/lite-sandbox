@@ -150,7 +150,7 @@ func configureOpencodeConfig(configPath, binPath string) error {
 	// permission.bash = "deny" blocks the built-in shell so opencode must use
 	// the sandbox (any existing bash rule object is intentionally replaced —
 	// granular allows would defeat the deny). lite-sandbox* auto-allows the
-	// sandbox's own tools (lite-sandbox_bash, lite-sandbox_bash_output, ...) so
+	// sandbox's own tools (lite-sandbox_bash, lite-sandbox_list_shells, ...) so
 	// they never prompt, mirroring the Claude installer's allow entries.
 	perm := make(map[string]json.RawMessage)
 	if raw, ok := cfg["permission"]; ok {

@@ -192,7 +192,7 @@ func TestGrokHookMCPTools(t *testing.T) {
 	isolateConfig(t)
 	cwd := t.TempDir()
 
-	for _, tool := range []string{"lite-sandbox__bash", "lite-sandbox__bash_output", "lite-sandbox__kill_shell", "lite-sandbox__list_shells"} {
+	for _, tool := range []string{"lite-sandbox__bash", "lite-sandbox__kill_shell", "lite-sandbox__list_shells"} {
 		if got := runGrokHook(t, cwd, tool, map[string]any{"command": "ls"}, false); got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
 			t.Errorf("%s: expected allow, got %+v", tool, got)
 		}
