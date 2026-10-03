@@ -57,7 +57,12 @@ the OS sandbox in `denylist` mode.
 A config request is always confined to the agent's working directory: the hook
 and the server add `--dir <working directory>` when it has none, and refuse a
 `--dir` outside it, so the change is a per-directory override for the project
-and never edits the global config. The server also runs the config subprocess
+and never edits the global config. A directory resolves through a single
+override, and one a request creates merges into the base, not into an override
+the directory was inheriting from a parent (or, as a linked git worktree, from
+its main worktree). So approving any request there stops that inherited
+override's settings (a stricter `mode`, denials, ...) from applying to the
+directory. The server also runs the config subprocess
 with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to that directory, under which the
 config subcommands refuse to run unless the `--dir` they actually parsed is
 inside it. That catches an argument list that reads differently to cobra than

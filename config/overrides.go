@@ -92,19 +92,6 @@ func (c *Config) ForDirectory(dir string) *Config {
 	return &resolved
 }
 
-// GoverningOverride returns the override dir resolves through (see
-// ForDirectory), or nil when none applies. It may be an override for a parent
-// directory, or, for a linked git worktree, its main worktree's.
-func (c *Config) GoverningOverride(dir string) *DirectoryOverride {
-	if c == nil {
-		return nil
-	}
-	if i := matchOverride(dir, c.Overrides); i >= 0 {
-		return &c.Overrides[i]
-	}
-	return nil
-}
-
 // matchOverride returns the index of the override governing dir, or -1.
 //
 // A directory is matched directly first, so an override written for a worktree

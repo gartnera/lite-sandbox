@@ -665,14 +665,23 @@ already has instead of replacing it, and settings the command didn't touch keep
 inheriting from the base. Setting a directory to the value it already resolves
 to writes no override.
 
+An override `--dir` creates has **`merge: true`**: it is deep-merged into the
+base, and its `paths` and `commands` hold only the entries the command added or
+changed, so later edits to the base still reach the directory. A deep merge
+cannot clear a setting (one the override leaves unset is inherited from the
+base), so when the change does clear one — `aws disable`, or `aws
+force-profile` dropping the base's `allow_raw_credentials` — the new override
+is written replace-style instead. An override that already exists for the
+directory keeps its `merge` setting; to make one replace-style, set `merge:
+false` (or drop the key) by editing the config file — its `paths` and
+`commands` then replace the base's, so restate the base entries (denials
+included) it should keep.
+
 A directory resolves through a single override: its own, or else the nearest
-parent's (or, for a linked git worktree, its main worktree's). So when `--dir`
-creates an override for a directory that was inheriting one, the new override
-starts as a **copy of the inherited one**, `merge` setting included, and the
-command's change is applied on top. Without the copy, every setting the parent
-override made (a stricter `mode`, a denial, ...) would stop applying to the
-directory. The copy is a snapshot: later edits to the parent's override no
-longer reach the directory.
+parent's (or, for a linked git worktree, its main worktree's). An override
+`--dir` creates merges into the base, not into the override the directory was
+inheriting, so the settings that parent override made (a stricter `mode`, a
+denial, ...) stop applying to the directory unless the command restated them.
 
 Reads accept the flag too: `lite-sandbox config show --dir <path>` prints the
 configuration in effect there, as does any section's `show`/`list`
@@ -688,11 +697,8 @@ lite-sandbox config overrides list            # every directory with settings
 lite-sandbox config overrides remove <dir>    # drop all of that directory's settings
 ```
 
-`merge: true` can only be set by editing the `overrides` list in the config
-file; `--dir` always writes replace-style sections, seeded from the base as
-described above. When the directory's override already has `merge: true`,
-`--dir` keeps it: `paths` and `commands` are stored as a delta of only the
-entries the command added or changed, so later base edits still apply.
+On a replace-style override (`merge` unset or false, written by hand), `--dir`
+stores each section the command changed whole, since it replaces the base's.
 
 In both cases, a `remove` of an entry the directory would still inherit is
 reported as such rather than as a removal. On a `merge: true` override, the
