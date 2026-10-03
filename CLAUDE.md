@@ -61,6 +61,8 @@ LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run TestCodex
 
 The agent versions are pinned in `e2e/mockedserver/versions.go`; `TestMain` downloads all of them into `e2e/mockedserver/.bin/agents/<agent>/<version>` on first run, even with `-run` narrowing the tests, and `E2E_CRUSH_VERSION` / `E2E_CODEX_VERSION` / `E2E_CLAUDE_CODE_VERSION` / `E2E_OPENCODE_VERSION` / `E2E_GROK_VERSION` override a version for one run. Without `LITE_SANDBOX_E2E` the tests skip, so `go test ./...` stays offline.
 
+`TestClaudeCodeConfigRequest` covers config requests in both outcomes of the permission prompt: declined (a plain `claude -p`, where nobody can answer) and approved (`--permission-prompt-tool` pointed at the approver, an MCP server the test binary itself serves when `LITE_SANDBOX_E2E_APPROVER_LOG` is set; see `approver_test.go`).
+
 `e2e/claude` is the complementary real-model suite: it sends real prompts to Claude via the Agent SDK (API key required) and checks Claude actually chooses the sandbox tool over built-in Bash — behavior the mock cannot exercise:
 
 ```bash
