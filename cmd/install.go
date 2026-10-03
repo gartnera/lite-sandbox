@@ -750,7 +750,12 @@ func asString(v any) string {
 }
 
 func configureCLAUDEMD(claudeDir string) error {
-	return appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), claudeDirective)
+	for _, d := range claudeDirectives {
+		if err := appendDirectiveOnce(filepath.Join(claudeDir, "CLAUDE.md"), d); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // appendDirectiveOnce appends directive to the agent instructions file at path

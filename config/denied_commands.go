@@ -36,7 +36,7 @@ var selfProtectionSubcommands = []string{"config", "install", "update", "hook"}
 // program (sudo, crontab, ...) is a policy decision left to denied_commands.
 func DefaultDeniedCommands() []string {
 	out := make([]string, 0, 2*len(selfProtectionSubcommands))
-	for _, name := range selfCommandNames() {
+	for _, name := range SelfCommandNames() {
 		for _, sub := range selfProtectionSubcommands {
 			out = append(out, name+" "+sub)
 		}
@@ -44,11 +44,11 @@ func DefaultDeniedCommands() []string {
 	return out
 }
 
-// selfCommandNames returns the names this binary may be invoked as: the
+// SelfCommandNames returns the names this binary may be invoked as: the
 // canonical one, plus the running executable's own name when it was installed
 // under a different one. Test binaries are skipped so a test run does not
 // inherit deny entries named after itself.
-func selfCommandNames() []string {
+func SelfCommandNames() []string {
 	names := []string{appName}
 	exe, err := os.Executable()
 	if err != nil {

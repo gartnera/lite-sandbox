@@ -61,7 +61,7 @@ func BenchmarkHookEvaluateRead(b *testing.B) {
 	event := benchEvent(b, readEventJSON(cwd))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if d := evaluate(event, false); d != nil {
+		if d := evaluate(event, hookOptions{}); d != nil {
 			b.Fatalf("expected defer, got %+v", d)
 		}
 	}
@@ -76,7 +76,7 @@ func BenchmarkHookEvaluateReadRuntimes(b *testing.B) {
 	event := benchEvent(b, readEventJSON(cwd))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if d := evaluate(event, false); d != nil {
+		if d := evaluate(event, hookOptions{}); d != nil {
 			b.Fatalf("expected defer, got %+v", d)
 		}
 	}
@@ -90,7 +90,7 @@ func BenchmarkHookValidateBash(b *testing.B) {
 	event := benchEvent(b, bashEventJSON(cwd))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if d := evaluate(event, true); d == nil {
+		if d := evaluate(event, hookOptions{validateBash: true}); d == nil {
 			b.Fatal("expected allow decision, got defer")
 		}
 	}
@@ -103,7 +103,7 @@ func BenchmarkHookValidateBashRuntimes(b *testing.B) {
 	event := benchEvent(b, bashEventJSON(cwd))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if d := evaluate(event, true); d == nil {
+		if d := evaluate(event, hookOptions{validateBash: true}); d == nil {
 			b.Fatal("expected allow decision, got defer")
 		}
 	}

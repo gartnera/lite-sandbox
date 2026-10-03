@@ -167,6 +167,37 @@ lite-sandbox config commands allow "lite-sandbox update"   # lifts it
 lite-sandbox config commands deny "lite-sandbox update"    # drops the lift; the built-in is back in force
 ```
 
+### Config requests: the agent runs `lite-sandbox config` with your approval
+
+With Claude Code set up by `install` or `launch`, the agent can make a config
+change itself, with your approval each time, instead of telling you which
+command to run. When a sandbox error names a `lite-sandbox config ...` fix,
+the error says so and the agent runs that command with the bash tool. The
+PreToolUse hook answers `ask` for it, so Claude Code shows a permission
+prompt with the exact command. If you approve, the MCP server runs it on the
+host, outside the sandbox, and the next command runs under the new config.
+
+Only a bash command made up of a **single `lite-sandbox config` invocation
+with literal arguments** counts as a config request. With a pipe, `&&`, `;`, a
+redirection, an assignment, a variable, a substitution, or a glob, the
+command goes to the sandbox like any other, and the built-in deny entry
+refuses it. That keeps the command you approve the only thing that runs. The
+server always runs its own binary, whatever path the command names.
+`lite-sandbox config edit` is refused, because it needs a terminal, and so is
+a config command run in the background.
+
+The server runs a config request only if the hook asked you about that exact
+command. When the hook asks, it records a ticket in lite-sandbox's cache
+directory. The server takes that ticket (each ticket works once and expires
+after 15 minutes) before it runs the change, and refuses the command when no
+ticket matches. Without the hook there is no prompt and so no ticket, and the
+change never runs unapproved. It needs both halves, the hook registered with
+`--config-requests` and the server started with `serve-mcp --config-requests`.
+`install claude` and `launch claude` set both. Codex, opencode, Crush, and
+Grok Build don't get either flag, so for them the built-in deny holds exactly
+as before. In a non-interactive `claude -p` run, nobody can answer the
+prompt, so Claude Code denies the call.
+
 `commands` can be set per directory with
 [overrides](#per-directory-overrides). The built-in entries still apply under
 an override, since they aren't part of the section it replaces. A

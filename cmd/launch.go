@@ -204,7 +204,7 @@ func claudeLaunchArgs(binPath string, agentArgs []string) ([]string, error) {
 	}
 	argv = append(argv, "--settings", settings)
 	if plan.configMCP {
-		argv = append(argv, "--append-system-prompt", claudeDirective)
+		argv = append(argv, "--append-system-prompt", strings.Join(claudeDirectives, "\n\n"))
 	}
 	return append(argv, agentArgs...), nil
 }

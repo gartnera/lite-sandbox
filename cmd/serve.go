@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -24,21 +25,36 @@ var serveCmd = &cobra.Command{
 	Use:   "serve-mcp",
 	Short: "Start the MCP server over stdio",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runServe()
+		return runServe(serveFlags)
 	},
 }
 
+// serveOptions are serve-mcp's flags, fixed by the installer when it registers
+// the server.
+type serveOptions struct {
+	// configRequests lets the agent change the sandbox's own config by running
+	// `lite-sandbox config ...` with the bash tool, which then runs on the host
+	// instead of being refused by the deny list — but only a request the
+	// PreToolUse hook (hook --config-requests) asked the user to approve. Set
+	// by --config-requests.
+	configRequests bool
+}
+
+var serveFlags serveOptions
+
 func init() {
+	serveCmd.Flags().BoolVar(&serveFlags.configRequests, "config-requests", false,
+		"run `lite-sandbox config ...` bash commands the user approved (requires the PreToolUse hook registered with --config-requests)")
 	rootCmd.AddCommand(serveCmd)
 }
 
 // NewMCPServer creates and configures the MCP server with all tools registered.
 func NewMCPServer() *server.MCPServer {
 	sandbox := bash_sandboxed.NewSandbox()
-	return newMCPServer(sandbox)
+	return newMCPServer(sandbox, serveOptions{})
 }
 
-func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
+func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MCPServer {
 	s := server.NewMCPServer(
 		"lite-sandbox",
 		"0.1.0",
@@ -95,12 +111,18 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 			return mcp.NewToolResultError("failed to get working directory: " + err.Error()), nil
 		}
 
+		if opts.configRequests {
+			if req, ok := configrequest.Parse(command); ok {
+				return runConfigRequest(ctx, sandbox, cwd, req, runInBackground), nil
+			}
+		}
+
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
 
 		if runInBackground {
 			proc, err := sandbox.ExecuteBackground(command, cwd, readPaths, writePaths)
 			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
+				return mcp.NewToolResultError(opts.errorText(err)), nil
 			}
 			msg := fmt.Sprintf(
 				"Started background process with shell id %q.\nIts output is being written to %s; read it with this tool (e.g. `tail -n 50 %s`). Use the list_shells tool to see whether it has finished and its exit code, and the kill_shell tool (shell_id=%q) to stop it.",
@@ -115,7 +137,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 
 		output, err := sandbox.Execute(timeoutCtx, command, cwd, readPaths, writePaths)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return mcp.NewToolResultError(opts.errorText(err)), nil
 		}
 
 		return mcp.NewToolResultText(output), nil
@@ -163,6 +185,15 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox) *server.MCPServer {
 	})
 
 	return s
+}
+
+// errorText is a bash tool error as the agent reads it: with the config
+// request hint when the agent can make config requests.
+func (o serveOptions) errorText(err error) string {
+	if !o.configRequests {
+		return err.Error()
+	}
+	return withConfigRequestHint(err.Error())
 }
 
 // sandboxPaths computes the read- and write-allowed path lists for a command
@@ -304,7 +335,7 @@ func startDockerProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readP
 	return dockerSrv.Endpoint(), cleanup, nil
 }
 
-func runServe() error {
+func runServe(opts serveOptions) error {
 	slog.Info("starting MCP server")
 
 	sandbox := bash_sandboxed.NewSandbox()
@@ -378,7 +409,7 @@ func runServe() error {
 		}
 	}()
 
-	s := newMCPServer(sandbox)
+	s := newMCPServer(sandbox, opts)
 	return server.ServeStdio(s)
 }
 

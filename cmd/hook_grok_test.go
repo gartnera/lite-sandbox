@@ -47,7 +47,7 @@ func runGrokHookRaw(t *testing.T, cwd, tool string, input any, truncated, valida
 	c.SetIn(bytes.NewReader(payload))
 	c.SetOut(&out)
 	c.SetErr(&bytes.Buffer{})
-	if err := runHook(c, validateBash); err != nil {
+	if err := runHook(c, hookOptions{validateBash: validateBash}); err != nil {
 		t.Fatalf("runHook: %v", err)
 	}
 	if out.Len() == 0 {

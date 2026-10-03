@@ -106,8 +106,8 @@ func TestClaudeLaunchArgsDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("lite-sandbox server missing from --mcp-config: %v", mcp.MCPServers)
 	}
-	if server.Command != testBin || !slices.Equal(server.Args, []string{"serve-mcp"}) {
-		t.Errorf("server = %+v, want %s serve-mcp", server, testBin)
+	if server.Command != testBin || !slices.Equal(server.Args, []string{"serve-mcp", "--config-requests"}) {
+		t.Errorf("server = %+v, want %s serve-mcp --config-requests", server, testBin)
 	}
 	if !server.AlwaysLoad {
 		t.Error("alwaysLoad not set (it is on by default)")
@@ -132,11 +132,11 @@ func TestClaudeLaunchArgsDefault(t *testing.T) {
 	if want := hookToolMatcher + "|" + mcpToolMatcher; matcher != want {
 		t.Errorf("hook matcher = %q, want %q (the file tools are confined by default)", matcher, want)
 	}
-	if want := testBin + " hook"; command != want {
+	if want := testBin + " hook --config-requests"; command != want {
 		t.Errorf("hook command = %q, want %q", command, want)
 	}
 
-	if got := flagValue(t, argv, "--append-system-prompt"); got != claudeDirective {
+	if got := flagValue(t, argv, "--append-system-prompt"); got != strings.Join(claudeDirectives, "\n\n") {
 		t.Errorf("--append-system-prompt = %q, want the usage directive", got)
 	}
 }
