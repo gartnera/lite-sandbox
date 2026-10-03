@@ -42,6 +42,10 @@ type configEdit struct {
 	root     *config.Config
 	override *config.DirectoryOverride
 	before   *config.Config
+	// seededFrom is the path of the override the directory inherited when the
+	// edit created its own override, which then started as a copy of it (see
+	// loadConfig); "" otherwise.
+	seededFrom string
 }
 
 // currentEdit holds the state of the in-flight --dir edit. Every command runs
@@ -198,10 +202,34 @@ func loadConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A directory resolves through exactly one override. One that has none of
+	// its own may inherit a parent's (or, as a linked git worktree, its main
+	// worktree's); an override created for it here replaces that one, so it
+	// starts as a copy of it, merge setting included. Otherwise every section
+	// the command did not touch would fall back to the base config, and
+	// approving `commands allow make` for a project could silently drop the
+	// mode and denials its parent's override sets.
+	var seed *config.DirectoryOverride
+	seededFrom := ""
+	if findOverride(cfg, configDir) == nil {
+		if g := cfg.GoverningOverride(resolveDirArg(configDir)); g != nil {
+			c, err := copyConfig(&g.Config)
+			if err != nil {
+				return nil, err
+			}
+			seed = &config.DirectoryOverride{Merge: g.Merge, Config: *c}
+			seededFrom = g.Path
+		}
+	}
 	// overridePtr appends an empty override when the directory has none yet;
 	// nothing is written unless the command goes on to call saveConfig, and an
-	// override still setting nothing by then is dropped again.
-	currentEdit = &configEdit{root: cfg, override: overridePtr(cfg, configDir), before: before}
+	// override still setting nothing by then (or, when seeded, changing
+	// nothing) is dropped again.
+	o := overridePtr(cfg, configDir)
+	if seed != nil {
+		o.Merge, o.Config = seed.Merge, seed.Config
+	}
+	currentEdit = &configEdit{root: cfg, override: o, before: before, seededFrom: seededFrom}
 	return view, nil
 }
 
@@ -224,10 +252,17 @@ func saveConfig(cfg *config.Config) error {
 	currentEdit = nil
 
 	dir := resolveDirArg(configDir)
-	recordEdit(ed.override, ed.root, ed.before, cfg)
-	scoped := ed.override.SetsAnySection()
-	if !scoped {
+	var scoped bool
+	if ed.seededFrom != "" && sectionsEqual(ed.before, cfg) {
+		// A copy of the inherited override that the command did not change
+		// would only pin the directory to today's copy of it.
 		removeOverride(ed.root, dir)
+	} else {
+		recordEdit(ed.override, ed.root, ed.before, cfg)
+		scoped = ed.override.SetsAnySection()
+		if !scoped {
+			removeOverride(ed.root, dir)
+		}
 	}
 	// What the directory will actually resolve to once this is written, which
 	// is not always what the command produced: an override inherits the
@@ -235,6 +270,8 @@ func saveConfig(cfg *config.Config) error {
 	// and `commands` entry by entry.
 	inherited := inheritedStatements(ed.root.ForDirectory(dir), cfg)
 	switch {
+	case scoped && ed.seededFrom != "":
+		fmt.Printf("Scoped to %s (per-directory override, starting from the override for %s, which it inherited)\n", dir, ed.seededFrom)
 	case scoped:
 		fmt.Printf("Scoped to %s (per-directory override)\n", dir)
 	case len(inherited) == 0:
@@ -367,6 +404,24 @@ func applyChangedSections(dst, before, after *config.Config) {
 		}
 		dv.Field(i).Set(av.Field(i))
 	}
+}
+
+// sectionsEqual reports whether before and after hold the same value in every
+// section, i.e. whether applyChangedSections would copy nothing.
+func sectionsEqual(before, after *config.Config) bool {
+	bv := reflect.ValueOf(before).Elem()
+	av := reflect.ValueOf(after).Elem()
+	t := bv.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Name == "Overrides" || !f.IsExported() {
+			continue
+		}
+		if !reflect.DeepEqual(bv.Field(i).Interface(), av.Field(i).Interface()) {
+			return false
+		}
+	}
+	return true
 }
 
 // copyConfig returns a deep copy of cfg (minus any overrides, which a resolved

@@ -38,6 +38,11 @@ type serveOptions struct {
 	// PreToolUse hook (hook --config-requests) asked the user to approve. Set
 	// by --config-requests.
 	configRequests bool
+	// reload applies the config file to the running server after a config
+	// request changed it, exactly as the file watcher does (the sandbox and
+	// the IMDS servers), so the next command runs under it. runServe sets it;
+	// without it only the sandbox is updated.
+	reload func()
 }
 
 var serveFlags serveOptions
@@ -76,12 +81,11 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 	)
 
 	s.AddTool(bashTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		command, err := request.RequireString("command")
-		if err != nil {
+		args, _ := request.Params.Arguments.(map[string]any)
+		command, runInBackground, ok := bashToolArgs(args)
+		if !ok {
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
-
-		args, _ := request.Params.Arguments.(map[string]any)
 
 		// Extract optional timeout parameter (default 120000ms = 2 minutes)
 		timeoutMs := 120000.0 // default
@@ -99,13 +103,6 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 			}
 		}
 
-		runInBackground := false
-		if args != nil {
-			if v, ok := args["run_in_background"].(bool); ok {
-				runInBackground = v
-			}
-		}
-
 		cwd, err := os.Getwd()
 		if err != nil {
 			return mcp.NewToolResultError("failed to get working directory: " + err.Error()), nil
@@ -113,7 +110,7 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 
 		if opts.configRequests {
 			if req, ok := configrequest.Parse(command); ok {
-				return runConfigRequest(ctx, sandbox, cwd, req, runInBackground), nil
+				return runConfigRequest(ctx, sandbox, opts, cwd, req, runInBackground), nil
 			}
 		}
 
@@ -390,20 +387,32 @@ func runServe(opts serveOptions) error {
 		defer cleanup()
 	}
 
-	go func() {
-		err := config.Watch(ctx, func(newCfg *config.Config) {
-			// Watch hands back the raw reloaded config; resolve it for cwd and
-			// merge it into its one paths and commands lists once, so the sandbox
-			// and IMDS below both see the effective config.
-			newCfg = newCfg.ForDirectory(cwd).Effective()
-			sandbox.UpdateConfig(newCfg, cwd)
-			slog.Info("reloaded config", "profiles", profileNames(newCfg), "allowed_commands", newCfg.ExtraCommandList(), "unsandboxed_commands", newCfg.UnsandboxedCommandList(), "denied_commands", newCfg.EffectiveDeniedCommands())
+	// applyConfig brings the running server in line with a reloaded config,
+	// for the file watcher and for a config request alike.
+	applyConfig := func(newCfg *config.Config) {
+		// The raw config file: resolve it for cwd and merge it into its one
+		// paths and commands lists once, so the sandbox and IMDS below both see
+		// the effective config.
+		newCfg = newCfg.ForDirectory(cwd).Effective()
+		sandbox.UpdateConfig(newCfg, cwd)
+		slog.Info("reloaded config", "profiles", profileNames(newCfg), "allowed_commands", newCfg.ExtraCommandList(), "unsandboxed_commands", newCfg.UnsandboxedCommandList(), "denied_commands", newCfg.EffectiveDeniedCommands())
 
-			// Start, stop, or restart the IMDS server to match the new AWS settings.
-			if err := imdsLC.apply(newCfg.AWS); err != nil {
-				slog.Error("failed to apply AWS config change", "error", err)
-			}
-		})
+		// Start, stop, or restart the IMDS server to match the new AWS settings.
+		if err := imdsLC.apply(newCfg.AWS); err != nil {
+			slog.Error("failed to apply AWS config change", "error", err)
+		}
+	}
+	opts.reload = func() {
+		newCfg, err := config.Load()
+		if err != nil {
+			slog.Error("failed to reload config after a config request", "error", err)
+			return
+		}
+		applyConfig(newCfg)
+	}
+
+	go func() {
+		err := config.Watch(ctx, applyConfig)
 		if err != nil && ctx.Err() == nil {
 			slog.Error("config watcher failed", "error", err)
 		}

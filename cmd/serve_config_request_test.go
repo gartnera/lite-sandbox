@@ -255,7 +255,11 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 	runs := stubConfigCommand(t)
 	c := setupClientWith(t, serveOptions{configRequests: true})
 	req := configrequest.Request{Args: []string{"mode", "set", "open", "--dir", "/"}}
-	if err := configrequest.Issue(req); err != nil {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configrequest.Issue(cwd, req); err != nil {
 		t.Fatal(err)
 	}
 	text, isErr := runBash(t, c, "lite-sandbox config mode set open --dir /")
@@ -325,5 +329,96 @@ func TestHookDenialConfigRequestHint(t *testing.T) {
 		if got := strings.Contains(d.HookSpecificOutput.PermissionDecisionReason, "make this config change yourself"); got != on {
 			t.Errorf("configRequests=%v: hint present = %v", on, got)
 		}
+	}
+}
+
+// TestConfigRequestHookReadsInputAsServer checks the hook reads a bash call's
+// input exactly as the server does, so no spelling of the input makes the
+// hook see something other than the config request the server runs. Decoded
+// into a struct, {"command": ..., "Command": "ls"} read as "ls" to the hook
+// (keys match case-insensitively, the last wins) and was pre-approved, and a
+// mistyped run_in_background failed the hook's decode the same way; the
+// server then ran a ticket a declined prompt had left behind.
+func TestConfigRequestHookReadsInputAsServer(t *testing.T) {
+	isolateConfig(t)
+	isolateConfigRequests(t)
+	runs := stubConfigCommand(t)
+	c := setupClientWith(t, serveOptions{configRequests: true})
+	const command = "lite-sandbox config mode set open"
+
+	// The user is asked, and declines: the ticket stays behind.
+	if d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAsk {
+		t.Fatalf("decision = %+v, want ask", d)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"command":"lite-sandbox config mode set open","Command":"ls"}`,
+		`{"command":"lite-sandbox config mode set open","run_in_background":"no"}`,
+	} {
+		ev := &hook.Event{
+			HookEventName: hook.EventPreToolUse,
+			ToolName:      mcpToolPrefix + "bash",
+			CWD:           cwd,
+			RawToolInput:  json.RawMessage(raw),
+		}
+		if d := evaluate(ev, hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAsk {
+			t.Errorf("%s: decision = %+v, want ask: the server reads this as the config request", raw, d)
+		}
+	}
+
+	// Each ask re-issued the same ticket, so one approval still runs once.
+	res, err := c.CallTool(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "bash", Arguments: map[string]any{"command": command, "Command": "ls"}},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("approved call failed: %v %+v", err, res)
+	}
+	if len(*runs) != 1 {
+		t.Fatalf("runs = %v, want one", *runs)
+	}
+}
+
+// TestConfigRequestReloads checks an approved config request applies the new
+// config through the server's reload (the one the file watcher uses, which
+// also reconciles the IMDS servers), not a partial copy of it.
+func TestConfigRequestReloads(t *testing.T) {
+	isolateConfig(t)
+	isolateConfigRequests(t)
+	stubConfigCommand(t)
+	reloads := 0
+	c := setupClientWith(t, serveOptions{configRequests: true, reload: func() { reloads++ }})
+	const command = "lite-sandbox config aws force-profile dev"
+	if d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAsk {
+		t.Fatalf("decision = %+v, want ask", d)
+	}
+	if text, isErr := runBash(t, c, command); isErr {
+		t.Fatalf("approved call failed: %s", text)
+	}
+	if reloads != 1 {
+		t.Fatalf("reloads = %d, want 1", reloads)
+	}
+}
+
+// TestConfigRequestHintNotOnDenials checks the hint stays off what it would
+// steer badly: a command deny list error (whose fix lifts a deliberate
+// denial) and the hook's own decisions about a config request.
+func TestConfigRequestHintNotOnDenials(t *testing.T) {
+	msg := `command "git" is denied by the command deny list entry "git push"; the user can lift it with ` +
+		"`lite-sandbox config commands remove \"git push\"`"
+	if got := withConfigRequestHint(msg); got != msg {
+		t.Errorf("deny list error got a hint: %q", got)
+	}
+
+	isolateConfigRequests(t)
+	d := evaluate(bashEvent(t, "lite-sandbox config commands allow make", true), hookOptions{configRequests: true})
+	if decisionOf(d) != hook.DecisionDeny {
+		t.Fatalf("decision = %+v, want deny", d)
+	}
+	if reason := d.HookSpecificOutput.PermissionDecisionReason; strings.Contains(reason, "make this config change yourself") {
+		t.Errorf("the hook's refusal of a config request suggests making one: %q", reason)
 	}
 }

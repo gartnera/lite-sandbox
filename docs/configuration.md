@@ -193,7 +193,8 @@ agent's working directory. When the command has no `--dir`, lite-sandbox adds
 make` becomes `lite-sandbox config --dir /path/to/project commands allow make`,
 and that scoped command is what the prompt asks you to approve and what runs.
 A `--dir` the agent writes is kept only when it names the working directory or
-a directory beneath it. `--dir /`, `--dir ~`, `--dir ..` or a sibling project
+a directory beneath it, and it is shown as the absolute directory it names
+(`--dir .` becomes `--dir /path/to/project`). `--dir /`, `--dir ~`, `--dir ..` or a sibling project
 is refused, since an override there reaches beyond the project. So are the
 commands that have no per-directory form (`config path`, `config overrides
 list`, `config paths migrate`, ...), and `config overrides remove` or `config
@@ -202,15 +203,26 @@ make in your own terminal.
 
 The server runs a config request only if the hook asked you about that exact
 command. When the hook asks, it records a ticket in lite-sandbox's cache
-directory. The server takes that ticket (each ticket works once and expires
-after 15 minutes) before it runs the change, and refuses the command when no
-ticket matches. Without the hook there is no prompt and so no ticket, and the
+directory, naming the command's arguments and the working directory (with
+symlinks resolved, so the hook and the server agree on it however each spells
+it). The server takes that ticket (each ticket works once and expires after
+15 minutes) before it runs the change, and refuses the command when no ticket
+matches. The hook and the server read the bash tool's input the same way, so
+no spelling of the input can make the hook see a different command from the
+one the server runs. Without the hook there is no prompt and so no ticket, and the
 change never runs unapproved. It needs both halves, the hook registered with
 `--config-requests` and the server started with `serve-mcp --config-requests`.
 `install claude` and `launch claude` set both. Codex, opencode, Crush, and
 Grok Build don't get either flag, so for them the built-in deny holds exactly
 as before. In a non-interactive `claude -p` run, nobody can answer the
 prompt, so Claude Code denies the call.
+
+The hint pointing the agent at config requests is added to errors about a
+command or path that isn't allowed yet. It isn't added to a
+[command deny list](#denied-commands) error: lifting a denial you or
+lite-sandbox made on purpose is not a change to steer the agent toward. An
+approved request takes effect immediately, including starting or stopping the
+[AWS credential server](aws-and-docker.md) when it changes `aws`.
 
 `commands` can be set per directory with
 [overrides](#per-directory-overrides). The built-in entries still apply under
@@ -652,6 +664,15 @@ sections the command changed. So an `add` extends the list the directory
 already has instead of replacing it, and settings the command didn't touch keep
 inheriting from the base. Setting a directory to the value it already resolves
 to writes no override.
+
+A directory resolves through a single override: its own, or else the nearest
+parent's (or, for a linked git worktree, its main worktree's). So when `--dir`
+creates an override for a directory that was inheriting one, the new override
+starts as a **copy of the inherited one**, `merge` setting included, and the
+command's change is applied on top. Without the copy, every setting the parent
+override made (a stricter `mode`, a denial, ...) would stop applying to the
+directory. The copy is a snapshot: later edits to the parent's override no
+longer reach the directory.
 
 Reads accept the flag too: `lite-sandbox config show --dir <path>` prints the
 configuration in effect there, as does any section's `show`/`list`

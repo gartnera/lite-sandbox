@@ -129,6 +129,15 @@ func runHook(cmd *cobra.Command, opts hookOptions) error {
 // the sandbox and allowed when it passes; otherwise it is redirected to the
 // sandboxed MCP tool. Filesystem tools are checked against path boundaries.
 func evaluate(event *hook.Event, opts hookOptions) *hook.Decision {
+	// A config request rewrites the policy itself, so unlike every other
+	// sandbox bash command it is never pre-approved: the user confirms it.
+	// Its decisions are about running `lite-sandbox config`, so they get no
+	// hint suggesting it.
+	if event.ToolName == mcpToolPrefix+"bash" {
+		if d := evaluateConfigRequest(event, opts); d != nil {
+			return d
+		}
+	}
 	d := evaluateTool(event, opts)
 	// A denial naming a `lite-sandbox config` fix also says the agent can run
 	// it, when this agent can put config requests to the user.
@@ -142,13 +151,6 @@ func evaluate(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateTool is evaluate before the config request hint.
 func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 	validateBash := opts.validateBash
-	// A config request rewrites the policy itself, so unlike every other
-	// sandbox bash command it is never pre-approved: the user confirms it.
-	if event.ToolName == mcpToolPrefix+"bash" {
-		if d := evaluateConfigRequest(event, opts); d != nil {
-			return d
-		}
-	}
 	// The sandbox's own MCP tools are pre-approved via the hook because
 	// subagents and skills do not inherit permissions.allow from settings.json
 	// (anthropics/claude-code#18950) but PreToolUse hooks still fire there.
@@ -184,34 +186,39 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if !opts.configRequests || event.FromGrok() {
 		return nil
 	}
-	var in struct {
-		Command         string `json:"command"`
-		RunInBackground bool   `json:"run_in_background"`
-	}
-	if err := json.Unmarshal(event.RawToolInput, &in); err != nil {
+	// Read exactly as the server does (bashToolArgs), so the command the hook
+	// judges is the one that runs. Input the server cannot read either is
+	// refused there, so deferring to the usual pre-approval is safe.
+	var args map[string]any
+	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
 		return nil
 	}
-	req, ok := configrequest.Parse(in.Command)
+	command, background, ok := bashToolArgs(args)
 	if !ok {
 		return nil
 	}
-	if in.RunInBackground {
+	req, ok := configrequest.Parse(command)
+	if !ok {
+		return nil
+	}
+	if background {
 		return hook.NewDecision(hook.DecisionDeny,
 			"Blocked by lite-sandbox: run `lite-sandbox config` in the foreground (run_in_background false).")
 	}
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	req, err := req.Scope(eventCWD(event))
+	cwd := eventCWD(event)
+	scoped, err := req.Scope(cwd)
 	if err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	if err := configrequest.Issue(req); err != nil {
+	if err := configrequest.Issue(cwd, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+req.Command())
+		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+scoped.Command())
 }
 
 // denyUninspectableGrokInput blocks a governed Grok Build tool call whose

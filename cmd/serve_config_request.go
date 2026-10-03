@@ -47,32 +47,32 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
 // was never shown to the user and is refused.
-func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
+func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts serveOptions, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
 	if background {
 		return mcp.NewToolResultError("`lite-sandbox config` cannot run in the background; run it with run_in_background false")
 	}
 	if err := req.Validate(); err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
-	req, err := req.Scope(cwd)
+	scoped, err := req.Scope(cwd)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
-	if err := configrequest.Consume(req); err != nil {
+	if err := configrequest.Consume(cwd, req); err != nil {
 		if errors.Is(err, configrequest.ErrNoTicket) {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"Refused: `%s` was not approved. lite-sandbox runs config changes only after its PreToolUse hook "+
 					"asks the user to approve them, and the hook did not run for this call (or the approval expired). "+
 					"Ask the user to run the command themselves, or to re-run `lite-sandbox install` so the hook is registered.",
-				req.Command()))
+				scoped.Command()))
 		}
 		return mcp.NewToolResultError("checking the approval: " + err.Error())
 	}
 
-	out, err := runConfigCommand(ctx, cwd, req.Args)
+	out, err := runConfigCommand(ctx, cwd, scoped.Args)
 	out = strings.TrimRight(out, "\n")
 	if err != nil {
-		msg := fmt.Sprintf("`%s` failed: %v", req.Command(), err)
+		msg := fmt.Sprintf("`%s` failed: %v", scoped.Command(), err)
 		if out != "" {
 			msg += "\n" + out
 		}
@@ -80,7 +80,9 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd 
 	}
 	// Apply the new config now rather than wait for the file watcher, so the
 	// very next command runs under it.
-	if cfg, err := config.LoadForDirectory(cwd); err == nil {
+	if opts.reload != nil {
+		opts.reload()
+	} else if cfg, err := config.LoadForDirectory(cwd); err == nil {
 		sandbox.UpdateConfig(cfg, cwd)
 	}
 	return mcp.NewToolResultText(out + "\n")
@@ -103,13 +105,32 @@ const configRequestAloneHint = "\n\n`lite-sandbox config` runs only as a command
 	"redirections, variables or globs. Run it that way and the user is asked to approve it."
 
 // withConfigRequestHint appends the config request hint to msg when it names a
-// `lite-sandbox config` command.
+// `lite-sandbox config` command. A command deny list error gets none: its fix
+// lifts a denial the user (or lite-sandbox, for its own subcommands) made on
+// purpose, which is not a change to steer the agent toward. The one exception
+// is the denial of `lite-sandbox config` itself, which a config request that
+// was not run on its own hits; that one is told how to run it.
 func withConfigRequestHint(msg string) string {
 	if strings.Contains(msg, `deny list entry "lite-sandbox config"`) {
 		return msg + configRequestAloneHint
+	}
+	if strings.Contains(msg, "command deny list entry") {
+		return msg
 	}
 	if strings.Contains(msg, "lite-sandbox config ") {
 		return msg + configRequestHint
 	}
 	return msg
+}
+
+// bashToolArgs reads the bash tool's command and run_in_background from the
+// tool's arguments. The tool handler and the hook both read a call through it,
+// so they agree on what a call runs: in particular on whether it is a config
+// request, which the hook must ask the user about and the server only runs
+// when the hook did. (Decoding into a struct, the hook would match keys case
+// insensitively and read {"command": ..., "Command": "ls"} as "ls".)
+func bashToolArgs(args map[string]any) (command string, background, ok bool) {
+	command, ok = args["command"].(string)
+	background, _ = args["run_in_background"].(bool)
+	return command, background, ok
 }

@@ -12,35 +12,37 @@ import (
 
 // isolate points the ticket directory at a fresh temp dir (os.UserCacheDir
 // reads XDG_CACHE_HOME on Linux and HOME on macOS).
-func isolate(t *testing.T) {
+// It returns a project directory to make requests from.
+func isolate(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", dir)
 	t.Setenv("HOME", dir)
+	return t.TempDir()
 }
 
 func TestIssueConsume(t *testing.T) {
-	isolate(t)
+	cwd := isolate(t)
 	req := Request{Args: []string{"commands", "allow", "make"}}
 
-	if err := Consume(req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("Consume before Issue = %v, want ErrNoTicket", err)
 	}
-	if err := Issue(req); err != nil {
+	if err := Issue(cwd, req); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if err := Consume(Request{Args: []string{"commands", "allow", "make"}}); err != nil {
+	if err := Consume(cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
 		t.Fatalf("Consume after Issue: %v", err)
 	}
 	// Single use.
-	if err := Consume(req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("second Consume = %v, want ErrNoTicket", err)
 	}
 }
 
 func TestConsumeOtherArgs(t *testing.T) {
-	isolate(t)
-	if err := Issue(Request{Args: []string{"commands", "allow", "make"}}); err != nil {
+	cwd := isolate(t)
+	if err := Issue(cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
@@ -49,16 +51,37 @@ func TestConsumeOtherArgs(t *testing.T) {
 		{"commands allow make"},
 		{"mode", "set", "open"},
 	} {
-		if err := Consume(Request{Args: args}); !errors.Is(err, ErrNoTicket) {
-			t.Errorf("Consume(%q) = %v, want ErrNoTicket", args, err)
+		if err := Consume(cwd, Request{Args: args}); !errors.Is(err, ErrNoTicket) {
+			t.Errorf("Consume(cwd, %q) = %v, want ErrNoTicket", args, err)
 		}
 	}
 }
 
+// TestTicketWorkingDirectory checks a ticket names the working directory it
+// was issued from, however that directory is spelled: a symlink to the same
+// directory finds it, another project with the same arguments does not.
+func TestTicketWorkingDirectory(t *testing.T) {
+	cwd := isolate(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(cwd, link); err != nil {
+		t.Fatal(err)
+	}
+	req := Request{Args: []string{"commands", "allow", "make", "--dir", "."}}
+	if err := Issue(cwd, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := Consume(t.TempDir(), req); !errors.Is(err, ErrNoTicket) {
+		t.Fatalf("Consume from another project = %v, want ErrNoTicket", err)
+	}
+	if err := Consume(link, req); err != nil {
+		t.Fatalf("Consume through a symlink to the same directory: %v", err)
+	}
+}
+
 func TestConsumeExpired(t *testing.T) {
-	isolate(t)
+	cwd := isolate(t)
 	req := Request{Args: []string{"paths", "allow", "/srv"}}
-	if err := Issue(req); err != nil {
+	if err := Issue(cwd, req); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := Dir()
@@ -66,29 +89,29 @@ func TestConsumeExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-TicketTTL - time.Minute)
-	if err := os.Chtimes(filepath.Join(dir, req.key()), old, old); err != nil {
+	if err := os.Chtimes(filepath.Join(dir, key(cwd, req)), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := Consume(req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("Consume of an expired ticket = %v, want ErrNoTicket", err)
 	}
 }
 
 func TestIssuePrunesExpired(t *testing.T) {
-	isolate(t)
+	cwd := isolate(t)
 	stale := Request{Args: []string{"profiles", "enable", "go"}}
-	if err := Issue(stale); err != nil {
+	if err := Issue(cwd, stale); err != nil {
 		t.Fatal(err)
 	}
 	dir, _ := Dir()
 	old := time.Now().Add(-TicketTTL - time.Minute)
-	if err := os.Chtimes(filepath.Join(dir, stale.key()), old, old); err != nil {
+	if err := os.Chtimes(filepath.Join(dir, key(cwd, stale)), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := Issue(Request{Args: []string{"profiles", "enable", "rust"}}); err != nil {
+	if err := Issue(cwd, Request{Args: []string{"profiles", "enable", "rust"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, stale.key())); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, key(cwd, stale))); !os.IsNotExist(err) {
 		t.Fatalf("expired ticket not pruned: %v", err)
 	}
 }
@@ -130,11 +153,12 @@ func TestScope(t *testing.T) {
 	}{
 		// No --dir: scoped to cwd.
 		{args: []string{"commands", "allow", "make"}, want: []string{"--dir", cwd, "commands", "allow", "make"}},
-		// A --dir at or under cwd is kept as written.
-		{args: []string{"commands", "allow", "make", "--dir", "."}, want: []string{"commands", "allow", "make", "--dir", "."}},
-		{args: []string{"--dir", "sub/dir", "show"}, want: []string{"--dir", "sub/dir", "show"}},
-		{args: []string{"--dir=" + cwd, "show"}, want: []string{"--dir=" + cwd, "show"}},
-		{args: []string{"show", "--dir", "~/work/proj/x"}, want: []string{"show", "--dir", "~/work/proj/x"}},
+		// A --dir at or under cwd is kept, as the absolute directory it names.
+		{args: []string{"commands", "allow", "make", "--dir", "."}, want: []string{"commands", "allow", "make", "--dir", cwd}},
+		{args: []string{"--dir", "sub/dir", "show"}, want: []string{"--dir", filepath.Join(cwd, "sub", "dir"), "show"}},
+		{args: []string{"--dir=" + cwd + "/", "show"}, want: []string{"--dir=" + cwd, "show"}},
+		{args: []string{"--dir=x", "show"}, want: []string{"--dir=" + filepath.Join(cwd, "x"), "show"}},
+		{args: []string{"show", "--dir", "~/work/proj/x"}, want: []string{"show", "--dir", filepath.Join(cwd, "x")}},
 		// "--dir" after "--" is positional.
 		{args: []string{"paths", "allow", "--", "--dir"}, want: []string{"--dir", cwd, "paths", "allow", "--", "--dir"}},
 		// Anywhere else is refused.

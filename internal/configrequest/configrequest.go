@@ -156,49 +156,51 @@ const RootEnv = "LITE_SANDBOX_CONFIG_REQUEST_ROOT"
 // a parent, a sibling, $HOME, / — is refused, since an override there would
 // reach beyond the project the user is approving changes for.
 //
-// The hook and the server both scope the request before keying its ticket,
-// so the user approves, and the server runs, the scoped command.
+// Every --dir is rewritten as the absolute directory it names, so the
+// command the user approves says which directory it changes, and is exactly
+// what runs. The hook and the server both scope the request, so the user
+// approves the command the server runs.
 func (r Request) Scope(cwd string) (Request, error) {
 	cwd = filepath.Clean(cwd)
-	dirs, ok := r.dirValues()
-	if !ok {
-		return Request{}, errors.New("`--dir` needs a directory")
-	}
-	if len(dirs) == 0 {
-		return Request{Args: append([]string{"--dir", cwd}, r.Args...)}, nil
-	}
-	for _, d := range dirs {
-		if !Within(cwd, ResolveDir(cwd, d)) {
-			return Request{}, fmt.Errorf("`--dir %s` is outside the working directory %s: config changes the agent requests apply only to the project, as a per-directory override for %s or a directory beneath it", d, cwd, cwd)
+	args := slices.Clone(r.Args)
+	found := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break // the rest is positional
 		}
-	}
-	return r, nil
-}
-
-// dirValues returns the values of every --dir flag in the request, and false
-// when a --dir has no (or an empty) value.
-func (r Request) dirValues() ([]string, bool) {
-	var dirs []string
-	for i := 0; i < len(r.Args); i++ {
-		a := r.Args[i]
+		var dir string
 		switch {
-		case a == "--":
-			return dirs, true // the rest is positional
 		case a == "--dir":
-			if i+1 >= len(r.Args) {
-				return nil, false
+			if i+1 >= len(args) {
+				return Request{}, errors.New("`--dir` needs a directory")
 			}
 			i++
-			dirs = append(dirs, r.Args[i])
+			dir = args[i]
 		case strings.HasPrefix(a, "--dir="):
-			dirs = append(dirs, strings.TrimPrefix(a, "--dir="))
+			dir = strings.TrimPrefix(a, "--dir=")
+		default:
+			continue
 		}
+		// An empty --dir is no --dir at all to the config subcommands: global.
+		if dir == "" {
+			return Request{}, errors.New("`--dir` needs a directory")
+		}
+		abs := ResolveDir(cwd, dir)
+		if !Within(cwd, abs) {
+			return Request{}, fmt.Errorf("`--dir %s` is outside the working directory %s: config changes the agent requests apply only to the project, as a per-directory override for %s or a directory beneath it", dir, cwd, cwd)
+		}
+		if a == "--dir" {
+			args[i] = abs
+		} else {
+			args[i] = "--dir=" + abs
+		}
+		found = true
 	}
-	// An empty --dir is no --dir at all to the config subcommands: global.
-	if slices.Contains(dirs, "") {
-		return nil, false
+	if !found {
+		args = append([]string{"--dir", cwd}, args...)
 	}
-	return dirs, true
+	return Request{Args: args}, nil
 }
 
 // ResolveDir resolves a --dir value the way the config subcommands do — a
@@ -247,9 +249,19 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// key names a request's ticket.
-func (r Request) key() string {
+// key names the ticket for request r made from cwd. r is the request as the
+// agent wrote it, before Scope: its arguments are what the hook and the
+// server both read from the same command, whereas the scoped arguments carry
+// cwd, which the two may spell differently (the event's cwd against the
+// server's os.Getwd, /tmp against /private/tmp). The working directory goes in
+// with its symlinks resolved instead, which also keeps a relative --dir from
+// naming the same ticket in every project.
+func key(cwd string, r Request) string {
+	if real, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = real
+	}
 	h := sha256.New()
+	fmt.Fprintf(h, "%d:%s\x00", len(cwd), filepath.Clean(cwd))
 	for _, a := range r.Args {
 		fmt.Fprintf(h, "%d:%s\x00", len(a), a)
 	}
@@ -265,9 +277,9 @@ func Dir() (string, error) {
 	return filepath.Join(cache, "lite-sandbox", "config-requests"), nil
 }
 
-// Issue records a ticket for r. The hook calls it as it asks the user to
-// approve the call.
-func Issue(r Request) error {
+// Issue records a ticket for request r made from cwd (see key). The hook
+// calls it as it asks the user to approve the call.
+func Issue(cwd string, r Request) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -276,7 +288,7 @@ func Issue(r Request) error {
 		return err
 	}
 	pruneExpired(dir)
-	p := filepath.Join(dir, r.key())
+	p := filepath.Join(dir, key(cwd, r))
 	tmp, err := os.CreateTemp(dir, ".ticket-*")
 	if err != nil {
 		return err
@@ -300,14 +312,15 @@ func Issue(r Request) error {
 // the PreToolUse hook did not run for it, so the user was never asked.
 var ErrNoTicket = errors.New("no approval was recorded for this request")
 
-// Consume takes the ticket for r, so each approval runs exactly one request.
-// It returns ErrNoTicket when there is none, or only an expired one.
-func Consume(r Request) error {
+// Consume takes the ticket for request r made from cwd, so each approval runs
+// exactly one request. It returns ErrNoTicket when there is none, or only an
+// expired one.
+func Consume(cwd string, r Request) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
 	}
-	p := filepath.Join(dir, r.key())
+	p := filepath.Join(dir, key(cwd, r))
 	info, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return ErrNoTicket
