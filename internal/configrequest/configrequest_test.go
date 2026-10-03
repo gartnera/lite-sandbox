@@ -119,6 +119,49 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := filepath.Join(home, "work", "proj")
+	for _, tc := range []struct {
+		args    []string
+		want    []string // nil: want an error
+		wantErr string
+	}{
+		// No --dir: scoped to cwd.
+		{args: []string{"commands", "allow", "make"}, want: []string{"--dir", cwd, "commands", "allow", "make"}},
+		// A --dir at or under cwd is kept as written.
+		{args: []string{"commands", "allow", "make", "--dir", "."}, want: []string{"commands", "allow", "make", "--dir", "."}},
+		{args: []string{"--dir", "sub/dir", "show"}, want: []string{"--dir", "sub/dir", "show"}},
+		{args: []string{"--dir=" + cwd, "show"}, want: []string{"--dir=" + cwd, "show"}},
+		{args: []string{"show", "--dir", "~/work/proj/x"}, want: []string{"show", "--dir", "~/work/proj/x"}},
+		// "--dir" after "--" is positional.
+		{args: []string{"paths", "allow", "--", "--dir"}, want: []string{"--dir", cwd, "paths", "allow", "--", "--dir"}},
+		// Anywhere else is refused.
+		{args: []string{"--dir", "/", "mode", "set", "open"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir", "~", "mode", "set", "open"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir", "..", "mode", "set", "open"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir", "../proj-other", "show"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir", "sub/../../x", "show"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir=/etc", "show"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir", ".", "show", "--dir", "/"}, wantErr: "outside the working directory"},
+		{args: []string{"--dir=", "mode", "set", "open"}, wantErr: "needs a directory"},
+		{args: []string{"--dir", "", "mode", "set", "open"}, wantErr: "needs a directory"},
+		{args: []string{"show", "--dir"}, wantErr: "needs a directory"},
+	} {
+		got, err := Request{Args: tc.args}.Scope(cwd)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Scope(%q) = %q, %v; want error containing %q", tc.args, got.Args, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(got.Args, tc.want) {
+			t.Errorf("Scope(%q) = %q, %v; want %q", tc.args, got.Args, err, tc.want)
+		}
+	}
+}
+
 func TestCommand(t *testing.T) {
 	got := Request{Args: []string{"paths", "allow", "~/my dir", "--write"}}.Command()
 	want := "lite-sandbox config paths allow '~/my dir' --write"

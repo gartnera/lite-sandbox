@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 
@@ -10,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/configrequest"
 )
 
 var configCmd = &cobra.Command{
@@ -47,7 +49,29 @@ type configEdit struct {
 // loadConfig sets it (or clears it when no --dir is given).
 var currentEdit *configEdit
 
+// checkConfigRequestDir refuses a config subcommand run for a config request
+// (configrequest.RootEnv set by the MCP server) unless --dir confines it to the
+// request's directory. The server already scoped the request; this checks the
+// value cobra actually parsed, which a flag taking the next word as its value
+// could otherwise make differ from what the server read.
+func checkConfigRequestDir() error {
+	root := os.Getenv(configrequest.RootEnv)
+	if root == "" {
+		return nil
+	}
+	root = filepath.Clean(root)
+	if configDir == "" || !configrequest.Within(root, resolveDirArg(configDir)) {
+		return fmt.Errorf("config changes the agent requests apply only to %s: pass --dir with that directory or one beneath it", root)
+	}
+	return nil
+}
+
 func init() {
+	configCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// cobra runs only the nearest PersistentPreRun, so run the root's too.
+		rootCmd.PersistentPreRun(cmd, args)
+		return checkConfigRequestDir()
+	}
 	configCmd.PersistentFlags().StringVar(&configDir, "dir", "",
 		"apply the setting only to commands run at or under this directory (a per-directory override); reads resolve for it")
 

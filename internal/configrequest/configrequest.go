@@ -142,6 +142,92 @@ func (r Request) Validate() error {
 	return nil
 }
 
+// RootEnv names the environment variable the server sets when it runs a
+// config request: the directory the request is confined to. The config
+// subcommands refuse to run under it unless --dir names that directory or one
+// beneath it, which catches whatever Scope's reading of the arguments missed
+// (cobra, not Scope, decides what --dir ends up as).
+const RootEnv = "LITE_SANDBOX_CONFIG_REQUEST_ROOT"
+
+// Scope confines the request to cwd, the directory the agent works in. A
+// config request never edits the global config: the change is always a
+// per-directory override (--dir) for cwd or a directory beneath it. A request
+// that names no --dir gets `--dir <cwd>`; one whose --dir points elsewhere —
+// a parent, a sibling, $HOME, / — is refused, since an override there would
+// reach beyond the project the user is approving changes for.
+//
+// The hook and the server both scope the request before keying its ticket,
+// so the user approves, and the server runs, the scoped command.
+func (r Request) Scope(cwd string) (Request, error) {
+	cwd = filepath.Clean(cwd)
+	dirs, ok := r.dirValues()
+	if !ok {
+		return Request{}, errors.New("`--dir` needs a directory")
+	}
+	if len(dirs) == 0 {
+		return Request{Args: append([]string{"--dir", cwd}, r.Args...)}, nil
+	}
+	for _, d := range dirs {
+		if !Within(cwd, ResolveDir(cwd, d)) {
+			return Request{}, fmt.Errorf("`--dir %s` is outside the working directory %s: config changes the agent requests apply only to the project, as a per-directory override for %s or a directory beneath it", d, cwd, cwd)
+		}
+	}
+	return r, nil
+}
+
+// dirValues returns the values of every --dir flag in the request, and false
+// when a --dir has no (or an empty) value.
+func (r Request) dirValues() ([]string, bool) {
+	var dirs []string
+	for i := 0; i < len(r.Args); i++ {
+		a := r.Args[i]
+		switch {
+		case a == "--":
+			return dirs, true // the rest is positional
+		case a == "--dir":
+			if i+1 >= len(r.Args) {
+				return nil, false
+			}
+			i++
+			dirs = append(dirs, r.Args[i])
+		case strings.HasPrefix(a, "--dir="):
+			dirs = append(dirs, strings.TrimPrefix(a, "--dir="))
+		}
+	}
+	// An empty --dir is no --dir at all to the config subcommands: global.
+	if slices.Contains(dirs, "") {
+		return nil, false
+	}
+	return dirs, true
+}
+
+// ResolveDir resolves a --dir value the way the config subcommands do — a
+// leading ~ is the home directory, a relative path is taken from cwd — and
+// cleans it.
+func ResolveDir(cwd, dir string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if dir == "~" {
+			dir = home
+		} else if strings.HasPrefix(dir, "~/") {
+			dir = filepath.Join(home, dir[2:])
+		}
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	return filepath.Clean(dir)
+}
+
+// Within reports whether dir is root or a directory beneath it. Both must be
+// absolute and clean. The comparison is lexical, as override matching is.
+func Within(root, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // Command renders the request as the command line it runs.
 func (r Request) Command() string {
 	quoted := make([]string, len(r.Args))

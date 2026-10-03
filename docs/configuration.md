@@ -186,6 +186,20 @@ server always runs its own binary, whatever path the command names.
 `lite-sandbox config edit` is refused, because it needs a terminal, and so is
 a config command run in the background.
 
+A config request **never changes the global config**: it always lands in a
+[per-directory override](#writing-overrides-from-the-cli---dir) for the
+agent's working directory. When the command has no `--dir`, lite-sandbox adds
+`--dir <working directory>` itself, so `lite-sandbox config commands allow
+make` becomes `lite-sandbox config --dir /path/to/project commands allow make`,
+and that scoped command is what the prompt asks you to approve and what runs.
+A `--dir` the agent writes is kept only when it names the working directory or
+a directory beneath it. `--dir /`, `--dir ~`, `--dir ..` or a sibling project
+is refused, since an override there reaches beyond the project. So are the
+commands that have no per-directory form (`config path`, `config overrides
+list`, `config paths migrate`, ...), and `config overrides remove` or `config
+aws remove-override` naming another directory. Global changes stay yours to
+make in your own terminal.
+
 The server runs a config request only if the hook asked you about that exact
 command. When the hook asks, it records a ticket in lite-sandbox's cache
 directory. The server takes that ticket (each ticket works once and expires

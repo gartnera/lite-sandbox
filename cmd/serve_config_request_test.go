@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/hook"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -76,17 +78,21 @@ func runBash(t *testing.T, c *client.Client, command string) (string, bool) {
 }
 
 // bashEvent is the PreToolUse event Claude Code sends before running command
-// with the sandbox's bash tool.
+// with the sandbox's bash tool, from the directory the server runs in.
 func bashEvent(t *testing.T, command string, background bool) *hook.Event {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{"command": command, "run_in_background": background})
 	if err != nil {
 		t.Fatal(err)
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &hook.Event{
 		HookEventName: hook.EventPreToolUse,
 		ToolName:      mcpToolPrefix + "bash",
-		CWD:           t.TempDir(),
+		CWD:           cwd,
 		RawToolInput:  raw,
 	}
 }
@@ -117,13 +123,19 @@ func TestConfigRequestRequiresHook(t *testing.T) {
 		t.Fatalf("config command ran without approval: %v", *runs)
 	}
 
-	// The hook asks the user, naming the command.
+	// The hook asks the user, naming the command scoped to the working
+	// directory: a config request never edits the global config.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true})
 	if decisionOf(d) != hook.DecisionAsk {
 		t.Fatalf("hook decision = %+v, want ask", d)
 	}
-	if reason := d.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, command) {
-		t.Errorf("ask reason %q does not name the command", reason)
+	scoped := "lite-sandbox config --dir " + cwd + " commands allow make"
+	if reason := d.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, scoped) {
+		t.Errorf("ask reason %q does not name the scoped command %q", reason, scoped)
 	}
 
 	// A different request is still refused.
@@ -136,7 +148,7 @@ func TestConfigRequestRequiresHook(t *testing.T) {
 	if isErr {
 		t.Fatalf("approved call failed: %s", text)
 	}
-	if want := []string{"commands", "allow", "make"}; len(*runs) != 1 || !slices.Equal((*runs)[0], want) {
+	if want := []string{"--dir", cwd, "commands", "allow", "make"}; len(*runs) != 1 || !slices.Equal((*runs)[0], want) {
 		t.Fatalf("runs = %v, want one run of %v", *runs, want)
 	}
 
@@ -223,9 +235,60 @@ func TestConfigRequestHookDenials(t *testing.T) {
 	for name, ev := range map[string]*hook.Event{
 		"interactive edit": bashEvent(t, "lite-sandbox config edit", false),
 		"background":       bashEvent(t, "lite-sandbox config commands allow make", true),
+		"global dir":       bashEvent(t, "lite-sandbox config mode set open --dir /", false),
+		"parent dir":       bashEvent(t, "lite-sandbox config mode set open --dir ..", false),
+		"home dir":         bashEvent(t, "lite-sandbox config mode set open --dir ~", false),
+		"empty dir":        bashEvent(t, "lite-sandbox config mode set open --dir=", false),
 	} {
 		if d := evaluate(ev, hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionDeny {
 			t.Errorf("%s: decision = %+v, want deny", name, d)
+		}
+	}
+}
+
+// TestConfigRequestOutsideDir checks the server refuses a request whose --dir
+// leaves the working directory even when a ticket exists for it (one the hook
+// would never issue).
+func TestConfigRequestOutsideDir(t *testing.T) {
+	isolateConfig(t)
+	isolateConfigRequests(t)
+	runs := stubConfigCommand(t)
+	c := setupClientWith(t, serveOptions{configRequests: true})
+	req := configrequest.Request{Args: []string{"mode", "set", "open", "--dir", "/"}}
+	if err := configrequest.Issue(req); err != nil {
+		t.Fatal(err)
+	}
+	text, isErr := runBash(t, c, "lite-sandbox config mode set open --dir /")
+	if !isErr || !strings.Contains(text, "outside the working directory") {
+		t.Fatalf("got %q (error %v), want the out-of-directory refusal", text, isErr)
+	}
+	if len(*runs) != 0 {
+		t.Fatalf("runs = %v, want none", *runs)
+	}
+}
+
+// TestCheckConfigRequestDir checks the config subcommands' own guard, which
+// holds whatever --dir cobra ends up parsing.
+func TestCheckConfigRequestDir(t *testing.T) {
+	root := t.TempDir()
+	orig := configDir
+	t.Cleanup(func() { configDir = orig })
+
+	for _, tc := range []struct {
+		env, dir string
+		ok       bool
+	}{
+		{env: "", dir: "", ok: true}, // not a config request
+		{env: root, dir: root, ok: true},
+		{env: root, dir: filepath.Join(root, "sub"), ok: true},
+		{env: root, dir: "", ok: false},
+		{env: root, dir: "/", ok: false},
+		{env: root, dir: filepath.Dir(root), ok: false},
+	} {
+		t.Setenv(configrequest.RootEnv, tc.env)
+		configDir = tc.dir
+		if err := checkConfigRequestDir(); (err == nil) != tc.ok {
+			t.Errorf("root %q, --dir %q: err = %v, want ok %v", tc.env, tc.dir, err, tc.ok)
 		}
 	}
 }

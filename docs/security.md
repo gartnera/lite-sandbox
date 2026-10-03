@@ -54,6 +54,16 @@ unapproved. The tickets live in lite-sandbox's cache directory, which is as
 protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 
+A config request is always confined to the agent's working directory: the hook
+and the server add `--dir <working directory>` when it has none, and refuse a
+`--dir` outside it, so the change is a per-directory override for the project
+and never edits the global config. The server also runs the config subprocess
+with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to that directory, under which the
+config subcommands refuse to run unless the `--dir` they actually parsed is
+inside it. That catches an argument list that reads differently to cobra than
+to the server's own scan (for example `--socket --dir /`, where `--dir` is the
+socket's value).
+
 ## Static preflight (AST-level, before execution)
 
 1. **Command deny list**: invocations matching a denied command (see above) are refused before any other command gate. No allowed command, `no_sandbox` or not, lifts this check. It is re-applied at the runtime layer and inside command wrappers.

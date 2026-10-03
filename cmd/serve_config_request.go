@@ -22,8 +22,9 @@ const configCommandTimeout = time.Minute
 
 // runConfigCommand runs `lite-sandbox config <args>` in dir and returns its
 // combined output. It runs as a separate process because the config
-// subcommands print to stdout, which in this process is the MCP transport. A
-// variable so tests can stand in for the binary.
+// subcommands print to stdout, which in this process is the MCP transport.
+// configrequest.RootEnv makes the subprocess itself refuse a --dir outside dir.
+// A variable so tests can stand in for the binary.
 var runConfigCommand = func(ctx context.Context, dir string, args []string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -33,6 +34,7 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 	defer cancel()
 	c := exec.CommandContext(ctx, exe, append([]string{"config"}, args...)...)
 	c.Dir = dir
+	c.Env = append(c.Environ(), configrequest.RootEnv+"="+dir)
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
@@ -40,7 +42,9 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // runConfigRequest runs a config request — a bash tool command that is just
 // `lite-sandbox config ...` (configrequest.Parse) — once the user has approved
 // it. It runs on the host, not in the sandbox, whose deny list exists to stop
-// exactly this command. The approval is the ticket the PreToolUse hook records
+// exactly this command. It is always scoped to cwd (Request.Scope): the change
+// lands in a per-directory override, never the global config. The approval is
+// the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
 // was never shown to the user and is refused.
 func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
@@ -48,6 +52,10 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd 
 		return mcp.NewToolResultError("`lite-sandbox config` cannot run in the background; run it with run_in_background false")
 	}
 	if err := req.Validate(); err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	req, err := req.Scope(cwd)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
 	if err := configrequest.Consume(req); err != nil {
@@ -83,7 +91,8 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd 
 // itself (with the user's approval) instead of only relaying it.
 const configRequestHint = "\n\nYou can make this config change yourself: run the `lite-sandbox config ...` command " +
 	"with the mcp__lite-sandbox__bash tool, as a command of its own. The user is asked to approve it, " +
-	"and it applies to the next command."
+	"and it applies to the next command. It is scoped to this working directory (a `--dir` override is " +
+	"added when the command has none); global changes are left to the user."
 
 // configRequestAloneHint replaces configRequestHint when the error is the deny
 // list refusing `lite-sandbox config` itself: the command was run, just not on

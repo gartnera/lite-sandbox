@@ -175,8 +175,9 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateConfigRequest decides a sandbox bash tool call that is a config
 // request (configrequest.Parse), or returns nil for any other command. When
 // this agent was installed to make config requests (--config-requests), it
-// records a ticket for the exact request and answers "ask", so the agent
-// prompts the user; the server runs the request only on that ticket (see
+// scopes the request to the working directory (Request.Scope: always a --dir
+// override, never the global config), records a ticket for the exact scoped
+// request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
 // internal/configrequest). Without the flag it returns nil: the call is
 // pre-approved like any other, and the sandbox's deny list refuses it.
 func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
@@ -201,12 +202,16 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
+	req, err := req.Scope(eventCWD(event))
+	if err != nil {
+		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
+	}
 	if err := configrequest.Issue(req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		"lite-sandbox: the agent asks to change the sandbox's own configuration: "+req.Command())
+		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+req.Command())
 }
 
 // denyUninspectableGrokInput blocks a governed Grok Build tool call whose
