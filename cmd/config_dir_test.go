@@ -603,3 +603,82 @@ commands:
 		t.Errorf("allowed = %v, want the base entry still in force", got)
 	}
 }
+
+// TestConfigDir_NewOverrideKeepsInherited: a directory resolves through one
+// override, so a --dir edit that creates one for a directory inheriting a
+// parent's must start from a copy of the parent's. Otherwise approving
+// `commands allow make` for a project under ~/work would drop the mode and
+// the denial ~/work's override sets, and the project would resolve to the
+// looser base config.
+func TestConfigDir_NewOverrideKeepsInherited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+mode: denylist
+overrides:
+  - path: /work
+    mode: allowlist
+    paths:
+      - path: /work/secrets
+        read: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withConfigDir(t, "/work/proj", func() {
+		captureStdout(t, func() {
+			if err := configCmdRun(t, configCommandsAllowCmd, "make"); err != nil {
+				t.Fatalf("commands allow: %v", err)
+			}
+		})
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped := cfg.ForDirectory("/work/proj")
+	if got := scoped.EffectiveMode(); got != config.ModeAllowlist {
+		t.Errorf("mode = %s, want the inherited allowlist", got)
+	}
+	if !slices.Contains(scoped.EffectiveDeniedReadPaths(), "/work/secrets") {
+		t.Errorf("denied read paths = %v, want the inherited /work/secrets denial", scoped.EffectiveDeniedReadPaths())
+	}
+	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"make"}) {
+		t.Errorf("allowed commands = %v, want make", got)
+	}
+	// The parent's override and the rest of ~/work are untouched.
+	if got := cfg.ForDirectory("/work/other").ExtraCommandList(); len(got) != 0 {
+		t.Errorf("/work/other allowed commands = %v, want none", got)
+	}
+}
+
+// TestConfigDir_NoChangeLeavesNoSeededOverride: the copy of an inherited
+// override is written only when the command changed something.
+func TestConfigDir_NoChangeLeavesNoSeededOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("LITE_SANDBOX_CONFIG", path)
+	if err := os.WriteFile(path, []byte(`
+overrides:
+  - path: /work
+    commands:
+      - command: make
+        allow: true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withConfigDir(t, "/work/proj", func() {
+		captureStdout(t, func() {
+			if err := configCmdRun(t, configCommandsAllowCmd, "make"); err != nil {
+				t.Fatalf("commands allow: %v", err)
+			}
+		})
+	})
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Overrides) != 1 {
+		t.Fatalf("overrides = %+v, want only /work's", cfg.Overrides)
+	}
+}

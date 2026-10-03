@@ -35,6 +35,13 @@ var bins struct {
 }
 
 func TestMain(m *testing.M) {
+	if logPath := os.Getenv(approverLogEnv); logPath != "" {
+		if err := serveApprover(logPath); err != nil {
+			fmt.Fprintf(os.Stderr, "e2e approver: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv(e2eEnv) != "" {
 		if err := provision(); err != nil {
 			fmt.Fprintf(os.Stderr, "e2e: provisioning failed: %v\n", err)

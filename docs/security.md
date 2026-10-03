@@ -42,6 +42,28 @@ sandbox (which mounts the same files read-only in `denylist` mode) is enabled.
 A `commands` entry with `allow: false` adds to the list; see
 [Denied commands](configuration.md#denied-commands).
 
+The one way past the built-in `config` entry is a
+[config request](configuration.md#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval),
+and only Claude Code is set up for it. A bash tool command that consists of
+a single literal `lite-sandbox config ...` invocation is answered `ask` by the
+PreToolUse hook, so the user approves it. The MCP server then runs it outside
+the sandbox. The server also requires a ticket that the hook records when it
+asks, single-use and matched to the exact arguments. A call the hook never saw
+(no hook registered, or a path that skips hooks) is refused, not run
+unapproved. The tickets live in lite-sandbox's cache directory, which is as
+protected as the config file: outside the path boundary, and read-only under
+the OS sandbox in `denylist` mode.
+
+A config request is always confined to the agent's working directory: the hook
+and the server add `--dir <working directory>` when it has none, and refuse a
+`--dir` outside it, so the change is a per-directory override for the project
+and never edits the global config. The server also runs the config subprocess
+with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to that directory, under which the
+config subcommands refuse to run unless the `--dir` they actually parsed is
+inside it. That catches an argument list that reads differently to cobra than
+to the server's own scan (for example `--socket --dir /`, where `--dir` is the
+socket's value).
+
 ## Static preflight (AST-level, before execution)
 
 1. **Command deny list**: invocations matching a denied command (see above) are refused before any other command gate. No allowed command, `no_sandbox` or not, lifts this check. It is re-applied at the runtime layer and inside command wrappers.

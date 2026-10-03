@@ -48,8 +48,8 @@ func TestConfigureMCPServer(t *testing.T) {
 		t.Errorf("expected command /usr/local/bin/lite-sandbox, got %s", server.Command)
 	}
 
-	if len(server.Args) != 1 || server.Args[0] != "serve-mcp" {
-		t.Errorf("expected args [serve], got %v", server.Args)
+	if !slices.Equal(server.Args, []string{"serve-mcp", "--config-requests"}) {
+		t.Errorf("expected args [serve-mcp --config-requests], got %v", server.Args)
 	}
 
 	if !server.AlwaysLoad {
@@ -406,13 +406,13 @@ func TestClaudeHookPlan(t *testing.T) {
 		{
 			name:        "default install allows MCP tools via hook",
 			configMCP:   true,
-			wantCommand: bin + " hook",
+			wantCommand: bin + " hook --config-requests",
 			wantMatcher: mcpToolMatcher,
 		},
 		{
 			name:     "with-tool-hook governs built-ins and allows MCP tools",
 			wantHook: true, governFS: true, configMCP: true,
-			wantCommand: bin + " hook",
+			wantCommand: bin + " hook --config-requests",
 			wantMatcher: hookToolMatcher + "|" + mcpToolMatcher,
 		},
 		{

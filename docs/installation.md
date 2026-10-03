@@ -87,9 +87,9 @@ Because it configures one session rather than every project, `launch` is stricte
 ## Claude Code
 
 For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`):
-1. Adds the MCP server to `~/.claude.json` (user-scoped) with `"alwaysLoad": true` (see [`--always-load`](#always-load) below)
+1. Adds the MCP server (`lite-sandbox serve-mcp --config-requests`) to `~/.claude.json` (user-scoped) with `"alwaysLoad": true` (see [`--always-load`](#always-load) below)
 2. Adds allow rules for the lite-sandbox MCP tools (`bash`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
-3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools. Subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow.
+3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools. Subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow. The one bash command it doesn't allow is a [config request](configuration.md#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval), a lone `lite-sandbox config ...` that the agent runs to change the sandbox's policy. For that command the hook answers `ask`, so you approve each change (the hook is registered as `lite-sandbox hook --config-requests`).
 4. Adds a usage directive to `~/.claude/CLAUDE.md`
 
 All of these honor `CLAUDE_CONFIG_DIR` the way Claude Code does: when it is set, `settings.json`, `CLAUDE.md`, and `.claude.json` are all written under that directory (Claude Code then keeps its user config at `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`).

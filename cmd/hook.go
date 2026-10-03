@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/audit"
+	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/hook"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -41,10 +43,23 @@ const (
 // name.
 const grokMCPToolPrefix = grokServerName + "__"
 
-// hookValidateBash selects the --bash-ast-hook-mode behavior: instead of denying the
-// built-in Bash tool, parse and validate its command against the sandbox and
-// allow it when it passes. Set by the --validate-bash flag.
-var hookValidateBash bool
+// hookOptions are the hook's flags, fixed by the installer when it registers
+// the hook.
+type hookOptions struct {
+	// validateBash selects the --bash-ast-hook-mode behavior: instead of
+	// denying the built-in Bash tool, parse and validate its command against
+	// the sandbox and allow it when it passes. Set by --validate-bash.
+	validateBash bool
+	// configRequests says the MCP server runs config requests
+	// (serve-mcp --config-requests) and this agent prompts the user when the
+	// hook answers "ask". Only then does the hook put a config request — a bash
+	// tool call that is just `lite-sandbox config ...` — before the user; without
+	// it the call is pre-approved like any other and the sandbox's deny list
+	// refuses it. Set by --config-requests.
+	configRequests bool
+}
+
+var hookFlags hookOptions
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
@@ -60,23 +75,28 @@ var hookCmd = &cobra.Command{
 		"by `lite-sandbox install`.\n\n" +
 		"With --validate-bash, the built-in Bash tool is validated through the " +
 		"sandbox (AST whitelist + path boundaries) and allowed when it passes " +
-		"instead of being redirected to the MCP tool.",
+		"instead of being redirected to the MCP tool.\n\n" +
+		"With --config-requests, a bash tool call that is just `lite-sandbox config ...` " +
+		"is answered \"ask\" instead, and recorded so the MCP server (serve-mcp " +
+		"--config-requests) knows the user was asked before it runs the change.",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runHook(cmd, hookValidateBash)
+		return runHook(cmd, hookFlags)
 	},
 }
 
 func init() {
-	hookCmd.Flags().BoolVar(&hookValidateBash, "validate-bash", false,
+	hookCmd.Flags().BoolVar(&hookFlags.validateBash, "validate-bash", false,
 		"validate the built-in Bash command through the sandbox and allow it when it passes, instead of denying it")
+	hookCmd.Flags().BoolVar(&hookFlags.configRequests, "config-requests", false,
+		"ask the user to approve each `lite-sandbox config` command run with the sandbox's bash tool (the server runs only those the hook asked about)")
 	rootCmd.AddCommand(hookCmd)
 }
 
 // runHook is the hot path Claude Code invokes per tool call. It is deliberately
 // fail-open: any internal error (unparseable event, missing cwd) defers to
 // Claude Code's normal permission flow rather than blocking the user's work.
-func runHook(cmd *cobra.Command, validateBash bool) error {
+func runHook(cmd *cobra.Command, opts hookOptions) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -95,7 +115,7 @@ func runHook(cmd *cobra.Command, validateBash bool) error {
 		return nil
 	}
 
-	decision := evaluate(event, validateBash)
+	decision := evaluate(event, opts)
 	if decision == nil {
 		// Nothing to enforce: defer to normal permission flow (no JSON).
 		return nil
@@ -108,7 +128,29 @@ func runHook(cmd *cobra.Command, validateBash bool) error {
 // validateBash is set (--bash-ast-hook-mode) the command is validated through
 // the sandbox and allowed when it passes; otherwise it is redirected to the
 // sandboxed MCP tool. Filesystem tools are checked against path boundaries.
-func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
+func evaluate(event *hook.Event, opts hookOptions) *hook.Decision {
+	// A config request rewrites the policy itself, so unlike every other
+	// sandbox bash command it is never pre-approved: the user confirms it.
+	// Its decisions are about running `lite-sandbox config`, so they get no
+	// hint suggesting it.
+	if event.ToolName == mcpToolPrefix+"bash" {
+		if d := evaluateConfigRequest(event, opts); d != nil {
+			return d
+		}
+	}
+	d := evaluateTool(event, opts)
+	// A denial naming a `lite-sandbox config` fix also says the agent can run
+	// it, when this agent can put config requests to the user.
+	if d != nil && opts.configRequests && !event.FromGrok() &&
+		d.HookSpecificOutput.PermissionDecision == hook.DecisionDeny {
+		d.HookSpecificOutput.PermissionDecisionReason = withConfigRequestHint(d.HookSpecificOutput.PermissionDecisionReason)
+	}
+	return d
+}
+
+// evaluateTool is evaluate before the config request hint.
+func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
+	validateBash := opts.validateBash
 	// The sandbox's own MCP tools are pre-approved via the hook because
 	// subagents and skills do not inherit permissions.allow from settings.json
 	// (anthropics/claude-code#18950) but PreToolUse hooks still fire there.
@@ -130,6 +172,53 @@ func evaluate(event *hook.Event, validateBash bool) *hook.Decision {
 		return validateBuiltinBash(event)
 	}
 	return evaluatePathPolicy(event)
+}
+
+// evaluateConfigRequest decides a sandbox bash tool call that is a config
+// request (configrequest.Parse), or returns nil for any other command. When
+// this agent was installed to make config requests (--config-requests), it
+// scopes the request to the working directory (Request.Scope: always a --dir
+// override, never the global config), records a ticket for the exact scoped
+// request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
+// internal/configrequest). Without the flag it returns nil: the call is
+// pre-approved like any other, and the sandbox's deny list refuses it.
+func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
+	if !opts.configRequests || event.FromGrok() {
+		return nil
+	}
+	// Read exactly as the server does (bashToolArgs), so the command the hook
+	// judges is the one that runs. Input the server cannot read either is
+	// refused there, so deferring to the usual pre-approval is safe.
+	var args map[string]any
+	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
+		return nil
+	}
+	command, background, ok := bashToolArgs(args)
+	if !ok {
+		return nil
+	}
+	req, ok := configrequest.Parse(command)
+	if !ok {
+		return nil
+	}
+	if background {
+		return hook.NewDecision(hook.DecisionDeny,
+			"Blocked by lite-sandbox: run `lite-sandbox config` in the foreground (run_in_background false).")
+	}
+	if err := req.Validate(); err != nil {
+		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
+	}
+	cwd := eventCWD(event)
+	scoped, err := req.Scope(cwd)
+	if err != nil {
+		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
+	}
+	if err := configrequest.Issue(cwd, req); err != nil {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
+	}
+	return hook.NewDecision(hook.DecisionAsk,
+		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+scoped.Command())
 }
 
 // denyUninspectableGrokInput blocks a governed Grok Build tool call whose

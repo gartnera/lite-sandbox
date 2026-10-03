@@ -245,7 +245,7 @@ func TestRunHookDenyOutput(t *testing.T) {
 		c.SetIn(bytes.NewReader(payload))
 		c.SetOut(&out)
 		c.SetErr(&bytes.Buffer{})
-		if err := runHook(c, false); err != nil {
+		if err := runHook(c, hookOptions{}); err != nil {
 			t.Fatalf("runHook returned error: %v", err)
 		}
 		return out.String()
@@ -287,7 +287,7 @@ func TestRunHookFailOpen(t *testing.T) {
 	c.SetIn(strings.NewReader("not json"))
 	c.SetOut(&out)
 	c.SetErr(&bytes.Buffer{})
-	if err := runHook(c, false); err != nil {
+	if err := runHook(c, hookOptions{}); err != nil {
 		t.Fatalf("runHook should fail-open, got error: %v", err)
 	}
 	if out.String() != "" {
@@ -304,7 +304,7 @@ func TestDenyBuiltinBash(t *testing.T) {
 		CWD:       cwd,
 		ToolInput: &hook.BashInput{Command: "ls -la"},
 	}
-	got := evaluate(event, false)
+	got := evaluate(event, hookOptions{})
 	if got == nil {
 		t.Fatal("expected Bash to be denied, got nil (defer)")
 	}
@@ -317,7 +317,7 @@ func TestDenyBuiltinBash(t *testing.T) {
 
 	// Bash is denied even when tool_input failed to parse (ToolInput nil).
 	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}
-	if evaluate(bare, false) == nil {
+	if evaluate(bare, hookOptions{}) == nil {
 		t.Error("expected Bash to be denied even without parsed tool input")
 	}
 }
@@ -339,7 +339,7 @@ func TestEvaluateMCPToolAllow(t *testing.T) {
 		// not depend on it.
 		event := &hook.Event{ToolName: tool, CWD: cwd}
 		for _, validateBash := range []bool{false, true} {
-			got := evaluate(event, validateBash)
+			got := evaluate(event, hookOptions{validateBash: validateBash})
 			if got == nil {
 				t.Fatalf("%s (validateBash=%v): expected allow decision, got nil (defer)", tool, validateBash)
 			}
@@ -351,7 +351,7 @@ func TestEvaluateMCPToolAllow(t *testing.T) {
 
 	// A different server's MCP tool is not ours to approve.
 	other := &hook.Event{ToolName: "mcp__other-server__bash", CWD: cwd}
-	if got := evaluate(other, false); got != nil {
+	if got := evaluate(other, hookOptions{}); got != nil {
 		t.Errorf("expected defer (nil) for another server's MCP tool, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
@@ -409,7 +409,7 @@ func TestValidateBuiltinBash(t *testing.T) {
 				CWD:       cwd,
 				ToolInput: &hook.BashInput{Command: tt.command},
 			}
-			got := evaluate(event, true)
+			got := evaluate(event, hookOptions{validateBash: true})
 			if got == nil {
 				t.Fatal("expected a decision in validate-bash mode, got nil (defer)")
 			}
@@ -430,7 +430,7 @@ func TestValidateBuiltinBash(t *testing.T) {
 
 	// Without a parseable command, defer rather than guess.
 	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}
-	if got := evaluate(bare, true); got != nil {
+	if got := evaluate(bare, hookOptions{validateBash: true}); got != nil {
 		t.Errorf("expected defer (nil) without a command, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
 	}
 }

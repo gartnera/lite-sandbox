@@ -100,6 +100,9 @@ func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP 
 		if command == "" {
 			command = binPath + " hook"
 		}
+		// The MCP server runs config requests (mcpServerEntry), which only the
+		// hook can put before the user.
+		command += " --config-requests"
 		if matcher == "" {
 			matcher = mcpToolMatcher
 		} else {
@@ -114,13 +117,24 @@ func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP 
 // --append-system-prompt.
 const claudeDirective = `ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The built-in Bash tool is denied and will not run. The sandboxed tool is pre-approved and requires no permission prompts.`
 
+// claudeConfigRequestDirective tells Claude Code it can make config requests.
+// It is a directive of its own, rather than part of claudeDirective, so an
+// existing install's CLAUDE.md gains it without the first one being
+// duplicated.
+const claudeConfigRequestDirective = `If lite-sandbox blocks a command you need and its error names a ` + "`lite-sandbox config ...`" + ` fix, run that command with mcp__lite-sandbox__bash, as a command of its own: the user is asked to approve the change.`
+
+// claudeDirectives are the usage directives, in the order they are added.
+var claudeDirectives = []string{claudeDirective, claudeConfigRequestDirective}
+
 // mcpServerEntry is the lite-sandbox MCP server entry: `<binPath> serve-mcp`.
 // It is written into Claude Code's user config by `install` and passed to
 // --mcp-config by `launch`.
 func mcpServerEntry(binPath string, alwaysLoad bool) mcpServerConfig {
 	return mcpServerConfig{
-		Command:    binPath,
-		Args:       []string{"serve-mcp"},
+		Command: binPath,
+		// Config requests are safe to run because the plan registers the hook
+		// with --config-requests alongside every MCP server (claudeHookPlan).
+		Args:       []string{"serve-mcp", "--config-requests"},
 		AlwaysLoad: alwaysLoad,
 	}
 }
