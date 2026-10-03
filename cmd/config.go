@@ -42,10 +42,9 @@ type configEdit struct {
 	root     *config.Config
 	override *config.DirectoryOverride
 	before   *config.Config
-	// seededFrom is the path of the override the directory inherited when the
-	// edit created its own override, which then started as a copy of it (see
-	// loadConfig); "" otherwise.
-	seededFrom string
+	// created is set when the edit created the override (see loadConfig), so
+	// recordEdit may still pick how it combines with the base.
+	created bool
 }
 
 // currentEdit holds the state of the in-flight --dir edit. Every command runs
@@ -202,34 +201,20 @@ func loadConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A directory resolves through exactly one override. One that has none of
-	// its own may inherit a parent's (or, as a linked git worktree, its main
-	// worktree's); an override created for it here replaces that one, so it
-	// starts as a copy of it, merge setting included. Otherwise every section
-	// the command did not touch would fall back to the base config, and
-	// approving `commands allow make` for a project could silently drop the
-	// mode and denials its parent's override sets.
-	var seed *config.DirectoryOverride
-	seededFrom := ""
-	if findOverride(cfg, configDir) == nil {
-		if g := cfg.GoverningOverride(resolveDirArg(configDir)); g != nil {
-			c, err := copyConfig(&g.Config)
-			if err != nil {
-				return nil, err
-			}
-			seed = &config.DirectoryOverride{Merge: g.Merge, Config: *c}
-			seededFrom = g.Path
-		}
-	}
 	// overridePtr appends an empty override when the directory has none yet;
 	// nothing is written unless the command goes on to call saveConfig, and an
-	// override still setting nothing by then (or, when seeded, changing
-	// nothing) is dropped again.
+	// override still setting nothing by then is dropped again. A new override
+	// deep-merges into the base, so it records only what the command changed
+	// in `paths` and `commands`, where later edits to the base keep reaching
+	// the directory (recordEdit falls back to replace-style when the change
+	// clears a setting, which a deep merge would inherit back from the base).
+	// An existing override keeps whichever merge setting it already has.
+	isNew := findOverride(cfg, configDir) == nil
 	o := overridePtr(cfg, configDir)
-	if seed != nil {
-		o.Merge, o.Config = seed.Merge, seed.Config
+	if isNew {
+		o.Merge = true
 	}
-	currentEdit = &configEdit{root: cfg, override: o, before: before, seededFrom: seededFrom}
+	currentEdit = &configEdit{root: cfg, override: o, before: before, created: isNew}
 	return view, nil
 }
 
@@ -252,17 +237,10 @@ func saveConfig(cfg *config.Config) error {
 	currentEdit = nil
 
 	dir := resolveDirArg(configDir)
-	var scoped bool
-	if ed.seededFrom != "" && sectionsEqual(ed.before, cfg) {
-		// A copy of the inherited override that the command did not change
-		// would only pin the directory to today's copy of it.
+	recordEdit(ed.override, ed.root, ed.before, cfg, ed.created)
+	scoped := ed.override.SetsAnySection()
+	if !scoped {
 		removeOverride(ed.root, dir)
-	} else {
-		recordEdit(ed.override, ed.root, ed.before, cfg)
-		scoped = ed.override.SetsAnySection()
-		if !scoped {
-			removeOverride(ed.root, dir)
-		}
 	}
 	// What the directory will actually resolve to once this is written, which
 	// is not always what the command produced: an override inherits the
@@ -270,8 +248,6 @@ func saveConfig(cfg *config.Config) error {
 	// and `commands` entry by entry.
 	inherited := inheritedStatements(ed.root.ForDirectory(dir), cfg)
 	switch {
-	case scoped && ed.seededFrom != "":
-		fmt.Printf("Scoped to %s (per-directory override, starting from the override for %s, which it inherited)\n", dir, ed.seededFrom)
 	case scoped:
 		fmt.Printf("Scoped to %s (per-directory override)\n", dir)
 	case len(inherited) == 0:
@@ -285,9 +261,48 @@ func saveConfig(cfg *config.Config) error {
 // sections whose value differs from the view it was handed, reduced on a
 // merge: true override to the delta against the base, since that override
 // inherits `paths` and `commands` entry by entry.
-func recordEdit(o *config.DirectoryOverride, base, before, after *config.Config) {
+//
+// A deep merge cannot clear a setting: a field the override leaves unset
+// inherits the base's. So when the edit created the override (which then holds
+// nothing but this change) and the change clears one — `aws disable`, or
+// `aws force-profile` dropping a base allow_raw_credentials — the override is
+// written replace-style instead, storing each changed section whole.
+func recordEdit(o *config.DirectoryOverride, base, before, after *config.Config, created bool) {
 	applyChangedSections(&o.Config, before, after)
+	if created && o.Merge && !mergeResolvesTo(o, base, before, after) {
+		o.Merge = false
+		o.Config = config.Config{}
+		applyChangedSections(&o.Config, before, after)
+	}
 	config.PruneRestatedEntries(o, base)
+}
+
+// mergeResolvesTo reports whether the directory of override o, combined with
+// base, resolves to after in every non-list section the command changed. List
+// sections are left out: the leaf lists combine the same way in either merge
+// mode, and an entry of a keyed list (`paths`, `commands`) that the override
+// cannot drop is reported by inheritedStatements instead.
+func mergeResolvesTo(o *config.DirectoryOverride, base, before, after *config.Config) bool {
+	probe := *base
+	probe.Overrides = []config.DirectoryOverride{*o}
+	resolved := probe.ForDirectory(o.Path)
+	rv := reflect.ValueOf(resolved).Elem()
+	bv := reflect.ValueOf(before).Elem()
+	av := reflect.ValueOf(after).Elem()
+	t := av.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Name == "Overrides" || !f.IsExported() || f.Type.Kind() == reflect.Slice {
+			continue
+		}
+		if reflect.DeepEqual(bv.Field(i).Interface(), av.Field(i).Interface()) {
+			continue
+		}
+		if !reflect.DeepEqual(rv.Field(i).Interface(), av.Field(i).Interface()) {
+			return false
+		}
+	}
+	return true
 }
 
 // inheritedStatement is one `paths` or `commands` entry a --dir edit could not
@@ -337,7 +352,7 @@ func stillStated(view *config.Config, states func(*config.Config) bool) bool {
 		return false
 	}
 	o := probe.Overrides[i]
-	recordEdit(&o, &probe, ed.before, view)
+	recordEdit(&o, &probe, ed.before, view, ed.created)
 	if o.SetsAnySection() {
 		probe.Overrides[i] = o
 	} else {
@@ -404,24 +419,6 @@ func applyChangedSections(dst, before, after *config.Config) {
 		}
 		dv.Field(i).Set(av.Field(i))
 	}
-}
-
-// sectionsEqual reports whether before and after hold the same value in every
-// section, i.e. whether applyChangedSections would copy nothing.
-func sectionsEqual(before, after *config.Config) bool {
-	bv := reflect.ValueOf(before).Elem()
-	av := reflect.ValueOf(after).Elem()
-	t := bv.Type()
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.Name == "Overrides" || !f.IsExported() {
-			continue
-		}
-		if !reflect.DeepEqual(bv.Field(i).Interface(), av.Field(i).Interface()) {
-			return false
-		}
-	}
-	return true
 }
 
 // copyConfig returns a deep copy of cfg (minus any overrides, which a resolved

@@ -93,8 +93,10 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 
 // TestConfigDir_ListsInheritBase covers the list settings: a --dir edit starts
 // from what the directory resolves to today, so `add` is additive against the
-// base list instead of silently replacing it (the override stores the whole
-// resulting list, since a section replaces its base counterpart).
+// base list instead of silently replacing it. The override --dir creates is
+// merge: true, so it stores only the added entry, and removing an entry the
+// base states is reported rather than applied (an override can restate an
+// entry, not drop it).
 func TestConfigDir_ListsInheritBase(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	const dir = "/work/acme"
@@ -108,16 +110,22 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 		t.Fatalf("base add: %v", err)
 	}
 
+	var removeOut string
 	withConfigDir(t, dir, func() {
 		captureStdout(t, func() {
 			if err := add.RunE(add, []string{"npm"}); err != nil {
 				t.Fatalf("dir add: %v", err)
 			}
+		})
+		removeOut = captureStdout(t, func() {
 			if err := remove.RunE(remove, []string{"ninja"}); err != nil {
 				t.Fatalf("dir remove: %v", err)
 			}
 		})
 	})
+	if !strings.Contains(removeOut, `ninja: "allow" in the base config still applies to /work/acme`) {
+		t.Errorf("remove output = %q, want the inherited entry reported", removeOut)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -127,8 +135,11 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 		t.Errorf("base extra_commands = %v, want [make ninja]", cfg.ExtraCommandList())
 	}
 	got := cfg.ForDirectory(dir).ExtraCommandList()
-	if !slices.Equal(got, []string{"make", "npm"}) {
-		t.Errorf("extra_commands for %s = %v, want [make npm]", dir, got)
+	if !slices.Equal(got, []string{"make", "ninja", "npm"}) {
+		t.Errorf("extra_commands for %s = %v, want [make ninja npm]", dir, got)
+	}
+	if o := findOverride(cfg, dir); o == nil || !o.Merge || len(o.Commands) != 1 || o.Commands[0].Command != "npm" {
+		t.Errorf("override = %+v, want merge: true holding only npm", o)
 	}
 
 	// `list --dir` reports what that directory resolves to.
@@ -140,7 +151,7 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 			}
 		})
 	})
-	if !strings.Contains(out, "npm") || strings.Contains(out, "ninja") {
+	if !strings.Contains(out, "npm") || !strings.Contains(out, "ninja") {
 		t.Errorf("list --dir = %q, want the directory's list", out)
 	}
 }
@@ -242,6 +253,63 @@ func TestConfigDir_DisableUnderDir(t *testing.T) {
 	}
 	if cfg.ForDirectory(dir).AWS.AWSEnabled() {
 		t.Error("aws should be disabled for the directory")
+	}
+}
+
+// TestConfigDir_ClearingFallsBackToReplace: a merge: true override cannot
+// clear a field (unset inherits the base's), so a new override whose change
+// clears one is written replace-style. Otherwise `aws disable --dir` would
+// leave the base's AWS access on, and `aws force-profile --dir` would keep the
+// base's raw credentials readable.
+func TestConfigDir_ClearingFallsBackToReplace(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+
+	captureStdout(t, func() {
+		if err := awsAllowRawCredentialsCmd.RunE(awsAllowRawCredentialsCmd, nil); err != nil {
+			t.Fatalf("base allow-raw-credentials: %v", err)
+		}
+	})
+	withConfigDir(t, "/work/a", func() {
+		captureStdout(t, func() {
+			if err := awsDisableCmd.RunE(awsDisableCmd, nil); err != nil {
+				t.Fatalf("dir aws disable: %v", err)
+			}
+		})
+	})
+	withConfigDir(t, "/work/b", func() {
+		captureStdout(t, func() {
+			if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"ro"}); err != nil {
+				t.Fatalf("dir aws force-profile: %v", err)
+			}
+		})
+	})
+	withConfigDir(t, "/work/c", func() {
+		captureStdout(t, func() {
+			if err := configCmdRun(t, configLocalBinaryExecutionEnableCmd); err != nil {
+				t.Fatalf("dir local-binary-execution enable: %v", err)
+			}
+		})
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ForDirectory("/work/a").AWS.AWSEnabled() {
+		t.Error("aws should be disabled for /work/a")
+	}
+	b := cfg.ForDirectory("/work/b").AWS
+	if b.AllowsRawCredentials() || b.IMDSProfile() != "ro" {
+		t.Errorf("aws for /work/b = %+v, want force_profile ro without raw credentials", b)
+	}
+	for _, dir := range []string{"/work/a", "/work/b"} {
+		if o := findOverride(cfg, dir); o == nil || o.Merge {
+			t.Errorf("override for %s = %+v, want replace-style", dir, o)
+		}
+	}
+	// A change that clears nothing keeps the merge: true override.
+	if o := findOverride(cfg, "/work/c"); o == nil || !o.Merge {
+		t.Errorf("override for /work/c = %+v, want merge: true", o)
 	}
 }
 
@@ -565,10 +633,11 @@ overrides:
 	}
 }
 
-// TestConfigDir_RemovingLastEntryIsReported: a replace-style override cannot
-// record an emptied section (an empty list is not written), so removing the
-// last entry leaves the base's list applying to the directory. That is
-// reported, not claimed as a removal.
+// TestConfigDir_RemovingLastEntryIsReported: a replace-style override (one
+// written by hand; --dir creates merge: true ones) cannot record an emptied
+// section (an empty list is not written), so removing the last entry leaves
+// the base's list applying to the directory. That is reported, not claimed as
+// a removal.
 func TestConfigDir_RemovingLastEntryIsReported(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
@@ -576,6 +645,11 @@ func TestConfigDir_RemovingLastEntryIsReported(t *testing.T) {
 commands:
   - command: curl
     allow: true
+overrides:
+  - path: /work/acme
+    commands:
+      - command: curl
+        allow: true
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -604,23 +678,21 @@ commands:
 	}
 }
 
-// TestConfigDir_NewOverrideKeepsInherited: a directory resolves through one
-// override, so a --dir edit that creates one for a directory inheriting a
-// parent's must start from a copy of the parent's. Otherwise approving
-// `commands allow make` for a project under ~/work would drop the mode and
-// the denial ~/work's override sets, and the project would resolve to the
-// looser base config.
-func TestConfigDir_NewOverrideKeepsInherited(t *testing.T) {
+// TestConfigDir_NewOverrideMerges: an override --dir creates is merge: true
+// and records only what the command changed. It deep-merges into the base, not
+// into the override the directory was inheriting from a parent, so settings
+// that parent override made and the command did not touch stop applying.
+func TestConfigDir_NewOverrideMerges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
 mode: denylist
+commands:
+  - command: curl
+    allow: true
 overrides:
   - path: /work
     mode: allowlist
-    paths:
-      - path: /work/secrets
-        read: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -637,25 +709,29 @@ overrides:
 	if err != nil {
 		t.Fatal(err)
 	}
+	o := findOverride(cfg, "/work/proj")
+	if o == nil || !o.Merge {
+		t.Fatalf("override = %+v, want merge: true", o)
+	}
+	if len(o.Commands) != 1 || o.Commands[0].Command != "make" || o.Mode != "" {
+		t.Errorf("override = %+v, want only the make entry", o)
+	}
 	scoped := cfg.ForDirectory("/work/proj")
-	if got := scoped.EffectiveMode(); got != config.ModeAllowlist {
-		t.Errorf("mode = %s, want the inherited allowlist", got)
+	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"curl", "make"}) {
+		t.Errorf("allowed commands = %v, want the base's curl and make", got)
 	}
-	if !slices.Contains(scoped.EffectiveDeniedReadPaths(), "/work/secrets") {
-		t.Errorf("denied read paths = %v, want the inherited /work/secrets denial", scoped.EffectiveDeniedReadPaths())
-	}
-	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"make"}) {
-		t.Errorf("allowed commands = %v, want make", got)
+	if got := scoped.EffectiveMode(); got != config.ModeDenylist {
+		t.Errorf("mode = %s, want the base's denylist", got)
 	}
 	// The parent's override and the rest of ~/work are untouched.
-	if got := cfg.ForDirectory("/work/other").ExtraCommandList(); len(got) != 0 {
-		t.Errorf("/work/other allowed commands = %v, want none", got)
+	if got := cfg.ForDirectory("/work/other").EffectiveMode(); got != config.ModeAllowlist {
+		t.Errorf("/work/other mode = %s, want allowlist", got)
 	}
 }
 
-// TestConfigDir_NoChangeLeavesNoSeededOverride: the copy of an inherited
-// override is written only when the command changed something.
-func TestConfigDir_NoChangeLeavesNoSeededOverride(t *testing.T) {
+// TestConfigDir_InheritedValueLeavesNoOverride: setting a directory to what it
+// already resolves to through a parent's override writes nothing.
+func TestConfigDir_InheritedValueLeavesNoOverride(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`

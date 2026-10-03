@@ -148,7 +148,8 @@ func TestConfigCommandsCmd_Dir(t *testing.T) {
 	if !slices.Equal(got, []string{"make", "npm"}) {
 		t.Errorf("allowed for %s = %v", dir, got)
 	}
-	if len(cfg.Overrides) != 1 || len(cfg.Overrides[0].Commands) != 2 {
+	// The override is merge: true, so it holds only the entry it adds.
+	if len(cfg.Overrides) != 1 || !cfg.Overrides[0].Merge || len(cfg.Overrides[0].Commands) != 1 {
 		t.Errorf("overrides = %+v", cfg.Overrides)
 	}
 }
