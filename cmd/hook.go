@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -274,6 +275,10 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		return nil
 	}
 
+	if isClaudeConfigTarget(path, eventCWD(event), write) {
+		return nil
+	}
+
 	sb, cwd := sandboxForEvent(event)
 	if sb == nil {
 		// Without a working directory we cannot resolve the boundary; fail-open.
@@ -286,6 +291,37 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		what = event.ToolInput.Describe()
 	}
 	return boundaryDenial(sb, cwd, what, path, write, event.FromGrok())
+}
+
+// isClaudeConfigTarget reports whether a Claude Code file tool's target
+// resolves inside a .claude directory (see bash_sandboxed.IsClaudeConfigPath).
+// The hook leaves those calls to Claude Code's normal permission flow, reads
+// and writes alike: Claude Code treats .claude as a protected path and prompts
+// before writing it, so the user decides — rather than the hook denying
+// ~/.claude as outside the boundary, or letting a project's .claude through as
+// inside it. Sandboxed bash, by contrast, may only read .claude.
+//
+// Only the resolved path counts, so a symlink named .claude (a cloned repo's
+// .claude -> ~/.ssh) gets the boundary check like any other path. A write into
+// .git keeps its denial, and the read-denied built-ins and config denials
+// (~/.claude/.credentials.json) keep the boundary check: deferring them
+// would hand the agent's credentials to a read Claude Code may not prompt for.
+func isClaudeConfigTarget(path, cwd string, write bool) bool {
+	if cwd == "" && !filepath.IsAbs(path) {
+		return false
+	}
+	resolved := bash_sandboxed.ResolvePath(path, cwd)
+	if !bash_sandboxed.IsClaudeConfigPath(resolved) {
+		return false
+	}
+	if write && bash_sandboxed.IsGitInternalPath(resolved) {
+		return false
+	}
+	cfg, err := config.LoadForDirectory(cwd)
+	if err != nil {
+		return false
+	}
+	return !bash_sandboxed.IsUnderAllowedPaths(resolved, cfg.EffectiveDeniedReadPaths())
 }
 
 // evaluateApplyPatch enforces the writable-path boundary on Codex's apply_patch

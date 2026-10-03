@@ -471,7 +471,8 @@ This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.
 - **denies reads** (`Read`, and `Grep`/`Glob` with an explicit `path`) outside the readable paths;
 - **denies writes** (`Write`, `Edit`, `NotebookEdit`) outside the writable paths;
 - **allows the sandbox's own tools** (`mcp__lite-sandbox__*`), so they stay prompt-free in subagents and skills, which don't inherit `permissions.allow` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950));
-- **defers** everything in bounds to Claude Code's normal permission flow.
+- **defers** everything in bounds to Claude Code's normal permission flow;
+- **defers `.claude`** paths (the project's or `~/.claude`, reads and writes alike, except `.claude/worktrees`) to Claude Code's normal permission flow too, inside the boundary or not. Only the resolved path counts, so a symlink named `.claude` pointing elsewhere is checked like any other path, and the deny-listed files under it (`~/.claude/.credentials.json`) and writes into a `.git` keep their denial. Claude Code treats `.claude` as a [protected path](https://code.claude.com/docs/en/permission-modes) and prompts before writing it, so you decide on each change to the agent's own settings, skills, and instructions. The sandboxed bash tool can only read `.claude`.
 
 The path boundaries are computed the same way as the bash tool's (see `cmd/serve.go`): the working directory, plus any paths granted in the config's `paths` list, plus the worktree parent when `git.allow_worktree_parent` is set. Writable paths are also readable. A denial tells the model the path is out of bounds and that the user can widen the boundary with `lite-sandbox config paths allow <path>` (`--write` for writes).
 

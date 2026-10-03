@@ -195,6 +195,52 @@ func TestEvaluatePathPolicy(t *testing.T) {
 			wantInMsg: ".git",
 		},
 		{
+			name: "write into the project's .claude defers to Claude Code",
+			event: &hook.Event{
+				ToolName:  hook.ToolWrite,
+				CWD:       cwd,
+				ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, ".claude", "settings.json")},
+			},
+		},
+		{
+			name: "edit into an outside .claude defers to Claude Code",
+			event: &hook.Event{
+				ToolName:  hook.ToolEdit,
+				CWD:       cwd,
+				ToolInput: &hook.EditInput{FilePath: filepath.Join(outside, ".claude", "CLAUDE.md")},
+			},
+		},
+		{
+			name: "read from an outside .claude defers to Claude Code",
+			event: &hook.Event{
+				ToolName:  hook.ToolRead,
+				CWD:       cwd,
+				ToolInput: &hook.ReadInput{FilePath: filepath.Join(outside, ".claude", "settings.json")},
+			},
+		},
+		{
+			name: "write into an outside .claude/worktrees is denied",
+			event: &hook.Event{
+				ToolName:  hook.ToolWrite,
+				CWD:       cwd,
+				ToolInput: &hook.WriteInput{FilePath: filepath.Join(outside, ".claude", "worktrees", "feat", "a.go")},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
+			name: "apply_patch into an outside .claude is denied",
+			event: &hook.Event{
+				ToolName: hook.ToolApplyPatch,
+				CWD:      cwd,
+				ToolInput: &hook.ApplyPatchInput{
+					Command: "*** Begin Patch\n*** Add File: " + filepath.Join(outside, ".claude", "settings.json") + "\n+{}\n*** End Patch",
+				},
+			},
+			wantDeny:  true,
+			wantInMsg: "writable",
+		},
+		{
 			name: "unmodeled tool defers",
 			event: &hook.Event{
 				ToolName: "WebFetch",
@@ -221,6 +267,52 @@ func TestEvaluatePathPolicy(t *testing.T) {
 				}
 			} else if got != nil {
 				t.Fatalf("expected defer (nil), got deny: %s", got.HookSpecificOutput.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
+// TestEvaluatePathPolicyClaudeDir covers the .claude special case: Claude
+// Code's file tools on a path that resolves into .claude defer to Claude
+// Code's own protected-path prompt, except where that would loosen the hook —
+// a symlink merely named .claude, a write into .git, the agent's credentials.
+func TestEvaluatePathPolicyClaudeDir(t *testing.T) {
+	isolateConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	for _, d := range []string{filepath.Join(home, ".claude"), filepath.Join(outside, "secrets"), filepath.Join(outside, ".claude", ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A cloned repo's .claude pointing at a directory outside the boundary.
+	if err := os.Symlink(filepath.Join(outside, "secrets"), filepath.Join(cwd, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		input    hook.ToolInput
+		tool     string
+		wantDeny bool
+	}{
+		{"edit ~/.claude settings defers", &hook.EditInput{FilePath: filepath.Join(home, ".claude", "settings.json")}, hook.ToolEdit, false},
+		{"read ~/.claude settings defers", &hook.ReadInput{FilePath: filepath.Join(home, ".claude", "settings.json")}, hook.ToolRead, false},
+		{"read ~/.claude credentials is denied", &hook.ReadInput{FilePath: filepath.Join(home, ".claude", ".credentials.json")}, hook.ToolRead, true},
+		{"read through a symlink named .claude is denied", &hook.ReadInput{FilePath: filepath.Join(cwd, ".claude", "id_rsa")}, hook.ToolRead, true},
+		{"write into .git under .claude is denied", &hook.WriteInput{FilePath: filepath.Join(outside, ".claude", ".git", "config")}, hook.ToolWrite, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluatePathPolicy(&hook.Event{ToolName: tt.tool, CWD: cwd, ToolInput: tt.input})
+			if tt.wantDeny && (got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny) {
+				t.Fatalf("expected deny, got %+v", got)
+			}
+			if !tt.wantDeny && got != nil {
+				t.Fatalf("expected defer (nil), got %s", got.HookSpecificOutput.PermissionDecisionReason)
 			}
 		})
 	}
