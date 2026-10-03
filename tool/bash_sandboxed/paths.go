@@ -131,11 +131,11 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 		if pathToCheck == "" || !looksLikePath(pathToCheck) {
 			continue
 		}
-		if err := checkPathBoundary(arg, pathToCheck, workDir, isWriteCmd, allowed); err != nil {
+		if err := checkBoundary(arg, pathToCheck, workDir, isWriteCmd, allowed); err != nil {
 			return err
 		}
 	}
-	return nil
+	return validateClaudeDirWrites(cmdName, args, workDir, skipIndices)
 }
 
 // nonPathArgIndices returns the argument indices (within args, which includes
@@ -157,7 +157,22 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 	return nil
 }
 
-// checkPathBoundary validates one candidate path against the allowed set:
+// checkPathBoundary validates one path a command opens, creates, or extracts
+// into: checkBoundary, plus, for a write, the read-only .claude directories
+// (see checkClaudeDirWrite). Command arguments use checkBoundary instead,
+// since a write command's arguments are not all written (validateCommandArgPaths
+// checks .claude against the ones that are).
+func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
+	if err := checkBoundary(orig, path, workDir, isWrite, allowed); err != nil {
+		return err
+	}
+	if isWrite {
+		return checkClaudeDirWrite(orig, path, workDir)
+	}
+	return nil
+}
+
+// checkBoundary validates one candidate path against the allowed set:
 // it resolves the path relative to workDir, verifies containment, and blocks
 // .git internals. orig is the argument as written, used in error messages.
 // For reads, an absolute path that doesn't exist locally is allowed through:
@@ -167,7 +182,7 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 // /dev/null is always allowed, for reads and writes alike: reading it yields
 // nothing and writing it discards, so it exposes nothing (e.g. `diff /dev/null
 // new.txt`, `cp /dev/null empty.txt`).
-func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
+func checkBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
 	resolved := ResolvePath(path, workDir)
 	if resolved == os.DevNull {
 		return nil
@@ -239,6 +254,12 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 			if isGitInternalPath(resolved) {
 				validationErr = tagRule(rulePathBoundary, resolved, fmt.Errorf("redirect path %q accesses .git directory which is not allowed", lit))
 				return false
+			}
+			if r.Op != syntax.RdrIn {
+				if err := checkClaudeDirWrite(lit, lit, workDir); err != nil {
+					validationErr = err
+					return false
+				}
 			}
 		}
 		return true
