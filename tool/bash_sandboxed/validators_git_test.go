@@ -78,6 +78,8 @@ func TestValidate_AllowedGitSubcommands(t *testing.T) {
 		{"git clean", "git clean -fd"},
 		{"git revert", "git revert HEAD"},
 		{"git apply", "git apply patch.diff"},
+		{"git update-index", "git update-index --assume-unchanged file.go"},
+		{"git update-index refresh", "git update-index --refresh"},
 		// Local write also unlocks branch/tag/config mutation
 		{"git branch delete", "git branch -d feature"},
 		{"git branch move", "git branch -m old new"},
@@ -196,6 +198,7 @@ func TestValidate_GitLocalReadOnly(t *testing.T) {
 		{"git merge", "git merge feature", "local_write is disabled"},
 		{"git reset", "git reset HEAD", "local_write is disabled"},
 		{"git stash", "git stash", "local_write is disabled"},
+		{"git update-index", "git update-index --skip-worktree file.go", "local_write is disabled"},
 		// Remote read blocked
 		{"git fetch", "git fetch origin", "remote_read is disabled"},
 		{"git pull", "git pull", "remote_read is disabled"},

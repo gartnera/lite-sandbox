@@ -53,6 +53,10 @@ var gitLocalWriteSubcommands = map[string]bool{
 	"notes":       true,
 	"apply":       true,
 	"am":          true,
+	// update-index only edits the index (and, under --test-untracked-cache,
+	// a scratch directory in the worktree). Its --fsmonitor runs only the
+	// core.fsmonitor hook, which git config (also local_write) already sets.
+	"update-index": true,
 }
 
 // gitRemoteReadSubcommands are subcommands that read from remotes.
