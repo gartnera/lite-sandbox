@@ -719,7 +719,7 @@ Git commands are enabled by default, with separate permission levels:
 ```yaml
 git:
   local_read: true             # git status, log, diff, show, grep (default: true)
-  local_write: true            # git add, commit, branch, tag (default: true)
+  local_write: true            # git add, commit, branch, tag, update-index (default: true)
   remote_read: true            # git fetch, pull, clone (default: true)
   remote_write: false          # git push (default: false)
   allow_worktree_parent: false # if cwd is a linked worktree, also allow read+write to the main worktree (default: false)
