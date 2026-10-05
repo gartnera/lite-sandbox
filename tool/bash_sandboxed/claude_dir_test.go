@@ -67,6 +67,7 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 		{"ln to .claude", "ln -s .claude/settings.json link2"},
 		{"chmod outside", "chmod 644 a.txt"},
 		{"chmod dash mode outside", "chmod -x a.txt"},
+		{"git merge-file -p reads", "git merge-file -p .claude/settings.json a.txt a.txt"},
 	}
 	for _, tt := range allowed {
 		t.Run("allowed/"+tt.name, func(t *testing.T) {
@@ -117,6 +118,18 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 		{"git mv", "git mv a.txt .claude/settings.json"},
 		{"git checkout path", "git checkout -- .claude/settings.json"},
 		{"git -C restore", "git -C .claude restore settings.json"},
+		{"git checkout-index", "git checkout-index -f .claude/settings.json"},
+		{"git merge-file", "git merge-file .claude/settings.json a.txt a.txt"},
+		{"git interpret-trailers --in-place", "git interpret-trailers --in-place --trailer 'A: b' .claude/settings.json"},
+		{"git diff --output", "git diff --output=.claude/settings.json"},
+		{"git archive -o", "git archive -o .claude/x.tar HEAD"},
+		{"git archive --output", "git archive --output .claude/x.tar HEAD"},
+		{"git format-patch -o", "git format-patch -o .claude/skills HEAD~1"},
+		{"git format-patch in .claude", "cd .claude && git format-patch HEAD~1"},
+		{"git bundle create", "git bundle create .claude/x.bundle HEAD"},
+		{"git fast-export marks", "git fast-export --export-marks=.claude/marks HEAD"},
+		{"git read-tree --index-output", "git read-tree --index-output=.claude/idx HEAD"},
+		{"git unpack-file in .claude", "cd .claude && git unpack-file abc123"},
 	}
 	for _, tt := range blocked {
 		t.Run("blocked/"+tt.name, func(t *testing.T) {

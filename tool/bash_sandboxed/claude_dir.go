@@ -189,15 +189,16 @@ func chmodTargets(args []string) []string {
 // gitWriteSubcommands are the git subcommands whose path operands are
 // working-tree files they create, rewrite, or delete.
 var gitWriteSubcommands = map[string]bool{
-	"mv":       true,
-	"rm":       true,
-	"checkout": true,
-	"restore":  true,
+	"mv":             true,
+	"rm":             true,
+	"checkout":       true,
+	"restore":        true,
+	"checkout-index": true,
 }
 
-// gitWriteTargets returns the path operands of a git subcommand that writes
-// the working tree (see gitWriteSubcommands), relative to the -C directories
-// that precede it.
+// gitWriteTargets returns the files a git invocation writes that its
+// arguments name (see gitSubcommandWriteTargets), relative to the -C
+// directories that precede the subcommand.
 func gitWriteTargets(args []string) []string {
 	base := ""
 	for i := 1; i < len(args); i++ {
@@ -215,22 +216,84 @@ func gitWriteTargets(args []string) []string {
 		if strings.HasPrefix(a, "-") {
 			continue
 		}
-		if a == "" || !gitWriteSubcommands[a] {
+		if a == "" {
 			return nil
 		}
 		var out []string
-		for j := i + 1; j < len(args); j++ {
-			if args[j] == "--" {
-				continue
+		for _, t := range gitSubcommandWriteTargets(args[i:]) {
+			if t != "" && t != "-" {
+				out = append(out, filepath.Join(base, t))
 			}
-			if strings.HasPrefix(args[j], "-") || args[j] == "" {
-				continue
-			}
-			out = append(out, filepath.Join(base, args[j]))
 		}
 		return out
 	}
 	return nil
+}
+
+// gitSubcommandWriteTargets returns the files that args (starting with the
+// subcommand) write: the operands of gitWriteSubcommands, the output files
+// and directories of the subcommands that take one, and "." for those that
+// write into the current directory by default. Any subcommand's --output=
+// counts (git diff --output=FILE and its log/show relatives).
+func gitSubcommandWriteTargets(args []string) []string {
+	var out []string
+	for _, a := range args[1:] {
+		if a == "--" {
+			break
+		}
+		if v, ok := strings.CutPrefix(a, "--output="); ok {
+			out = append(out, v)
+		}
+	}
+	switch sub := args[0]; {
+	case gitWriteSubcommands[sub]:
+		pos, vals, _ := optSpec{long: []string{"prefix", "stage"}}.parse(args, nil)
+		return append(append(out, pos...), vals["prefix"]...)
+	case sub == "merge-file":
+		// Writes the result over the first file, unless -p prints it.
+		pos, _, flags := optSpec{short: "L"}.parse(args, nil)
+		if !flags["p"] && !flags["stdout"] && len(pos) > 0 {
+			out = append(out, pos[0])
+		}
+	case sub == "interpret-trailers":
+		pos, _, flags := optSpec{long: []string{"trailer", "where", "if-exists", "if-missing"}}.parse(args, nil)
+		if flags["in-place"] {
+			out = append(out, pos...)
+		}
+	case sub == "archive":
+		_, vals, _ := optSpec{short: "o", long: []string{"output", "format", "prefix", "add-file", "add-virtual-file", "remote", "exec"}}.parse(args, nil)
+		out = append(append(out, vals["o"]...), vals["output"]...)
+	case sub == "format-patch", sub == "bugreport", sub == "diagnose":
+		_, vals, flags := optSpec{short: "o", long: []string{"output-directory"}}.parse(args, nil)
+		dirs := append(vals["o"], vals["output-directory"]...)
+		if len(dirs) == 0 && !flags["stdout"] {
+			dirs = []string{"."}
+		}
+		out = append(out, dirs...)
+	case sub == "mailsplit":
+		_, vals, _ := optSpec{short: "o"}.parse(args, nil)
+		out = append(out, vals["o"]...)
+	case sub == "bundle":
+		pos, _, _ := optSpec{}.parse(args, nil)
+		if len(pos) > 1 && pos[0] == "create" {
+			out = append(out, pos[1])
+		}
+	case sub == "pack-objects":
+		// Writes <base-name>-<hash>.pack and .idx.
+		pos, _, flags := optSpec{}.parse(args, nil)
+		if !flags["stdout"] && len(pos) > 0 {
+			out = append(out, pos[0])
+		}
+	case sub == "fast-export", sub == "fast-import":
+		_, vals, _ := optSpec{long: []string{"export-marks"}}.parse(args, nil)
+		out = append(out, vals["export-marks"]...)
+	case sub == "read-tree":
+		_, vals, _ := optSpec{long: []string{"index-output"}}.parse(args, nil)
+		out = append(out, vals["index-output"]...)
+	case sub == "unpack-file":
+		out = append(out, ".")
+	}
+	return out
 }
 
 // optSpec describes a command's options well enough to tell its operands
