@@ -87,6 +87,12 @@ var (
 	gitFetchLike = gitSubcommand{perm: gitRemoteRead}
 )
 
+// gitUploadPackFlags are the flags of git fetch and pull that name the
+// program to run as git-upload-pack.
+var gitUploadPackFlags = map[string]gitFlag{
+	"--upload-pack": {gitBlocked, "runs the given command as git-upload-pack"},
+}
+
 // gitBlockedSubcommand is a subcommand that is never allowed.
 func gitBlockedSubcommand(reason string) gitSubcommand {
 	return gitSubcommand{perm: gitBlocked, reason: reason}
@@ -292,10 +298,19 @@ var gitSubcommands = map[string]gitSubcommand{
 	},
 
 	// Remote reads.
-	"fetch":        gitFetchLike,
-	"pull":         gitFetchLike,
-	"clone":        gitFetchLike,
-	"ls-remote":    gitFetchLike,
+	// fetch, pull, clone, and ls-remote take the program to run as
+	// git-upload-pack (over ssh on the remote, or locally for a local or
+	// file:// remote), like fetch-pack.
+	"fetch": {perm: gitRemoteRead, flags: gitUploadPackFlags},
+	"pull":  {perm: gitRemoteRead, flags: gitUploadPackFlags},
+	"clone": {perm: gitRemoteRead, flags: map[string]gitFlag{
+		"-u":            gitUploadPackFlags["--upload-pack"],
+		"--upload-pack": gitUploadPackFlags["--upload-pack"],
+	}},
+	"ls-remote": {perm: gitRemoteRead, flags: map[string]gitFlag{
+		"--upload-pack": gitUploadPackFlags["--upload-pack"],
+		"--exec":        gitUploadPackFlags["--upload-pack"],
+	}},
 	"backfill":     gitFetchLike,
 	"request-pull": gitFetchLike,
 	"fetch-pack": {perm: gitRemoteRead, flags: map[string]gitFlag{
@@ -314,12 +329,19 @@ var gitSubcommands = map[string]gitSubcommand{
 		"set-url":      gitLocalWrite,
 		"prune":        gitLocalWrite,
 	}},
-	"submodule": {perm: gitLocalWrite, actions: map[string]gitPerm{
-		"": gitRemoteRead, "status": gitRemoteRead, "summary": gitRemoteRead, "foreach": gitRemoteRead,
-	}},
+	"submodule": {
+		perm:   gitLocalWrite,
+		reason: "runs the shell command given on its command line in each submodule",
+		actions: map[string]gitPerm{
+			"": gitRemoteRead, "status": gitRemoteRead, "summary": gitRemoteRead, "foreach": gitBlocked,
+		},
+	},
 
 	// Remote writes.
-	"push": {perm: gitRemoteWrite},
+	"push": {perm: gitRemoteWrite, flags: map[string]gitFlag{
+		"--receive-pack": {gitBlocked, "runs the given command as git-receive-pack"},
+		"--exec":         {gitBlocked, "runs the given command as git-receive-pack"},
+	}},
 	"send-pack": {perm: gitRemoteWrite, flags: map[string]gitFlag{
 		"--receive-pack": {gitBlocked, "runs the given command as git-receive-pack"},
 		"--exec":         {gitBlocked, "runs the given command as git-receive-pack"},
@@ -389,6 +411,9 @@ func validateGitArgs(args []*syntax.Word, gitCfg *config.GitConfig) error {
 		// Bare "git", or only flags (e.g. "git --version") — prints help.
 		return nil
 	}
+	if err := checkGitGlobalConfig(args[1:idx], gitCfg); err != nil {
+		return err
+	}
 	spec, ok := gitSubcommands[subcommand]
 	if !ok {
 		return fmt.Errorf("git subcommand %q is not allowed", subcommand)
@@ -417,6 +442,23 @@ func validateGitArgs(args []*syntax.Word, gitCfg *config.GitConfig) error {
 	}
 	if spec.check != nil {
 		return spec.check(rest, gitCfg)
+	}
+	return nil
+}
+
+// checkGitGlobalConfig requires local_write for the global -c and
+// --config-env options (the arguments before the subcommand): a config value
+// can name a program git runs (core.pager, core.fsmonitor, diff.external,
+// core.sshCommand, ...), and setting one is a local write, as with git config.
+func checkGitGlobalConfig(global []*syntax.Word, cfg *config.GitConfig) error {
+	if cfg.GitLocalWrite() {
+		return nil
+	}
+	for _, arg := range global {
+		lit := arg.Lit()
+		if lit == "-c" || lit == "--config-env" || strings.HasPrefix(lit, "--config-env=") {
+			return fmt.Errorf("git option %q is not allowed: sets a config value, which can name a program for git to run (local_write is disabled)", lit)
+		}
 	}
 	return nil
 }
@@ -468,12 +510,23 @@ func checkGitFlags(subcommand string, rest []*syntax.Word, flags map[string]gitF
 	return nil
 }
 
-// matchGitFlag returns the key of flags that the argument lit sets.
+// matchGitFlag returns the key of flags that the argument lit sets. git
+// accepts short flags bundled (-qd is -q -d), so a short flag matches
+// anywhere in a bundle; that also refuses one that is the attached value of
+// an earlier option in the bundle, which can be spelled apart instead.
 func matchGitFlag(lit string, flags map[string]gitFlag) (string, bool) {
 	if _, ok := flags[lit]; ok {
 		return lit, true
 	}
 	if !strings.HasPrefix(lit, "--") {
+		if len(lit) > 2 && lit[0] == '-' {
+			for _, c := range lit[1:] {
+				key := "-" + string(c)
+				if _, ok := flags[key]; ok {
+					return key, true
+				}
+			}
+		}
 		return "", false
 	}
 	name, _, _ := strings.Cut(lit[2:], "=")
@@ -591,9 +644,18 @@ func validateGitHelpArgs(rest []*syntax.Word, _ *config.GitConfig) error {
 func validateGitMaintenanceArgs(rest []*syntax.Word, cfg *config.GitConfig) error {
 	for i, arg := range rest {
 		lit := wordText(arg)
-		prefetch := lit == "--task=prefetch" ||
-			(lit == "--task" && i+1 < len(rest) && wordText(rest[i+1]) == "prefetch")
-		if prefetch && !cfg.GitRemoteRead() {
+		if lit == "--" {
+			break
+		}
+		name, val, hasVal := strings.Cut(strings.TrimPrefix(lit, "--"), "=")
+		// git accepts any prefix of --task (--ta=prefetch).
+		if !strings.HasPrefix(lit, "--") || name == "" || !strings.HasPrefix("task", name) {
+			continue
+		}
+		if !hasVal && i+1 < len(rest) {
+			val = wordText(rest[i+1])
+		}
+		if val == "prefetch" && !cfg.GitRemoteRead() {
 			return fmt.Errorf("git maintenance task \"prefetch\" is not allowed: fetches from remotes (remote_read is disabled)")
 		}
 	}

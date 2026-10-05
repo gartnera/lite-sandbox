@@ -130,6 +130,18 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 		{"git fast-export marks", "git fast-export --export-marks=.claude/marks HEAD"},
 		{"git read-tree --index-output", "git read-tree --index-output=.claude/idx HEAD"},
 		{"git unpack-file in .claude", "cd .claude && git unpack-file abc123"},
+		{"git diff --output separate", "git diff --output .claude/settings.json"},
+		{"git interpret-trailers --in", "git interpret-trailers --in --trailer 'A: b' .claude/settings.json"},
+		{"git merge-file --marker-size", "git merge-file --marker-size 7 .claude/settings.json a.txt a.txt"},
+		{"git bundle create --version", "git bundle create --version 3 .claude/x.bundle HEAD"},
+		{"git pack-objects --window", "git pack-objects --window 10 .claude/pack"},
+		{"git --work-tree checkout", "git --work-tree .claude checkout HEAD -- settings.json"},
+		{"git --work-tree= checkout", "git --work-tree=.claude checkout HEAD -- settings.json"},
+		{"git init", "git init .claude/skills/repo"},
+		{"git clone", "git clone -q . .claude/skills/repo"},
+		{"git clone in .claude", "cd .claude && git clone https://example.invalid/repo.git"},
+		{"git worktree add", "git worktree add -b x .claude/skills/wt"},
+		{"sort --out abbreviated", "sort --out .claude/settings.json a.txt"},
 	}
 	for _, tt := range blocked {
 		t.Run("blocked/"+tt.name, func(t *testing.T) {

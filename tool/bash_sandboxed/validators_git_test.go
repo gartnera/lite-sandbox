@@ -195,6 +195,14 @@ func TestValidate_BlockedGitSubcommands(t *testing.T) {
 		{"git filter-branch", "git filter-branch --env-filter 'echo'", `git subcommand "filter-branch" is not allowed`},
 		// git grep -O runs a pager command on the matching files
 		{"git grep -O", "git grep -O foo", `git grep flag "-O" is not allowed`},
+		// The porcelain transports take the program to run as upload-pack/receive-pack
+		{"git fetch --upload-pack", "git fetch --upload-pack='touch x; git-upload-pack' .", `git fetch flag "--upload-pack=touch x; git-upload-pack" is not allowed`},
+		{"git pull --upload-pack", "git pull --upload-pack x origin", `git pull flag "--upload-pack" is not allowed`},
+		{"git clone -u", "git clone -u x . copy", `git clone flag "-u" is not allowed`},
+		{"git clone -qu bundled", "git clone -qu x . copy", `git clone flag "-qu" is not allowed`},
+		{"git ls-remote --upload-pack", "git ls-remote --upload=x .", `git ls-remote flag "--upload=x" is not allowed`},
+		{"git ls-remote --exec", "git ls-remote --exec=x .", `git ls-remote flag "--exec=x" is not allowed`},
+		{"git submodule foreach", "git submodule foreach 'touch x'", `git submodule foreach is not allowed: runs the shell command`},
 		{"git grep -O attached", "git grep -Osh foo", `git grep flag "-Osh" is not allowed`},
 		{"git grep -O bundled", "git grep -nOsh foo", `git grep flag "-nOsh" is not allowed`},
 		{"git grep long", "git grep --open-files-in-pager=sh foo", `git grep flag "--open-files-in-pager=sh" is not allowed`},
@@ -702,6 +710,13 @@ func TestValidate_GitReadActions(t *testing.T) {
 		{"git branch --del feature", `git branch flag "--del" is not allowed`},
 		{"git branch --delete=feature", `git branch flag "--delete=feature" is not allowed`},
 		{"git tag --ann v1", `git tag flag "--ann" is not allowed`},
+		// Short flags match inside a bundle
+		{"git branch -qd feature", `git branch flag "-qd" is not allowed`},
+		{"git tag -fa v1", `git tag flag "-fa" is not allowed`},
+		{"git symbolic-ref -qd HEAD", `git symbolic-ref flag "-qd" is not allowed`},
+		// Global config can name a program git runs
+		{"git -c core.pager=cat log", `git option "-c" is not allowed`},
+		{"git --config-env=core.pager=P log", `git option "--config-env=core.pager=P" is not allowed`},
 		// Remote reads stay remote reads
 		{"git archive --remote=origin HEAD", `git archive flag "--remote=origin" is not allowed: fetches the archive from a remote (remote_read is disabled)`},
 		{"git backfill", "remote_read is disabled"},
@@ -734,7 +749,7 @@ func TestValidate_GitMaintenancePrefetch(t *testing.T) {
 		LocalWrite: boolPtr(true),
 		RemoteRead: boolPtr(false),
 	})
-	for _, cmd := range []string{"git maintenance run --task=prefetch", "git maintenance run --task prefetch"} {
+	for _, cmd := range []string{"git maintenance run --task=prefetch", "git maintenance run --task prefetch", "git maintenance run --ta=prefetch", "git maintenance run --tas prefetch"} {
 		f, err := ParseBash(cmd)
 		if err != nil {
 			t.Fatalf("parse error: %v", err)

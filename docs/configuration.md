@@ -741,7 +741,7 @@ unvalidated) is refused:
 | --- | --- |
 | `local_read` | `status`, `log`, `diff`, `show`, `blame`, `annotate`, `grep`, `shortlog`, `describe`, `whatchanged`, `range-diff`, `show-branch`, `cherry`, `last-modified`, `rev-parse`, `rev-list`, `name-rev`, `merge-base`, `merge-tree`, `ls-files`, `ls-tree`, `cat-file`, `diff-files`, `diff-index`, `diff-tree`, `diff-pairs`, `for-each-ref`, `show-ref`, `format-rev`, `count-objects`, `fsck`, `verify-commit`, `verify-tag`, `verify-pack`, `show-index`, `pack-redundant`, `repo`, `var`, `check-attr`, `check-ignore`, `check-mailmap`, `check-ref-format`, `url-parse`, `hash-object`, `symbolic-ref`, `column`, `stripspace`, `patch-id`, `mailinfo`, `mailsplit`, `fmt-merge-msg`, `interpret-trailers`, `get-tar-commit-id`; and, writing the output files they're told to, `format-patch`, `archive`, `fast-export`, `pack-objects`, `unpack-file`, `bugreport`, `diagnose` |
 | `local_write` | `add`, `commit`, `checkout`, `switch`, `restore`, `reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `rm`, `mv`, `init`, `bisect`, `clean`, `apply`, `am`, `quiltimport`, `stash`, `worktree`, `notes`, `history`, `replay`, `replace`, `rerere`, `sparse-checkout`, `refs`, `gc`, `maintenance run`, `prune`, `prune-packed`, `repack`, `pack-refs`, `commit-graph`, `multi-pack-index`, `bundle`, `update-index`, `update-ref`, `update-server-info`, `checkout-index`, `read-tree`, `write-tree`, `commit-tree`, `mktag`, `mktree`, `merge-file`, `index-pack`, `unpack-objects`, `fast-import` |
-| `remote_read` | `fetch`, `pull`, `clone`, `ls-remote`, `backfill`, `request-pull`, `fetch-pack`, `remote` (listing and `show`), `submodule status`/`summary`/`foreach` |
+| `remote_read` | `fetch`, `pull`, `clone`, `ls-remote`, `backfill`, `request-pull`, `fetch-pack`, `remote` (listing and `show`), `submodule status`/`summary` |
 | `remote_write` | `push`, `send-pack` |
 | always allowed | `help`, `version` |
 
@@ -762,13 +762,16 @@ Some subcommands mix levels, and are checked by what the invocation does:
   the ones above are `local_write`.
 - `archive --remote` and `maintenance run --task=prefetch` also need
   `remote_read`.
+- The global `-c` and `--config-env` options (`git -c core.pager=cat log`)
+  need `local_write`: a config value can name a program for git to run, and
+  setting one is a local write, as with `git config`.
 
 A few subcommands and flags are always blocked, whatever the levels, because
 they run a command given on the command line, start something outside the
 repository, or handle credentials:
 
 - `hook`, `filter-branch`, `difftool`, `mergetool`, `merge-index`,
-  `for-each-repo`;
+  `for-each-repo`, `submodule foreach`;
 - `credential`, `credential-cache`, `credential-store`, `send-email`,
   `imap-send`;
 - servers and transport internals (`daemon`, `http-backend`, `instaweb`,
@@ -778,13 +781,14 @@ repository, or handle credentials:
   systemd, or launchd schedule or edit the global config), and the bridges
   to other version control systems (`svn`, `p4`, `cvsimport`, ...);
 - `grep -O`/`--open-files-in-pager` (runs a pager command on the matching
-  files), `archive --exec`, `fetch-pack --upload-pack`, `send-pack
-  --receive-pack`, `help --web`, `hash-object --stdin-paths` and `fast-import
+  files), `archive --exec`, `--upload-pack` of `fetch`/`pull`/`clone`/`ls-remote`/`fetch-pack`,
+  `--receive-pack` of `push`/`send-pack`, `help --web`, `hash-object --stdin-paths` and `fast-import
   --allow-unsafe-features` (which read or write files named on stdin or in the
   import stream, out of reach of the path checks).
 
 Long flags are matched by the abbreviations git accepts, so `git branch --del`
-counts as `--delete`.
+counts as `--delete`, and short flags inside a bundle, so `git branch -qd`
+counts as `-d`.
 
 Git's repository paths are checked at runtime like any other path, including
 after variable expansion (e.g. `git -C $REPO_DIR status` validates the
