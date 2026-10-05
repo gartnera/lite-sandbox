@@ -789,7 +789,8 @@ func TestExecute_GitPlumbing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tt.cmd, err)
 		}
-		if out != tt.want {
+		// BSD wc (macOS) left-pads its count, so compare trimmed.
+		if strings.TrimSpace(out) != strings.TrimSpace(tt.want) {
 			t.Errorf("%s: got %q, want %q", tt.cmd, out, tt.want)
 		}
 	}
