@@ -718,8 +718,8 @@ Git commands are enabled by default, with separate permission levels:
 
 ```yaml
 git:
-  local_read: true             # git status, log, diff, show, grep (default: true)
-  local_write: true            # git add, commit, branch, tag, update-index (default: true)
+  local_read: true             # git status, log, diff, show, grep, for-each-ref (default: true)
+  local_write: true            # git add, commit, branch -d, tag -a, update-ref, gc (default: true)
   remote_read: true            # git fetch, pull, clone (default: true)
   remote_write: false          # git push (default: false)
   allow_worktree_parent: false # if cwd is a linked worktree, also allow read+write to the main worktree (default: false)
@@ -733,8 +733,62 @@ lite-sandbox config git show
 lite-sandbox config git set remote_write true
 ```
 
-`git grep` is a local read, but its `-O`/`--open-files-in-pager` flag is
-always blocked since it runs an arbitrary pager command on the matching files.
+Every git subcommand is classified under one of these levels, and a
+subcommand that isn't (including your own aliases, whose expansion would run
+unvalidated) is refused:
+
+| Level | Subcommands |
+| --- | --- |
+| `local_read` | `status`, `log`, `diff`, `show`, `blame`, `annotate`, `grep`, `shortlog`, `describe`, `whatchanged`, `range-diff`, `show-branch`, `cherry`, `last-modified`, `rev-parse`, `rev-list`, `name-rev`, `merge-base`, `merge-tree`, `ls-files`, `ls-tree`, `cat-file`, `diff-files`, `diff-index`, `diff-tree`, `diff-pairs`, `for-each-ref`, `show-ref`, `format-rev`, `count-objects`, `fsck`, `verify-commit`, `verify-tag`, `verify-pack`, `show-index`, `pack-redundant`, `repo`, `var`, `check-attr`, `check-ignore`, `check-mailmap`, `check-ref-format`, `url-parse`, `hash-object`, `symbolic-ref`, `column`, `stripspace`, `patch-id`, `mailinfo`, `mailsplit`, `fmt-merge-msg`, `interpret-trailers`, `get-tar-commit-id`; and, writing the output files they're told to, `format-patch`, `archive`, `fast-export`, `pack-objects`, `unpack-file`, `bugreport`, `diagnose` |
+| `local_write` | `add`, `commit`, `checkout`, `switch`, `restore`, `reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `rm`, `mv`, `init`, `bisect`, `clean`, `apply`, `am`, `quiltimport`, `stash`, `worktree`, `notes`, `history`, `replay`, `replace`, `rerere`, `sparse-checkout`, `refs`, `gc`, `maintenance run`, `prune`, `prune-packed`, `repack`, `pack-refs`, `commit-graph`, `multi-pack-index`, `bundle`, `update-index`, `update-ref`, `update-server-info`, `checkout-index`, `read-tree`, `write-tree`, `commit-tree`, `mktag`, `mktree`, `merge-file`, `index-pack`, `unpack-objects`, `fast-import` |
+| `remote_read` | `fetch`, `pull`, `clone`, `ls-remote`, `backfill`, `request-pull`, `fetch-pack`, `remote` (listing and `show`), `submodule status`/`summary` |
+| `remote_write` | `push`, `send-pack` |
+| always allowed | `help`, `version` |
+
+Some subcommands mix levels, and are checked by what the invocation does:
+
+- `branch`, `tag`, and `config` are reads; their mutating flags (`branch -d`,
+  `tag -a`, setting a `config` value, ...) need `local_write`. So do
+  `hash-object -w`, `fsck --lost-found`, `interpret-trailers --in-place`, and
+  `symbolic-ref` with a target or `-d`.
+- The listing actions of write subcommands need only `local_read`: `stash
+  list`/`show`, `worktree list`, `notes` (`list`, `show`), `refs`
+  `list`/`exists`/`verify`, `rerere status`/`diff`/`remaining`,
+  `sparse-checkout list`/`check-rules`, `commit-graph verify`,
+  `multi-pack-index verify`, `bundle create`/`verify`/`list-heads`, and
+  `maintenance is-needed`. `reflog` is the other way round: a read, except
+  `reflog expire`/`delete`/`drop`/`write`.
+- `remote add`/`remove`/`rename`/`set-url`/... and every `submodule` action but
+  the ones above are `local_write`.
+- `archive --remote` and `maintenance run --task=prefetch` also need
+  `remote_read`.
+- The global `-c` and `--config-env` options (`git -c core.pager=cat log`)
+  need `local_write`: a config value can name a program for git to run, and
+  setting one is a local write, as with `git config`.
+
+A few subcommands and flags are always blocked, whatever the levels, because
+they run a command given on the command line, start something outside the
+repository, or handle credentials:
+
+- `hook`, `filter-branch`, `difftool`, `mergetool`, `merge-index`,
+  `for-each-repo`, `submodule foreach`;
+- `credential`, `credential-cache`, `credential-store`, `send-email`,
+  `imap-send`;
+- servers and transport internals (`daemon`, `http-backend`, `instaweb`,
+  `upload-pack`, `receive-pack`, `upload-archive`, `shell`, `http-fetch`,
+  `http-push`, ...), GUIs (`gui`, `gitk`, `citool`), `scalar`,
+  `maintenance start`/`stop`/`register`/`unregister` (which install a cron,
+  systemd, or launchd schedule or edit the global config), and the bridges
+  to other version control systems (`svn`, `p4`, `cvsimport`, ...);
+- `grep -O`/`--open-files-in-pager` (runs a pager command on the matching
+  files), `archive --exec`, `--upload-pack` of `fetch`/`pull`/`clone`/`ls-remote`/`fetch-pack`,
+  `--receive-pack` of `push`/`send-pack`, `help --web`, `hash-object --stdin-paths` and `fast-import
+  --allow-unsafe-features` (which read or write files named on stdin or in the
+  import stream, out of reach of the path checks).
+
+Long flags are matched by the abbreviations git accepts, so `git branch --del`
+counts as `--delete`, and short flags inside a bundle, so `git branch -qd`
+counts as `-d`.
 
 Git's repository paths are checked at runtime like any other path, including
 after variable expansion (e.g. `git -C $REPO_DIR status` validates the

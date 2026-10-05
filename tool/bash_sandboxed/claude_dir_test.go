@@ -67,6 +67,7 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 		{"ln to .claude", "ln -s .claude/settings.json link2"},
 		{"chmod outside", "chmod 644 a.txt"},
 		{"chmod dash mode outside", "chmod -x a.txt"},
+		{"git merge-file -p reads", "git merge-file -p .claude/settings.json a.txt a.txt"},
 	}
 	for _, tt := range allowed {
 		t.Run("allowed/"+tt.name, func(t *testing.T) {
@@ -117,6 +118,30 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 		{"git mv", "git mv a.txt .claude/settings.json"},
 		{"git checkout path", "git checkout -- .claude/settings.json"},
 		{"git -C restore", "git -C .claude restore settings.json"},
+		{"git checkout-index", "git checkout-index -f .claude/settings.json"},
+		{"git merge-file", "git merge-file .claude/settings.json a.txt a.txt"},
+		{"git interpret-trailers --in-place", "git interpret-trailers --in-place --trailer 'A: b' .claude/settings.json"},
+		{"git diff --output", "git diff --output=.claude/settings.json"},
+		{"git archive -o", "git archive -o .claude/x.tar HEAD"},
+		{"git archive --output", "git archive --output .claude/x.tar HEAD"},
+		{"git format-patch -o", "git format-patch -o .claude/skills HEAD~1"},
+		{"git format-patch in .claude", "cd .claude && git format-patch HEAD~1"},
+		{"git bundle create", "git bundle create .claude/x.bundle HEAD"},
+		{"git fast-export marks", "git fast-export --export-marks=.claude/marks HEAD"},
+		{"git read-tree --index-output", "git read-tree --index-output=.claude/idx HEAD"},
+		{"git unpack-file in .claude", "cd .claude && git unpack-file abc123"},
+		{"git diff --output separate", "git diff --output .claude/settings.json"},
+		{"git interpret-trailers --in", "git interpret-trailers --in --trailer 'A: b' .claude/settings.json"},
+		{"git merge-file --marker-size", "git merge-file --marker-size 7 .claude/settings.json a.txt a.txt"},
+		{"git bundle create --version", "git bundle create --version 3 .claude/x.bundle HEAD"},
+		{"git pack-objects --window", "git pack-objects --window 10 .claude/pack"},
+		{"git --work-tree checkout", "git --work-tree .claude checkout HEAD -- settings.json"},
+		{"git --work-tree= checkout", "git --work-tree=.claude checkout HEAD -- settings.json"},
+		{"git init", "git init .claude/skills/repo"},
+		{"git clone", "git clone -q . .claude/skills/repo"},
+		{"git clone in .claude", "cd .claude && git clone https://example.invalid/repo.git"},
+		{"git worktree add", "git worktree add -b x .claude/skills/wt"},
+		{"sort --out abbreviated", "sort --out .claude/settings.json a.txt"},
 	}
 	for _, tt := range blocked {
 		t.Run("blocked/"+tt.name, func(t *testing.T) {

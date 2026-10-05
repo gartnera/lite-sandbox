@@ -189,25 +189,39 @@ func chmodTargets(args []string) []string {
 // gitWriteSubcommands are the git subcommands whose path operands are
 // working-tree files they create, rewrite, or delete.
 var gitWriteSubcommands = map[string]bool{
-	"mv":       true,
-	"rm":       true,
-	"checkout": true,
-	"restore":  true,
+	"mv":             true,
+	"rm":             true,
+	"checkout":       true,
+	"restore":        true,
+	"checkout-index": true,
 }
 
-// gitWriteTargets returns the path operands of a git subcommand that writes
-// the working tree (see gitWriteSubcommands), relative to the -C directories
-// that precede it.
+// gitWriteTargets returns the files a git invocation writes that its
+// arguments name (see gitSubcommandWriteTargets), relative to the -C
+// directories that precede the subcommand.
+//
+// --work-tree moves the files the subcommand writes into that tree, so each
+// target is also listed under it (git resolves a path from the current
+// directory when it is inside the work tree, and from the tree's top
+// otherwise).
 func gitWriteTargets(args []string) []string {
-	base := ""
+	base, workTree := "", ""
 	for i := 1; i < len(args); i++ {
 		a := args[i]
+		if v, ok := strings.CutPrefix(a, "--work-tree="); ok {
+			workTree = v
+			continue
+		}
 		if gitGlobalValueFlags[a] {
-			if a == "-C" && i+1 < len(args) {
+			if (a == "-C" || a == "--work-tree") && i+1 < len(args) {
 				if args[i+1] == "" {
 					return nil // non-literal; re-checked after expansion
 				}
-				base = filepath.Join(base, args[i+1])
+				if a == "-C" {
+					base = filepath.Join(base, args[i+1])
+				} else {
+					workTree = args[i+1]
+				}
 			}
 			i++
 			continue
@@ -215,22 +229,131 @@ func gitWriteTargets(args []string) []string {
 		if strings.HasPrefix(a, "-") {
 			continue
 		}
-		if a == "" || !gitWriteSubcommands[a] {
+		if a == "" {
 			return nil
 		}
+		if workTree != "" && !filepath.IsAbs(workTree) {
+			workTree = filepath.Join(base, workTree)
+		}
 		var out []string
-		for j := i + 1; j < len(args); j++ {
-			if args[j] == "--" {
+		for _, t := range gitSubcommandWriteTargets(args[i:]) {
+			if t == "" || t == "-" {
 				continue
 			}
-			if strings.HasPrefix(args[j], "-") || args[j] == "" {
-				continue
+			out = append(out, filepath.Join(base, t))
+			if workTree != "" && !filepath.IsAbs(t) {
+				out = append(out, filepath.Join(workTree, t))
 			}
-			out = append(out, filepath.Join(base, args[j]))
 		}
 		return out
 	}
 	return nil
+}
+
+// gitSubcommandWriteTargets returns the files that args (starting with the
+// subcommand) write: the operands of gitWriteSubcommands, the output files
+// and directories of the subcommands that take one, and "." for those that
+// write into the current directory by default. Any subcommand's --output
+// counts (git diff --output FILE and its log/show relatives).
+func gitSubcommandWriteTargets(args []string) []string {
+	var out []string
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if v, ok := strings.CutPrefix(a, "--output="); ok {
+			out = append(out, v)
+		} else if a == "--output" && i+1 < len(args) {
+			i++
+			out = append(out, args[i])
+		}
+	}
+	switch sub := args[0]; {
+	case gitWriteSubcommands[sub]:
+		pos, vals, _ := optSpec{long: []string{"prefix", "stage"}}.parse(args, nil)
+		return append(append(out, pos...), vals["prefix"]...)
+	case sub == "merge-file":
+		// Writes the result over the first file, unless -p prints it.
+		pos, _, flags := optSpec{short: "L", long: []string{"marker-size", "diff-algorithm"}}.parse(args, nil)
+		if !flags["p"] && !flags["stdout"] && len(pos) > 0 {
+			out = append(out, pos[0])
+		}
+	case sub == "interpret-trailers":
+		pos, _, flags := optSpec{long: []string{"trailer", "where", "if-exists", "if-missing"}}.parse(args, nil)
+		for name := range flags {
+			// git accepts --in, --in-p, ... for --in-place.
+			if len(name) >= 2 && strings.HasPrefix("in-place", name) {
+				out = append(out, pos...)
+				break
+			}
+		}
+	case sub == "archive":
+		_, vals, _ := optSpec{short: "o", long: []string{"output", "format", "prefix", "add-file", "add-virtual-file", "remote", "exec"}}.parse(args, nil)
+		out = append(append(out, vals["o"]...), vals["output"]...)
+	case sub == "format-patch", sub == "bugreport", sub == "diagnose":
+		_, vals, flags := optSpec{short: "o", long: []string{"output-directory"}}.parse(args, nil)
+		dirs := append(vals["o"], vals["output-directory"]...)
+		if len(dirs) == 0 && !flags["stdout"] {
+			dirs = []string{"."}
+		}
+		out = append(out, dirs...)
+	case sub == "mailsplit":
+		_, vals, _ := optSpec{short: "o"}.parse(args, nil)
+		out = append(out, vals["o"]...)
+	case sub == "bundle":
+		pos, _, _ := optSpec{long: []string{"version"}}.parse(args, nil)
+		if len(pos) > 1 && pos[0] == "create" {
+			out = append(out, pos[1])
+		}
+	case sub == "pack-objects":
+		// Writes <base-name>-<hash>.pack and .idx.
+		pos, _, flags := optSpec{long: []string{
+			"window", "depth", "window-memory", "max-pack-size", "threads", "compression",
+			"index-version", "filter", "unpack-unreachable", "keep-pack", "missing",
+			"cruft-expiration", "uri-protocol", "name-hash-version",
+		}}.parse(args, nil)
+		if !flags["stdout"] && len(pos) > 0 {
+			out = append(out, pos[0])
+		}
+	case sub == "fast-export", sub == "fast-import":
+		_, vals, _ := optSpec{long: []string{"export-marks"}}.parse(args, nil)
+		out = append(out, vals["export-marks"]...)
+	case sub == "read-tree":
+		_, vals, _ := optSpec{long: []string{"index-output"}}.parse(args, nil)
+		out = append(out, vals["index-output"]...)
+	case sub == "unpack-file":
+		out = append(out, ".")
+	case sub == "init":
+		// git init [<directory>]
+		pos, vals, _ := optSpec{short: "b", long: []string{"template", "separate-git-dir", "initial-branch", "object-format", "ref-format"}}.parse(args, nil)
+		out = append(append(out, pos...), vals["separate-git-dir"]...)
+	case sub == "clone":
+		// git clone <repository> [<directory>], which defaults to a
+		// directory named after the repository in the current one.
+		pos, vals, _ := optSpec{short: "obucj", long: []string{
+			"origin", "branch", "upload-pack", "template", "reference", "reference-if-able",
+			"separate-git-dir", "depth", "shallow-since", "shallow-exclude", "config",
+			"server-option", "filter", "bundle-uri", "jobs", "revision", "ref-format",
+		}}.parse(args, nil)
+		switch {
+		case len(pos) > 1:
+			out = append(out, pos[1])
+		case len(pos) == 1:
+			out = append(out, ".")
+		}
+		out = append(out, vals["separate-git-dir"]...)
+	case sub == "worktree":
+		// git worktree add <path> [<commit>], git worktree move <worktree> <new-path>
+		pos, _, _ := optSpec{short: "bB", long: []string{"reason"}}.parse(args, nil)
+		switch {
+		case len(pos) > 1 && pos[0] == "add":
+			out = append(out, pos[1])
+		case len(pos) > 2 && pos[0] == "move":
+			out = append(out, pos[2])
+		}
+	}
+	return out
 }
 
 // optSpec describes a command's options well enough to tell its operands
@@ -240,6 +363,29 @@ func gitWriteTargets(args []string) []string {
 type optSpec struct {
 	short string
 	long  []string
+}
+
+// longName expands name to the one entry of long it abbreviates, the way
+// getopt_long and git's option parser accept any unambiguous prefix
+// (--target for --target-directory). An exact or ambiguous name is returned
+// as is.
+func (sp optSpec) longName(name string) string {
+	if name == "" || slices.Contains(sp.long, name) {
+		return name
+	}
+	match := ""
+	for _, l := range sp.long {
+		if strings.HasPrefix(l, name) {
+			if match != "" {
+				return name
+			}
+			match = l
+		}
+	}
+	if match == "" {
+		return name
+	}
+	return match
 }
 
 // parse splits args (with the command name at index 0) into the operands, the
@@ -262,6 +408,7 @@ func (sp optSpec) parse(args []string, skip map[int]bool) (pos []string, vals ma
 			return pos, vals, flags
 		case strings.HasPrefix(a, "--"):
 			name, val, hasVal := strings.Cut(a[2:], "=")
+			name = sp.longName(name)
 			flags[name] = true
 			switch {
 			case hasVal:
