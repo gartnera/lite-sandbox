@@ -70,7 +70,9 @@ func validateClaudeDirWrites(cmdName string, args []string, workDir string, skip
 // that are not paths (sed's script). It errs toward listing an argument: a
 // non-target listed by mistake only matters if it resolves into .claude.
 // What a command writes without naming it (git checkout switching branches,
-// tar extracting entries) is left to the OS sandbox.
+// tar extracting entries) is not refused: the OS sandbox does not mask
+// .claude either, since git failing on a tracked .claude file midway
+// through a checkout or rebase leaves the tree half switched.
 func writeTargets(cmdName string, args []string, skip map[int]bool) []string {
 	switch cmdName {
 	case "rm", "touch", "tee", "mkdir":

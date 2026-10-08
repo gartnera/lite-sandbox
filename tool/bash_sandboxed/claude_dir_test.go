@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,28 +162,42 @@ func TestBashSandboxed_ClaudeDirReadOnly(t *testing.T) {
 	}
 }
 
-// TestOSSandboxClaudeDirReadOnly checks the OS sandbox backstop: a write into
-// .claude that the path checks cannot see (cp copying a tree that contains
-// one) is refused by the read-only mount.
-func TestOSSandboxClaudeDirReadOnly(t *testing.T) {
+// TestOSSandboxGitCheckoutTrackedClaudeDir checks that the OS sandbox does
+// not mask .claude: switching branches across a change to a tracked .claude
+// file succeeds instead of failing midway with a half-switched tree.
+func TestOSSandboxGitCheckoutTrackedClaudeDir(t *testing.T) {
 	requireOSSandbox(t)
 	workDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(workDir, ".claude"), 0o755); err != nil {
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	skill := filepath.Join(workDir, ".claude", "skills", "s", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(workDir, "src", ".claude"), 0o755); err != nil {
+	if err := os.WriteFile(skill, []byte("main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "src", ".claude", "settings.json"), []byte("planted\n"), 0o644); err != nil {
+	git("init", "-q", "-b", "main")
+	git("add", ".")
+	git("commit", "-q", "-m", "main")
+	git("checkout", "-q", "-b", "other")
+	if err := os.WriteFile(skill, []byte("other\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := newOSSandboxForTest(t, workDir)
+	git("commit", "-q", "-am", "other")
+	git("checkout", "-q", "main")
 
-	if out, err := s.Execute(context.Background(), "cat src/.claude/settings.json", workDir, []string{workDir}, []string{workDir}); err != nil || out != "planted\n" {
-		t.Fatalf("read failed: %q, %v", out, err)
+	s := newOSSandboxForTest(t, workDir)
+	if out, err := s.Execute(context.Background(), "git checkout -q other", workDir, []string{workDir}, []string{workDir}); err != nil {
+		t.Fatalf("git checkout failed: %q, %v", out, err)
 	}
-	_, _ = s.Execute(context.Background(), "cp -r src/. .", workDir, []string{workDir}, []string{workDir})
-	if _, err := os.Stat(filepath.Join(workDir, ".claude", "settings.json")); err == nil {
-		t.Fatal("cp wrote into the read-only .claude directory")
+	if got, err := os.ReadFile(skill); err != nil || string(got) != "other\n" {
+		t.Fatalf("SKILL.md not checked out: %q, %v", got, err)
 	}
 }

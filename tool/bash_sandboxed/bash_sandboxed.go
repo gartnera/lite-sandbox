@@ -1723,23 +1723,6 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		opts.DeniedReadPaths = denyPaths(s.cfg.EffectiveDeniedReadEntries())
 		opts.DeniedWritePaths = denyPaths(s.cfg.EffectiveDeniedWriteEntries())
 	}
-	// The project's .claude directory is read-only wherever the path boundary
-	// is enforced (see IsClaudeConfigPath): this backs the path checks for
-	// writes they cannot see, such as git checking out a .claude file or tar
-	// extracting one. A missing directory is created so it can be mounted. A
-	// working directory that is itself inside .claude (~/.claude) is mounted
-	// read-only whole, matching the path checks, which refuse every write
-	// there.
-	if rulePathBoundary.blockedIn(s.cfg.EffectiveMode()) {
-		dir := s.workerWorkDir
-		if real, err := filepath.EvalSymlinks(dir); err == nil {
-			dir = real
-		}
-		if !IsClaudeConfigPath(dir) {
-			dir = filepath.Join(dir, ".claude")
-		}
-		opts.DeniedWritePaths = append(opts.DeniedWritePaths, os_sandbox.DenyPath{Path: dir, Dir: true})
-	}
 	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "mode", s.cfg.EffectiveMode(), "deniedRead", len(opts.DeniedReadPaths))
 	w, err := os_sandbox.StartWorker(context.Background(), opts)
 	if err != nil {
