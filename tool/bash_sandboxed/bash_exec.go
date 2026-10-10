@@ -510,10 +510,11 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths) error {
 	useOSSandbox := s.osSandboxEnabled()
 
-	// Build environment from parent context
+	// Build environment from parent context: a nested script is a child
+	// process, so it inherits only the exported variables.
 	var env []string
 	hc.Env.Each(func(name string, vr expand.Variable) bool {
-		if !vr.IsSet() {
+		if !isExportedEnvVar(vr) {
 			return true
 		}
 		env = append(env, name+"="+vr.String())

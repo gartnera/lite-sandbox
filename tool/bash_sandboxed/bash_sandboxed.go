@@ -1233,7 +1233,7 @@ func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox 
 func (s *Sandbox) commandEnv(hc interp.HandlerContext, injectDockerProxy bool) (map[string]string, error) {
 	envMap := make(map[string]string)
 	hc.Env.Each(func(name string, vr expand.Variable) bool {
-		if vr.IsSet() {
+		if isExportedEnvVar(vr) {
 			envMap[name] = vr.String()
 		}
 		return true
@@ -1252,6 +1252,14 @@ func (s *Sandbox) commandEnv(hc interp.HandlerContext, injectDockerProxy bool) (
 		}
 	}
 	return envMap, nil
+}
+
+// isExportedEnvVar reports whether a shell variable belongs in a child
+// process's environment: like bash (and interp's own execEnv), only exported,
+// set, plain string variables are passed on, so `FOO=bar; printenv FOO` prints
+// nothing while `export FOO=bar` and `FOO=bar printenv FOO` print bar.
+func isExportedEnvVar(vr expand.Variable) bool {
+	return vr.IsSet() && vr.Exported && vr.Kind == expand.String
 }
 
 // execOnHost runs a command directly on the host, mirroring

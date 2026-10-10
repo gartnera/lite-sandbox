@@ -155,6 +155,36 @@ func TestExecuteBash(t *testing.T) {
 			wantOut: "bar\n",
 		},
 		{
+			name:    "unexported variable not passed to bash -c",
+			command: `FOO=bar; bash -c 'echo "[$FOO]"'`,
+			wantOut: "[]\n",
+		},
+		{
+			name:    "exported variable passed to bash -c",
+			command: `export FOO=bar; bash -c 'echo "[$FOO]"'`,
+			wantOut: "[bar]\n",
+		},
+		{
+			name:    "prefix assignment passed to bash -c",
+			command: `FOO=bar bash -c 'echo "[$FOO]"'`,
+			wantOut: "[bar]\n",
+		},
+		{
+			name:    "unexported variable not passed to external command",
+			command: `FOO=bar; printenv FOO || echo unset`,
+			wantOut: "unset\n",
+		},
+		{
+			name:    "exported variable passed to external command",
+			command: `FOO=bar; export FOO; printenv FOO`,
+			wantOut: "bar\n",
+		},
+		{
+			name:    "prefix assignment passed to external command",
+			command: `FOO=bar printenv FOO`,
+			wantOut: "bar\n",
+		},
+		{
 			name:    "bash -c with subshell",
 			command: `bash -c 'echo $(echo inner)'`,
 			wantOut: "inner\n",
