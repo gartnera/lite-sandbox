@@ -132,6 +132,9 @@ type Sandbox struct {
 	// lock every other handler reads through. See python.go.
 	montyMu sync.Mutex
 	monty   *montygo.Runner
+	// montyPolicy is the OS policy every run gets (see montyOsPolicy), settled
+	// alongside monty because it is checked against the compiled runtime.
+	montyPolicy montygo.OsPolicy
 }
 
 // NewSandbox creates a Sandbox with the default configuration: no extra

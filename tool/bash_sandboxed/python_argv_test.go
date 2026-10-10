@@ -394,3 +394,25 @@ func TestRewriteFromSysImport(t *testing.T) {
 		}
 	}
 }
+
+// TestPythonArgvShimKeepsSysAttributes checks that mentioning argv, which
+// swaps `sys` for the shim, does not cost the program the rest of sys: every
+// attribute monty's own module has must still read through.
+func TestPythonArgvShimKeepsSysAttributes(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+
+	reads := make([]string, len(pythonSysAttrs))
+	for i, attr := range pythonSysAttrs {
+		reads[i] = "sys." + attr
+	}
+	prog := "import sys\nsys.argv\n" + strings.Join(reads, "\n") + "\nprint(sys.maxsize == 2**63 - 1, sys.argv)\n"
+	out, err := s.Execute(context.Background(), "python3 - x <<'PY'\n"+prog+"PY", dir, []string{dir}, []string{dir})
+	if err != nil {
+		t.Fatalf("%v (output %q)", err, out)
+	}
+	if out != "True ['-', 'x']\n" {
+		t.Fatalf("got %q", out)
+	}
+}

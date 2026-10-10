@@ -8,9 +8,10 @@ import (
 	montygo "github.com/fugue-labs/monty-go"
 )
 
-// monty has no sys.argv. Its `sys` module is built in Rust from a fixed
-// attribute list, and module objects have no __dict__, so a program cannot
-// assign one either (`sys.argv = [...]` raises AttributeError). Without help,
+// monty's sys.argv holds only the script name: it runs no command line. Its
+// `sys` module is built in Rust from a fixed attribute list, and module
+// attributes cannot be set, so a program cannot assign argv either
+// (`sys.argv = [...]` raises AttributeError). Without help,
 // `python3 script.py --flag input.csv` would run with its arguments silently
 // invisible — the kind of failure that produces a wrong answer rather than an
 // error.
@@ -55,11 +56,23 @@ func sysPrologue(argv []string) string {
 	b.WriteString("class " + pythonShimName + ":\n")
 	b.WriteString("    argv = " + pythonListLiteral(argv) + "\n")
 	b.WriteString("    stdin = " + pythonStdinInput + "\n")
-	for _, attr := range []string{"version", "version_info", "platform", "stdout", "stderr"} {
+	for _, attr := range pythonSysAttrs {
 		b.WriteString("    " + attr + " = _lite_sandbox_real_sys." + attr + "\n")
 	}
 	b.WriteString("sys = " + pythonShimName + "()\n")
 	return b.String()
+}
+
+// pythonSysAttrs are the real sys attributes the shim proxies: every one
+// monty's sys module has, bar the argv the shim replaces. Each must exist —
+// the prologue reads them all, so a missing one would fail every program
+// that mentions argv.
+var pythonSysAttrs = []string{
+	"version", "version_info", "hexversion", "api_version", "platform", "copyright",
+	"builtin_module_names", "maxsize", "maxunicode", "byteorder", "float_info",
+	"float_repr_style", "executable", "prefix", "exec_prefix", "base_prefix",
+	"base_exec_prefix", "platlibdir", "abiflags", "dont_write_bytecode",
+	"pycache_prefix", "flags", "stdout", "stderr",
 }
 
 // pythonListLiteral renders strings as a Python list literal. Every value is
