@@ -227,6 +227,11 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if entry, denied := s.deniedCommandWords(cmdName, args[1:]); denied {
 		return commandDeniedError(cmdName, entry)
 	}
+	// Nor can a wrapped command be approved: the validators here do not see
+	// the call's approval, so a prompted command must run on its own.
+	if entry, ok := matchCommandEntries(s.getPromptCommands(), cmdName, wordLits(args[1:])); ok {
+		return promptWrappedError(cmdName, entry)
+	}
 	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, xcrun)", cmdName))
 	}

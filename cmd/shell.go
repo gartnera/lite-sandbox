@@ -128,7 +128,21 @@ func runShell() error {
 			continue
 		}
 
-		output, err := sandbox.Execute(ctx, line, workDir, readPaths, writePaths)
+		// The user typing the command is the one a prompt entry asks.
+		runCtx := ctx
+		if prompted := sandbox.PromptedCommands(line); len(prompted) > 0 {
+			fmt.Fprintf(os.Stderr, "%s\nRun it? [y/N] ", promptReason(prompted))
+			if !scanner.Scan() {
+				fmt.Fprintln(os.Stderr)
+				break
+			}
+			if answer := strings.ToLower(strings.TrimSpace(scanner.Text())); answer != "y" && answer != "yes" {
+				continue
+			}
+			runCtx = bash_sandboxed.WithApproval(ctx)
+		}
+
+		output, err := sandbox.Execute(runCtx, line, workDir, readPaths, writePaths)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}

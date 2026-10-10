@@ -401,6 +401,15 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		}
 		script = cmdString
 	} else if scriptFile != "" {
+		// `bash <script>` runs the script as surely as `./<script>` does, so a
+		// prompt entry for the script applies here too; past it, the
+		// script's own commands are not covered by the call's approval.
+		if _, err := s.checkPrompt(ctx, scriptFile, args[i:]); err != nil {
+			if err := s.report(ctx, layerRuntime, ruleCommandPrompt, err); err != nil {
+				return err
+			}
+		}
+		ctx = withoutApproval(ctx)
 		path := absPath(scriptFile, hc.Dir)
 		// A bare extra_commands script entry is an explicit trust opt-in, so
 		// invoking it via `bash <script>` must behave the same as running it
@@ -467,6 +476,9 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 
 	hc := interp.HandlerCtx(ctx)
 	scriptPath := absPath(args[0], hc.Dir)
+	// The call's approval covers the command line the user saw, not the
+	// commands of the script it runs.
+	ctx = withoutApproval(ctx)
 
 	// Read the script file
 	data, err := os.ReadFile(scriptPath)
@@ -579,12 +591,18 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			return err
 		}
 	}
+	// Runtime prompt check, alongside the deny list: a prompted invocation
+	// whose name was dynamic, or that a script runs, is caught here.
+	promptApproved, promptErr := s.checkPrompt(ctx, cmdName, args[1:])
+	if err := s.report(ctx, layerRuntime, ruleCommandPrompt, promptErr); err != nil {
+		return err
+	}
 	// Runtime command whitelist check — catches blocked commands
 	// introduced via source/. or other dynamic execution paths.
 	// Process-control commands (kill, pkill) are permitted only when
 	// the OS sandbox is active, where they are contained.
 	osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly {
+	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly && !promptApproved {
 		// Whitelist and local-binary gates are allowlist-only rules: in
 		// denylist/open mode the finding is audited and the command runs.
 		var gateErr error
@@ -768,8 +786,12 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						return nil, err
 					}
 				}
+				promptApproved, promptErr := s.checkPrompt(ctx, name, args[1:])
+				if err := s.report(ctx, layerRuntime, ruleCommandPrompt, promptErr); err != nil {
+					return nil, err
+				}
 				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
-				if !s.commandWhitelisted(name) && !s.extraAllowsArgs(name, args[1:]) && !osOnly {
+				if !s.commandWhitelisted(name) && !s.extraAllowsArgs(name, args[1:]) && !osOnly && !promptApproved {
 					if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(name)); err != nil {
 						return nil, err
 					}

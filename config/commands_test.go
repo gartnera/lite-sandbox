@@ -56,6 +56,38 @@ commands:
 	}
 }
 
+// TestCommands_Prompt: a prompt entry, with or without an allow, is listed by
+// PromptedCommandList; a prompted allow is still an allow (its prompt is the
+// sandbox's to enforce), and a prompt-only entry allows nothing on its own.
+func TestCommands_Prompt(t *testing.T) {
+	writeConfig(t, `
+commands:
+  - command: rm
+    prompt: true
+  - command: git push
+    allow: true
+    prompt: true
+  - command: lite-sandbox update
+    allow: true
+    prompt: true
+  - command: curl
+    allow: true
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.PromptedCommandList(); !slices.Equal(got, []string{"rm", "git push", "lite-sandbox update"}) {
+		t.Errorf("PromptedCommandList = %v", got)
+	}
+	if got := cfg.ExtraCommandList(); !slices.Equal(got, []string{"git push", "lite-sandbox update", "curl"}) {
+		t.Errorf("ExtraCommandList = %v", got)
+	}
+	if got := cfg.LiftedDeniedCommands(); !slices.Equal(got, []string{"lite-sandbox update"}) {
+		t.Errorf("LiftedDeniedCommands = %v (a prompted allow lifts a built-in like any allow)", got)
+	}
+}
+
 // TestCommands_LegacyKeysStillLoadAsUnion: the three deprecated lists keep
 // loading, resolve as the union with commands, and a "-" entry still lifts.
 func TestCommands_LegacyKeysStillLoadAsUnion(t *testing.T) {
@@ -110,8 +142,10 @@ commands:
 func TestCommands_Validation(t *testing.T) {
 	for _, tc := range []struct{ name, body, wantErr string }{
 		{"no command", "commands:\n  - allow: true\n", "without a command"},
-		{"neither", "commands:\n  - command: curl\n", "neither allow: true nor allow: false"},
+		{"neither", "commands:\n  - command: curl\n", "none of allow: true, allow: false or prompt: true"},
 		{"no_sandbox on deny", "commands:\n  - command: curl\n    allow: false\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
+		{"no_sandbox on prompt", "commands:\n  - command: curl\n    prompt: true\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
+		{"prompt on deny", "commands:\n  - command: curl\n    allow: false\n    prompt: true\n", "prompt applies to an allow or stands on its own"},
 		{"leading dash", "commands:\n  - command: -lite-sandbox hook\n    allow: false\n", "deprecated denied_commands way"},
 		{"in override", "overrides:\n  - path: /x\n    commands:\n      - command: curl\n", `override "/x"`},
 	} {
@@ -136,6 +170,8 @@ func TestCommandEntry_Describe(t *testing.T) {
 		{CommandEntry{Command: "curl", Allow: &yes}, "allow"},
 		{CommandEntry{Command: "docker", Allow: &yes, NoSandbox: true}, "allow, no sandbox (runs on the host, outside the OS sandbox)"},
 		{CommandEntry{Command: "sudo", Allow: &no}, "deny"},
+		{CommandEntry{Command: "rm", Prompt: true}, "prompt (asks the user to approve each invocation)"},
+		{CommandEntry{Command: "git push", Allow: &yes, Prompt: true}, "allow, prompt (asks the user to approve each invocation)"},
 	} {
 		if got := tc.e.Describe(); got != tc.want {
 			t.Errorf("%+v.Describe() = %q, want %q", tc.e, got, tc.want)

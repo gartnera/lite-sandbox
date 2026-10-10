@@ -8,42 +8,27 @@
 // `lite-sandbox config` invocation with literal arguments (see Parse), which
 // the MCP server runs itself, outside the sandbox — but only once the user has
 // approved it. The server cannot see the agent's permission prompt, so the
-// approval travels as a ticket: the PreToolUse hook, which the agent runs
-// before the tool call, answers "ask" (the agent prompts the user) and records
-// a ticket naming the exact arguments. The server runs a request only after
-// consuming the matching ticket. With no hook registered there is no ticket,
-// so the server refuses instead of making an unapproved change.
-//
-// Tickets live in lite-sandbox's cache directory, guarded like the config file
-// itself: the path boundary keeps sandboxed commands' writes in the project,
-// and under the OS sandbox the directory is in config.DefaultDeniedWritePaths.
-// Nor can a command mint a ticket by running the hook, which the built-in
-// command deny list denies. And a ticket only matters when the hook did not
-// run: when it does, it asks the user about the call whatever tickets exist.
+// approval travels as a ticket (internal/approval): the PreToolUse hook, which
+// the agent runs before the tool call, answers "ask" (the agent prompts the
+// user) and records a ticket naming the exact arguments. The server runs a
+// request only after consuming the matching ticket. With no hook registered
+// there is no ticket, so the server refuses instead of making an unapproved
+// change.
 package configrequest
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/approval"
 )
-
-// TicketTTL bounds how long a ticket waits for its tool call. The hook writes
-// it before the user is prompted, so it has to outlast a user who steps away
-// from the prompt; anything older is from a call that never reached the server
-// (the user declined, or the agent was interrupted) and is ignored.
-const TicketTTL = 15 * time.Minute
 
 // Request is a config request: the arguments to `lite-sandbox config`.
 type Request struct {
@@ -249,113 +234,28 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// key names the ticket for request r made from cwd. r is the request as the
-// agent wrote it, before Scope: its arguments are what the hook and the
-// server both read from the same command, whereas the scoped arguments carry
-// cwd, which the two may spell differently (the event's cwd against the
-// server's os.Getwd, /tmp against /private/tmp). The working directory goes in
-// with its symlinks resolved instead, which also keeps a relative --dir from
-// naming the same ticket in every project.
-func key(cwd string, r Request) string {
-	if real, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = real
-	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%d:%s\x00", len(cwd), filepath.Clean(cwd))
-	for _, a := range r.Args {
-		fmt.Fprintf(h, "%d:%s\x00", len(a), a)
-	}
-	return hex.EncodeToString(h.Sum(nil))
+// subject is the approval subject of request r: its arguments as the agent
+// wrote them, before Scope. Those are what the hook and the server both read
+// from the same command, whereas the scoped arguments carry cwd, which the two
+// may spell differently; the ticket is keyed on the working directory itself
+// (see approval.Issue).
+func (r Request) subject() approval.Subject {
+	return append(approval.Subject{"config"}, r.Args...)
 }
 
-// Dir is the directory tickets are kept in.
-func Dir() (string, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("unable to determine cache directory: %w", err)
-	}
-	return filepath.Join(cache, "lite-sandbox", "config-requests"), nil
-}
-
-// Issue records a ticket for request r made from cwd (see key). The hook
-// calls it as it asks the user to approve the call.
+// Issue records a ticket for request r made from cwd. The hook calls it as it
+// asks the user to approve the call.
 func Issue(cwd string, r Request) error {
-	dir, err := Dir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	pruneExpired(dir)
-	p := filepath.Join(dir, key(cwd, r))
-	tmp, err := os.CreateTemp(dir, ".ticket-*")
-	if err != nil {
-		return err
-	}
-	_, werr := tmp.WriteString(r.Command() + "\n")
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		os.Remove(tmp.Name())
-		return werr
-	}
-	if err := os.Rename(tmp.Name(), p); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
+	return approval.Issue(cwd, r.subject(), r.Command())
 }
 
 // ErrNoTicket is returned by Consume when no live ticket matches the request:
 // the PreToolUse hook did not run for it, so the user was never asked.
-var ErrNoTicket = errors.New("no approval was recorded for this request")
+var ErrNoTicket = approval.ErrNoTicket
 
 // Consume takes the ticket for request r made from cwd, so each approval runs
 // exactly one request. It returns ErrNoTicket when there is none, or only an
 // expired one.
 func Consume(cwd string, r Request) error {
-	dir, err := Dir()
-	if err != nil {
-		return err
-	}
-	p := filepath.Join(dir, key(cwd, r))
-	info, err := os.Lstat(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return ErrNoTicket
-	}
-	if err != nil {
-		return err
-	}
-	// Remove first: of two concurrent calls only one removal succeeds, and
-	// only that one may run.
-	if err := os.Remove(p); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return ErrNoTicket
-		}
-		return err
-	}
-	if !info.Mode().IsRegular() || time.Since(info.ModTime()) > TicketTTL {
-		return ErrNoTicket
-	}
-	return nil
-}
-
-// pruneExpired removes tickets past their TTL, which are left behind by calls
-// the user declined.
-func pruneExpired(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if time.Since(info.ModTime()) > TicketTTL {
-			os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
+	return approval.Consume(cwd, r.subject())
 }

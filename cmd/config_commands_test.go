@@ -230,3 +230,44 @@ func TestConfigCommandsCmd_DeprecatedAliasesAndMigrate(t *testing.T) {
 		t.Errorf("second migrate output = %q", out)
 	}
 }
+
+func TestConfigCommandsCmd_Prompt(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	setCommandsFlags(t, false)
+	out := captureStdout(t, func() {
+		if err := configCommandsPromptCmd.RunE(configCommandsPromptCmd, []string{"rm", "lite-sandbox install"}); err != nil {
+			t.Fatalf("prompt: %v", err)
+		}
+		prev := commandsAllowPrompt
+		commandsAllowPrompt = true
+		t.Cleanup(func() { commandsAllowPrompt = prev })
+		if err := configCommandsAllowCmd.RunE(configCommandsAllowCmd, []string{"git push"}); err != nil {
+			t.Fatalf("allow --prompt: %v", err)
+		}
+	})
+	for _, want := range []string{"rm: prompt", "git push: allow, prompt", "still denied by the built-in deny list"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.PromptedCommandList(); !slices.Equal(got, []string{"rm", "lite-sandbox install", "git push"}) {
+		t.Errorf("prompted = %v", got)
+	}
+	if got := cfg.ExtraCommandList(); !slices.Equal(got, []string{"git push"}) {
+		t.Errorf("allowed = %v", got)
+	}
+	// prompt replaces whatever was said about the command, as allow and deny do.
+	captureStdout(t, func() {
+		commandsAllowPrompt = false
+		if err := configCommandsPromptCmd.RunE(configCommandsPromptCmd, []string{"git push"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if cfg, _ = config.Load(); len(cfg.ExtraCommandList()) != 0 || len(cfg.Commands) != 3 {
+		t.Errorf("commands after re-prompt = %+v", cfg.Commands)
+	}
+}

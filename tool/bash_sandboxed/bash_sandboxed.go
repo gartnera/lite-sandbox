@@ -81,6 +81,10 @@ type Sandbox struct {
 	// and outranks extra_commands / unsandboxed_commands: a denied invocation
 	// is denied however it was allowed. See denied_commands.go.
 	deniedCommands map[string][]deniedEntry
+	// promptCommands is the parsed list of commands entries with
+	// prompt: true, keyed like deniedCommands: an invocation matching one
+	// runs only in a call the user approved. See prompted_commands.go.
+	promptCommands map[string][]deniedEntry
 	imdsEndpoint   string
 	// imdsRegion is the AWS region resolved for the brokered profile (from the
 	// host-side ~/.aws config, which is masked inside the sandbox). It is injected
@@ -240,6 +244,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.unsandboxedBareScriptPaths = unsandboxedBareScripts
 	s.unsandboxedSub = unsandboxedSub
 	s.deniedCommands = parseDeniedCommands(cfg.EffectiveDeniedCommands())
+	s.promptCommands = parseDeniedCommands(cfg.PromptedCommandList())
 
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
@@ -853,6 +858,12 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 							return false
 						}
 					}
+					// A prompted invocation runs only in an approved call, and
+					// once approved counts as whitelisted.
+					promptApproved, promptErr := s.checkPrompt(ctx, cmdName, wordLits(n.Args[1:]))
+					if fail(layerStatic, ruleCommandPrompt, promptErr) {
+						return false
+					}
 					// Check whether this command is allowed via extra_commands.
 					// Bare entries (no subcommand restriction) always match.
 					// Restricted entries (e.g. "pnpx prettier") only match when the
@@ -862,7 +873,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					// OS sandbox is active, where they are contained to sandbox-spawned
 					// processes.
 					osOnly := osSandboxOnlyCommands[cmdName] && s.osSandboxEnabled()
-					if !s.commandWhitelisted(cmdName) && !inExtra && !declaredFuncs[cmdName] && !osOnly {
+					if !s.commandWhitelisted(cmdName) && !inExtra && !declaredFuncs[cmdName] && !osOnly && !promptApproved {
 						// Whitelist and local-binary gates: allowlist-only rules, so
 						// in denylist/open mode this records the finding and moves on.
 						var gateErr error
@@ -934,17 +945,24 @@ func extraSubCommandMatches(extraSub map[string][][]string, cmdName string, args
 // readAllowedPaths are absolute directories that read-only commands may access.
 // writeAllowedPaths are absolute directories that write commands may access.
 func (s *Sandbox) ValidateCommand(command string, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
-	// Bare extra_commands entries bypass AST parsing; treat as valid.
+	return s.ValidateCommandContext(context.Background(), command, workDir, readAllowedPaths, writeAllowedPaths)
+}
+
+// ValidateCommandContext is ValidateCommand under ctx, which may carry the
+// user's approval (WithApproval) for the command's prompted invocations.
+func (s *Sandbox) ValidateCommandContext(ctx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
+	// ValidateCommand backs the PreToolUse hook, so its findings are
+	// attributed to the hook in the audit log.
+	ctx = withAuditScope(ctx, command, workDir, "hook")
+	// Bare extra_commands entries bypass AST parsing; treat as valid, once
+	// any command needing approval in them has it.
 	if s.isExtraCommandInvocation(command) {
-		return nil
+		return s.checkRawPrompt(ctx, command)
 	}
 	f, err := ParseBash(command)
 	if err != nil {
 		return err
 	}
-	// ValidateCommand backs the PreToolUse hook's --validate-bash path, so its
-	// findings are attributed to the hook in the audit log.
-	ctx := withAuditScope(context.Background(), command, workDir, "hook")
 	if err := s.validateFileCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return err
 	}
@@ -1456,6 +1474,9 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 	// confinement still applies — unless the entry came from unsandboxed_commands,
 	// which runs on the host regardless.
 	if s.isExtraCommandInvocation(command) {
+		if err := s.checkRawPrompt(withAuditScope(ctx, command, workDir, "bash"), command); err != nil {
+			return "", fmt.Errorf("validation failed: %w", err)
+		}
 		return s.executeRaw(ctx, command, workDir, s.isUnsandboxedInvocation(command))
 	}
 

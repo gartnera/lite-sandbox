@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/approval"
 	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
@@ -35,8 +37,10 @@ type serveOptions struct {
 	// configRequests lets the agent change the sandbox's own config by running
 	// `lite-sandbox config ...` with the bash tool, which then runs on the host
 	// instead of being refused by the deny list — but only a request the
-	// PreToolUse hook (hook --config-requests) asked the user to approve. Set
-	// by --config-requests.
+	// PreToolUse hook (hook --config-requests) asked the user to approve. It
+	// likewise lets a command run whose commands entry has prompt: true, once
+	// the hook asked the user about the call (approveCall). Set by
+	// --config-requests.
 	configRequests bool
 	// reload applies the config file to the running server after a config
 	// request changed it, exactly as the file watcher does (the sandbox and
@@ -49,7 +53,7 @@ var serveFlags serveOptions
 
 func init() {
 	serveCmd.Flags().BoolVar(&serveFlags.configRequests, "config-requests", false,
-		"run `lite-sandbox config ...` bash commands the user approved (requires the PreToolUse hook registered with --config-requests)")
+		"run `lite-sandbox config ...` bash commands, and commands whose commands entry has prompt: true, that the user approved (requires the PreToolUse hook registered with --config-requests)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -115,9 +119,10 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 		}
 
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		ctx = opts.approveCall(ctx, sandbox, cwd, command)
 
 		if runInBackground {
-			proc, err := sandbox.ExecuteBackground(command, cwd, readPaths, writePaths)
+			proc, err := sandbox.ExecuteBackgroundContext(ctx, command, cwd, readPaths, writePaths)
 			if err != nil {
 				return mcp.NewToolResultError(opts.errorText(err)), nil
 			}
@@ -182,6 +187,25 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 	})
 
 	return s
+}
+
+// approveCall returns ctx marked approved (bash_sandboxed.WithApproval) when
+// the user approved this bash tool call in the agent's permission prompt: the
+// PreToolUse hook asked about it, because it runs a command whose commands
+// entry has prompt: true, and recorded the ticket this consumes. Without
+// config requests no hook asks, so no call is approved and the sandbox refuses
+// every prompted command.
+func (o serveOptions) approveCall(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd, command string) context.Context {
+	if !o.configRequests || !sandbox.HasPromptedCommands() {
+		return ctx
+	}
+	if err := approval.Consume(cwd, approval.CommandSubject(command)); err != nil {
+		if !errors.Is(err, approval.ErrNoTicket) {
+			slog.Warn("checking the approval of a prompted command", "error", err)
+		}
+		return ctx
+	}
+	return bash_sandboxed.WithApproval(ctx)
 }
 
 // errorText is a bash tool error as the agent reads it: with the config

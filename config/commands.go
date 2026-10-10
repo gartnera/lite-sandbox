@@ -22,6 +22,11 @@ import (
 //	    allow: false
 //	  - command: lite-sandbox update   # an allow on a built-in denial lifts it
 //	    allow: true                    # (was "-lite-sandbox update")
+//	  - command: rm                # whitelisted (validated) only once the user
+//	    prompt: true               # approves the invocation
+//	  - command: git push          # the allow applies only once the user
+//	    allow: true                # approves the invocation
+//	    prompt: true
 //
 // Command is a bare name ("curl", "./scripts/deploy.sh") or a name followed by
 // the leading non-flag arguments the entry is limited to ("uv run pyright",
@@ -35,10 +40,18 @@ import (
 // exactly the pushes. The one exception is the built-in deny list
 // (DefaultDeniedCommands): an allow whose text equals a built-in entry lifts
 // that entry, which is how `lite-sandbox update` is opened up.
+//
+// Prompt makes every matching invocation wait for the user's approval, asked
+// through the agent's permission prompt (see the hook's --config-requests).
+// On an allow, the allow takes effect only once the user approves; on its
+// own, an approved invocation is treated as whitelisted, so the command's
+// argument validators and path checks still apply. A denial cannot prompt: a
+// denied command never runs.
 type CommandEntry struct {
 	Command   string `yaml:"command"`
 	Allow     *bool  `yaml:"allow,omitempty"`
 	NoSandbox bool   `yaml:"no_sandbox,omitempty"`
+	Prompt    bool   `yaml:"prompt,omitempty"`
 	// Profile names the profile an entry was expanded from (see
 	// Config.Effective); it is never read from or written to the file. A
 	// profile's allow of a bare command name whitelists the command rather
@@ -79,11 +92,17 @@ func (e CommandEntry) Validate() error {
 	if e.Text() == "" {
 		return fmt.Errorf("commands entry without a command")
 	}
-	if e.Allow == nil {
-		return fmt.Errorf("commands entry %q sets neither allow: true nor allow: false", e.Command)
+	if e.Allow == nil && !e.Prompt {
+		return fmt.Errorf("commands entry %q sets none of allow: true, allow: false or prompt: true", e.Command)
 	}
 	if e.NoSandbox && e.Denies() {
 		return fmt.Errorf("commands entry %q: no_sandbox applies to an allow only (a denied command never runs)", e.Command)
+	}
+	if e.NoSandbox && !e.Allows() {
+		return fmt.Errorf("commands entry %q: no_sandbox applies to an allow only; add allow: true", e.Command)
+	}
+	if e.Prompt && e.Denies() {
+		return fmt.Errorf("commands entry %q: prompt applies to an allow or stands on its own (a denied command never runs)", e.Command)
 	}
 	if strings.HasPrefix(e.Text(), "-") {
 		return fmt.Errorf("commands entry %q: a leading \"-\" is the deprecated denied_commands way to lift a built-in entry; write the entry with allow: true instead", e.Command)
@@ -92,13 +111,20 @@ func (e CommandEntry) Validate() error {
 }
 
 // Describe renders the entry's effect as a short phrase for listings:
-// "allow", "allow, no sandbox", or "deny".
+// "allow", "allow, no sandbox", "deny", "prompt", or "allow, prompt".
 func (e CommandEntry) Describe() string {
+	const prompt = "prompt (asks the user to approve each invocation)"
 	switch {
 	case e.Denies():
 		return "deny"
+	case !e.Allows():
+		return prompt
+	case e.NoSandbox && e.Prompt:
+		return "allow, no sandbox (runs on the host, outside the OS sandbox), " + prompt
 	case e.NoSandbox:
 		return "allow, no sandbox (runs on the host, outside the OS sandbox)"
+	case e.Prompt:
+		return "allow, " + prompt
 	default:
 		return "allow"
 	}
@@ -182,6 +208,13 @@ func (c *Config) UnsandboxedCommandList() []string {
 // whitelisted command. Empty for a config WithProfiles has not expanded.
 func (c *Config) WhitelistedCommandList() []string {
 	return c.commandsWhere(func(*Config) []string { return nil }, CommandEntry.Whitelists)
+}
+
+// PromptedCommandList returns the commands whose invocations wait for the
+// user's approval: the commands entries with prompt: true, allows and
+// prompt-only entries alike. The deprecated lists have no way to say it.
+func (c *Config) PromptedCommandList() []string {
+	return c.commandsWhere(func(*Config) []string { return nil }, func(e CommandEntry) bool { return e.Prompt })
 }
 
 // DeniedCommandList returns the user-added deny entries, as written and
