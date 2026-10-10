@@ -212,35 +212,17 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	roBinds := opts.ROBinds
 	maskPaths := opts.MaskPaths
 
-	// Find our own binary path to pass to the sandbox
-	self, err := os.Executable()
+	// The binary is resolved once per process and, on Linux, pinned by an
+	// open handle, so a worker never runs a different build than the server
+	// that starts it (see pinnedWorkerBinary).
+	bin, err := pinnedWorkerBinary()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get executable path: %w", err)
+		return nil, err
 	}
-
-	// If running from a test binary, try to find the actual binary
-	baseName := filepath.Base(self)
-	isTestBinary := baseName != "lite-sandbox" && (filepath.Ext(self) == ".test" || filepath.Ext(baseName) == ".test")
-	if isTestBinary {
-		// Look for lite-sandbox next to the test's working directory, then two
-		// levels up (for tests in tool/bash_sandboxed).
-		found := ""
-		if cwd, err := os.Getwd(); err == nil {
-			for _, candidate := range []string{
-				filepath.Join(cwd, "lite-sandbox"),
-				filepath.Join(cwd, "../..", "lite-sandbox"),
-			} {
-				if _, err := os.Stat(candidate); err == nil {
-					found = candidate
-					break
-				}
-			}
-		}
-		if found == "" {
-			return nil, fmt.Errorf("lite-sandbox binary not found (required for OS sandbox tests, run 'go build -o lite-sandbox' first)")
-		}
-		self = found
+	if err := checkWorkerBinary(bin); err != nil {
+		return nil, err
 	}
+	self := bin.path
 
 	// Resolve symlinks in workDir (e.g., /tmp might be a symlink)
 	realWorkDir, err := filepath.EvalSymlinks(workDir)
@@ -284,8 +266,12 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 
 		// The deny-list and socket masks are applied last (see buildBwrapArgs)
 		// so an overlapping writable bind cannot re-expose them.
+		exe := self
+		if bin.file != nil {
+			exe = pinnedExecFDPath
+		}
 		plan := bwrapPlan{
-			self:      self,
+			self:      exe,
 			workDir:   realWorkDir,
 			binds:     binds,
 			roBinds:   roMounts,
@@ -315,6 +301,9 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		}
 		args := buildBwrapArgs(plan)
 		cmd = exec.CommandContext(ctx, "bwrap", args...)
+		if bin.file != nil {
+			cmd.ExtraFiles = []*os.File{bin.file} // pinnedExecFD
+		}
 
 	case "darwin":
 		// Build sandbox-exec command

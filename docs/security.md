@@ -96,6 +96,7 @@ An optional OS-level sandbox adds isolation on top of AST-level validation, usin
 **Architecture:**
 - **Long-lived worker**: one sandboxed process accepts gob-encoded commands over stdin/stdout and runs many commands without restarting the sandbox
 - **Automatic recovery**: a dead worker is detected and replaced
+- **Same build as the server**: the worker is the server's own executable, never a `lite-sandbox` looked up on `PATH`. On Linux the server holds an open handle on its running binary and bwrap execs the worker through it, so a rebuild or `lite-sandbox update` that replaces the file mid-session doesn't change what later workers run. macOS can't exec through a handle, so there the server refuses to start a worker once the file has changed and asks for a restart
 - **Die-with-parent**: the worker is killed if the MCP server exits
 
 **Configuration:**

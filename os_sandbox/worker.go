@@ -96,6 +96,7 @@ func setProcGroup(cmd *exec.Cmd) {
 func RunWorker() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
+	closePinnedExecFD()
 
 	slog.Info("sandbox worker started")
 
