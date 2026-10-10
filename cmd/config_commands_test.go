@@ -231,21 +231,21 @@ func TestConfigCommandsCmd_DeprecatedAliasesAndMigrate(t *testing.T) {
 	}
 }
 
-func TestConfigCommandsCmd_Prompt(t *testing.T) {
+func TestConfigCommandsCmd_Ask(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	setCommandsFlags(t, false)
 	out := captureStdout(t, func() {
-		if err := configCommandsPromptCmd.RunE(configCommandsPromptCmd, []string{"rm", "lite-sandbox install"}); err != nil {
-			t.Fatalf("prompt: %v", err)
+		if err := configCommandsAskCmd.RunE(configCommandsAskCmd, []string{"rm", "lite-sandbox install"}); err != nil {
+			t.Fatalf("ask: %v", err)
 		}
-		prev := commandsAllowPrompt
-		commandsAllowPrompt = true
-		t.Cleanup(func() { commandsAllowPrompt = prev })
+		prev := commandsAllowAsk
+		commandsAllowAsk = true
+		t.Cleanup(func() { commandsAllowAsk = prev })
 		if err := configCommandsAllowCmd.RunE(configCommandsAllowCmd, []string{"git push"}); err != nil {
-			t.Fatalf("allow --prompt: %v", err)
+			t.Fatalf("allow --ask: %v", err)
 		}
 	})
-	for _, want := range []string{"rm: prompt", "git push: allow, prompt", "still denied by the built-in deny list"} {
+	for _, want := range []string{"rm: ask", "git push: allow, ask", "still denied by the built-in deny list"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -254,20 +254,20 @@ func TestConfigCommandsCmd_Prompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.PromptedCommandList(); !slices.Equal(got, []string{"rm", "lite-sandbox install", "git push"}) {
-		t.Errorf("prompted = %v", got)
+	if got := cfg.AskCommandList(); !slices.Equal(got, []string{"rm", "lite-sandbox install", "git push"}) {
+		t.Errorf("asked = %v", got)
 	}
 	if got := cfg.ExtraCommandList(); !slices.Equal(got, []string{"git push"}) {
 		t.Errorf("allowed = %v", got)
 	}
-	// prompt replaces whatever was said about the command, as allow and deny do.
+	// ask replaces whatever was said about the command, as allow and deny do.
 	captureStdout(t, func() {
-		commandsAllowPrompt = false
-		if err := configCommandsPromptCmd.RunE(configCommandsPromptCmd, []string{"git push"}); err != nil {
+		commandsAllowAsk = false
+		if err := configCommandsAskCmd.RunE(configCommandsAskCmd, []string{"git push"}); err != nil {
 			t.Fatal(err)
 		}
 	})
 	if cfg, _ = config.Load(); len(cfg.ExtraCommandList()) != 0 || len(cfg.Commands) != 3 {
-		t.Errorf("commands after re-prompt = %+v", cfg.Commands)
+		t.Errorf("commands after re-ask = %+v", cfg.Commands)
 	}
 }

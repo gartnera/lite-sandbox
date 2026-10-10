@@ -229,8 +229,8 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	// Nor can a wrapped command be approved: the validators here do not see
 	// the call's approval, so a prompted command must run on its own.
-	if entry, ok := matchCommandEntries(s.getPromptCommands(), cmdName, wordLits(args[1:])); ok {
-		return promptWrappedError(cmdName, entry)
+	if entry, ok := matchCommandEntries(s.getAskCommands(), cmdName, wordLits(args[1:])); ok {
+		return askWrappedError(cmdName, entry)
 	}
 	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, xcrun)", cmdName))

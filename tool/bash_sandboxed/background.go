@@ -429,7 +429,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 
 	var f *syntax.File
 	if isExtra {
-		if err := s.checkRawPrompt(validateCtx, command); err != nil {
+		if err := s.checkRawAsk(validateCtx, command); err != nil {
 			return nil, fmt.Errorf("validation failed: %w", err)
 		}
 	} else {

@@ -56,20 +56,20 @@ commands:
 	}
 }
 
-// TestCommands_Prompt: a prompt entry, with or without an allow, is listed by
-// PromptedCommandList; a prompted allow is still an allow (its prompt is the
-// sandbox's to enforce), and a prompt-only entry allows nothing on its own.
-func TestCommands_Prompt(t *testing.T) {
+// TestCommands_Ask: an ask entry, with or without an allow, is listed by
+// AskCommandList; an asking allow is still an allow (its ask is the
+// sandbox's to enforce), and an ask-only entry allows nothing on its own.
+func TestCommands_Ask(t *testing.T) {
 	writeConfig(t, `
 commands:
   - command: rm
-    prompt: true
+    ask: true
   - command: git push
     allow: true
-    prompt: true
+    ask: true
   - command: lite-sandbox update
     allow: true
-    prompt: true
+    ask: true
   - command: curl
     allow: true
 `)
@@ -77,14 +77,14 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.PromptedCommandList(); !slices.Equal(got, []string{"rm", "git push", "lite-sandbox update"}) {
-		t.Errorf("PromptedCommandList = %v", got)
+	if got := cfg.AskCommandList(); !slices.Equal(got, []string{"rm", "git push", "lite-sandbox update"}) {
+		t.Errorf("AskCommandList = %v", got)
 	}
 	if got := cfg.ExtraCommandList(); !slices.Equal(got, []string{"git push", "lite-sandbox update", "curl"}) {
 		t.Errorf("ExtraCommandList = %v", got)
 	}
 	if got := cfg.LiftedDeniedCommands(); !slices.Equal(got, []string{"lite-sandbox update"}) {
-		t.Errorf("LiftedDeniedCommands = %v (a prompted allow lifts a built-in like any allow)", got)
+		t.Errorf("LiftedDeniedCommands = %v (an asking allow lifts a built-in like any allow)", got)
 	}
 }
 
@@ -142,10 +142,10 @@ commands:
 func TestCommands_Validation(t *testing.T) {
 	for _, tc := range []struct{ name, body, wantErr string }{
 		{"no command", "commands:\n  - allow: true\n", "without a command"},
-		{"neither", "commands:\n  - command: curl\n", "none of allow: true, allow: false or prompt: true"},
+		{"neither", "commands:\n  - command: curl\n", "none of allow: true, allow: false or ask: true"},
 		{"no_sandbox on deny", "commands:\n  - command: curl\n    allow: false\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
-		{"no_sandbox on prompt", "commands:\n  - command: curl\n    prompt: true\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
-		{"prompt on deny", "commands:\n  - command: curl\n    allow: false\n    prompt: true\n", "prompt applies to an allow or stands on its own"},
+		{"no_sandbox on ask", "commands:\n  - command: curl\n    ask: true\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
+		{"ask on deny", "commands:\n  - command: curl\n    allow: false\n    ask: true\n", "ask applies to an allow or stands on its own"},
 		{"leading dash", "commands:\n  - command: -lite-sandbox hook\n    allow: false\n", "deprecated denied_commands way"},
 		{"in override", "overrides:\n  - path: /x\n    commands:\n      - command: curl\n", `override "/x"`},
 	} {
@@ -170,8 +170,8 @@ func TestCommandEntry_Describe(t *testing.T) {
 		{CommandEntry{Command: "curl", Allow: &yes}, "allow"},
 		{CommandEntry{Command: "docker", Allow: &yes, NoSandbox: true}, "allow, no sandbox (runs on the host, outside the OS sandbox)"},
 		{CommandEntry{Command: "sudo", Allow: &no}, "deny"},
-		{CommandEntry{Command: "rm", Prompt: true}, "prompt (asks the user to approve each invocation)"},
-		{CommandEntry{Command: "git push", Allow: &yes, Prompt: true}, "allow, prompt (asks the user to approve each invocation)"},
+		{CommandEntry{Command: "rm", Ask: true}, "ask (asks the user to approve each invocation)"},
+		{CommandEntry{Command: "git push", Allow: &yes, Ask: true}, "allow, ask (asks the user to approve each invocation)"},
 	} {
 		if got := tc.e.Describe(); got != tc.want {
 			t.Errorf("%+v.Describe() = %q, want %q", tc.e, got, tc.want)

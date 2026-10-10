@@ -38,7 +38,7 @@ type serveOptions struct {
 	// `lite-sandbox config ...` with the bash tool, which then runs on the host
 	// instead of being refused by the deny list — but only a request the
 	// PreToolUse hook (hook --config-requests) asked the user to approve. It
-	// likewise lets a command run whose commands entry has prompt: true, once
+	// likewise lets a command run whose commands entry has ask: true, once
 	// the hook asked the user about the call (approveCall). Set by
 	// --config-requests.
 	configRequests bool
@@ -53,7 +53,7 @@ var serveFlags serveOptions
 
 func init() {
 	serveCmd.Flags().BoolVar(&serveFlags.configRequests, "config-requests", false,
-		"run `lite-sandbox config ...` bash commands, and commands whose commands entry has prompt: true, that the user approved (requires the PreToolUse hook registered with --config-requests)")
+		"run `lite-sandbox config ...` bash commands, and commands whose commands entry has ask: true, that the user approved (requires the PreToolUse hook registered with --config-requests)")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -192,11 +192,11 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 // approveCall returns ctx marked approved (bash_sandboxed.WithApproval) when
 // the user approved this bash tool call in the agent's permission prompt: the
 // PreToolUse hook asked about it, because it runs a command whose commands
-// entry has prompt: true, and recorded the ticket this consumes. Without
+// entry has ask: true, and recorded the ticket this consumes. Without
 // config requests no hook asks, so no call is approved and the sandbox refuses
 // every prompted command.
 func (o serveOptions) approveCall(ctx context.Context, sandbox *bash_sandboxed.Sandbox, cwd, command string) context.Context {
-	if !o.configRequests || !sandbox.HasPromptedCommands() {
+	if !o.configRequests || !sandbox.HasAskCommands() {
 		return ctx
 	}
 	if err := approval.Consume(cwd, approval.CommandSubject(command)); err != nil {

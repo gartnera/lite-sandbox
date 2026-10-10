@@ -46,7 +46,7 @@ deny list refuses the sandbox's own policy-editing subcommands in every
 enforcing mode. Everything else about commands goes in the `commands` list:
 what is allowed beyond the whitelist, what runs on the host instead of inside
 the OS sandbox, what waits for your approval each time, and what is always
-refused. Each entry is a command plus a tri-state `allow` and/or `prompt`:
+refused. Each entry is a command plus a tri-state `allow` and/or `ask`:
 
 ```yaml
 commands:
@@ -64,23 +64,23 @@ commands:
   - command: lite-sandbox update   # an allow on a built-in denial lifts it (was "-lite-sandbox update")
     allow: true
   - command: rm                    # asks you before each invocation, then validates it as usual
-    prompt: true
+    ask: true
   - command: git push              # asks you before each invocation, then allows it
     allow: true
-    prompt: true
+    ask: true
 ```
 
 `command` is a bare name, or a name followed by the leading non-flag arguments
 the entry applies to; extra whitespace between words is ignored. Each command
-has one entry, so `allow`, `prompt` and `deny` on the CLI replace whatever
+has one entry, so `allow`, `ask` and `deny` on the CLI replace whatever
 the config said about it before.
 
 ```bash
 lite-sandbox config commands allow curl "uv run pyright"
 lite-sandbox config commands allow docker --no-sandbox
 lite-sandbox config commands deny sudo "gh auth"
-lite-sandbox config commands prompt rm curl                  # ask before each invocation
-lite-sandbox config commands allow "git push" --prompt       # ask, then allow
+lite-sandbox config commands ask rm curl                     # ask before each invocation
+lite-sandbox config commands allow "git push" --ask          # ask, then allow
 lite-sandbox config commands allow "lite-sandbox update"     # lifts the built-in denial
 lite-sandbox config commands list                            # built-in denials included
 lite-sandbox config commands remove curl
@@ -125,9 +125,9 @@ whatever `DOCKER_HOST` the host environment sets). A restricted entry
 unsandboxes only matching invocations; e.g. `git push` leaves other `git`
 subcommands confined.
 
-### Prompted commands
+### Commands that ask first
 
-`prompt: true` makes each matching invocation wait for your approval: the
+`ask: true` makes each matching invocation wait for your approval: the
 agent shows its permission prompt with the whole command, and the command runs
 only if you approve. Use it for commands you want to see before they run
 rather than allow or refuse outright.
@@ -139,14 +139,14 @@ rather than allow or refuse outright.
 - **With `allow: true`**, the allow takes effect once you approve: the
   invocation gets everything the allow gives (a bare one's raw-bash path, a
   restricted one's validator bypass, `no_sandbox`). `git push` with
-  `allow: true` and `prompt: true` asks before every push, which `git`'s
-  argument validator would otherwise refuse. A prompted allow of a built-in
+  `allow: true` and `ask: true` asks before every push, which `git`'s
+  argument validator would otherwise refuse. An asking allow of a built-in
   denial's text (`lite-sandbox update`) lifts it the same way, asking each
   time.
-- **A denial can't prompt**: a denied command never runs.
+- **A denial can't ask**: a denied command never runs.
 
 Entries match like [denials](#denied-commands): by base name, and a restricted
-entry (`gh pr`) wherever the subcommand could start. Prompts are enforced in
+entry (`gh pr`) wherever the subcommand could start. Asks are enforced in
 `denylist` and `allowlist` mode; in `open` mode, like every rule, a match is
 only recorded to the audit log.
 

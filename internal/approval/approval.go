@@ -9,7 +9,7 @@
 // matching ticket. With no hook registered there is no ticket, so the server
 // treats the call as unapproved. Two kinds of call use it: config requests
 // (internal/configrequest) and commands that a commands entry with
-// prompt: true makes wait for the user.
+// ask: true makes wait for the user.
 //
 // Tickets live in lite-sandbox's cache directory, guarded like the config file
 // itself: the path boundary keeps sandboxed commands' writes in the project,
@@ -151,7 +151,7 @@ func pruneExpired(dir string) {
 }
 
 // CommandSubject is the subject of a bash tool call whose command runs a
-// prompted invocation (a commands entry with prompt: true): the command
+// prompted invocation (a commands entry with ask: true): the command
 // string exactly as the tool received it.
 func CommandSubject(command string) Subject {
 	return Subject{"command", command}

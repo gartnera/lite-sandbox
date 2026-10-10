@@ -24,7 +24,7 @@ os_sandbox: true    # bubblewrap / sandbox-exec worker
 |---|---|---|---|
 | Unlisted programs (`python3`, `npm`, `make`, `./script`) | run | run | blocked; toolchain profiles opt-in |
 | Denied commands (`commands` entries with `allow: false`, incl. the sandbox's own `config`/`install`/`update`/`hook`) | run | blocked | blocked |
-| Prompted commands (`commands` entries with `prompt: true`) without your approval | run | blocked | blocked |
+| Commands that ask first (`commands` entries with `ask: true`) without your approval | run | blocked | blocked |
 | Path arguments and redirections outside the project | run | blocked | blocked |
 | `git push`, `pnpm publish`, `find -delete`, `tar -c`, … | run | blocked | blocked |
 | Network tools (`curl`, `wget`, `nc`) | run | run | blocked |

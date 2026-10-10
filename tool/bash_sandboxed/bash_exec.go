@@ -402,10 +402,10 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		script = cmdString
 	} else if scriptFile != "" {
 		// `bash <script>` runs the script as surely as `./<script>` does, so a
-		// prompt entry for the script applies here too; past it, the
+		// ask entry for the script applies here too; past it, the
 		// script's own commands are not covered by the call's approval.
-		if _, err := s.checkPrompt(ctx, scriptFile, args[i:]); err != nil {
-			if err := s.report(ctx, layerRuntime, ruleCommandPrompt, err); err != nil {
+		if _, err := s.checkAsk(ctx, scriptFile, args[i:]); err != nil {
+			if err := s.report(ctx, layerRuntime, ruleCommandAsk, err); err != nil {
 				return err
 			}
 		}
@@ -591,10 +591,10 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			return err
 		}
 	}
-	// Runtime prompt check, alongside the deny list: a prompted invocation
+	// Runtime ask check, alongside the deny list: a prompted invocation
 	// whose name was dynamic, or that a script runs, is caught here.
-	promptApproved, promptErr := s.checkPrompt(ctx, cmdName, args[1:])
-	if err := s.report(ctx, layerRuntime, ruleCommandPrompt, promptErr); err != nil {
+	askApproved, askErr := s.checkAsk(ctx, cmdName, args[1:])
+	if err := s.report(ctx, layerRuntime, ruleCommandAsk, askErr); err != nil {
 		return err
 	}
 	// Runtime command whitelist check — catches blocked commands
@@ -602,7 +602,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	// Process-control commands (kill, pkill) are permitted only when
 	// the OS sandbox is active, where they are contained.
 	osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly && !promptApproved {
+	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly && !askApproved {
 		// Whitelist and local-binary gates are allowlist-only rules: in
 		// denylist/open mode the finding is audited and the command runs.
 		var gateErr error
@@ -786,12 +786,12 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 						return nil, err
 					}
 				}
-				promptApproved, promptErr := s.checkPrompt(ctx, name, args[1:])
-				if err := s.report(ctx, layerRuntime, ruleCommandPrompt, promptErr); err != nil {
+				askApproved, askErr := s.checkAsk(ctx, name, args[1:])
+				if err := s.report(ctx, layerRuntime, ruleCommandAsk, askErr); err != nil {
 					return nil, err
 				}
 				osOnly := osSandboxOnlyCommands[name] && useOSSandbox
-				if !s.commandWhitelisted(name) && !s.extraAllowsArgs(name, args[1:]) && !osOnly && !promptApproved {
+				if !s.commandWhitelisted(name) && !s.extraAllowsArgs(name, args[1:]) && !osOnly && !askApproved {
 					if err := s.report(ctx, layerRuntime, ruleCommandWhitelist, commandNotAllowed(name)); err != nil {
 						return nil, err
 					}

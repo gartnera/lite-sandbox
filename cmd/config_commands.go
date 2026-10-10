@@ -25,12 +25,12 @@ command plus what applies to it:
   no_sandbox: true        the allowed command runs directly on the host, outside
                           the OS sandbox worker even when it is enabled — for a
                           command that cannot run confined  (allow ... --no-sandbox)
-  prompt: true            each invocation waits for the user to approve it in the
+  ask: true               each invocation waits for the user to approve it in the
                           agent's permission prompt; on its own, an approved
                           invocation counts as whitelisted (still validated)
-                                                                      (prompt <command>)
+                                                                      (ask <command>)
                           and with allow: true, the allow applies once approved
-                                                                      (allow ... --prompt)
+                                                                      (allow ... --ask)
   allow: false            refused in denylist and allowlist mode however else it is
                           allowed: checked before every command gate, matched by
                           base name (so /usr/local/bin/lite-sandbox counts), and
@@ -48,11 +48,11 @@ denied_commands), which still load. ` + "`migrate`" + ` rewrites those lists in 
 entries included.`,
 }
 
-var commandsAllowNoSandbox, commandsAllowPrompt bool
+var commandsAllowNoSandbox, commandsAllowAsk bool
 
 var configCommandsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List the configured command allows, prompts and denials (built-in denials included)",
+	Short: "List the configured command allows, asks and denials (built-in denials included)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -103,8 +103,8 @@ arguments match; those still go through normal parsing and validation.
 OS sandbox worker (and the docker filtering proxy) even when it is enabled. It
 is a trust-based escape hatch for a command that cannot run confined.
 
---prompt makes each matching invocation wait for the user's approval first
-(see ` + "`lite-sandbox config commands prompt`" + `).
+--ask makes each matching invocation wait for the user's approval first
+(see ` + "`lite-sandbox config commands ask`" + `).
 
 Allowing the exact text of a built-in denial ("lite-sandbox update") lifts it;
 the deny list otherwise outranks every allow.`,
@@ -116,7 +116,7 @@ the deny list otherwise outranks every allow.`,
 		}
 		yes := true
 		for _, c := range args {
-			e := config.CommandEntry{Command: c, Allow: &yes, NoSandbox: commandsAllowNoSandbox, Prompt: commandsAllowPrompt}
+			e := config.CommandEntry{Command: c, Allow: &yes, NoSandbox: commandsAllowNoSandbox, Ask: commandsAllowAsk}
 			if err := cfg.SetCommand(e); err != nil {
 				return err
 			}
@@ -129,25 +129,26 @@ the deny list otherwise outranks every allow.`,
 	},
 }
 
-var configCommandsPromptCmd = &cobra.Command{
-	Use:   "prompt <command>...",
+var configCommandsAskCmd = &cobra.Command{
+	Use:   "ask <command>...",
 	Short: "Ask the user to approve each invocation of commands before it runs",
-	Long: `A prompted command runs only in a bash tool call the user approved: the agent's
-PreToolUse hook sees the command in the call, asks the user through the
-agent's permission prompt, and the sandbox runs the call once they approve.
+	Long: `A command with an ask entry runs only in a bash tool call the user
+approved: the agent's PreToolUse hook sees the command in the call, asks the
+user through the agent's permission prompt, and the sandbox runs the call
+once they approve.
 An approved invocation counts as whitelisted, so a command off the whitelist
 ("curl") runs once approved, and its argument validators and path checks
 still apply. To have an allow take effect on approval instead — past the
-validators, e.g. "git push" — use ` + "`allow --prompt`" + `.
+validators, e.g. "git push" — use ` + "`allow --ask`" + `.
 
-A bare name ("rm") prompts for every invocation; a name plus arguments
+A bare name ("rm") asks for every invocation; a name plus arguments
 ("gh pr") only for invocations starting with them. Matching is by base name,
-like the deny list. The approval covers the command line the user saw: a
-prompted command is refused when the hook cannot see it there — a dynamic
+like the deny list. The approval covers the command line the user saw: such
+a command is refused when the hook cannot see it there — a dynamic
 name, a script file, or under find -exec, xargs, env, timeout or xcrun — and
 always with an agent that cannot ask (only Claude Code, installed by
-` + "`lite-sandbox install`" + `, asks). Prompts are enforced in denylist and allowlist
-mode; in open mode a prompted command runs unasked.`,
+` + "`lite-sandbox install`" + `, asks). Asks are enforced in denylist and allowlist
+mode; in open mode the command runs unasked.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -155,13 +156,13 @@ mode; in open mode a prompted command runs unasked.`,
 			return err
 		}
 		for _, c := range args {
-			e := config.CommandEntry{Command: c, Prompt: true}
+			e := config.CommandEntry{Command: c, Ask: true}
 			if err := cfg.SetCommand(e); err != nil {
 				return err
 			}
 			fmt.Printf("%s: %s\n", e.Text(), e.Describe())
 			if config.IsDefaultDeniedCommand(e.Text()) {
-				fmt.Printf("  still denied by the built-in deny list; `lite-sandbox config commands allow --prompt %q` lifts it, asking each time\n", e.Text())
+				fmt.Printf("  still denied by the built-in deny list; `lite-sandbox config commands allow --ask %q` lifts it, asking each time\n", e.Text())
 			}
 		}
 		return saveConfig(cfg)
@@ -210,7 +211,7 @@ like every rule, a match is only recorded to the audit log.`,
 
 var configCommandsRemoveCmd = &cobra.Command{
 	Use:   "remove <command>...",
-	Short: "Remove every allow, prompt or denial recorded for commands (a built-in denial comes back into force)",
+	Short: "Remove every allow, ask or denial recorded for commands (a built-in denial comes back into force)",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -335,13 +336,13 @@ func init() {
 	configCmd.AddCommand(configCommandsCmd)
 	configCommandsCmd.AddCommand(configCommandsListCmd)
 	configCommandsCmd.AddCommand(configCommandsAllowCmd)
-	configCommandsCmd.AddCommand(configCommandsPromptCmd)
+	configCommandsCmd.AddCommand(configCommandsAskCmd)
 	configCommandsCmd.AddCommand(configCommandsDenyCmd)
 	configCommandsCmd.AddCommand(configCommandsRemoveCmd)
 	configCommandsCmd.AddCommand(configCommandsMigrateCmd)
 
 	configCommandsAllowCmd.Flags().BoolVar(&commandsAllowNoSandbox, "no-sandbox", false, "run matching invocations directly on the host, bypassing the OS sandbox worker even when it is enabled")
-	configCommandsAllowCmd.Flags().BoolVar(&commandsAllowPrompt, "prompt", false, "ask the user to approve each matching invocation before the allow applies to it")
+	configCommandsAllowCmd.Flags().BoolVar(&commandsAllowAsk, "ask", false, "ask the user to approve each matching invocation before the allow applies to it")
 
 	yes := true
 	configCmd.AddCommand(deprecatedCommandListCommand("extra-commands", "allow",

@@ -15,10 +15,10 @@ import (
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
-// setupPromptProject runs the test from a fresh project directory under a
+// setupAskProject runs the test from a fresh project directory under a
 // config with the given body, and returns that directory and a client of a
 // server configured from it.
-func setupPromptProject(t *testing.T, body string, opts serveOptions) (string, *client.Client) {
+func setupAskProject(t *testing.T, body string, opts serveOptions) (string, *client.Client) {
 	t.Helper()
 	isolateConfig(t)
 	isolateConfigRequests(t)
@@ -55,13 +55,13 @@ func setupPromptProject(t *testing.T, body string, opts serveOptions) (string, *
 	return dir, c
 }
 
-const promptConfig = "commands:\n  - command: rm\n    prompt: true\n"
+const askConfig = "commands:\n  - command: rm\n    ask: true\n"
 
-// TestPromptedCommandRequiresHook is the end-to-end contract of prompt: true:
+// TestAskCommandRequiresHook is the end-to-end contract of ask: true:
 // the server runs a prompted command only in a call the hook asked the user
 // about, exactly that call, and once.
-func TestPromptedCommandRequiresHook(t *testing.T) {
-	dir, c := setupPromptProject(t, promptConfig, serveOptions{configRequests: true})
+func TestAskCommandRequiresHook(t *testing.T) {
+	dir, c := setupAskProject(t, askConfig, serveOptions{configRequests: true})
 	f := filepath.Join(dir, "f")
 	if err := os.WriteFile(f, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestPromptedCommandRequiresHook(t *testing.T) {
 		t.Fatal("one approval ran two calls")
 	}
 
-	// Commands that prompt for nothing keep the plain pre-approval, and one
+	// Commands that ask for nothing keep the plain pre-approval, and one
 	// the sandbox refuses anyway is denied rather than put to the user.
 	if d := evaluate(bashEvent(t, "ls", false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAllow {
 		t.Errorf("ls: hook decision = %+v, want allow", d)
@@ -111,9 +111,9 @@ func TestPromptedCommandRequiresHook(t *testing.T) {
 	}
 }
 
-// TestPromptedCommandBackground: the approval reaches a background call.
-func TestPromptedCommandBackground(t *testing.T) {
-	dir, c := setupPromptProject(t, promptConfig, serveOptions{configRequests: true})
+// TestAskCommandBackground: the approval reaches a background call.
+func TestAskCommandBackground(t *testing.T) {
+	dir, c := setupAskProject(t, askConfig, serveOptions{configRequests: true})
 	f := filepath.Join(dir, "f")
 	if err := os.WriteFile(f, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -129,11 +129,11 @@ func TestPromptedCommandBackground(t *testing.T) {
 	}
 }
 
-// TestPromptedCommandWithoutAsk: an agent that cannot ask (no
+// TestAskCommandWithoutAsk: an agent that cannot ask (no
 // --config-requests) gets the plain pre-approval from the hook, and the
 // sandbox refuses the prompted command.
-func TestPromptedCommandWithoutAsk(t *testing.T) {
-	dir, c := setupPromptProject(t, promptConfig, serveOptions{})
+func TestAskCommandWithoutAsk(t *testing.T) {
+	dir, c := setupAskProject(t, askConfig, serveOptions{})
 	if err := os.WriteFile(filepath.Join(dir, "f"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +145,11 @@ func TestPromptedCommandWithoutAsk(t *testing.T) {
 	}
 }
 
-// TestValidateBuiltinBashPrompt: in --validate-bash mode a prompted command
+// TestValidateBuiltinBashAsk: in --validate-bash mode a prompted command
 // that passes validation is put to the user when the agent asks (Claude
 // Code), and denied for Codex, which would run an "ask" unchecked, and Grok.
-func TestValidateBuiltinBashPrompt(t *testing.T) {
-	dir, _ := setupPromptProject(t, promptConfig, serveOptions{})
+func TestValidateBuiltinBashAsk(t *testing.T) {
+	dir, _ := setupAskProject(t, askConfig, serveOptions{})
 	claude := &hook.Event{ToolName: hook.ToolBash, CWD: dir, ToolInput: &hook.BashInput{Command: "rm f"}}
 	if d := validateBuiltinBash(claude); decisionOf(d) != hook.DecisionAsk {
 		t.Errorf("Claude Code: decision = %+v, want ask", d)
