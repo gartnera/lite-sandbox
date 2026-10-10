@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -62,8 +63,10 @@ func TestWorkerOptions_ScopedGrant(t *testing.T) {
 }
 
 func TestAgentWritableDir(t *testing.T) {
-	work := t.TempDir()
-	bind := t.TempDir()
+	// Synthetic paths, outside the temp roots: macOS leaves /var/folders
+	// (where t.TempDir lives) writable, which would mask what is tested.
+	work := "/ls-test/work"
+	bind := "/ls-test/bind"
 	opts := os_sandbox.WorkerOptions{WorkDir: work, ExtraBinds: []string{bind}}
 	cases := map[string]bool{
 		filepath.Join(work, "bin", "gh"): true,
@@ -77,7 +80,7 @@ func TestAgentWritableDir(t *testing.T) {
 		}
 	}
 
-	home := t.TempDir()
+	home := "/ls-test/home"
 	t.Setenv("HOME", home)
 	opts = os_sandbox.WorkerOptions{WorkDir: work, HomeWritable: true,
 		DeniedWritePaths: []os_sandbox.DenyPath{{Path: filepath.Join(home, ".local", "bin"), Dir: true}}}
@@ -86,6 +89,11 @@ func TestAgentWritableDir(t *testing.T) {
 	}
 	if dir := agentWritableDir(filepath.Join(home, ".local", "bin", "gh"), opts); dir != "" {
 		t.Errorf("denylist mode: a binary under a write-denied path reported writable through %s", dir)
+	}
+	if runtime.GOOS == "darwin" {
+		if agentWritableDir("/private/var/folders/x/T/gh", os_sandbox.WorkerOptions{WorkDir: work}) == "" {
+			t.Error("macOS: a binary under /private/var/folders was not reported")
+		}
 	}
 }
 
