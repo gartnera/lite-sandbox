@@ -19,6 +19,7 @@ import (
 	montygo "github.com/fugue-labs/monty-go"
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/audit"
+	"github.com/gartnera/lite-sandbox/internal/gitworktree"
 	"github.com/gartnera/lite-sandbox/os_sandbox"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -115,6 +116,11 @@ type Sandbox struct {
 	whitelistedCommands map[string]bool
 	worker              *os_sandbox.Worker
 	workerWorkDir       string
+	// scopes maps each command a scoped grant names to its scope, and
+	// scopedWorkers holds the scopes' running workers, by scope key. See
+	// scoped_workers.go.
+	scopes        map[string]config.CommandScope
+	scopedWorkers map[string]*scopedWorker
 	// argValidators holds a reference to commandArgValidators so that
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
@@ -248,6 +254,12 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 	s.unsandboxedSub = unsandboxedSub
 	s.deniedCommands = parseDeniedCommands(cfg.EffectiveDeniedCommands())
 	s.askCommands = parseDeniedCommands(cfg.AskCommandList())
+	s.scopes = make(map[string]config.CommandScope)
+	for _, scope := range cfg.CommandScopes() {
+		for _, name := range scope.Commands {
+			s.scopes[name] = scope
+		}
+	}
 
 	// Store worker config for lazy start / restart.
 	s.workerWorkDir = workDir
@@ -264,6 +276,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		s.worker.Close()
 		s.worker = nil
 	}
+	s.closeScopedWorkersLocked()
 	if cfg.OSSandboxEnabled() && !prevOSSandbox {
 		slog.Info("enabling OS sandbox", "block_aws_credentials", cfg.AWS.UsesIMDS())
 	}
@@ -585,6 +598,7 @@ func (s *Sandbox) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.closeScopedWorkersLocked()
 	if s.worker != nil {
 		return s.worker.Close()
 	}
@@ -1231,12 +1245,17 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 
 // dispatchExec runs an exec invocation inside the OS sandbox worker or directly
 // on the host. Commands go to the worker when the OS sandbox is enabled and the
-// command is not an unsandboxed_commands entry. Host execution injects the
+// command is not an unsandboxed_commands entry: to its scope's own worker when
+// a scoped grant names it (see scoped_workers.go), to the shared worker
+// otherwise. Host execution injects the
 // docker filtering proxy's DOCKER_HOST only for non-unsandboxed commands, so
 // unsandboxed ones reach the real docker daemon (or the host's own DOCKER_HOST).
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	unsandboxed := s.execIsUnsandboxed(ctx, args)
 	if useOSSandbox && !unsandboxed {
+		if len(args) > 0 && s.isScopedCommand(args[0]) {
+			return s.execInScopedWorker(ctx, args)
+		}
 		return s.execInWorker(ctx, args)
 	}
 	return s.execOnHost(ctx, args, !unsandboxed)
@@ -1655,8 +1674,9 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	return nil
 }
 
-// getOrCreateWorker returns the current worker, starting a new one if the worker
-// is nil or dead. Must be called without holding s.mu.
+// getOrCreateWorker returns the shared worker, starting a new one if the
+// worker is nil or dead. Must be called without holding s.mu. Every command
+// runs here except those a scoped grant names (see scoped_workers.go).
 func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	s.mu.Lock()
 	if s.worker != nil && !s.worker.IsDead() {
@@ -1664,8 +1684,31 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		s.mu.Unlock()
 		return w, nil
 	}
+	cfg := s.cfg
 	s.mu.Unlock()
 
+	opts := s.workerOptions(cfg)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.worker != nil && !s.worker.IsDead() {
+		return s.worker, nil
+	}
+	slog.Info("starting new sandbox worker", "workDir", opts.WorkDir, "mode", cfg.EffectiveMode(), "deniedRead", len(opts.DeniedReadPaths))
+	w, err := os_sandbox.StartWorker(context.Background(), opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start worker: %w", err)
+	}
+	s.worker = w
+	return w, nil
+}
+
+// workerOptions builds the filesystem policy of a worker started from cfg:
+// the shared worker's from the sandbox's config, a scoped worker's from
+// Config.ForScope. Either way the grants of every scope cfg still holds
+// scoped are hidden (Config.ScopedDeniedReadEntries), in every mode. Must be
+// called without holding s.mu.
+func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 	// The worker is writable in the working directory by default; every other
 	// directory a command may legitimately write to must be added here or the
 	// OS sandbox denies the write (EPERM) even though the Go validator
@@ -1675,19 +1718,19 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	// writeAllowedPaths), but that only gates the interpreter — the OS sandbox
 	// worker has its own profile. Without adding them here, a write the
 	// validator allows is still denied by bwrap/seatbelt with EPERM.
-	extraBinds := s.ConfigWritePaths()
+	extraBinds := cfg.ExpandedWritablePaths()
 
 	// Internal write grants are the inverse: the OS sandbox worker allows the
 	// writes (so spawned programs can reach their own data — a profile's build
 	// cache, a tool's ~/.cache), but the paths are deliberately NOT part of the
 	// interpreter's write set, so the agent's direct writes there are still
 	// rejected at the AST/runtime layer.
-	extraBinds = append(extraBinds, s.ConfigInternalWritePaths()...)
+	extraBinds = append(extraBinds, cfg.ExpandedInternalWritablePaths()...)
 
 	// Internal read grants likewise only reach the worker (as read-only
 	// binds); reads inside the OS sandbox are broadly allowed already, so this
 	// mainly re-exposes host paths hidden by the worker's /tmp overlay.
-	roBinds := s.ConfigInternalReadPaths()
+	roBinds := cfg.ExpandedInternalReadablePaths()
 
 	// Background commands' output files live under BackgroundOutputRoot,
 	// which on Linux sits under the /tmp the worker overlays with its own
@@ -1709,8 +1752,10 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 	s.mu.RLock()
 	workerWorkDir := s.workerWorkDir
 	s.mu.RUnlock()
-	if parent := s.WorktreeParentPath(workerWorkDir); parent != "" {
-		extraBinds = append(extraBinds, parent)
+	if cfg.Git.AllowsWorktreeParent() {
+		if parent := gitworktree.MainWorktree(workerWorkDir); parent != "" {
+			extraBinds = append(extraBinds, parent)
+		}
 	}
 
 	// Bind the docker proxy socket dir into the worker so sandboxed commands
@@ -1727,16 +1772,8 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		extraBinds = append(extraBinds, dockerSocketDir)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.worker != nil && !s.worker.IsDead() {
-		return s.worker, nil
-	}
-
-	// s.cfg is read directly rather than via getConfig(): s.mu is already held
-	// exclusively here and sync.RWMutex is not reentrant.
 	opts := os_sandbox.WorkerOptions{
-		WorkDir:    s.workerWorkDir,
+		WorkDir:    workerWorkDir,
 		ExtraBinds: extraBinds,
 		ROBinds:    roBinds,
 		MaskPaths:  dockerMaskPaths,
@@ -1744,31 +1781,34 @@ func (s *Sandbox) getOrCreateWorker() (*os_sandbox.Worker, error) {
 		// and ~/.aws in brokered IMDS mode where credentials come from the
 		// IMDS server instead of the files (raw-credentials mode and an
 		// unconfigured aws section leave it readable) — less whatever a paths
-		// grant on the path lifted.
-		DeniedReadPaths: denyPaths(s.cfg.AlwaysDeniedReadEntries()),
+		// grant on the path lifted — and the paths granted to commands of
+		// another worker.
+		DeniedReadPaths: denyPaths(cfg.AlwaysDeniedReadEntries(), cfg.ScopedDeniedReadEntries()),
 	}
 	// Denylist mode flips the worker's write posture: the home directory is
 	// writable and only the deny lists are carved out. Allowlist mode keeps the
 	// original cwd-confined layout.
-	if s.cfg.EffectiveMode() == config.ModeDenylist {
+	if cfg.EffectiveMode() == config.ModeDenylist {
 		opts.HomeWritable = true
-		opts.DeniedReadPaths = denyPaths(s.cfg.EffectiveDeniedReadEntries())
-		opts.DeniedWritePaths = denyPaths(s.cfg.EffectiveDeniedWriteEntries())
+		opts.DeniedReadPaths = denyPaths(cfg.EffectiveDeniedReadEntries(), cfg.ScopedDeniedReadEntries())
+		opts.DeniedWritePaths = denyPaths(cfg.EffectiveDeniedWriteEntries())
 	}
-	slog.Info("starting new sandbox worker", "workDir", s.workerWorkDir, "mode", s.cfg.EffectiveMode(), "deniedRead", len(opts.DeniedReadPaths))
-	w, err := os_sandbox.StartWorker(context.Background(), opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start worker: %w", err)
-	}
-	s.worker = w
-	return w, nil
+	return opts
 }
 
-// denyPaths converts config deny-list entries to the worker's type.
-func denyPaths(entries []config.DeniedPath) []os_sandbox.DenyPath {
-	out := make([]os_sandbox.DenyPath, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, os_sandbox.DenyPath{Path: e.Path, Dir: e.Dir})
+// denyPaths converts config deny-list entries to the worker's type, merging
+// the lists and dropping a path a previous list already named.
+func denyPaths(lists ...[]config.DeniedPath) []os_sandbox.DenyPath {
+	var out []os_sandbox.DenyPath
+	seen := make(map[string]bool)
+	for _, entries := range lists {
+		for _, e := range entries {
+			if seen[e.Path] {
+				continue
+			}
+			seen[e.Path] = true
+			out = append(out, os_sandbox.DenyPath{Path: e.Path, Dir: e.Dir})
+		}
 	}
 	return out
 }

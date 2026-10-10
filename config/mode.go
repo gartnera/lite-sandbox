@@ -391,13 +391,17 @@ func (c *Config) splitDefaults(defaults []DeniedPath, lifts func(PathEntry) bool
 }
 
 // liftsRead reports whether a paths entry grants read access (a write grant
-// implies read), which lifts a read denial on its path.
-func liftsRead(e PathEntry) bool { return e.Profile == "" && (e.GrantsRead() || e.GrantsWrite()) }
+// implies read), which lifts a read denial on its path. A grant scoped to
+// commands lifts nothing here: it lifts the denial in its commands' own worker
+// only (Config.ForScope).
+func liftsRead(e PathEntry) bool {
+	return e.Profile == "" && !e.Scoped() && (e.GrantsRead() || e.GrantsWrite())
+}
 
 // liftsWrite reports whether a paths entry grants write access, which lifts a
 // write denial on its path. Like liftsRead, only a grant the user wrote lifts:
 // a profile's preset paths never open a built-in denial.
-func liftsWrite(e PathEntry) bool { return e.Profile == "" && e.GrantsWrite() }
+func liftsWrite(e PathEntry) bool { return e.Profile == "" && !e.Scoped() && e.GrantsWrite() }
 
 // DeniedEntriesLiftedBy returns the built-in deny-list entries that a paths
 // grant on p lifts, for the CLI to say so when it records one.

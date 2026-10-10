@@ -341,7 +341,8 @@ By default the sandbox confines reads and writes to the working directory. The
 write outside the working directory, and what the OS sandbox hides or keeps
 read-only in `denylist` mode. Each entry names a path and sets `read` and/or
 `write` (`true` grants, `false` denies, unset says nothing), plus an optional
-`internal` for grants that apply only at the OS sandbox layer:
+`internal` for grants that apply only at the OS sandbox layer (and `commands` to
+scope one to a single CLI, see [below](#grants-for-one-command-commands)):
 
 ```yaml
 paths:
@@ -430,6 +431,80 @@ you don't want to widen what the agent can touch. It only has an effect when
 `os_sandbox` is enabled. The OS sandbox's filesystem is already broadly
 readable, so an internal read grant mainly matters for host paths hidden by the
 sandbox's `/tmp` overlay on Linux.
+
+### Grants for one command: `commands`
+
+An internal grant reaches every program in the OS sandbox: a program the
+agent writes and runs (`go run`, a script) can read it just as well as the
+tool it was meant for. For a credential that only one CLI should hold, scope
+the grant to that command:
+
+```yaml
+paths:
+  - path: ~/.config/gh   # gh's token, for gh alone
+    read: true
+    internal: true
+    commands: [gh]
+```
+
+```bash
+lite-sandbox config paths allow ~/.config/gh --commands gh   # implies --internal
+```
+
+The named commands then run in an OS sandbox worker of their own that has the
+path, while the shared worker every other command runs in hides it, in
+**every** mode (like the credential masks). So a program the agent writes
+can't read the file, and if that program launches `gh` itself, that `gh` runs
+in the shared worker, without the token. A grant on a built-in deny-list path
+(`~/.config/gh` is one) lifts it in the command's own worker only; for every
+other command it stays masked, and `config mode show` lists the scope.
+
+What gets routed to the command's worker, and how:
+
+- Only a direct invocation by the bare name: `gh pr list`, but not `./gh`,
+  `/usr/bin/gh`, `timeout 60 gh`, or `xargs gh`. Those run in the shared
+  worker, without the grant.
+- The binary is looked up on the server's `PATH`, and refused when it lies
+  somewhere sandboxed commands can write: the working directory, a writable
+  grant or internal write grant (a profile's cache, such as `~/go/bin`), or in
+  denylist mode anywhere in `$HOME` outside the write-denied paths. Otherwise
+  the agent could replace it.
+- Variables the agent sets (`export GH_CONFIG_DIR=...`, `GIT_*`, a pager or
+  editor) are not passed to it.
+- It runs with the server's environment. `PATH` keeps only the directories
+  sandboxed commands can't write, so the programs it starts can't be ones the
+  agent planted.
+- It still has to be allowed and pass validation like any command. Allow its
+  subcommands (`lite-sandbox config commands allow "gh pr view" "gh api"`),
+  not the bare name: a bare allow runs the whole command line through `bash -c`, which
+  always goes to the shared worker, and `no_sandbox` runs it on the host,
+  where nothing is hidden. `paths allow --commands` and `config mode show`
+  warn about both.
+
+The path should lie outside what the agent may read itself (the working
+directory and the agent-facing grants). The OS sandbox only covers the
+programs commands start, not the agent's own redirects or the embedded Python,
+which the path boundary governs.
+
+Commands naming the same entries share one worker. Each worker starts on the
+first command that needs it and closes after five minutes without one, so
+it only costs anything while the CLI is in use. Like `internal`, the scoping
+only takes effect when `os_sandbox` is enabled.
+
+Only scope a grant to a CLI that never runs code from the project. Once the
+CLI has the credential it can do whatever the credential allows, limited only
+by the argument validators. `git`, for example, is a bad candidate: it runs
+hooks, filters, and credential helpers configured in `.git`, which sandboxed
+commands can write, and a git holding a token would hand it to that code.
+The same goes for a CLI that starts git. The scoped worker runs in the working
+directory, so a `git status` or `git checkout` that the CLI runs reads the
+project's `.git/config` and hooks. gh does this in `pr create`, `pr checkout`,
+`pr merge`, and the `repo` and `issue develop` commands that clone, sync, or
+check out, so allow only subcommands that don't (`gh pr view`, `gh pr list`,
+`gh issue view`, `gh api`), never `gh pr` or `gh issue` as a whole.
+Note also that `gh auth login` keeps the token in the system keyring by
+default; the file grant protects a token stored in `hosts.yml` (`gh auth login
+--insecure-storage`, or a host without a keyring).
 
 ### Denials: `read: false`, `write: false` (denylist mode)
 
