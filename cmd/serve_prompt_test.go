@@ -146,20 +146,25 @@ func TestPromptedCommandWithoutAsk(t *testing.T) {
 }
 
 // TestValidateBuiltinBashPrompt: in --validate-bash mode a prompted command
-// that passes validation is put to the user when the agent asks (--ask), and
-// denied when it cannot.
+// that passes validation is put to the user when the agent asks (Claude
+// Code), and denied for Codex, which would run an "ask" unchecked, and Grok.
 func TestValidateBuiltinBashPrompt(t *testing.T) {
 	dir, _ := setupPromptProject(t, promptConfig, serveOptions{})
-	ev := &hook.Event{ToolName: hook.ToolBash, CWD: dir, ToolInput: &hook.BashInput{Command: "rm f"}}
-	d := validateBuiltinBash(ev, hookOptions{ask: true})
-	if decisionOf(d) != hook.DecisionAsk {
-		t.Errorf("--ask: decision = %+v, want ask", d)
+	claude := &hook.Event{ToolName: hook.ToolBash, CWD: dir, ToolInput: &hook.BashInput{Command: "rm f"}}
+	if d := validateBuiltinBash(claude); decisionOf(d) != hook.DecisionAsk {
+		t.Errorf("Claude Code: decision = %+v, want ask", d)
 	}
-	if d := validateBuiltinBash(ev, hookOptions{}); decisionOf(d) != hook.DecisionDeny {
-		t.Errorf("without --ask: decision = %+v, want deny", d)
+	for name, ev := range map[string]*hook.Event{
+		"codex turn_id": {ToolName: hook.ToolBash, CWD: dir, TurnID: "t1", ToolInput: &hook.BashInput{Command: "rm f"}},
+		"codex model":   {ToolName: hook.ToolBash, CWD: dir, Model: "gpt-5", ToolInput: &hook.BashInput{Command: "rm f"}},
+		"grok":          {ToolName: hook.ToolBash, CWD: dir, GrokEventName: "pre_tool_use", ToolInput: &hook.BashInput{Command: "rm f"}},
+	} {
+		if d := validateBuiltinBash(ev); decisionOf(d) != hook.DecisionDeny {
+			t.Errorf("%s: decision = %+v, want deny", name, d)
+		}
 	}
-	ev.ToolInput = &hook.BashInput{Command: "rm /etc/hostname"}
-	if d := validateBuiltinBash(ev, hookOptions{ask: true}); decisionOf(d) != hook.DecisionDeny {
+	claude.ToolInput = &hook.BashInput{Command: "rm /etc/hostname"}
+	if d := validateBuiltinBash(claude); decisionOf(d) != hook.DecisionDeny {
 		t.Errorf("rm outside the boundary: decision = %+v, want deny", d)
 	}
 }

@@ -85,9 +85,7 @@ func (o claudeOptions) plan(binPath string) claudePlan {
 func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP bool) (command, matcher string) {
 	if wantHook {
 		if validateBash {
-			// Claude Code puts an "ask" to the user, so a command whose
-			// commands entry prompts can be approved there.
-			command = binPath + " hook --validate-bash --ask"
+			command = binPath + " hook --validate-bash"
 		} else {
 			command = binPath + " hook"
 		}

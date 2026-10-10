@@ -192,7 +192,7 @@ func TestClaudeLaunchArgsBashASTHookMode(t *testing.T) {
 	if matcher != hookToolMatcher {
 		t.Errorf("hook matcher = %q, want %q", matcher, hookToolMatcher)
 	}
-	if want := testBin + " hook --validate-bash --ask"; command != want {
+	if want := testBin + " hook --validate-bash"; command != want {
 		t.Errorf("hook command = %q, want %q", command, want)
 	}
 }

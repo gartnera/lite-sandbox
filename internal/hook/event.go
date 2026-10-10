@@ -51,6 +51,13 @@ type Event struct {
 	// Codex never send it, so it identifies an event from Grok (see FromGrok).
 	GrokEventName string `json:"hookEventName,omitempty"`
 
+	// TurnID and Model are Codex-specific extensions of the protocol, sent on
+	// every Codex PreToolUse event; Claude Code sends neither on PreToolUse
+	// (only SessionStart may carry model). They identify an event from Codex
+	// (see FromCodex).
+	TurnID string `json:"turn_id,omitempty"`
+	Model  string `json:"model,omitempty"`
+
 	// ToolInputTruncated is Grok's flag for a tool input over its 128 KiB hook
 	// payload limit. Grok then sends a clipped JSON string in place of the
 	// input object, so the arguments cannot be decoded.
@@ -68,6 +75,18 @@ type Event struct {
 // FromGrok reports whether the event was sent by Grok Build, whose tool names
 // (and MCP tool naming) differ from Claude Code's.
 func (e *Event) FromGrok() bool { return e.GrokEventName != "" }
+
+// FromCodex reports whether the event was sent by Codex, by the fields only
+// Codex adds to the shared protocol.
+func (e *Event) FromCodex() bool { return e.TurnID != "" || e.Model != "" }
+
+// CanAsk reports whether the agent that sent the event puts an "ask"
+// decision to the user. Claude Code does. Codex parses "ask" but does not
+// support it: it reports the hook as failed and runs the tool call, so an
+// "ask" there would let the call through unchecked. Grok Build does not
+// support it either. Misreading a Claude Code event as Codex's only turns an
+// ask into a denial, the safe direction.
+func (e *Event) CanAsk() bool { return !e.FromGrok() && !e.FromCodex() }
 
 // ToolInput is implemented by every typed tool argument struct. Tool reports
 // the canonical tool name and Describe returns a short human/AI readable

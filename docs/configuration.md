@@ -167,12 +167,16 @@ refused when the hook can't see it in the command line:
 - a command run by a wrapper (`find -exec`, `xargs`, `env`, `timeout`,
   `xcrun`), which is refused even in an approved call: run it on its own.
 
-Only Claude Code, set up by `install claude` or `launch claude`, puts the
-`ask` to you (the hook is registered with `--config-requests`, and with
-`--ask` in `--bash-ast-hook-mode`, where the built-in Bash tool runs the
-command once you approve, so no ticket is needed). Codex, opencode, Crush and
-Grok Build can't ask, so for them a prompted command is refused, as if
-denied. In a non-interactive `claude -p` run nobody can answer the prompt, so
+Only Claude Code puts the `ask` to you, and existing installs need no
+change: through the sandbox's bash tool it relies on the
+`--config-requests` flags that `install claude` and `launch claude` already
+set, and in `--bash-ast-hook-mode` the hook answers `ask` for the built-in Bash
+tool directly (which runs the command once you approve, so no ticket is
+needed). Codex, opencode, Crush and Grok Build can't ask, so for them a
+prompted command is refused, as if denied. Codex in particular parses an
+`ask` but doesn't support it, running the tool call anyway, so the hook tells
+its events apart by the `turn_id` and `model` fields Codex adds and never
+answers `ask` to them. In a non-interactive `claude -p` run nobody can answer the prompt, so
 Claude Code denies the call.
 
 ### Denied commands

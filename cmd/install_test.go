@@ -418,13 +418,13 @@ func TestClaudeHookPlan(t *testing.T) {
 		{
 			name:     "bash-ast mode matches only Bash (no MCP server)",
 			wantHook: true, validateBash: true,
-			wantCommand: bin + " hook --validate-bash --ask",
+			wantCommand: bin + " hook --validate-bash",
 			wantMatcher: bashValidateMatcher,
 		},
 		{
 			name:     "bash-ast with tool hook matches built-ins only",
 			wantHook: true, validateBash: true, governFS: true,
-			wantCommand: bin + " hook --validate-bash --ask",
+			wantCommand: bin + " hook --validate-bash",
 			wantMatcher: hookToolMatcher,
 		},
 	}

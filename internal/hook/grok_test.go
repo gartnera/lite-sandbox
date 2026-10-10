@@ -247,3 +247,24 @@ func TestMediaInputTilde(t *testing.T) {
 		t.Errorf("Paths() = %q, want the ~-expanded path too", got)
 	}
 }
+
+// TestAgentDetection: Codex is told apart by the turn_id and model fields it
+// adds to the protocol, and only Claude Code is trusted to ask.
+func TestAgentDetection(t *testing.T) {
+	for _, tc := range []struct {
+		name, body    string
+		codex, canAsk bool
+	}{
+		{"claude", `{"hook_event_name": "PreToolUse", "session_id": "s", "permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_1", "tool_input": {"command": "ls"}}`, false, true},
+		{"codex", `{"hook_event_name": "PreToolUse", "session_id": "s", "model": "gpt-5.5", "turn_id": "t1", "permission_mode": "default", "tool_name": "Bash", "tool_use_id": "call_1", "tool_input": {"command": "ls"}}`, true, false},
+		{"grok", `{"hook_event_name": "PreToolUse", "hookEventName": "pre_tool_use", "tool_name": "run_terminal_command", "tool_input": {"command": "ls"}}`, false, false},
+	} {
+		e, err := ParseEvent(strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.FromCodex() != tc.codex || e.CanAsk() != tc.canAsk {
+			t.Errorf("%s: FromCodex = %v, CanAsk = %v", tc.name, e.FromCodex(), e.CanAsk())
+		}
+	}
+}

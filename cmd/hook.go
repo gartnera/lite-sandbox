@@ -60,16 +60,7 @@ type hookOptions struct {
 	// it the call is pre-approved like any other and the sandbox's deny list
 	// refuses it. Set by --config-requests.
 	configRequests bool
-	// ask says this agent prompts the user when the hook answers "ask"
-	// (Claude Code does; Codex and Grok Build do not). Only then does the
-	// hook put a command that runs a prompted invocation (a commands entry
-	// with prompt: true) before the user; otherwise the sandbox refuses it.
-	// Set by --ask, and implied by --config-requests.
-	ask bool
 }
-
-// asks reports whether the agent puts a hook's "ask" to the user.
-func (o hookOptions) asks() bool { return o.ask || o.configRequests }
 
 var hookFlags hookOptions
 
@@ -92,8 +83,8 @@ var hookCmd = &cobra.Command{
 		"is answered \"ask\" instead, and recorded so the MCP server (serve-mcp " +
 		"--config-requests) knows the user was asked before it runs the change. " +
 		"Likewise a bash tool call that runs a command whose commands entry has prompt: true.\n\n" +
-		"With --ask (implied by --config-requests), a built-in Bash command that runs such a " +
-		"command is answered \"ask\" in --validate-bash mode, rather than denied.",
+		"With --validate-bash, a built-in Bash command that runs such a command is answered " +
+		"\"ask\" when the agent puts an ask to the user (Claude Code), and denied otherwise.",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runHook(cmd, hookFlags)
@@ -105,8 +96,6 @@ func init() {
 		"validate the built-in Bash command through the sandbox and allow it when it passes, instead of denying it")
 	hookCmd.Flags().BoolVar(&hookFlags.configRequests, "config-requests", false,
 		"ask the user to approve each `lite-sandbox config` command run with the sandbox's bash tool (the server runs only those the hook asked about)")
-	hookCmd.Flags().BoolVar(&hookFlags.ask, "ask", false,
-		"the agent prompts the user on an \"ask\" decision: ask the user to approve commands whose commands entry has prompt: true")
 	rootCmd.AddCommand(hookCmd)
 }
 
@@ -189,7 +178,7 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 		return d
 	}
 	if hook.IsShellTool(event.ToolName) {
-		return validateBuiltinBash(event, opts)
+		return validateBuiltinBash(event)
 	}
 	return evaluatePathPolicy(event)
 }
@@ -253,7 +242,7 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 // pre-approved like any other, and the sandbox refuses the prompted command
 // for want of an approval.
 func evaluatePromptedCommand(event *hook.Event, opts hookOptions) *hook.Decision {
-	if !opts.configRequests || event.FromGrok() {
+	if !opts.configRequests || !event.CanAsk() {
 		return nil
 	}
 	var args map[string]any
@@ -372,10 +361,11 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 //
 // A command that runs a prompted invocation (a commands entry with
 // prompt: true) is validated as approved and, when it passes, answered "ask"
-// so the agent puts it to the user — when the agent does that (--ask). The
-// built-in Bash tool runs only once the user approves, so no ticket is needed.
-// Otherwise the prompt check stands and the command is denied.
-func validateBuiltinBash(event *hook.Event, opts hookOptions) *hook.Decision {
+// so the agent puts it to the user — when the agent does that
+// (hook.Event.CanAsk: Claude Code, not Codex or Grok Build). The built-in Bash
+// tool runs only once the user approves, so no ticket is needed. Otherwise
+// the prompt check stands and the command is denied.
+func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	in, ok := event.ToolInput.(hook.ShellInput)
 	if !ok || in.ShellCommand() == "" {
 		// Could not see the command; defer rather than guess.
@@ -392,7 +382,7 @@ func validateBuiltinBash(event *hook.Event, opts hookOptions) *hook.Decision {
 
 	var prompted []string
 	ctx := context.Background()
-	if opts.asks() && !event.FromGrok() {
+	if event.CanAsk() {
 		if prompted = sb.PromptedCommands(in.ShellCommand()); len(prompted) > 0 {
 			ctx = bash_sandboxed.WithApproval(ctx)
 		}
