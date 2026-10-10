@@ -465,17 +465,39 @@ work. As in CPython, the mode takes effect at open time: `"w"` truncates, `"a"`
 creates, and `"r"` on a missing file raises a `FileNotFoundError` the script
 can catch.
 
+Relative paths resolve against the shell's working directory, which is also
+what `os.getcwd()` reports. `os.chdir()` moves the program's own working
+directory (not the shell's) after checking the target against the readable
+paths. monty resolves `..` in a path textually before lite-sandbox sees it, so
+`link/../x` means `x` even when `link` is a symlink; the result is checked
+against the boundary like any other path. `Path.stat()` and `os.stat()` return
+a real `os.stat_result` (`st.st_size`, `st.st_mtime`, …).
+
 `os.getenv` and `os.environ` always see an empty environment, since the host's
 would expose the credentials the rest of the sandbox masks.
+
+### Clocks, sleep and randomness
+
+These behave as they would under CPython on the same machine:
+
+- `time.time()`, `datetime.now()` and friends read the real clock, in the
+  host's local time zone (from `$TZ`, else `/etc/localtime`) rather than
+  monty's default of UTC.
+- `time.sleep()` really waits, for as long as asked. The command timeout
+  still applies, so put a long wait in a background command.
+- `random` starts from real entropy, and `os.urandom(n)` returns bytes from the
+  host's CSPRNG, up to 1 MiB per call.
+- `print(..., file=sys.stderr)` writes to the command's stderr.
 
 ### What monty does not support
 
 monty implements a **subset of Python**, which is the most likely source of
 surprises. There are no third-party packages: `numpy`, `pandas`, `requests`,
 and the rest can't be imported, and there's no `pip` or `venv`. The standard
-library is partial: `os`, `pathlib`, `json`, `re`, `math`, `datetime`, `sys`,
-`typing`, `asyncio`, `dataclasses`, `collections`, `functools`, `itertools`,
-and `base64` are available.
+library is partial: `os`, `pathlib`, `json`, `re`, `math`, `random`,
+`datetime`, `time`, `sys`, `typing`, `asyncio`, `dataclasses`, `collections`,
+`copy`, `functools`, `itertools`, `base64`, `binascii`, and `unicodedata` are
+available.
 
 Also unavailable:
 
@@ -487,15 +509,16 @@ Also unavailable:
 | `sys.exit`, `sys.stdout.write` | `print()`, and the shell for exit codes |
 | Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |
 | Generators, `match`, `del` | Lists and comprehensions |
+| Sorting `Path` objects (`sorted(p.iterdir())`) | `sorted(str(x) for x in p.iterdir())` |
 
 When a program hits one of these, the error names monty and suggests an
 alternative.
 
 ### sys.argv and sys.stdin
 
-monty provides neither: its `sys` module has a fixed set of attributes, and
-Python can't assign to it. lite-sandbox supplies both, so arguments and piped
-input work as they do in CPython:
+monty's `sys.argv` holds only the script name, it has no `sys.stdin`, and
+Python can't assign to its `sys` module. lite-sandbox supplies both, so
+arguments and piped input work as they do in CPython:
 
 ```bash
 python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']

@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	montygo "github.com/fugue-labs/monty-go"
 )
@@ -268,11 +268,11 @@ func (s *Sandbox) montyOsCall(m *montyFS, stdin *stdinSource) montygo.OsCallFunc
 			return nil, nil
 		case "os.environ":
 			return map[string]any{}, nil
-		case "date.today":
-			return time.Now().Format(time.DateOnly), nil
-		case "datetime.now":
-			return time.Now().Format("2006-01-02T15:04:05.000000"), nil
+		case "os.urandom":
+			return urandom(call)
 		}
+		// The clocks, sleeps and random seeding never get here: the OS policy
+		// (montyOsPolicy) has monty answer them itself.
 		return nil, fmt.Errorf("%s is not supported in the sandbox", call.Function)
 	}
 }
@@ -349,29 +349,54 @@ func (m *montyFS) stat(call *montygo.OsCall) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat: %w", cleanFSError(err, path))
 	}
-	// monty hands this straight back to Python as a dict, so the fields are
-	// reachable as s["st_size"]. Attribute access (s.st_size) is not supported
-	// by this monty build regardless of what is returned here.
+	// A real os.stat_result, so s.st_size and s[6] both work, and so does
+	// os.chdir(), which monty validates by asking for a stat and checking
+	// st_mode for a directory.
 	mtime := float64(info.ModTime().UnixNano()) / 1e9
-	return map[string]any{
-		"st_mode":  int(info.Mode().Perm()) | modeTypeBits(info.Mode()),
-		"st_size":  int(info.Size()),
-		"st_mtime": mtime,
-		"st_atime": mtime,
-		"st_ctime": mtime,
+	return montygo.StatResult{
+		StMode:  int64(info.Mode().Perm()) | modeTypeBits(info.Mode()),
+		StSize:  info.Size(),
+		StMtime: mtime,
+		StAtime: mtime,
+		StCtime: mtime,
 	}, nil
+}
+
+// montyMaxUrandomBytes caps one os.urandom() call. Entropy is not a boundary
+// question, but the answer is buffered whole and crosses into the interpreter
+// as one value, so an absurd size would be a memory problem first.
+const montyMaxUrandomBytes = 1 << 20
+
+// urandom serves os.urandom(n) from the host's CSPRNG. monty insists on
+// exactly n bytes back, as CPython guarantees.
+func urandom(call *montygo.OsCall) (any, error) {
+	var n float64
+	if len(call.Args) > 0 {
+		n, _ = call.Args[0].(float64)
+	}
+	if n > montyMaxUrandomBytes {
+		return nil, &montygo.PyError{
+			Type:    "ValueError",
+			Message: fmt.Sprintf("os.urandom: %d bytes is more than the sandbox's limit of %d", int64(n), montyMaxUrandomBytes),
+		}
+	}
+	buf := make([]byte, int(n))
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("os.urandom: %w", err)
+	}
+	return montygo.Bytes(buf), nil
 }
 
 // modeTypeBits maps Go's portable file-type bits onto the POSIX S_IF* values
 // Python code expects to find in st_mode.
-func modeTypeBits(mode fs.FileMode) int {
+func modeTypeBits(mode fs.FileMode) int64 {
 	switch {
 	case mode&fs.ModeDir != 0:
-		return 0o040000
+		return montygo.ModeDir
 	case mode&fs.ModeSymlink != 0:
-		return 0o120000
+		return montygo.ModeSymlink
 	default:
-		return 0o100000
+		return montygo.ModeFile
 	}
 }
 
@@ -394,9 +419,9 @@ func (m *montyFS) iterdir(call *montygo.OsCall) (any, error) {
 		return nil, fmt.Errorf("iterdir: %w", cleanFSError(err, path))
 	}
 	sort.Strings(names)
-	// CPython yields paths with the parent still attached, so join them back
-	// onto the argument as written. They arrive in Python as plain strings —
-	// this monty build does not rebuild them into Path objects.
+	// Each entry is the child's full path; monty keeps the final component
+	// and rebuilds it beneath the Path the program iterated, relative or not,
+	// so `Path("src").iterdir()` yields `src/x` as CPython does.
 	out := make([]any, 0, len(names))
 	resolvedDir := ResolvePath(path, m.workDir)
 	for _, name := range names {
@@ -647,7 +672,8 @@ func (m *montyFS) openFile(call *montygo.OsCall) (any, error) {
 }
 
 // pathArg extracts the path at index i, rejecting anything that is not a
-// string. monty passes paths through as plain strings.
+// string. monty passes paths through as plain strings, always absolute: it
+// resolves a relative one against the working directory (WithCwd) first.
 func pathArg(call *montygo.OsCall, i int) (string, error) {
 	if len(call.Args) <= i {
 		return "", fmt.Errorf("%s: missing path argument", call.Function)

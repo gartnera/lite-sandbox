@@ -96,8 +96,10 @@ func TestPythonPathBoundary(t *testing.T) {
 			wantErr: "outside allowed directories",
 		},
 		{
+			// monty normalizes the .. lexically before the host sees the
+			// path, so this reaches the boundary as OUTSIDE's absolute path.
 			name:    "traverse out with ..",
-			program: `print(Path('../../etc/passwd').read_text())`,
+			program: `print(Path(RELOUTSIDE + '/secret.txt').read_text())`,
 			wantErr: "outside allowed directories",
 		},
 		{
@@ -152,7 +154,7 @@ func TestPythonPathBoundary(t *testing.T) {
 		},
 		{
 			name:    "iterdir hides .git",
-			program: `print([str(p) for p in sorted(Path('.').iterdir()) if 'git' in str(p)])`,
+			program: `print([p for p in sorted(str(p) for p in Path('.').iterdir()) if 'git' in p])`,
 			wantOut: "[]\n",
 		},
 	}
@@ -162,7 +164,12 @@ func TestPythonPathBoundary(t *testing.T) {
 			// Each case gets a fresh tree so writes from one do not leak into
 			// the next.
 			dir, outside := pythonTestDir(t)
-			program := strings.ReplaceAll(tt.program, "OUTSIDE", "'"+outside+"'")
+			relOutside, err := filepath.Rel(dir, outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			program := strings.ReplaceAll(tt.program, "RELOUTSIDE", "'"+relOutside+"'")
+			program = strings.ReplaceAll(program, "OUTSIDE", "'"+outside+"'")
 			cmd := `python3 -c "from pathlib import Path
 ` + program + `"`
 
@@ -758,9 +765,9 @@ func TestPythonExtraCommandsRunsRealPython(t *testing.T) {
 	}
 	dir := t.TempDir()
 
-	// A program that only real CPython can run: monty has no sys.executable
-	// and cannot import a third-party-style module path.
-	realOnly := `python3 -c "import sys; print('real' if hasattr(sys, 'executable') else 'monty')"`
+	// A program that tells the two apart: monty reports its own platform
+	// rather than the host's.
+	realOnly := `python3 -c "import sys; print('monty' if sys.platform == 'monty' else 'real')"`
 
 	t.Run("without an extra_commands entry it runs on monty", func(t *testing.T) {
 		s := newTestSandbox()

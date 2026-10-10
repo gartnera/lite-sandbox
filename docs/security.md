@@ -236,8 +236,8 @@ Other details:
   existence check for `"r"`), checked against the writable set for the first
   two and the readable set for the last. So `open()` has the same bounds as
   `pathlib`, with no second code path.
-- **A prologue is prepended when a program uses `sys.argv`,** because monty
-  doesn't provide it. It defines a shim object holding the argument strings and
+- **A prologue is prepended when a program uses `sys.argv`,** because monty's
+  holds only the script name. It defines a shim object holding the argument strings and
   rewrites statements that would rebind `sys` back to the real module. The
   rewrite only ever adds an assignment to that shim, so it can't widen what
   Python can reach. Programs that never mention `argv` are passed through
@@ -249,11 +249,23 @@ Other details:
   confines path resolution to the allowed directory and a symlink swapped
   between the check and the open can't redirect it. monty's upstream mount
   implementation uses the same primitive.
+- **Relative paths are resolved inside monty.** The interpreter is given the
+  shell's working directory and makes every path absolute, normalizing `..`
+  textually, before the OS call leaves it. The host checks that absolute path
+  like any other, and `os.Root` still confines how the kernel resolves it, so a
+  textual `..` can't reach anything the resolved path couldn't. `os.chdir()`
+  only moves the program's own working directory, after a `stat` of the target
+  checked against the readable set.
+- **Clocks, sleeps and randomness add no reach.** monty answers them itself
+  from the host clocks and entropy that wazero exposes to the module (`random`
+  is seeded from `crypto/rand`). The host performs `time.sleep()` waits, which
+  stop at the command timeout. `os.urandom` is served host-side from
+  `crypto/rand`, capped at 1 MiB per call.
 
 Each run is also bounded by the command timeout, a memory cap, a recursion
 limit, and a cap on host calls per run. The last one catches a script that
-loops on filesystem operations, since time spent in host calls doesn't count
-toward the interpreter's own duration accounting.
+loops on filesystem operations or sleeps, since time spent in host calls doesn't
+count toward the interpreter's own duration accounting.
 
 ## Known Limitations
 

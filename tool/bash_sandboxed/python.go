@@ -40,28 +40,36 @@ const (
 	// does not advance monty's own duration accounting, which is why this
 	// backstop exists separately from the command timeout.
 	montyMaxSuspensions = 50_000
+
+	// montyMaxSleep caps a single time.sleep(). monty's own default is ten
+	// seconds, which would silently shorten a longer sleep — a script that
+	// waits 30s for something would wake early and misbehave. The cap here is
+	// far past any command timeout, so in practice the timeout is what bounds
+	// a sleep: the wait is performed host-side and stops when the context does.
+	montyMaxSleep = 24 * time.Hour
 )
 
 // montyRunner returns the process-wide compiled monty runtime, building it on
-// first use. Compiling the wasm module costs ~2s, so it is deliberately lazy:
+// first use, along with the OS policy every run is given. Compiling the wasm module costs ~2s, so it is deliberately lazy:
 // a sandbox that never runs Python never pays for it. Runner.Execute builds a
 // fresh isolated instance per call, so one Runner is safe to share across
 // concurrent invocations.
 //
 // It takes its own mutex rather than the sandbox's config lock, so the one-off
 // compile does not block every getConfig in the process while it runs.
-func (s *Sandbox) montyRunner() (*montygo.Runner, error) {
+func (s *Sandbox) montyRunner() (*montygo.Runner, montygo.OsPolicy, error) {
 	s.montyMu.Lock()
 	defer s.montyMu.Unlock()
 	if s.monty != nil {
-		return s.monty, nil
+		return s.monty, s.montyPolicy, nil
 	}
 	r, err := montygo.New()
 	if err != nil {
-		return nil, fmt.Errorf("python: cannot start the monty interpreter: %w", err)
+		return nil, montygo.OsPolicy{}, fmt.Errorf("python: cannot start the monty interpreter: %w", err)
 	}
 	s.monty = r
-	return r, nil
+	s.montyPolicy = montyOsPolicy(r)
+	return r, s.montyPolicy, nil
 }
 
 // pythonInvocation is the result of parsing a python argv.
@@ -235,7 +243,7 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 		return interp.ExitStatus(2)
 	}
 
-	runner, err := s.montyRunner()
+	runner, policy, err := s.montyRunner()
 	if err != nil {
 		return err
 	}
@@ -274,8 +282,17 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 
 	_, err = runner.Execute(ctx, code, inputs,
 		montygo.WithPrintFunc(func(out string) { io.WriteString(hc.Stdout, out) }),
+		montygo.WithStderrFunc(func(out string) { io.WriteString(hc.Stderr, out) }),
 		montygo.WithOsCallFunc(s.montyOsCall(fs, stdin)),
 		montygo.WithLimits(limits),
+		// The shell's working directory is the program's: os.getcwd()
+		// reports it, and monty resolves every relative path against it
+		// before the OS call reaches the boundary checks, which therefore
+		// only ever see absolute paths. os.chdir() moves only the
+		// program's own view; it is checked through a Path.stat like any
+		// other path question.
+		montygo.WithCwd(hc.Dir),
+		montygo.WithOsPolicy(policy),
 	)
 	if err != nil {
 		return pythonRunError(err, inv.name, lineOffset, hc.Stderr)
@@ -360,14 +377,15 @@ func pythonLimitationNote(traceback string) string {
 	case strings.Contains(traceback, "ModuleNotFoundError"), strings.Contains(traceback, "ImportError"):
 		return "\n" + pythonIsMontyNote + " Third-party packages cannot be installed or " +
 			"imported — pip and venv do not exist here. The standard library is partial: os, " +
-			"pathlib, json, re, math, datetime, sys, typing, asyncio, dataclasses, collections, " +
-			"functools, itertools and base64 work.\n" + pythonEscapeHatches
+			"pathlib, json, re, math, random, datetime, time, sys, typing, asyncio, dataclasses, " +
+			"collections, copy, functools, itertools, base64, binascii and unicodedata work.\n" +
+			pythonEscapeHatches
 	case strings.Contains(traceback, "TimeoutError"):
 		return "\nnote: the sandbox stopped the program at the bash tool's command timeout. " +
 			"Long-running work belongs in a background command."
 	case strings.Contains(traceback, "exceeded max suspensions"):
-		return fmt.Sprintf("\nnote: the program made more than %d filesystem operations, "+
-			"the sandbox's limit for one python run. Batch the work or split it across runs.",
+		return fmt.Sprintf("\nnote: the program made more than %d filesystem operations and "+
+			"sleeps, the sandbox's limit for one python run. Batch the work or split it across runs.",
 			montyMaxSuspensions)
 	case strings.Contains(traceback, "MemoryError"):
 		return "\nnote: the sandbox caps the built-in interpreter's heap. Process the data in " +
