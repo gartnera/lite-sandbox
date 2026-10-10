@@ -239,3 +239,34 @@ func TestConfigPathsCmd_DeprecatedAliasesAndMigrate(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigPathsAllowCommands: --commands records a scoped internal grant and
+// warns when an allow would route the command around its worker.
+func TestConfigPathsAllowCommands(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	yes := true
+	cfg := &config.Config{Commands: []config.CommandEntry{{Command: "gh", Allow: &yes}}}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	setPathsFlags(t, false, false, false, false)
+	prev := pathsAllowCommands
+	pathsAllowCommands = []string{"gh"}
+	t.Cleanup(func() { pathsAllowCommands = prev })
+	out := captureStdout(t, func() {
+		if err := configPathsAllowCmd.RunE(configPathsAllowCmd, []string{"/creds/gh"}); err != nil {
+			t.Fatalf("allow --commands: %v", err)
+		}
+	})
+	if !strings.Contains(out, "only for gh") || !strings.Contains(out, "warning: gh does not get this grant") {
+		t.Errorf("output = %q", out)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := cfg.Paths[0]
+	if !e.Internal || !slices.Equal(e.Commands, []string{"gh"}) || !e.GrantsRead() {
+		t.Errorf("entry = %+v, want a read grant, internal, scoped to gh", e)
+	}
+}

@@ -64,6 +64,7 @@ var configModeShowCmd = &cobra.Command{
 		liftedRead, liftedWrite := cfg.LiftedDeniedEntries()
 		printDenyList("Always hidden under the OS sandbox (every mode):",
 			cfg.AlwaysDeniedReadEntries(), allModesOnly(liftedRead, true))
+		printCommandScopes(cfg)
 		if cfg.EffectiveMode() == config.ModeDenylist {
 			printDenyList("Read-denied paths (hidden from sandboxed commands under the OS sandbox):",
 				allModesOnly(cfg.EffectiveDeniedReadEntries(), false), allModesOnly(liftedRead, false))
@@ -204,6 +205,33 @@ var configAuditDisableCmd = &cobra.Command{
 // The lifted entries — built-ins a paths grant overrides — follow, each with
 // the grant that lifts it, since a deny list that is silently shorter than
 // the documented one would be a gap too.
+// printCommandScopes lists the paths granted to commands alone: each scope's
+// commands, which run in an OS sandbox worker of their own, and the paths
+// every other worker hides.
+func printCommandScopes(cfg *config.Config) {
+	scopes := cfg.CommandScopes()
+	if len(scopes) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Granted to commands alone (they run in an OS sandbox worker of their own; every other command's worker hides the paths):")
+	for _, s := range scopes {
+		fmt.Printf("  %s:\n", strings.Join(s.Commands, ", "))
+		for _, e := range s.Entries {
+			access := "read"
+			if e.GrantsWrite() {
+				access = "read, write"
+			}
+			fmt.Printf("    %s   (%s)\n", e.Path, access)
+		}
+		for _, name := range s.Commands {
+			if why := cfg.ScopeBypass(name); why != "" {
+				fmt.Printf("    warning: %s does not get these: %s\n", name, why)
+			}
+		}
+	}
+}
+
 func printDenyList(title string, entries, lifted []config.DeniedPath) {
 	fmt.Println()
 	fmt.Println(title)

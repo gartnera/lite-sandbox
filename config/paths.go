@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -30,11 +31,26 @@ import (
 // lists (DefaultDeniedReadPaths / DefaultDeniedWritePaths): read: false hides
 // the path entirely, write: false keeps it readable but not modifiable. Path
 // supports ~ expansion and, for grants, the trailing /* nested-only form.
+//
+// An internal grant can be scoped to commands, for a credential only one CLI
+// should hold:
+//
+//   - path: ~/.config/gh         # only gh's own worker sees it
+//     read: true
+//     internal: true
+//     commands: [gh]
+//
+// The named commands then run in an OS sandbox worker of their own that has
+// the path, while the shared worker every other command runs in hides it, in
+// every mode (see scoped.go).
 type PathEntry struct {
 	Path     string `yaml:"path"`
 	Read     *bool  `yaml:"read,omitempty"`
 	Write    *bool  `yaml:"write,omitempty"`
 	Internal bool   `yaml:"internal,omitempty"`
+	// Commands scopes an internal grant to the named commands (bare names,
+	// as they are invoked). See CommandScope.
+	Commands []string `yaml:"commands,omitempty"`
 	// Profile names the profile an entry was expanded from (see
 	// Config.Effective); it is never read from or written to the file. A
 	// profile's grant widens the boundary like any other, but never lifts a
@@ -76,8 +92,24 @@ func (e PathEntry) Validate() error {
 	if e.Internal && e.Denies() {
 		return fmt.Errorf("paths entry %q: internal applies to grants only (a denial already acts at the OS sandbox layer alone)", e.Path)
 	}
+	if len(e.Commands) > 0 {
+		if !e.Internal {
+			return fmt.Errorf("paths entry %q: commands scopes an internal grant; add internal: true (the agent's own reads and writes are never scoped to a command)", e.Path)
+		}
+		if strings.HasSuffix(e.Path, "/*") {
+			return fmt.Errorf("paths entry %q: a grant scoped to commands names the path itself, not the /* nested-only form", e.Path)
+		}
+		for _, c := range e.Commands {
+			if c == "" || strings.ContainsAny(c, "/ \t") {
+				return fmt.Errorf("paths entry %q: commands entry %q must be a bare command name", e.Path, c)
+			}
+		}
+	}
 	return nil
 }
+
+// Scoped reports whether the entry is an internal grant scoped to commands.
+func (e PathEntry) Scoped() bool { return len(e.Commands) > 0 }
 
 // Describe renders the entry's access as a short phrase for listings:
 // "read", "read, write", "deny read", "read, deny write", with an
@@ -97,7 +129,10 @@ func (e PathEntry) Describe() string {
 		parts = append(parts, "deny write")
 	}
 	s := strings.Join(parts, ", ")
-	if e.Internal {
+	switch {
+	case e.Scoped():
+		s += " (internal: only for " + strings.Join(e.Commands, ", ") + ", in its own OS sandbox worker)"
+	case e.Internal:
 		s += " (internal: OS sandbox layer only)"
 	}
 	return s
@@ -164,12 +199,13 @@ func (e PathEntry) GrantsAgentRead() bool { return e.GrantsRead() && !e.Internal
 func (e PathEntry) GrantsAgentWrite() bool { return e.GrantsWrite() && !e.Internal }
 
 // GrantsInternalRead reports whether the entry grants read access at the OS
-// sandbox layer only.
-func (e PathEntry) GrantsInternalRead() bool { return e.GrantsRead() && e.Internal }
+// sandbox layer only, to every command. A grant scoped to commands is not
+// one: it reaches only those commands' worker (see CommandScopes).
+func (e PathEntry) GrantsInternalRead() bool { return e.GrantsRead() && e.Internal && !e.Scoped() }
 
 // GrantsInternalWrite reports whether the entry grants write access at the OS
-// sandbox layer only.
-func (e PathEntry) GrantsInternalWrite() bool { return e.GrantsWrite() && e.Internal }
+// sandbox layer only, to every command (not scoped).
+func (e PathEntry) GrantsInternalWrite() bool { return e.GrantsWrite() && e.Internal && !e.Scoped() }
 
 // ReadablePathList returns every path granted read access to the agent (not
 // internal), as written: the paths entries with read: true plus the deprecated
@@ -439,7 +475,8 @@ func appendUniqueEntries(list, add []PathEntry) []PathEntry {
 		dup := false
 		for _, have := range list {
 			if have.Path == e.Path && have.Internal == e.Internal &&
-				boolPtrEqual(have.Read, e.Read) && boolPtrEqual(have.Write, e.Write) {
+				boolPtrEqual(have.Read, e.Read) && boolPtrEqual(have.Write, e.Write) &&
+				slices.Equal(have.Commands, e.Commands) {
 				dup = true
 				break
 			}

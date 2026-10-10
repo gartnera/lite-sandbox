@@ -26,6 +26,10 @@ entry is a path plus what applies there:
   internal: true          the grant holds only at the OS sandbox layer, for
                           programs a command spawns; the agent's own reads and
                           writes there are still refused      (allow ... --internal)
+  commands: [gh]          an internal grant only the named commands get: they
+                          run in an OS sandbox worker of their own that has
+                          the path, while every other command's worker hides
+                          it, in every mode                   (allow ... --commands gh)
   read: false             hidden entirely, in denylist mode   (deny <path>)
   write: false            readable but not writable, in denylist mode (deny <path> --write)
 
@@ -42,6 +46,7 @@ entries included.`,
 var (
 	pathsAllowWrite    bool
 	pathsAllowInternal bool
+	pathsAllowCommands []string
 	pathsDenyRead      bool
 	pathsDenyWrite     bool
 )
@@ -89,7 +94,7 @@ var configPathsAllowCmd = &cobra.Command{
 		}
 		yes := true
 		for _, p := range args {
-			e := config.PathEntry{Path: p, Internal: pathsAllowInternal}
+			e := config.PathEntry{Path: p, Internal: pathsAllowInternal || len(pathsAllowCommands) > 0, Commands: pathsAllowCommands}
 			if pathsAllowWrite {
 				e.Write = &yes
 			} else {
@@ -100,9 +105,15 @@ var configPathsAllowCmd = &cobra.Command{
 			}
 			fmt.Printf("%s: %s\n", p, e.Describe())
 			// A grant on a built-in deny-list path is how the default is
-			// lifted, so say what it just un-masked.
+			// lifted, so say what it just un-masked. (A scoped grant lifts
+			// nothing for the other commands, so it lists nothing.)
 			for _, d := range cfg.DeniedEntriesLiftedBy(p) {
 				fmt.Printf("  lifts built-in denial: %s%s\n", d.Path, describeLift(d))
+			}
+			for _, name := range e.Commands {
+				if why := cfg.ScopeBypass(name); why != "" {
+					fmt.Printf("  warning: %s does not get this grant: %s\n", name, why)
+				}
 			}
 		}
 		return saveConfig(cfg)
@@ -283,6 +294,7 @@ func init() {
 
 	configPathsAllowCmd.Flags().BoolVar(&pathsAllowWrite, "write", false, "grant write access as well as read")
 	configPathsAllowCmd.Flags().BoolVar(&pathsAllowInternal, "internal", false, "grant only at the OS sandbox layer, for programs a command spawns; the agent's own reads and writes there stay refused")
+	configPathsAllowCmd.Flags().StringSliceVar(&pathsAllowCommands, "commands", nil, "grant only to these commands (comma-separated bare names), which then run in an OS sandbox worker of their own; implies --internal")
 	configPathsDenyCmd.Flags().BoolVar(&pathsDenyRead, "read", false, "hide the path entirely (the default)")
 	configPathsDenyCmd.Flags().BoolVar(&pathsDenyWrite, "write", false, "keep the path readable but refuse writes")
 
