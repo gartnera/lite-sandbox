@@ -231,6 +231,8 @@ func ruleReason(rule string) string {
 		return "direct execution of a path"
 	case "command_denylist":
 		return "on the command deny list"
+	case "command_ask":
+		return "waiting for the user's approval (ask: true)"
 	}
 	return rule
 }

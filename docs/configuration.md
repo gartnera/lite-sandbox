@@ -45,8 +45,8 @@ The command whitelist decides what runs in `allowlist` mode, and a built-in
 deny list refuses the sandbox's own policy-editing subcommands in every
 enforcing mode. Everything else about commands goes in the `commands` list:
 what is allowed beyond the whitelist, what runs on the host instead of inside
-the OS sandbox, and what is always refused. Each entry is a command plus a
-tri-state `allow`:
+the OS sandbox, what waits for your approval each time, and what is always
+refused. Each entry is a command plus a tri-state `allow` and/or `ask`:
 
 ```yaml
 commands:
@@ -63,17 +63,24 @@ commands:
     allow: false
   - command: lite-sandbox update   # an allow on a built-in denial lifts it (was "-lite-sandbox update")
     allow: true
+  - command: rm                    # asks you before each invocation, then validates it as usual
+    ask: true
+  - command: git push              # asks you before each invocation, then allows it
+    allow: true
+    ask: true
 ```
 
 `command` is a bare name, or a name followed by the leading non-flag arguments
 the entry applies to; extra whitespace between words is ignored. Each command
-has one entry, so `allow` and `deny` on the CLI replace whatever the config
-said about it before.
+has one entry, so `allow`, `ask` and `deny` on the CLI replace whatever
+the config said about it before.
 
 ```bash
 lite-sandbox config commands allow curl "uv run pyright"
 lite-sandbox config commands allow docker --no-sandbox
 lite-sandbox config commands deny sudo "gh auth"
+lite-sandbox config commands ask rm curl                     # ask before each invocation
+lite-sandbox config commands allow "git push" --ask          # ask, then allow
 lite-sandbox config commands allow "lite-sandbox update"     # lifts the built-in denial
 lite-sandbox config commands list                            # built-in denials included
 lite-sandbox config commands remove curl
@@ -117,6 +124,60 @@ These commands also bypass the docker filtering proxy: the proxy's
 whatever `DOCKER_HOST` the host environment sets). A restricted entry
 unsandboxes only matching invocations; e.g. `git push` leaves other `git`
 subcommands confined.
+
+### Commands that ask first
+
+`ask: true` makes each matching invocation wait for your approval: the
+agent shows its permission prompt with the whole command, and the command runs
+only if you approve. Use it for commands you want to see before they run
+rather than allow or refuse outright.
+
+- **On its own**, an approved invocation counts as whitelisted. A command off
+  the whitelist (`curl`) runs once you approve it, and a whitelisted one
+  (`rm`) now asks first; either way its argument validators and path checks
+  still apply, so an approved `rm` outside the project is still refused.
+- **With `allow: true`**, the allow takes effect once you approve: the
+  invocation gets everything the allow gives (a bare one's raw-bash path, a
+  restricted one's validator bypass, `no_sandbox`). `git push` with
+  `allow: true` and `ask: true` asks before every push, which `git`'s
+  argument validator would otherwise refuse. An asking allow of a built-in
+  denial's text (`lite-sandbox update`) lifts it the same way, asking each
+  time.
+- **A denial can't ask**: a denied command never runs.
+
+Entries match like [denials](#denied-commands): by base name, and a restricted
+entry (`gh pr`) wherever the subcommand could start. Asks are enforced in
+`denylist` and `allowlist` mode; in `open` mode, like every rule, a match is
+only recorded to the audit log.
+
+The approval is given for **one bash tool call**, the command line you were
+shown, and it works the way [config requests](#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval)
+do. The PreToolUse hook finds the prompted commands in the call, checks the
+call would pass validation once approved (a call the sandbox would refuse
+anyway is denied with that error instead of being put to you), records a
+single-use ticket for the exact command in lite-sandbox's cache directory, and
+answers `ask`. The MCP server takes the ticket before running the call; with
+no ticket it refuses every prompted invocation in it. So a prompted command is
+refused when the hook can't see it in the command line:
+
+- a command named through a variable or substitution (`$CMD`), or inside a
+  `bash -c` string the hook doesn't read;
+- a command run by a script file (`./build.sh`, `bash build.sh`): the approval
+  covers the command line, not the commands of a file you weren't shown;
+- a command run by a wrapper (`find -exec`, `xargs`, `env`, `timeout`,
+  `xcrun`), which is refused even in an approved call: run it on its own.
+
+Only Claude Code puts the `ask` to you, and existing installs need no
+change: through the sandbox's bash tool it relies on the
+`--config-requests` flags that `install claude` and `launch claude` already
+set, and in `--bash-ast-hook-mode` the hook answers `ask` for the built-in Bash
+tool directly (which runs the command once you approve, so no ticket is
+needed). Codex, opencode, Crush and Grok Build can't ask, so for them a
+prompted command is refused, as if denied. Codex in particular parses an
+`ask` but doesn't support it, running the tool call anyway, so the hook tells
+its events apart by the `turn_id` and `model` fields Codex adds and never
+answers `ask` to them. In a non-interactive `claude -p` run nobody can answer the prompt, so
+Claude Code denies the call.
 
 ### Denied commands
 

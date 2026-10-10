@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/approval"
 	"github.com/gartnera/lite-sandbox/internal/audit"
 	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/hook"
@@ -79,7 +81,10 @@ var hookCmd = &cobra.Command{
 		"instead of being redirected to the MCP tool.\n\n" +
 		"With --config-requests, a bash tool call that is just `lite-sandbox config ...` " +
 		"is answered \"ask\" instead, and recorded so the MCP server (serve-mcp " +
-		"--config-requests) knows the user was asked before it runs the change.",
+		"--config-requests) knows the user was asked before it runs the change. " +
+		"Likewise a bash tool call that runs a command whose commands entry has ask: true.\n\n" +
+		"With --validate-bash, a built-in Bash command that runs such a command is answered " +
+		"\"ask\" when the agent puts an ask to the user (Claude Code), and denied otherwise.",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runHook(cmd, hookFlags)
@@ -136,6 +141,9 @@ func evaluate(event *hook.Event, opts hookOptions) *hook.Decision {
 	// hint suggesting it.
 	if event.ToolName == mcpToolPrefix+"bash" {
 		if d := evaluateConfigRequest(event, opts); d != nil {
+			return d
+		}
+		if d := evaluateAskCommand(event, opts); d != nil {
 			return d
 		}
 	}
@@ -222,6 +230,66 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+scoped.Command())
 }
 
+// evaluateAskCommand decides a sandbox bash tool call whose command runs
+// a prompted invocation (a commands entry with ask: true), or returns nil
+// for any other command. When this agent was installed to make config
+// requests (--config-requests, which the server's flag of the same name
+// pairs with), it validates the command as the server would once approved —
+// a command the sandbox refuses anyway is denied with that error rather than
+// put to the user — then records a ticket for the exact command and answers
+// "ask"; the server treats the call as approved only on that ticket (see
+// internal/approval). Without the flag it returns nil: the call is
+// pre-approved like any other, and the sandbox refuses the prompted command
+// for want of an approval.
+func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
+	if !opts.configRequests || !event.CanAsk() {
+		return nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
+		return nil
+	}
+	command, _, ok := bashToolArgs(args)
+	if !ok {
+		return nil
+	}
+	cwd := eventCWD(event)
+	if cwd == "" {
+		return nil
+	}
+	// The hot path for every sandbox bash call: read the settings alone, and
+	// build a sandbox only when some entry asks.
+	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+		return nil
+	}
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+	prompted := sb.AskCommands(command)
+	if len(prompted) == 0 {
+		return nil
+	}
+	readPaths, writePaths := sandboxPaths(sb, cwd)
+	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
+		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
+	}
+	if err := approval.Issue(cwd, approval.CommandSubject(command), command); err != nil {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: could not record the command for the user's approval: %v", err))
+	}
+	return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+}
+
+// askReason is the "ask" reason for a command running the prompted
+// entries, shown with the user's permission prompt.
+func askReason(prompted []string) string {
+	quoted := make([]string, len(prompted))
+	for i, p := range prompted {
+		quoted[i] = "`" + p + "`"
+	}
+	return "lite-sandbox: this command runs " + strings.Join(quoted, ", ") +
+		", which the sandbox's config asks you to approve each time (commands entries with ask: true)."
+}
+
 // denyUninspectableGrokInput blocks a governed Grok Build tool call whose
 // arguments the hook cannot read: either Grok clipped them (over its 128 KiB
 // hook payload limit, sent as a truncated string) or they do not decode (a
@@ -290,6 +358,13 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 // MCP tool's pre-approval); a command that fails is denied with the validation
 // error so the model can correct it. Any inability to inspect the command
 // (missing input, no cwd) fails open to Claude Code's normal flow.
+//
+// A command that runs a prompted invocation (a commands entry with
+// ask: true) is validated as approved and, when it passes, answered "ask"
+// so the agent puts it to the user — when the agent does that
+// (hook.Event.CanAsk: Claude Code, not Codex or Grok Build). The built-in Bash
+// tool runs only once the user approves, so no ticket is needed. Otherwise
+// the ask check stands and the command is denied.
 func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	in, ok := event.ToolInput.(hook.ShellInput)
 	if !ok || in.ShellCommand() == "" {
@@ -305,7 +380,14 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	defer sb.Close()
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 
-	if err := sb.ValidateCommand(in.ShellCommand(), cwd, readPaths, writePaths); err != nil {
+	var prompted []string
+	ctx := context.Background()
+	if event.CanAsk() {
+		if prompted = sb.AskCommands(in.ShellCommand()); len(prompted) > 0 {
+			ctx = bash_sandboxed.WithApproval(ctx)
+		}
+	}
+	if err := sb.ValidateCommandContext(ctx, in.ShellCommand(), cwd, readPaths, writePaths); err != nil {
 		if event.FromGrok() {
 			// Short enough to survive Grok's 256-character clip, with the
 			// validation error (which names the fix) up front.
@@ -330,6 +412,9 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	// command runs — and the built-in Bash tool has no runtime layer and no OS
 	// sandbox worker behind it. Defer to Claude Code's normal permission flow
 	// instead: the static checks that did apply were still enforced above.
+	if len(prompted) > 0 {
+		return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+	}
 	if cfg, _ := config.LoadSettingsForDirectory(cwd); cfg.EffectiveMode() != config.ModeAllowlist {
 		return nil
 	}

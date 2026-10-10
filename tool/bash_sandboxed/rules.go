@@ -27,6 +27,11 @@ const (
 	// entries). Enforced in denylist mode too, and it outranks every allow: a
 	// denied command stays denied however it was allowed.
 	ruleCommandDenylist rule = "command_denylist"
+	// ruleCommandAsk: the invocation matches a commands entry with
+	// ask: true and the call was not approved by the user (or it runs
+	// where an approval cannot reach it, under a wrapper). Enforced in
+	// denylist mode too, like the deny list.
+	ruleCommandAsk rule = "command_ask"
 	// rulePathBoundary: a path argument, redirection target, or file open
 	// resolves outside the readable/writable boundary, or inside .git.
 	rulePathBoundary rule = "path_boundary"

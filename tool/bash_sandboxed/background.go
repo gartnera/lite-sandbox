@@ -411,17 +411,34 @@ func exitCodeFromErr(err error, killed bool) int {
 // written to the process's OutputPath, which the agent reads like any other
 // file. This mirrors the Claude Code Bash tool's run_in_background option.
 func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
+	return s.ExecuteBackgroundContext(context.Background(), command, workDir, readAllowedPaths, writeAllowedPaths)
+}
+
+// ExecuteBackgroundContext is ExecuteBackground with the approval (see
+// WithApproval) read from ctx. Only ctx's approval carries over to the
+// process, which outlives the call: it is cancelled by KillBackground and
+// shutdown, never by ctx.
+func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
 	isExtra := s.isExtraCommandInvocation(command)
 	forceHost := s.isUnsandboxedInvocation(command)
+	isApproved := approved(callCtx)
+	validateCtx := withAuditScope(context.Background(), command, workDir, "bash")
+	if isApproved {
+		validateCtx = WithApproval(validateCtx)
+	}
 
 	var f *syntax.File
-	if !isExtra {
+	if isExtra {
+		if err := s.checkRawAsk(validateCtx, command); err != nil {
+			return nil, fmt.Errorf("validation failed: %w", err)
+		}
+	} else {
 		var err error
 		f, err = ParseBash(command)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.validateFileCtx(withAuditScope(context.Background(), command, workDir, "bash"), f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 			return nil, fmt.Errorf("validation failed: %w", err)
 		}
 	}
@@ -434,6 +451,9 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 		return nil, err
 	}
 	ctx = withAuditScope(ctx, command, workDir, "bash")
+	if isApproved {
+		ctx = WithApproval(ctx)
+	}
 
 	// Track the runner goroutine so shutdown (killAll) can wait for it to finish
 	// tearing down its OS process. Add before launching so a concurrent shutdown

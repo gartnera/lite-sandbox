@@ -54,6 +54,17 @@ unapproved. The tickets live in lite-sandbox's cache directory, which is as
 protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 
+A `commands` entry with `ask: true` uses the same ticket: the hook answers
+`ask` for a bash tool call whose command line runs a prompted command and
+records a single-use ticket for that exact command, and the server lets the
+call's prompted invocations run only once it takes the ticket. Every gate that
+checks the deny list (static, runtime, the raw-bash path of a bare allow)
+checks prompts too, so an invocation the hook could not see in the command line
+(a dynamic name, a script file's contents) is refused rather than run unasked,
+and one under a wrapper (`find -exec`, `xargs`, `env`, `timeout`, `xcrun`),
+whose child the validators cannot tie to the approval, is refused always. See
+[Commands that ask first](configuration.md#commands-that-ask-first).
+
 A config request is always confined to the agent's working directory: the hook
 and the server add `--dir <working directory>` when it has none, and refuse a
 `--dir` outside it, so the change is a per-directory override for the project

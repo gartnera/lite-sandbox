@@ -8,6 +8,7 @@ import (
 )
 
 // deniedEntry is one parsed denied_commands entry, indexed by command name.
+// The ask entries (ask: true) are parsed and matched the same way.
 // prefix nil means a bare entry ("curl"), which denies every invocation of the
 // command; a non-nil prefix ("lite-sandbox config" -> ["config"]) denies only
 // invocations whose leading non-flag arguments start with those tokens. text is
@@ -67,10 +68,17 @@ func (s *Sandbox) deniedCommandName(cmdName string) bool {
 // expanded arguments (argv[1:]) matches the deny list, returning the entry
 // that matched for the error message.
 func (s *Sandbox) deniedCommand(cmdName string, args []string) (string, bool) {
+	return matchCommandEntries(s.getDeniedCommands(), cmdName, args)
+}
+
+// matchCommandEntries reports whether an invocation of cmdName with the given
+// expanded arguments matches one of the parsed entries (the deny list's, or
+// the ask entries'), returning the entry that matched.
+func matchCommandEntries(byName map[string][]deniedEntry, cmdName string, args []string) (string, bool) {
 	if cmdName == "" {
 		return "", false
 	}
-	entries := s.getDeniedCommands()[filepath.Base(cmdName)]
+	entries := byName[filepath.Base(cmdName)]
 	if len(entries) == 0 {
 		return "", false
 	}

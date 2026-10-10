@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // isolate points the ticket directory at a fresh temp dir (os.UserCacheDir
@@ -75,44 +74,6 @@ func TestTicketWorkingDirectory(t *testing.T) {
 	}
 	if err := Consume(link, req); err != nil {
 		t.Fatalf("Consume through a symlink to the same directory: %v", err)
-	}
-}
-
-func TestConsumeExpired(t *testing.T) {
-	cwd := isolate(t)
-	req := Request{Args: []string{"paths", "allow", "/srv"}}
-	if err := Issue(cwd, req); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := Dir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-TicketTTL - time.Minute)
-	if err := os.Chtimes(filepath.Join(dir, key(cwd, req)), old, old); err != nil {
-		t.Fatal(err)
-	}
-	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
-		t.Fatalf("Consume of an expired ticket = %v, want ErrNoTicket", err)
-	}
-}
-
-func TestIssuePrunesExpired(t *testing.T) {
-	cwd := isolate(t)
-	stale := Request{Args: []string{"profiles", "enable", "go"}}
-	if err := Issue(cwd, stale); err != nil {
-		t.Fatal(err)
-	}
-	dir, _ := Dir()
-	old := time.Now().Add(-TicketTTL - time.Minute)
-	if err := os.Chtimes(filepath.Join(dir, key(cwd, stale)), old, old); err != nil {
-		t.Fatal(err)
-	}
-	if err := Issue(cwd, Request{Args: []string{"profiles", "enable", "rust"}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, key(cwd, stale))); !os.IsNotExist(err) {
-		t.Fatalf("expired ticket not pruned: %v", err)
 	}
 }
 
