@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -128,12 +129,15 @@ func scopeHasEntry(s CommandScope, e PathEntry) bool {
 // read denials: what a worker that is not the grants' own must hide, in every
 // mode. A path an unscoped grant also names is left out, since that grant
 // already gives it to every command. ~ is expanded and each entry classified
-// by what exists on disk, like a user's read: false entry.
+// by what exists on disk, like a user's read: false entry — except a missing
+// path a write grant names, which is a directory: the scope's own worker
+// creates it as one (a writable bind), so it is created and masked here too
+// rather than left visible to the shared worker once the command fills it.
 func (c *Config) ScopedDeniedReadEntries() []DeniedPath {
 	if c == nil {
 		return nil
 	}
-	var paths []string
+	var out []DeniedPath
 	for _, e := range c.Paths {
 		if !e.Scoped() || !e.Grants() {
 			continue
@@ -145,11 +149,18 @@ func (c *Config) ScopedDeniedReadEntries() []DeniedPath {
 				break
 			}
 		}
-		if !shared {
-			paths = append(paths, e.Path)
+		if shared {
+			continue
 		}
+		p := expandPath(e.Path)
+		out = append(out, DeniedPath{Path: p, Dir: dirExists(p) || (e.GrantsWrite() && !pathExists(p))})
 	}
-	return uniqueDeniedPaths(userDeniedPaths(paths))
+	return uniqueDeniedPaths(out)
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // ScopeBypass explains why a command a scoped grant names would not run in

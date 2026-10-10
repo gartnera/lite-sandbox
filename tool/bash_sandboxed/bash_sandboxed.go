@@ -1250,8 +1250,8 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	unsandboxed := s.execIsUnsandboxed(ctx, args)
 	if useOSSandbox && !unsandboxed {
-		if scope, ok := s.commandScope(args[0]); ok {
-			return s.execInScopedWorker(ctx, scope, args)
+		if len(args) > 0 && s.isScopedCommand(args[0]) {
+			return s.execInScopedWorker(ctx, args)
 		}
 		return s.execInWorker(ctx, args)
 	}

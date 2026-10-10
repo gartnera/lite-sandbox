@@ -34,13 +34,17 @@ import (
 //   - the binary is resolved against the server's PATH and refused when it
 //     lies somewhere the agent can write (scopedBinary);
 //   - the command gets the server's environment, not the variables the agent
-//     set (GH_CONFIG_DIR, GIT_*, a pager, an editor);
+//     set (GH_CONFIG_DIR, GIT_*, a pager, an editor), with the PATH entries
+//     the agent can write removed (safePath);
 //   - a bare allow, which runs the whole command line through `bash -c`,
 //     never reaches a scoped worker: it runs in the shared one.
 //
 // What it cannot do is limit the CLI itself: once it has the credential it
 // can do anything the credential allows, within what its validators refuse.
-// So only grant this to CLIs that never run code from the project.
+// Nor can it stop the CLI from running code it finds in the working
+// directory, which the scoped worker runs in: a git it starts reads the
+// project's .git/config and hooks. So only grant this to CLIs, and allow only
+// subcommands of them, that never run code from the project.
 
 // scopedWorkerIdleTTL is how long a scoped worker stays up after its last
 // command finishes. A scope's commands tend to come in bursts (a few gh calls
@@ -56,24 +60,59 @@ type scopedWorker struct {
 	idle   *time.Timer
 }
 
+// isScopedCommand reports whether a scoped grant names the command invoked
+// as name. Only the bare name matches.
+func (s *Sandbox) isScopedCommand(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.scopes[name]
+	return ok
+}
+
 // commandScope returns the scope whose worker runs the command invoked as
-// name, if a scoped grant names it. Only the bare name matches.
-func (s *Sandbox) commandScope(name string) (config.CommandScope, bool) {
+// name, together with the config it belongs to, read under one lock so a
+// reload in between cannot pair a scope with another config's paths.
+func (s *Sandbox) commandScope(name string) (config.CommandScope, *config.Config, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	scope, ok := s.scopes[name]
-	return scope, ok
+	return scope, s.cfg, ok
 }
 
-// execInScopedWorker runs args in the scope's worker.
-func (s *Sandbox) execInScopedWorker(ctx context.Context, scope config.CommandScope, args []string) error {
+// execInScopedWorker runs args in the worker of the scope that names args[0].
+func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
+	scope, cfg, ok := s.commandScope(args[0])
+	if !ok {
+		// The config changed since dispatch and no longer scopes the command.
+		return s.execInWorker(ctx, args)
+	}
 	hc := interp.HandlerCtx(ctx)
 
-	bin, err := s.scopedBinary(args[0])
+	// What sandboxed commands can write: the shared worker's writable paths,
+	// and the interpreter's own write set for this call (redirects and the
+	// embedded Python write on the host, outside any worker).
+	shared := s.workerOptions(cfg)
+	var interpWrites []string
+	if paths, ok := ctx.Value(sandboxPathsKey).(*sandboxPaths); ok && paths != nil {
+		interpWrites = stripNestedOnlyMarkers(paths.writeAllowedPaths)
+	}
+	writable := func(p string) string {
+		if dir := agentWritableDir(p, shared); dir != "" {
+			return dir
+		}
+		for _, d := range interpWrites {
+			if underAny(p, d) {
+				return d
+			}
+		}
+		return ""
+	}
+
+	bin, err := scopedBinary(args[0], writable)
 	if err != nil {
 		return err
 	}
-	w, release, err := s.acquireScopedWorker(scope)
+	w, release, err := s.acquireScopedWorker(scope, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to get worker for %s: %w", scope.Key, err)
 	}
@@ -81,11 +120,14 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, scope config.CommandSc
 
 	// The server's environment, as a bare allow gets it (ambient AWS profile
 	// selectors stripped, the brokered endpoint injected), and none of the
-	// agent's variables.
+	// agent's variables. PATH keeps only the directories sandboxed commands
+	// cannot write, so the programs the CLI starts (git, ssh, a pager) cannot
+	// be ones the agent planted either.
 	s.mu.RLock()
 	imdsEndpoint, imdsRegion := s.imdsEndpoint, s.imdsRegion
 	s.mu.RUnlock()
 	env := envSliceToMap(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion))
+	env["PATH"] = safePath(env["PATH"], writable)
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)
@@ -100,11 +142,13 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, scope config.CommandSc
 
 // scopedBinary resolves the command name to the binary its scoped worker
 // runs: looked up on the server's PATH (the agent cannot change it, and its
-// own PATH is not consulted), symlinks resolved, and refused when the agent
-// could have written it — a binary under the working directory, a writable
-// grant, or any other path the shared worker may write. Otherwise the agent
-// could replace the binary and have its own program run with the grant.
-func (s *Sandbox) scopedBinary(name string) (string, error) {
+// own PATH is not consulted), and refused when the agent could have written
+// it — writable reports the directory through which it could, or "". Both the
+// path and its symlink target are checked, so the agent can neither replace
+// the binary nor what a link points to; the unresolved path is what runs, so
+// a multi-call binary or version-manager shim still sees the name it was
+// invoked by.
+func scopedBinary(name string, writable func(string) string) (string, error) {
 	path, err := exec.LookPath(name)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", name, err)
@@ -117,16 +161,29 @@ func (s *Sandbox) scopedBinary(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
-	shared := s.workerOptions(cfg)
 	for _, p := range []string{abs, resolved} {
-		if dir := agentWritableDir(p, shared); dir != "" {
+		if dir := writable(p); dir != "" {
 			return "", fmt.Errorf("%s resolves to %s, under %s, which sandboxed commands can write; a command granted paths of its own only runs from a binary they cannot replace", name, p, dir)
 		}
 	}
-	return resolved, nil
+	return abs, nil
+}
+
+// safePath drops the PATH entries sandboxed commands could write (and
+// relative ones, which resolve against the working directory).
+func safePath(path string, writable func(string) string) string {
+	var keep []string
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		clean := filepath.Clean(dir)
+		if writable(clean) != "" || writable(resolveIfExists(clean)) != "" {
+			continue
+		}
+		keep = append(keep, dir)
+	}
+	return strings.Join(keep, string(filepath.ListSeparator))
 }
 
 // agentWritableDir returns the directory through which a command in a worker
@@ -179,7 +236,7 @@ func resolveIfExists(p string) string {
 // acquireScopedWorker returns the scope's worker, starting it when there is
 // none (or it died), and counts the caller as running in it until release is
 // called. The last release arms the idle timer that closes it.
-func (s *Sandbox) acquireScopedWorker(scope config.CommandScope) (*os_sandbox.Worker, func(), error) {
+func (s *Sandbox) acquireScopedWorker(scope config.CommandScope, cfg *config.Config) (*os_sandbox.Worker, func(), error) {
 	s.mu.Lock()
 	if sw := s.scopedWorkers[scope.Key]; sw != nil && !sw.w.IsDead() {
 		sw.active++
@@ -190,7 +247,6 @@ func (s *Sandbox) acquireScopedWorker(scope config.CommandScope) (*os_sandbox.Wo
 		s.mu.Unlock()
 		return sw.w, s.scopedReleaser(scope.Key, sw), nil
 	}
-	cfg := s.cfg
 	s.mu.Unlock()
 
 	opts := s.workerOptions(cfg.ForScope(scope))

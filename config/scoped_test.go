@@ -252,3 +252,25 @@ paths:
 		t.Errorf("Load of a scoped grant without internal: err = %v", err)
 	}
 }
+
+// TestScopedDenied_MissingWriteGrantIsDir: a missing path a scoped write grant
+// names is masked as a directory (created, then hidden), since the scope's
+// worker will create it as one; a missing read grant stays a file entry.
+func TestScopedDenied_MissingWriteGrantIsDir(t *testing.T) {
+	dir := t.TempDir()
+	yes := true
+	cfg := &Config{Paths: []PathEntry{
+		{Path: filepath.Join(dir, "w"), Write: &yes, Internal: true, Commands: []string{"tool"}},
+		{Path: filepath.Join(dir, "r"), Read: &yes, Internal: true, Commands: []string{"tool"}},
+	}}
+	got := map[string]bool{}
+	for _, d := range cfg.ScopedDeniedReadEntries() {
+		got[d.Path] = d.Dir
+	}
+	if !got[filepath.Join(dir, "w")] {
+		t.Error("missing write grant not masked as a directory")
+	}
+	if dirFlag, ok := got[filepath.Join(dir, "r")]; !ok || dirFlag {
+		t.Errorf("missing read grant: present=%v dir=%v, want a file entry", ok, dirFlag)
+	}
+}

@@ -299,19 +299,19 @@ func init() {
 	configPathsDenyCmd.Flags().BoolVar(&pathsDenyWrite, "write", false, "keep the path readable but refuse writes")
 
 	yes, no := true, false
-	notInternal := func(e config.PathEntry) bool { return !e.Internal }
-	internal := func(e config.PathEntry) bool { return e.Internal }
+	// A grant scoped to commands is none of these: the old lists had no such
+	// kind, and listing it as internal would claim every command gets it.
 	configCmd.AddCommand(deprecatedPathListCommand("readable-paths", "allow",
-		func(e config.PathEntry) bool { return e.GrantsRead() && notInternal(e) },
+		config.PathEntry.GrantsAgentRead,
 		func(p string) config.PathEntry { return config.PathEntry{Path: p, Read: &yes} }))
 	configCmd.AddCommand(deprecatedPathListCommand("writable-paths", "allow --write",
-		func(e config.PathEntry) bool { return e.GrantsWrite() && notInternal(e) },
+		config.PathEntry.GrantsAgentWrite,
 		func(p string) config.PathEntry { return config.PathEntry{Path: p, Write: &yes} }))
 	configCmd.AddCommand(deprecatedPathListCommand("internal-readable-paths", "allow --internal",
-		func(e config.PathEntry) bool { return e.GrantsRead() && internal(e) },
+		config.PathEntry.GrantsInternalRead,
 		func(p string) config.PathEntry { return config.PathEntry{Path: p, Read: &yes, Internal: true} }))
 	configCmd.AddCommand(deprecatedPathListCommand("internal-writable-paths", "allow --write --internal",
-		func(e config.PathEntry) bool { return e.GrantsWrite() && internal(e) },
+		config.PathEntry.GrantsInternalWrite,
 		func(p string) config.PathEntry { return config.PathEntry{Path: p, Write: &yes, Internal: true} }))
 	configCmd.AddCommand(deprecatedPathListCommand("denied-read-paths", "deny",
 		config.PathEntry.DeniesRead,

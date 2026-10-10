@@ -43,7 +43,7 @@ func TestWorkerOptions_ScopedGrant(t *testing.T) {
 		t.Errorf("shared worker binds %s", creds)
 	}
 
-	scope, ok := s.commandScope("gh")
+	scope, _, ok := s.commandScope("gh")
 	if !ok {
 		t.Fatal("no scope for gh")
 	}
@@ -55,7 +55,7 @@ func TestWorkerOptions_ScopedGrant(t *testing.T) {
 		t.Errorf("gh's worker does not bind %s: %v", creds, own.ROBinds)
 	}
 	for _, name := range []string{"/usr/bin/gh", "./gh", "git"} {
-		if _, ok := s.commandScope(name); ok {
+		if s.isScopedCommand(name) {
 			t.Errorf("commandScope(%q) matched", name)
 		}
 	}
@@ -90,35 +90,61 @@ func TestAgentWritableDir(t *testing.T) {
 }
 
 // TestScopedBinary_RefusesAgentWritable: the scoped command resolves on the
-// server's PATH, and a binary the agent could have written is refused.
+// server's PATH, a binary the agent could have written is refused, and the
+// unresolved path is what runs (a shim keeps the name it was invoked by).
 func TestScopedBinary_RefusesAgentWritable(t *testing.T) {
 	work := t.TempDir()
 	safe := t.TempDir()
-	for _, dir := range []string{work, safe} {
+	target := t.TempDir()
+	for _, dir := range []string{work, target} {
 		if err := os.WriteFile(filepath.Join(dir, "credtool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	yes := true
-	s := NewSandbox()
-	s.updateConfig(&config.Config{
-		OSSandbox: &yes,
-		Paths:     []config.PathEntry{{Path: "/creds", Read: &yes, Internal: true, Commands: []string{"credtool"}}},
-	}, work)
+	if err := os.Symlink(filepath.Join(target, "credtool"), filepath.Join(safe, "credtool")); err != nil {
+		t.Fatal(err)
+	}
+	writableUnder := func(dirs ...string) func(string) string {
+		return func(p string) string {
+			for _, d := range dirs {
+				if underAny(p, d) {
+					return d
+				}
+			}
+			return ""
+		}
+	}
 
 	t.Setenv("PATH", work+string(os.PathListSeparator)+safe)
-	if _, err := s.scopedBinary("credtool"); err == nil || !strings.Contains(err.Error(), "can write") {
+	if _, err := scopedBinary("credtool", writableUnder(work)); err == nil || !strings.Contains(err.Error(), "can write") {
 		t.Errorf("binary in the working directory: err = %v, want a refusal", err)
 	}
 
 	t.Setenv("PATH", safe)
-	got, err := s.scopedBinary("credtool")
+	if _, err := scopedBinary("credtool", writableUnder(target)); err == nil {
+		t.Error("a link to a writable target was accepted")
+	}
+	got, err := scopedBinary("credtool", writableUnder(work))
 	if err != nil {
 		t.Fatalf("binary outside the writable paths: %v", err)
 	}
-	want, _ := filepath.EvalSymlinks(filepath.Join(safe, "credtool"))
-	if got != want {
-		t.Errorf("scopedBinary = %q, want %q", got, want)
+	if want := filepath.Join(safe, "credtool"); got != want {
+		t.Errorf("scopedBinary = %q, want the unresolved %q", got, want)
+	}
+}
+
+func TestSafePath(t *testing.T) {
+	work := t.TempDir()
+	writable := func(p string) string {
+		if underAny(p, work) {
+			return work
+		}
+		return ""
+	}
+	sep := string(os.PathListSeparator)
+	in := strings.Join([]string{filepath.Join(work, "bin"), "/usr/bin", "relative/bin", "", "/bin"}, sep)
+	if got, want := safePath(in, writable), "/usr/bin"+sep+"/bin"; got != want {
+		t.Errorf("safePath = %q, want %q", got, want)
 	}
 }
 
@@ -152,12 +178,14 @@ func TestOSSandboxScopedGrant(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("s3cret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// credtool prints the token and whatever AGENT_VAR it was given.
-	script := "#!/bin/sh\ncat " + secret + "\necho \"agent_var=$AGENT_VAR\"\n"
+	// credtool prints the token, whatever AGENT_VAR it was given, and its
+	// PATH.
+	script := "#!/bin/sh\ncat " + secret + "\necho \"agent_var=$AGENT_VAR\"\necho \"path=$PATH\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "credtool"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The working directory on the server's PATH: the CLI must not get it.
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+work+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	yes := true
 	s := NewSandbox()
@@ -184,6 +212,9 @@ func TestOSSandboxScopedGrant(t *testing.T) {
 	}
 	if strings.Contains(out, "leak") {
 		t.Errorf("credtool was given the agent's variable: %q", out)
+	}
+	if strings.Contains(out, work) {
+		t.Errorf("credtool's PATH kept the working directory: %q", out)
 	}
 
 	for _, cmd := range []string{

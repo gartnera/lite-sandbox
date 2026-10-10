@@ -469,11 +469,14 @@ What gets routed to the command's worker, and how:
   grant or internal write grant (a profile's cache, such as `~/go/bin`), or in
   denylist mode anywhere in `$HOME` outside the write-denied paths. Otherwise
   the agent could replace it.
-- It runs with the server's environment. Variables the agent sets (`export
-  GH_CONFIG_DIR=...`, `GIT_*`, a pager or editor) are not passed to it.
+- Variables the agent sets (`export GH_CONFIG_DIR=...`, `GIT_*`, a pager or
+  editor) are not passed to it.
+- It runs with the server's environment. `PATH` keeps only the directories
+  sandboxed commands can't write, so the programs it starts can't be ones the
+  agent planted.
 - It still has to be allowed and pass validation like any command. Allow its
-  subcommands (`lite-sandbox config commands allow "gh pr"`), not the bare
-  name: a bare allow runs the whole command line through `bash -c`, which
+  subcommands (`lite-sandbox config commands allow "gh pr view" "gh api"`),
+  not the bare name: a bare allow runs the whole command line through `bash -c`, which
   always goes to the shared worker, and `no_sandbox` runs it on the host,
   where nothing is hidden. `paths allow --commands` and `config mode show`
   warn about both.
@@ -493,6 +496,12 @@ CLI has the credential it can do whatever the credential allows, limited only
 by the argument validators. `git`, for example, is a bad candidate: it runs
 hooks, filters, and credential helpers configured in `.git`, which sandboxed
 commands can write, and a git holding a token would hand it to that code.
+The same goes for a CLI that starts git. The scoped worker runs in the working
+directory, so a `git status` or `git checkout` that the CLI runs reads the
+project's `.git/config` and hooks. gh does this in `pr create`, `pr checkout`,
+`pr merge`, and the `repo` and `issue develop` commands that clone, sync, or
+check out, so allow only subcommands that don't (`gh pr view`, `gh pr list`,
+`gh issue view`, `gh api`), never `gh pr` or `gh issue` as a whole.
 Note also that `gh auth login` keeps the token in the system keyring by
 default; the file grant protects a token stored in `hosts.yml` (`gh auth login
 --insecure-storage`, or a host without a keyring).

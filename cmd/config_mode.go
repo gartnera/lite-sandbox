@@ -199,12 +199,6 @@ var configAuditDisableCmd = &cobra.Command{
 	},
 }
 
-// printDenyList prints deny-list entries, marking file entries that do not
-// exist: on Linux those cannot be masked until they are created (see
-// os_sandbox.DenyPath), so the gap is made visible rather than implied closed.
-// The lifted entries — built-ins a paths grant overrides — follow, each with
-// the grant that lifts it, since a deny list that is silently shorter than
-// the documented one would be a gap too.
 // printCommandScopes lists the paths granted to commands alone: each scope's
 // commands, which run in an OS sandbox worker of their own, and the paths
 // every other worker hides.
@@ -222,7 +216,11 @@ func printCommandScopes(cfg *config.Config) {
 			if e.GrantsWrite() {
 				access = "read, write"
 			}
-			fmt.Printf("    %s   (%s)\n", e.Path, access)
+			note := ""
+			if _, err := os.Stat(config.ExpandPath(e.Path)); err != nil && !e.GrantsWrite() {
+				note = "   (does not exist; on Linux other workers do not hide it until it exists and they restart)"
+			}
+			fmt.Printf("    %s   (%s)%s\n", e.Path, access, note)
 		}
 		for _, name := range s.Commands {
 			if why := cfg.ScopeBypass(name); why != "" {
@@ -232,6 +230,12 @@ func printCommandScopes(cfg *config.Config) {
 	}
 }
 
+// printDenyList prints deny-list entries, marking file entries that do not
+// exist: on Linux those cannot be masked until they are created (see
+// os_sandbox.DenyPath), so the gap is made visible rather than implied closed.
+// The lifted entries — built-ins a paths grant overrides — follow, each with
+// the grant that lifts it, since a deny list that is silently shorter than
+// the documented one would be a gap too.
 func printDenyList(title string, entries, lifted []config.DeniedPath) {
 	fmt.Println()
 	fmt.Println(title)
