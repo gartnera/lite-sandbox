@@ -205,3 +205,30 @@ func TestParse(t *testing.T) {
 		}
 	}
 }
+
+func TestIsHelp(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--help"}, true},
+		{[]string{"-h"}, true},
+		{[]string{"paths", "--help"}, true},
+		{[]string{"paths", "allow", "-h"}, true},
+		{[]string{"--help", "mode", "set", "open"}, true},
+
+		{[]string{}, false},
+		{[]string{"paths", "show"}, false},
+		{[]string{"mode", "set", "open", "--dir", "--help"}, false},
+		{[]string{"mode", "set", "open", "--help=false"}, false},
+		{[]string{"mode", "set", "open", "--dir=.", "--help"}, false},
+		{[]string{"paths", "allow", "/x", "--write", "-h"}, false},
+		{[]string{"mode", "set", "open", "-hx"}, false},
+		{[]string{"mode", "set", "open", "--", "--help"}, false},
+		{[]string{"mode", "set", "", "--help"}, false},
+	} {
+		if got := (Request{Args: tc.args}).IsHelp(); got != tc.want {
+			t.Errorf("IsHelp(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}

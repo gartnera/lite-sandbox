@@ -50,7 +50,10 @@ PreToolUse hook, so the user approves it. The MCP server then runs it outside
 the sandbox. The server also requires a ticket that the hook records when it
 asks, single-use and matched to the exact arguments. A call the hook never saw
 (no hook registered, or a path that skips hooks) is refused, not run
-unapproved. The tickets live in lite-sandbox's cache directory, which is as
+unapproved. The exception is a help request (`--help` or `-h` with only
+plain words around it, so no other flag can take it as its value), which
+cobra answers by printing usage before any command or hook runs; it needs
+neither the prompt nor a ticket. The tickets live in lite-sandbox's cache directory, which is as
 protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 

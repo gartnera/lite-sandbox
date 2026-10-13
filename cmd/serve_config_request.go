@@ -46,10 +46,20 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // lands in a per-directory override, never the global config. The approval is
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
-// was never shown to the user and is refused.
+// was never shown to the user and is refused. A help request
+// (Request.IsHelp) changes nothing, so it runs without one.
 func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts serveOptions, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
 	if background {
 		return mcp.NewToolResultError("`lite-sandbox config` cannot run in the background; run it with run_in_background false")
+	}
+	if req.IsHelp() {
+		// Help only prints, so it runs without the user's approval and
+		// leaves the config, and so the sandbox, as it was.
+		out, err := runConfigCommand(ctx, cwd, req.Args)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("`%s` failed: %v\n%s", req.Command(), err, out))
+		}
+		return mcp.NewToolResultText(out)
 	}
 	if err := req.Validate(); err != nil {
 		return mcp.NewToolResultError(err.Error())

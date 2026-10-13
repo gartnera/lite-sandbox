@@ -422,3 +422,41 @@ func TestConfigRequestHintNotOnDenials(t *testing.T) {
 		t.Errorf("the hook's refusal of a config request suggests making one: %q", reason)
 	}
 }
+
+// TestConfigRequestHelp checks a config request that only asks for help is
+// neither put to the user nor held for a ticket, and runs exactly as written:
+// no --dir is added, since help changes nothing.
+func TestConfigRequestHelp(t *testing.T) {
+	isolateConfig(t)
+	isolateConfigRequests(t)
+	runs := stubConfigCommand(t)
+	c := setupClientWith(t, serveOptions{configRequests: true})
+
+	for _, command := range []string{
+		"lite-sandbox config --help",
+		"lite-sandbox config paths allow -h",
+	} {
+		if d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAllow {
+			t.Errorf("%s: hook decision = %+v, want allow", command, d)
+		}
+		if text, isErr := runBash(t, c, command); isErr {
+			t.Errorf("%s: %s", command, text)
+		}
+	}
+	want := [][]string{{"--help"}, {"paths", "allow", "-h"}}
+	if !slices.EqualFunc(*runs, want, slices.Equal) {
+		t.Fatalf("runs = %q, want %q", *runs, want)
+	}
+
+	// --help that another flag could consume is a change to approve.
+	const change = "lite-sandbox config mode set open --dir --help"
+	if _, isErr := runBash(t, c, change); !isErr {
+		t.Errorf("%s: ran without approval", change)
+	}
+	if len(*runs) != 2 {
+		t.Fatalf("runs = %q, want no new run", *runs)
+	}
+	if d := evaluate(bashEvent(t, change, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAsk {
+		t.Errorf("%s: hook decision = %+v, want ask", change, d)
+	}
+}
