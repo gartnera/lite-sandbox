@@ -104,6 +104,29 @@ func literal(w *syntax.Word) (string, bool) {
 	return b.String(), true
 }
 
+// IsHelp reports whether the request only prints help: `--help` or `-h`
+// together with nothing but plain words (the subcommand path, and arguments
+// cobra ignores once help is asked for), e.g. `lite-sandbox config paths
+// --help`. Such a request reads and changes nothing, so it needs no approval.
+//
+// Any other flag disqualifies it, because whether `--help` is the help flag
+// depends on how cobra parses what precedes it: in `--dir --help` it is
+// --dir's value, and `--help=false` turns help off, so the subcommand runs.
+// With only words around it, cobra parses `--help` as the help flag and
+// prints help before it runs any hook or the command itself.
+func (r Request) IsHelp() bool {
+	help := false
+	for _, a := range r.Args {
+		switch {
+		case a == "--help" || a == "-h":
+			help = true
+		case a == "" || strings.HasPrefix(a, "-"):
+			return false
+		}
+	}
+	return help
+}
+
 // Validate rejects a request the config tool will not run.
 func (r Request) Validate() error {
 	if len(r.Args) == 0 {

@@ -247,6 +247,13 @@ server always runs its own binary, whatever path the command names.
 `lite-sandbox config edit` is refused, because it needs a terminal, and so is
 a config command run in the background.
 
+A request for help runs without a prompt: `--help` or `-h` with nothing
+else but plain words, such as `lite-sandbox config --help` or `lite-sandbox
+config paths allow -h`. It only prints usage, so the server runs it as
+written, with no `--dir` added and no ticket. Any other flag makes it an
+ordinary request that asks, because another flag can take `--help` as its
+value (`--dir --help`) and the subcommand would then run.
+
 A config request **never changes the global config**: it always lands in a
 [per-directory override](#writing-overrides-from-the-cli---dir) for the
 agent's working directory. When the command has no `--dir`, lite-sandbox adds

@@ -214,6 +214,11 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 		return hook.NewDecision(hook.DecisionDeny,
 			"Blocked by lite-sandbox: run `lite-sandbox config` in the foreground (run_in_background false).")
 	}
+	if req.IsHelp() {
+		// Help changes nothing; the server runs it without a ticket.
+		return hook.NewDecision(hook.DecisionAllow,
+			"Pre-approved by lite-sandbox: `lite-sandbox config ... --help` only prints help.")
+	}
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
