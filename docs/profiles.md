@@ -111,6 +111,12 @@ The profile detects and grants (writable at the OS sandbox layer):
   `~/.cache/pnpm` on Linux). It holds registry metadata and the `pnpm dlx`
   cache, so pnpm run indirectly inside the sandbox (e.g. by a lefthook job or
   package script) can populate it.
+- **pnpm global dir**: the `global-dir` setting, defaulting to `global` under
+  the pnpm home (`$PNPM_HOME`, else `$XDG_DATA_HOME/pnpm`, else
+  `~/Library/pnpm` on macOS and `~/.local/share/pnpm` on Linux). pnpm installs
+  global packages there, and the pnpm version it downloads when a project's
+  `packageManager` field pins a different one. The pnpm home itself, whose
+  `bin` directory is on your `PATH`, is not granted.
 
 Restrictions:
 - `pnpm dlx` is blocked when invoked directly, since it downloads and runs remote packages
