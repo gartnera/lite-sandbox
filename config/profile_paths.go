@@ -37,11 +37,15 @@ func detectGoBinds() []string {
 }
 
 // detectPnpmBinds detects pnpm paths that need to be writable.
-// Returns the pnpm store directory (downloaded packages) and the pnpm cache
-// directory (registry metadata and the `pnpm dlx` cache), which live in
-// separate trees (e.g. ~/Library/pnpm/store vs ~/Library/Caches/pnpm on
+// Returns the pnpm store directory (downloaded packages), the pnpm cache
+// directory (registry metadata and the `pnpm dlx` cache), and the pnpm global
+// directory (global packages, and the pnpm versions pnpm provisions to honor a
+// project's `packageManager` pin), which live in separate trees (e.g.
+// ~/Library/pnpm/store, ~/Library/Caches/pnpm and ~/Library/pnpm/global on
 // macOS). Without the cache dir bound, pnpm invoked inside the sandbox — e.g.
-// by a lefthook job or package script — fails with EPERM creating its cache.
+// by a lefthook job or package script — fails with EPERM creating its cache;
+// without the global dir, a pnpm whose version differs from the project's pin
+// fails with EPERM downloading the pinned one.
 func detectPnpmBinds() []string {
 	var paths []string
 
@@ -74,10 +78,57 @@ func detectPnpmBinds() []string {
 		paths = append(paths, p)
 	}
 
+	// Likewise `global-dir`, which defaults to <pnpm home>/global. Only the
+	// global dir is granted, not the pnpm home, whose bin/ is on the user's PATH.
+	globalDir := ""
+	if output, err := exec.Command("pnpm", "config", "get", "global-dir").Output(); err != nil {
+		slog.Warn("failed to detect pnpm global dir", "error", err)
+	} else {
+		globalDir = strings.TrimSpace(string(output))
+	}
+	if globalDir == "" || globalDir == "undefined" {
+		globalDir = ""
+		if home := pnpmHomeDir(); home != "" {
+			globalDir = filepath.Join(home, "global")
+		}
+	}
+	if p := ensureDir(globalDir); p != "" {
+		paths = append(paths, p)
+	}
+
 	if len(paths) > 0 {
 		slog.Info("detected pnpm runtime paths", "paths", paths)
 	}
 	return paths
+}
+
+// pnpmHomeDir mirrors pnpm's getDataDir (config/reader/src/dirs.ts): the
+// directory pnpm keeps its global packages and bins under. It returns "" when
+// no home directory can be resolved.
+func pnpmHomeDir() string {
+	if dir := os.Getenv("PNPM_HOME"); dir != "" {
+		return dir
+	}
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return filepath.Join(dir, "pnpm")
+	}
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			return filepath.Join(dir, "pnpm")
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "pnpm")
+	case "windows":
+		return filepath.Join(home, ".pnpm")
+	default:
+		return filepath.Join(home, ".local", "share", "pnpm")
+	}
 }
 
 // existingHomeSubdir resolves a runtime directory that is configured by an

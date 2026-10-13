@@ -8,17 +8,19 @@ import (
 	"testing"
 )
 
-// fakePnpm installs a stub pnpm executable on PATH that answers the two
+// fakePnpm installs a stub pnpm executable on PATH that answers the
 // detection queries: `store path` prints a fixed store, `config get cache-dir`
-// prints $FAKE_PNPM_CACHE_DIR or "undefined" (pnpm's output when the setting
-// is unset).
+// and `config get global-dir` print $FAKE_PNPM_CACHE_DIR and
+// $FAKE_PNPM_GLOBAL_DIR, or "undefined" (pnpm's output when the setting is
+// unset).
 func fakePnpm(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
 	script := `#!/bin/sh
-case "$1" in
-store) echo /fake/pnpm-store ;;
-config) echo "${FAKE_PNPM_CACHE_DIR:-undefined}" ;;
+case "$1 $3" in
+"store "*) echo /fake/pnpm-store ;;
+"config cache-dir") echo "${FAKE_PNPM_CACHE_DIR:-undefined}" ;;
+"config global-dir") echo "${FAKE_PNPM_GLOBAL_DIR:-undefined}" ;;
 esac
 `
 	if err := os.WriteFile(filepath.Join(bin, "pnpm"), []byte(script), 0o755); err != nil {
@@ -34,6 +36,8 @@ func TestDetectPnpmBinds(t *testing.T) {
 	fakePnpm(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("PNPM_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
 
 	t.Run("default cache dir", func(t *testing.T) {
 		paths := detectPnpmBinds()
@@ -64,6 +68,60 @@ func TestDetectPnpmBinds(t *testing.T) {
 			t.Errorf("expected configured cache dir to be created: %v", err)
 		}
 	})
+
+	t.Run("default global dir", func(t *testing.T) {
+		pnpmHome := filepath.Join(t.TempDir(), "pnpm-home")
+		t.Setenv("PNPM_HOME", pnpmHome)
+		globalDir := filepath.Join(pnpmHome, "global")
+		paths := detectPnpmBinds()
+		if !slices.Contains(paths, globalDir) {
+			t.Errorf("expected detected paths to contain default global dir %q, got %v", globalDir, paths)
+		}
+		// Only the global dir: the pnpm home's bin/ is on the user's PATH.
+		if slices.Contains(paths, pnpmHome) {
+			t.Errorf("expected detected paths not to contain the pnpm home %q, got %v", pnpmHome, paths)
+		}
+		if _, err := os.Stat(globalDir); err != nil {
+			t.Errorf("expected default global dir to be created: %v", err)
+		}
+	})
+
+	t.Run("configured global dir", func(t *testing.T) {
+		globalDir := filepath.Join(t.TempDir(), "pnpm-global")
+		t.Setenv("FAKE_PNPM_GLOBAL_DIR", globalDir)
+		paths := detectPnpmBinds()
+		if !slices.Contains(paths, globalDir) {
+			t.Errorf("expected detected paths to contain configured global dir %q, got %v", globalDir, paths)
+		}
+	})
+}
+
+func TestPnpmHomeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	t.Setenv("PNPM_HOME", "/custom/pnpm")
+	t.Setenv("XDG_DATA_HOME", "/xdg/data")
+	if got := pnpmHomeDir(); got != "/custom/pnpm" {
+		t.Errorf("PNPM_HOME set: got %q", got)
+	}
+
+	t.Setenv("PNPM_HOME", "")
+	if got, want := pnpmHomeDir(), filepath.Join("/xdg/data", "pnpm"); got != want {
+		t.Errorf("XDG_DATA_HOME set: got %q, want %q", got, want)
+	}
+
+	t.Setenv("XDG_DATA_HOME", "")
+	want := filepath.Join(home, ".local", "share", "pnpm")
+	switch runtime.GOOS {
+	case "darwin":
+		want = filepath.Join(home, "Library", "pnpm")
+	case "windows":
+		t.Skip("default depends on LOCALAPPDATA")
+	}
+	if got := pnpmHomeDir(); got != want {
+		t.Errorf("default: got %q, want %q", got, want)
+	}
 }
 
 func TestDetectFlutterBinds(t *testing.T) {
