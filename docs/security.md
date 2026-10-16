@@ -68,18 +68,20 @@ and one under a wrapper (`find -exec`, `xargs`, `env`, `timeout`, `xcrun`),
 whose child the validators cannot tie to the approval, is refused always. See
 [Commands that ask first](configuration.md#commands-that-ask-first).
 
-A config request is always confined to the agent's working directory: the hook
-and the server add `--dir <working directory>` when it has none, and refuse a
-`--dir` outside it, so the change is a per-directory override for the project
-and never edits the global config. A directory resolves through a single
-override, and one a request creates merges into the base, not into an override
-the directory was inheriting from a parent (or, as a linked git worktree, from
-its main worktree). So approving any request there stops that inherited
-override's settings (a stricter `mode`, denials, ...) from applying to the
-directory. The server also runs the config subprocess
-with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to that directory, under which the
+A config request is always confined to the agent's project: the hook and the
+server add a `--dir` for it when the command has none, and refuse a `--dir`
+outside it, so the change is a per-directory override for the project and
+never edits the global config. The project is the working directory, or, in a
+linked git worktree, the repository's main worktree (whose override the linked
+worktrees inherit); a `--dir` inside the worktree itself is allowed too. A
+directory resolves through a single override, and one a request creates
+merges into the base, not into an override the directory was inheriting from
+a parent. So approving a request for a directory with no override of its own
+stops that inherited override's settings (a stricter `mode`, denials, ...)
+from applying to the directory. The server also runs the config subprocess
+with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to those directories, under which the
 config subcommands refuse to run unless the `--dir` they actually parsed is
-inside it. That catches an argument list that reads differently to cobra than
+inside one of them. That catches an argument list that reads differently to cobra than
 to the server's own scan (for example `--socket --dir /`, where `--dir` is the
 socket's value).
 

@@ -186,8 +186,9 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateConfigRequest decides a sandbox bash tool call that is a config
 // request (configrequest.Parse), or returns nil for any other command. When
 // this agent was installed to make config requests (--config-requests), it
-// scopes the request to the working directory (Request.Scope: always a --dir
-// override, never the global config), records a ticket for the exact scoped
+// scopes the request to the project (Request.Scope: always a --dir override —
+// for the main worktree when cwd is a linked git worktree — never the global
+// config), records a ticket for the exact scoped
 // request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
 // internal/configrequest). Without the flag it returns nil: the call is
 // pre-approved like any other, and the sandbox's deny list refuses it.
@@ -232,7 +233,7 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this directory only (the global config is left alone): "+scoped.Command())
+		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this project only (the global config is left alone): "+scoped.Command())
 }
 
 // evaluateAskCommand decides a sandbox bash tool call whose command runs

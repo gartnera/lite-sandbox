@@ -256,12 +256,17 @@ value (`--dir --help`) and the subcommand would then run.
 
 A config request **never changes the global config**: it always lands in a
 [per-directory override](#writing-overrides-from-the-cli---dir) for the
-agent's working directory. When the command has no `--dir`, lite-sandbox adds
-`--dir <working directory>` itself, so `lite-sandbox config commands allow
+agent's project. The agent never has to choose: when the command has no
+`--dir`, lite-sandbox adds one itself, so `lite-sandbox config commands allow
 make` becomes `lite-sandbox config --dir /path/to/project commands allow make`,
 and that scoped command is what the prompt asks you to approve and what runs.
-A `--dir` the agent writes is kept only when it names the working directory or
-a directory beneath it, and it is shown as the absolute directory it names
+The project is the working directory, except in a linked git worktree
+(`git worktree add`, or a tool that creates one per task): there it is the
+repository's main worktree, whose override every one of its worktrees
+inherits, so a change you approve once applies to the worktrees you create
+later too, instead of only to the throwaway checkout it was asked from.
+A `--dir` the agent writes is kept only when it names the project, the working
+directory, or a directory beneath either, and it is shown as the absolute directory it names
 (`--dir .` becomes `--dir /path/to/project`). `--dir /`, `--dir ~`, `--dir ..` or a sibling project
 is refused, since an override there reaches beyond the project. So are the
 commands that have no per-directory form (`config path`, `config overrides

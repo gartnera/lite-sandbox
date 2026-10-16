@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,7 +24,8 @@ const configCommandTimeout = time.Minute
 // runConfigCommand runs `lite-sandbox config <args>` in dir and returns its
 // combined output. It runs as a separate process because the config
 // subcommands print to stdout, which in this process is the MCP transport.
-// configrequest.RootEnv makes the subprocess itself refuse a --dir outside dir.
+// configrequest.RootEnv makes the subprocess itself refuse a --dir outside the
+// project dir belongs to (configrequest.Roots).
 // A variable so tests can stand in for the binary.
 var runConfigCommand = func(ctx context.Context, dir string, args []string) (string, error) {
 	exe, err := os.Executable()
@@ -34,7 +36,8 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 	defer cancel()
 	c := exec.CommandContext(ctx, exe, append([]string{"config"}, args...)...)
 	c.Dir = dir
-	c.Env = append(c.Environ(), configrequest.RootEnv+"="+dir)
+	roots := strings.Join(configrequest.Roots(dir), string(filepath.ListSeparator))
+	c.Env = append(c.Environ(), configrequest.RootEnv+"="+roots)
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
@@ -42,8 +45,9 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // runConfigRequest runs a config request — a bash tool command that is just
 // `lite-sandbox config ...` (configrequest.Parse) — once the user has approved
 // it. It runs on the host, not in the sandbox, whose deny list exists to stop
-// exactly this command. It is always scoped to cwd (Request.Scope): the change
-// lands in a per-directory override, never the global config. The approval is
+// exactly this command. It is always scoped to the project (Request.Scope):
+// the change lands in a per-directory override for cwd, or for the main
+// worktree when cwd is a linked git worktree, never the global config. The approval is
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
 // was never shown to the user and is refused. A help request
@@ -103,8 +107,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 // itself (with the user's approval) instead of only relaying it.
 const configRequestHint = "\n\nYou can make this config change yourself: run the `lite-sandbox config ...` command " +
 	"with the mcp__lite-sandbox__bash tool, as a command of its own. The user is asked to approve it, " +
-	"and it applies to the next command. It is scoped to this working directory (a `--dir` override is " +
-	"added when the command has none); global changes are left to the user."
+	"and it applies to the next command."
 
 // configRequestAloneHint replaces configRequestHint when the error is the deny
 // list refusing `lite-sandbox config` itself: the command was run, just not on

@@ -28,6 +28,7 @@ import (
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/internal/approval"
+	"github.com/gartnera/lite-sandbox/internal/gitworktree"
 )
 
 // Request is a config request: the arguments to `lite-sandbox config`.
@@ -151,24 +152,47 @@ func (r Request) Validate() error {
 }
 
 // RootEnv names the environment variable the server sets when it runs a
-// config request: the directory the request is confined to. The config
-// subcommands refuse to run under it unless --dir names that directory or one
-// beneath it, which catches whatever Scope's reading of the arguments missed
-// (cobra, not Scope, decides what --dir ends up as).
+// config request: the directories the request is confined to (Roots), joined
+// with os.PathListSeparator. The config subcommands refuse to run under it
+// unless --dir names one of those directories or one beneath it, which catches
+// whatever Scope's reading of the arguments missed (cobra, not Scope, decides
+// what --dir ends up as).
 const RootEnv = "LITE_SANDBOX_CONFIG_REQUEST_ROOT"
 
-// Scope confines the request to cwd, the directory the agent works in. A
-// config request never edits the global config: the change is always a
-// per-directory override (--dir) for cwd or a directory beneath it. A request
-// that names no --dir gets `--dir <cwd>`; one whose --dir points elsewhere —
-// a parent, a sibling, $HOME, / — is refused, since an override there would
-// reach beyond the project the user is approving changes for.
+// Roots returns the directories a config request made from cwd may change:
+// the project's root first — the main worktree when cwd is inside a linked git
+// worktree, cwd otherwise — then cwd itself when that differs.
+func Roots(cwd string) []string {
+	return roots(filepath.Clean(cwd), gitworktree.MainWorktree(cwd))
+}
+
+func roots(cwd, main string) []string {
+	if main == "" || main == cwd {
+		return []string{cwd}
+	}
+	return []string{filepath.Clean(main), cwd}
+}
+
+// Scope confines the request to the project the agent works in. A config
+// request never edits the global config: the change is always a per-directory
+// override (--dir). A request that names no --dir gets one for the project's
+// root (Roots): cwd, or — in a linked git worktree — the main worktree, so a
+// change made from one worktree reaches every worktree of the repository (an
+// override for the main worktree applies to its linked worktrees, see
+// config.Config.ForDirectory) instead of only the throwaway checkout it was
+// asked from. One whose --dir points elsewhere — a parent, a sibling, $HOME,
+// / — is refused, since an override there would reach beyond the project the
+// user is approving changes for.
 //
 // Every --dir is rewritten as the absolute directory it names, so the
 // command the user approves says which directory it changes, and is exactly
 // what runs. The hook and the server both scope the request, so the user
 // approves the command the server runs.
 func (r Request) Scope(cwd string) (Request, error) {
+	return r.scope(cwd, Roots(cwd))
+}
+
+func (r Request) scope(cwd string, roots []string) (Request, error) {
 	cwd = filepath.Clean(cwd)
 	args := slices.Clone(r.Args)
 	found := false
@@ -195,8 +219,8 @@ func (r Request) Scope(cwd string) (Request, error) {
 			return Request{}, errors.New("`--dir` needs a directory")
 		}
 		abs := ResolveDir(cwd, dir)
-		if !Within(cwd, abs) {
-			return Request{}, fmt.Errorf("`--dir %s` is outside the working directory %s: config changes the agent requests apply only to the project, as a per-directory override for %s or a directory beneath it", dir, cwd, cwd)
+		if !WithinAny(roots, abs) {
+			return Request{}, fmt.Errorf("`--dir %s` is outside the project %s: config changes the agent requests apply only to the project; leave out --dir and the change is scoped to it", dir, roots[0])
 		}
 		if a == "--dir" {
 			args[i] = abs
@@ -206,7 +230,7 @@ func (r Request) Scope(cwd string) (Request, error) {
 		found = true
 	}
 	if !found {
-		args = append([]string{"--dir", cwd}, args...)
+		args = append([]string{"--dir", roots[0]}, args...)
 	}
 	return Request{Args: args}, nil
 }
@@ -236,6 +260,11 @@ func Within(root, dir string) bool {
 	}
 	rel, err := filepath.Rel(root, dir)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// WithinAny reports whether dir is within one of roots (see Within).
+func WithinAny(roots []string, dir string) bool {
+	return slices.ContainsFunc(roots, func(root string) bool { return Within(root, dir) })
 }
 
 // Command renders the request as the command line it runs.
