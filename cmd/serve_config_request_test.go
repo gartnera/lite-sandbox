@@ -263,7 +263,7 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	text, isErr := runBash(t, c, "lite-sandbox config mode set open --dir /")
-	if !isErr || !strings.Contains(text, "outside the working directory") {
+	if !isErr || !strings.Contains(text, "outside the project") {
 		t.Fatalf("got %q (error %v), want the out-of-directory refusal", text, isErr)
 	}
 	if len(*runs) != 0 {
@@ -275,6 +275,7 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 // holds whatever --dir cobra ends up parsing.
 func TestCheckConfigRequestDir(t *testing.T) {
 	root := t.TempDir()
+	main := t.TempDir()
 	orig := configDir
 	t.Cleanup(func() { configDir = orig })
 
@@ -288,6 +289,10 @@ func TestCheckConfigRequestDir(t *testing.T) {
 		{env: root, dir: "", ok: false},
 		{env: root, dir: "/", ok: false},
 		{env: root, dir: filepath.Dir(root), ok: false},
+		// A linked worktree's request: the main worktree or the worktree.
+		{env: main + string(filepath.ListSeparator) + root, dir: main, ok: true},
+		{env: main + string(filepath.ListSeparator) + root, dir: filepath.Join(root, "sub"), ok: true},
+		{env: main + string(filepath.ListSeparator) + root, dir: filepath.Dir(main), ok: false},
 	} {
 		t.Setenv(configrequest.RootEnv, tc.env)
 		configDir = tc.dir

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -54,17 +55,23 @@ var currentEdit *configEdit
 
 // checkConfigRequestDir refuses a config subcommand run for a config request
 // (configrequest.RootEnv set by the MCP server) unless --dir confines it to the
-// request's directory. The server already scoped the request; this checks the
-// value cobra actually parsed, which a flag taking the next word as its value
-// could otherwise make differ from what the server read.
+// request's project (configrequest.Roots). The server already scoped the
+// request; this checks the value cobra actually parsed, which a flag taking
+// the next word as its value could otherwise make differ from what the server
+// read.
 func checkConfigRequestDir() error {
-	root := os.Getenv(configrequest.RootEnv)
-	if root == "" {
+	env := os.Getenv(configrequest.RootEnv)
+	if env == "" {
 		return nil
 	}
-	root = filepath.Clean(root)
-	if configDir == "" || !configrequest.Within(root, resolveDirArg(configDir)) {
-		return fmt.Errorf("config changes the agent requests apply only to %s: pass --dir with that directory or one beneath it", root)
+	var roots []string
+	for _, root := range filepath.SplitList(env) {
+		if root != "" {
+			roots = append(roots, filepath.Clean(root))
+		}
+	}
+	if len(roots) == 0 || configDir == "" || !configrequest.WithinAny(roots, resolveDirArg(configDir)) {
+		return fmt.Errorf("config changes the agent requests apply only to %s: pass --dir with one of those directories or one beneath it", strings.Join(roots, " or "))
 	}
 	return nil
 }
