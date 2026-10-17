@@ -127,6 +127,7 @@ var allowedCommands = map[string]bool{
 
 	// Process / system info (read-only)
 	"ps":       true,
+	"pgrep":    true, // arg validator: only a -F pid file is a path
 	"uptime":   true,
 	"uname":    true,
 	"hostname": true,
@@ -278,6 +279,7 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"unzip":   validateUnzipArgs,
 	"zip":     validateZipArgs,
 	"ar":      validateArArgs,
+	"pgrep":   validatePgrepArgs,
 	"rm":      validateRmArgs,
 	"sed":     validateSedArgs,
 	"git":     validateGitCommand,
