@@ -141,8 +141,8 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 // nonPathArgIndices returns the argument indices (within args, which includes
 // the command name at index 0) that are known not to be file paths for
 // cmdName — git global-flag values (e.g., -C /repo, which controls where git
-// runs, not what files are accessed), sed script expressions, and grep
-// patterns — so they are excluded from file-path security checks.
+// runs, not what files are accessed), sed script expressions, grep
+// patterns, and pgrep patterns — so they are excluded from file-path security checks.
 func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 	switch cmdName {
 	case "python", "python3":
@@ -153,6 +153,8 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 		return sedNonPathArgIndices(args)
 	case "grep", "egrep", "fgrep":
 		return grepNonPathArgIndices(args)
+	case "pgrep":
+		return pgrepNonPathArgIndices(args)
 	}
 	return nil
 }
