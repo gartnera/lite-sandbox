@@ -165,7 +165,7 @@ refused when the hook can't see it in the command line:
 - a command run by a script file (`./build.sh`, `bash build.sh`): the approval
   covers the command line, not the commands of a file you weren't shown;
 - a command run by a wrapper (`find -exec`, `xargs`, `env`, `timeout`,
-  `xcrun`), which is refused even in an approved call: run it on its own.
+  `nice`, `nohup`, `setsid`, `stdbuf`, `xcrun`), which is refused even in an approved call: run it on its own.
 
 Only Claude Code puts the `ask` to you, and existing installs need no
 change: through the sandbox's bash tool it relies on the
@@ -183,7 +183,7 @@ Claude Code denies the call.
 
 `allow: false` entries form a deny list. It is
 checked before every command gate (static, runtime, and wrapped: `env`,
-`xargs`, `timeout`, `find -exec`). In `denylist` and `allowlist` mode a match
+`xargs`, `timeout`, `nice`, `nohup`, `setsid`, `stdbuf`, `find -exec`). In `denylist` and `allowlist` mode a match
 is refused regardless of any allow, `no_sandbox` entries included: with
 `git push` denied and `git` allowed, only pushes are refused. In `open` mode a
 match is only recorded to the audit log, like every rule.

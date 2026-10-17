@@ -663,9 +663,6 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"chown", "chown root file", `command "chown" is not allowed`},
-		{"rmdir", "rmdir dir", `command "rmdir" is not allowed`},
-		{"dd", "dd if=/dev/zero of=file", `command "dd" is not allowed`},
 		{"mkfs", "mkfs /dev/sda", `command "mkfs" is not allowed`},
 		{"mount", "mount /dev/sda /mnt", `command "mount" is not allowed`},
 		{"umount", "umount /mnt", `command "umount" is not allowed`},
@@ -681,6 +678,25 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"sudo", "sudo echo hi", `command "sudo" is not allowed`},
 		{"iptables", "iptables -F", `command "iptables" is not allowed`},
 		{"crontab", "crontab -l", `command "crontab" is not allowed`},
+		{"chroot", "chroot / sh", `command "chroot" is not allowed`},
+		{"nsenter", "nsenter -t 1 sh", `command "nsenter" is not allowed`},
+		{"unshare", "unshare -r sh", `command "unshare" is not allowed`},
+		{"setpriv", "setpriv sh", `command "setpriv" is not allowed`},
+		{"dpkg", "dpkg -i pkg.deb", `command "dpkg" is not allowed`},
+		{"apt-get", "apt-get install curl", `command "apt-get" is not allowed`},
+		{"logger", "logger hello", `command "logger" is not allowed`},
+		{"wall", "wall hello", `command "wall" is not allowed`},
+		{"renice", "renice 10 1", `command "renice" is not allowed`},
+
+		// Run another program, outside the wrapper validators
+		{"watch", "watch ls", `command "watch" is not allowed`},
+		{"flock", "flock f sh", `command "flock" is not allowed`},
+		{"run-parts", "run-parts dir", `command "run-parts" is not allowed`},
+		{"script", "script -c sh", `command "script" is not allowed`},
+		{"prlimit", "prlimit sh", `command "prlimit" is not allowed`},
+		{"ldd", "ldd ./bin", `command "ldd" is not allowed`},
+		{"fstab-decode", "fstab-decode sh", `command "fstab-decode" is not allowed`},
+		{"dash", "dash -c ls", `command "dash" is not allowed`},
 
 		// Code execution (trivial sandbox bypass)
 		{"node", "node -e 'console.log(1)'", `command "node" is not allowed`},
@@ -717,10 +733,6 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"ss", "ss -tulpn", `command "ss" is not allowed`},
 		{"traceroute", "traceroute example.com", `command "traceroute" is not allowed`},
 
-		// Archive processing (arbitrary file writes)
-		{"gzip", "gzip file", `command "gzip" is not allowed`},
-		{"gunzip", "gunzip file.gz", `command "gunzip" is not allowed`},
-
 		// Version control (hook execution, remote code fetch)
 		{"gh", "gh pr list", `command "gh" is not allowed`},
 		{"svn", "svn checkout https://example.com/repo", `command "svn" is not allowed`},
@@ -732,11 +744,7 @@ func TestValidate_BlockedCommands(t *testing.T) {
 		{"bare dot source", ".", `bare "."`},
 		{"xargs with blocked command", "echo hello | xargs perl", `command "perl" is not allowed`},
 
-		// Text processing with write capability
-		{"csplit", "csplit file /pattern/", `command "csplit" is not allowed`},
-
 		// Interactive / potentially disruptive
-		{"top", "top", `command "top" is not allowed`},
 		{"htop", "htop", `command "htop" is not allowed`},
 	}
 	for _, tt := range tests {

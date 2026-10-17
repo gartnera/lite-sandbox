@@ -100,6 +100,74 @@ func writeTargets(cmdName string, args []string, skip map[int]bool) []string {
 		return nil
 	case "chmod":
 		return chmodTargets(args)
+	case "chown", "chgrp":
+		pos, _, flags := optSpec{long: []string{"from", "reference"}}.parse(args, nil)
+		if flags["reference"] || len(pos) == 0 {
+			return pos
+		}
+		return pos[1:] // the first operand is the owner or group
+	case "link":
+		pos, _, _ := optSpec{}.parse(args, nil)
+		if len(pos) >= 2 {
+			return pos[1:]
+		}
+		return nil
+	case "unlink", "rmdir", "shred", "truncate", "fallocate", "mkfifo":
+		spec := map[string]optSpec{
+			"shred":     {short: "ns", long: []string{"iterations", "size", "random-source"}},
+			"truncate":  {short: "sr", long: []string{"size", "reference"}},
+			"fallocate": {short: "lo", long: []string{"length", "offset"}},
+			"mkfifo":    {short: "m", long: []string{"mode"}},
+		}[cmdName]
+		pos, _, _ := spec.parse(args, nil)
+		return pos
+	case "install":
+		pos, vals, flags := installSpec.parse(args, nil)
+		if flags["d"] || flags["directory"] {
+			return pos
+		}
+		if dirs := targetDirs(vals); len(dirs) > 0 {
+			return dirs
+		}
+		if len(pos) >= 2 {
+			return pos[len(pos)-1:]
+		}
+		return nil
+	case "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz":
+		// Each operand is replaced by its (de)compressed file beside it,
+		// unless the output goes to stdout or nothing is written.
+		spec := map[string]optSpec{"gzip": gzipSpec, "gunzip": gzipSpec, "xz": xzSpec, "unxz": xzSpec}[cmdName]
+		pos, _, flags := spec.parse(args, nil)
+		for _, f := range []string{"c", "stdout", "to-stdout", "t", "test", "l", "list"} {
+			if flags[f] {
+				return nil
+			}
+		}
+		return pos
+	case "split":
+		// split [FILE [PREFIX]] writes PREFIXaa, PREFIXab, ... (default x).
+		pos, _, _ := splitSpec.parse(args, nil)
+		if len(pos) >= 2 {
+			return pos[1:]
+		}
+		return []string{"x"}
+	case "csplit":
+		// csplit writes PREFIX followed by the suffix format (default xx%02d);
+		// the format may hold a "/", so the two are checked joined.
+		_, vals, _ := optSpec{short: "bfn", long: []string{"suffix-format", "prefix", "digits"}}.parse(args, nil)
+		prefix, suffix := "xx", ""
+		if p := append(vals["f"], vals["prefix"]...); len(p) > 0 {
+			prefix = p[len(p)-1]
+		}
+		if b := append(vals["b"], vals["suffix-format"]...); len(b) > 0 {
+			suffix = b[len(b)-1]
+		}
+		return []string{prefix + suffix}
+	case "shuf":
+		_, vals, _ := optSpec{short: "ino", long: []string{"input-range", "head-count", "output", "random-source"}}.parse(args, nil)
+		return append(vals["o"], vals["output"]...)
+	case "dd":
+		return ddOperands(args, "of")
 	case "sed":
 		pos, _, flags := optSpec{short: "efl", long: []string{"expression", "file", "line-length"}}.parse(args, skip)
 		if flags["i"] || flags["in-place"] {
