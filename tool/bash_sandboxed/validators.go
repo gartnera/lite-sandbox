@@ -2,6 +2,7 @@ package bash_sandboxed
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -233,7 +234,7 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 		return askWrappedError(cmdName, entry)
 	}
 	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
-		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, xcrun)", cmdName))
+		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, nice, nohup, setsid, stdbuf, xcrun)", cmdName))
 	}
 	extra := s.getExtraCommands()
 	// The whitelist is an allowlist-only rule. A wrapped
@@ -579,6 +580,74 @@ func validateTimeoutArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[idx:])
 }
 
+// optionWrapperCommandIndex returns the index of the wrapped COMMAND in an
+// invocation of a wrapper whose options all come before COMMAND (getopt with
+// "+": nice, nohup, setsid, stdbuf), or wrapperNoCommand when there is none.
+// spec lists the wrapper's value-taking options; a long one may be
+// abbreviated, as getopt_long accepts.
+func optionWrapperCommandIndex(lits []string, spec optSpec) int {
+	i := 1 // skip the wrapper
+	for i < len(lits) {
+		lit := lits[i]
+		if lit == "--" {
+			i++
+			break
+		}
+		if name, ok := strings.CutPrefix(lit, "--"); ok {
+			if !strings.Contains(name, "=") && slices.Contains(spec.long, spec.longName(name)) {
+				i++ // consumes the following value argument
+			}
+			i++
+			continue
+		}
+		if len(lit) < 2 || lit[0] != '-' {
+			break
+		}
+		for j := 1; j < len(lit); j++ {
+			if strings.IndexByte(spec.short, lit[j]) >= 0 {
+				if j == len(lit)-1 {
+					i++ // consumes the following value argument
+				}
+				break
+			}
+		}
+		i++
+	}
+	if i >= len(lits) {
+		return wrapperNoCommand
+	}
+	return i
+}
+
+// optionWrapperSpecs lists, for each wrapper walked by
+// optionWrapperCommandIndex, its value-taking options. A legacy `nice -10`
+// is an option cluster with no value-taking letter, so it is skipped too.
+var optionWrapperSpecs = map[string]optSpec{
+	"nice":   {short: "n", long: []string{"adjustment"}},
+	"nohup":  {},
+	"setsid": {},
+	"stdbuf": {short: "ioe", long: []string{"input", "output", "error"}},
+}
+
+// validateOptionWrapperArgs validates nice, nohup, setsid, and stdbuf the way
+// validateTimeoutArgs does timeout: each execs COMMAND as a native child that
+// never re-enters the sandbox interpreter, so the command is validated here.
+func validateOptionWrapperArgs(s *Sandbox, args []*syntax.Word) error {
+	lits := wordLits(args)
+	idx := optionWrapperCommandIndex(lits, optionWrapperSpecs[lits[0]])
+	if idx < 0 {
+		return nil
+	}
+	return validateSubCommand(s, args[idx:])
+}
+
+// unwrapOptionWrapperArgs returns the wrapped command of a nice, nohup,
+// setsid, or stdbuf invocation, using the same walker as
+// validateOptionWrapperArgs.
+func unwrapOptionWrapperArgs(args []string) []string {
+	return sliceWrappedCommand(args, optionWrapperCommandIndex(args, optionWrapperSpecs[args[0]]))
+}
+
 // wrapperUnwrappers maps wrapper commands to a function that, given a full
 // invocation (command name first), returns the wrapped command's args (also
 // command name first) or nil when there is none. These share their option
@@ -591,6 +660,10 @@ var wrapperUnwrappers = map[string]func([]string) []string{
 	"env":     unwrapEnvArgs,
 	"xargs":   unwrapXargsArgs,
 	"xcrun":   unwrapXcrunArgs,
+	"nice":    unwrapOptionWrapperArgs,
+	"nohup":   unwrapOptionWrapperArgs,
+	"setsid":  unwrapOptionWrapperArgs,
+	"stdbuf":  unwrapOptionWrapperArgs,
 }
 
 // unwrapWrapperArgs repeatedly strips leading wrapper commands (timeout, env, xcrun,

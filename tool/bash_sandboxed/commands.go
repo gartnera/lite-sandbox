@@ -11,10 +11,11 @@ import (
 // Excluded categories:
 //   - Code execution: python, node, ruby, perl, go, java, gcc, etc. (trivial sandbox bypass)
 //   - Networking: curl, wget, ping, nmap, etc. (data exfiltration / remote code fetch)
-//   - Archive write: gzip, etc. (arbitrary file writes to sensitive locations)
 //   - tar, unzip, ar are allowed with arg validators restricting to read-only operations
+//   - gzip, bzip2, xz compress/decompress beside their operands, which are write-checked
 //   - Shell escape: eval, exec, source (bypass command whitelist)
-//   - xargs, env, timeout are allowed with arg validators that recursively validate the wrapped command
+//   - xargs, env, timeout, nice, nohup, setsid, stdbuf are allowed with arg
+//     validators that recursively validate the wrapped command
 //   - Version control: gh (can execute hooks, fetch remote code)
 //   - git is allowed with arg validator restricting to read-only subcommands
 //   - Package managers: npm, pip, cargo, etc. (arbitrary code execution via install scripts)
@@ -44,6 +45,8 @@ var allowedCommands = map[string]bool{
 	"vis":      true,
 	"unvis":    true,
 	"fmt":      true,
+	"tput":     true,
+	"clear":    true,
 
 	// Search / find (read-only)
 	"grep":    true,
@@ -56,6 +59,7 @@ var allowedCommands = map[string]bool{
 	"whereis": true,
 	"type":    true,
 	"look":    true,
+	"rgrep":   true,
 
 	// Navigation / directory management
 	"cd":    true,
@@ -63,6 +67,11 @@ var allowedCommands = map[string]bool{
 
 	// File info (read-only, no modification capability)
 	"ls":        true,
+	"dir":       true,
+	"vdir":      true,
+	"dircolors": true,
+	"lsattr":    true,
+	"namei":     true,
 	"stat":      true,
 	"file":      true,
 	"du":        true,
@@ -79,6 +88,10 @@ var allowedCommands = map[string]bool{
 	"shasum":    true,
 	"cksum":     true,
 	"b2sum":     true,
+	"sha224sum": true,
+	"sha384sum": true,
+	"sha512sum": true,
+	"sum":       true,
 
 	// Text processing (stdin/stdout only, no file write capability)
 	"sort":    true,
@@ -86,6 +99,9 @@ var allowedCommands = map[string]bool{
 	"cut":     true,
 	"tr":      true,
 	"diff":    true,
+	"diff3":   true, // arg validator: no --diff-program
+	"sdiff":   true, // arg validator: no --diff-program, no interactive -o merge
+	"cmp":     true,
 	"comm":    true,
 	"join":    true,
 	"tsort":   true,
@@ -94,6 +110,12 @@ var allowedCommands = map[string]bool{
 	"hexdump": true,
 	"xxd":     true,
 	"iconv":   true,
+	"base32":  true,
+	"basenc":  true,
+	"getopt":  true,
+	"shuf":    true, // -o is write-checked
+	"split":   true, // arg validator: no --filter; the output prefix is write-checked
+	"csplit":  true, // the output prefix is write-checked
 
 	// JSON/structured data and text processing (stdin/stdout processors)
 	"jq": true,
@@ -126,18 +148,37 @@ var allowedCommands = map[string]bool{
 	"expr":     true,
 
 	// Process / system info (read-only)
-	"ps":       true,
-	"pgrep":    true, // arg validator: only a -F pid file is a path
-	"uptime":   true,
-	"uname":    true,
-	"hostname": true,
-	"whoami":   true,
-	"id":       true,
-	"groups":   true,
-	"env":      true, // arg validator recursively validates the wrapped command
-	"printenv": true,
-	"date":     true,
-	"cal":      true,
+	"ps":         true,
+	"pgrep":      true, // arg validator: only a -F pid file is a path
+	"pidof":      true,
+	"top":        true,
+	"free":       true,
+	"vmstat":     true,
+	"uptime":     true,
+	"uname":      true,
+	"arch":       true,
+	"nproc":      true,
+	"getconf":    true,
+	"locale":     true,
+	"lscpu":      true,
+	"lsmem":      true,
+	"lsblk":      true,
+	"findmnt":    true,
+	"mountpoint": true,
+	"hostname":   true,
+	"hostid":     true,
+	"whoami":     true,
+	"logname":    true,
+	"id":         true,
+	"groups":     true,
+	"users":      true,
+	"who":        true,
+	"w":          true,
+	"tty":        true,
+	"env":        true, // arg validator recursively validates the wrapped command
+	"printenv":   true,
+	"date":       true,
+	"cal":        true,
 	// cygpath translates path strings between Windows and POSIX formats. It is
 	// Cygwin/MSYS-only and does not exist on macOS or Linux, so it is inert
 	// here. It is allowlisted because npm/pnpm cmd-shim launchers
@@ -156,11 +197,38 @@ var allowedCommands = map[string]bool{
 	"uuidgen": true,
 
 	// Compressed file readers (read-only, no extraction)
-	"zcat":  true,
-	"zless": true,
-	"zgrep": true,
-	"bzcat": true,
-	"xzcat": true,
+	"zcat":    true,
+	"zless":   true,
+	"zgrep":   true,
+	"bzcat":   true,
+	"xzcat":   true,
+	"zcmp":    true,
+	"zdiff":   true,
+	"zegrep":  true,
+	"zfgrep":  true,
+	"bzgrep":  true,
+	"bzegrep": true,
+	"bzfgrep": true,
+	"bzless":  true,
+	"bzcmp":   true,
+	"bzdiff":  true,
+	"xzgrep":  true,
+	"xzegrep": true,
+	"xzfgrep": true,
+	"xzless":  true,
+	"xzcmp":   true,
+	"xzdiff":  true,
+
+	// Compression in place: the output lands beside each operand, so the
+	// operands are write-checked (writeTargets). gzip's -N (restore the name
+	// stored in the archive) and xz's --files (read operands from a file)
+	// are refused by their validators.
+	"gzip":    true,
+	"gunzip":  true,
+	"bzip2":   true,
+	"bunzip2": true,
+	"xz":      true,
+	"unxz":    true,
 
 	// Archive inspection, extraction, and zip creation (arg validators for
 	// tar/unzip/zip/ar; what tar/unzip extract into and the archive zip writes
@@ -196,14 +264,26 @@ var allowedCommands = map[string]bool{
 	"mktemp": true,
 
 	// Scoped write commands (path-validated to stay within allowedPaths)
-	"cp":    true,
-	"mv":    true,
-	"rm":    true,
-	"touch": true,
-	"chmod": true,
-	"ln":    true,
-	"sed":   true,
-	"tee":   true,
+	"cp":        true,
+	"mv":        true,
+	"rm":        true,
+	"touch":     true,
+	"chmod":     true,
+	"chown":     true,
+	"chgrp":     true,
+	"ln":        true,
+	"link":      true,
+	"unlink":    true,
+	"rmdir":     true,
+	"mkfifo":    true,
+	"truncate":  true,
+	"fallocate": true,
+	"shred":     true,
+	"install":   true, // arg validator: no -s/--strip-program (runs a program)
+	"sed":       true,
+	"tee":       true,
+	"dd":        true, // if= is read-checked, of= write-checked
+	"sync":      true,
 
 	// Control flow / job control
 	"sleep":    true,
@@ -214,6 +294,10 @@ var allowedCommands = map[string]bool{
 	"break":    true,
 	"continue": true,
 	"timeout":  true, // arg validator recursively validates the wrapped command
+	"nice":     true, // arg validator recursively validates the wrapped command
+	"nohup":    true, // arg validator recursively validates the wrapped command
+	"setsid":   true, // arg validator recursively validates the wrapped command
+	"stdbuf":   true, // arg validator recursively validates the wrapped command
 	"time":     true,
 	"yes":      true,
 
@@ -250,17 +334,30 @@ var osSandboxOnlyCommands = map[string]bool{
 // writeCommands is the set of commands that perform write operations.
 // Path arguments to these commands are validated against writeAllowedPaths
 // rather than readAllowedPaths. This matches the "Scoped write commands"
-// category in allowedCommands, plus mkdir.
+// category in allowedCommands, plus mkdir, less dd and sync. Commands that
+// write only some of their arguments (dd of=, sort -o, gzip's operands) are
+// read commands whose written arguments (writeTargets) are write-checked by
+// validateWriteTargets.
 var writeCommands = map[string]bool{
-	"cp":    true,
-	"mv":    true,
-	"rm":    true,
-	"touch": true,
-	"chmod": true,
-	"ln":    true,
-	"sed":   true,
-	"tee":   true,
-	"mkdir": true,
+	"cp":        true,
+	"mv":        true,
+	"rm":        true,
+	"touch":     true,
+	"chmod":     true,
+	"chown":     true,
+	"chgrp":     true,
+	"ln":        true,
+	"link":      true,
+	"unlink":    true,
+	"rmdir":     true,
+	"mkfifo":    true,
+	"truncate":  true,
+	"fallocate": true,
+	"shred":     true,
+	"install":   true,
+	"sed":       true,
+	"tee":       true,
+	"mkdir":     true,
 }
 
 // commandArgValidators is a registry of per-command argument validation functions.
@@ -288,6 +385,24 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"xargs":   validateXargsArgs,
 	"env":     validateEnvArgs,
 	"timeout": validateTimeoutArgs,
+	"nice":    validateOptionWrapperArgs,
+	"nohup":   validateOptionWrapperArgs,
+	"setsid":  validateOptionWrapperArgs,
+	"stdbuf":  validateOptionWrapperArgs,
+	"diff3":   validateDiff3Args,
+	"sdiff":   validateSdiffArgs,
+	"split":   validateSplitArgs,
+	"install": validateInstallArgs,
+	"gzip":    validateGzipArgs,
+	"gunzip":  validateGzipArgs,
+	"xz":      validateXzArgs,
+	"unxz":    validateXzArgs,
+	"xzcat":   validateXzArgs,
+	"less":    validateLessArgs,
+	"arch":    validateArchArgs,
+	"zless":   validateLessArgs,
+	"bzless":  validateLessArgs,
+	"xzless":  validateLessArgs,
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {

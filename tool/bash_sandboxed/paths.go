@@ -85,14 +85,54 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 }
 
 // validateCommandPaths checks every path a single command touches: its
-// path-like arguments (against the read or write set, per writeCommands) and,
-// for tar, unzip, and zip, what they write (against the write set, see
-// validateArchiveWrites).
+// path-like arguments (against the read or write set, per writeCommands), the
+// arguments it writes (against the write set, see validateWriteTargets), for
+// tar, unzip, and zip, what they write (see validateArchiveWrites), and, for
+// a wrapper (timeout, env, nice, ...), the paths of the command it runs, which
+// never passes back through the interpreter.
 func validateCommandPaths(cmdName string, args []string, workDir string, sets resolvedPathSets) error {
 	if err := validateCommandArgPaths(cmdName, args, workDir, sets.forCommand(cmdName)); err != nil {
 		return err
 	}
-	return validateArchiveWrites(cmdName, args, workDir, sets.write)
+	if cmdName == "dd" {
+		if err := validateDdReads(args, workDir, sets.read); err != nil {
+			return err
+		}
+	}
+	if err := validateWriteTargets(cmdName, args, workDir, sets.write); err != nil {
+		return err
+	}
+	if err := validateArchiveWrites(cmdName, args, workDir, sets.write); err != nil {
+		return err
+	}
+	if _, wrapper := wrapperUnwrappers[cmdName]; wrapper {
+		if inner := unwrapWrapperArgs(args); len(inner) > 0 {
+			return validateCommandPaths(inner[0], inner, workDir, sets)
+		}
+	}
+	return nil
+}
+
+// validateWriteTargets checks the arguments a command writes (writeTargets)
+// against the write set, whatever the set its other arguments are checked
+// against: `sort -o FILE`, `shuf -o FILE`, `dd of=FILE`, the operands gzip
+// replaces. Unlike the generic pass it checks a target that does not look
+// like a path (split's prefix x) and one that does not exist yet. mktemp is
+// left out: it writes under $TMPDIR, contained by the OS sandbox (see
+// allowedCommands); git's targets are confined by its own validator.
+func validateWriteTargets(cmdName string, args []string, workDir string, write []resolvedAllowedPath) error {
+	if cmdName == "mktemp" || cmdName == "git" {
+		return nil
+	}
+	for _, t := range writeTargets(cmdName, args, nonPathArgIndices(cmdName, args)) {
+		if t == "" || t == "-" {
+			continue // non-literal (re-checked after expansion), or stdout
+		}
+		if err := checkPathBoundary(t, t, workDir, true, write); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validateCommandArgPaths checks the path-like arguments of a single command
@@ -151,10 +191,20 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 		return gitGlobalPathArgIndices(args)
 	case "sed":
 		return sedNonPathArgIndices(args)
-	case "grep", "egrep", "fgrep":
+	case "grep", "egrep", "fgrep", "rgrep", "zgrep", "zegrep", "zfgrep",
+		"bzgrep", "bzegrep", "bzfgrep", "xzgrep", "xzegrep", "xzfgrep":
 		return grepNonPathArgIndices(args)
 	case "pgrep":
 		return pgrepNonPathArgIndices(args)
+	case "pidof", "dd":
+		// pidof's operands are program names, matched against running
+		// processes; dd's are KEY=VALUE (if= and of= are checked by
+		// validateDdReads and validateWriteTargets).
+		skip := make(map[int]bool, len(args))
+		for i := 1; i < len(args); i++ {
+			skip[i] = true
+		}
+		return skip
 	}
 	return nil
 }

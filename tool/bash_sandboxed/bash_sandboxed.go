@@ -647,6 +647,21 @@ var blockedEnvVars = map[string]string{
 	"UNZIPOPT":    "injects unzip options",
 	"ZIPOPT":      "injects zip options",
 	"ZIP":         "injects zip options",
+	// less runs $LESSOPEN on every file it shows, even when its output is
+	// not a terminal, and a lesskey file (named by these, or by options in
+	// $LESS) can set LESSOPEN.
+	"LESSOPEN":         "less runs it as a command",
+	"LESSCLOSE":        "less runs it as a command",
+	"LESS":             "injects less options",
+	"LESSKEY":          "names a lesskey file, which can set LESSOPEN",
+	"LESSKEYIN":        "names a lesskey file, which can set LESSOPEN",
+	"LESSKEY_CONTENT":  "holds lesskey content, which can set LESSOPEN",
+	"LESSKEY_SYSTEM":   "names a lesskey file, which can set LESSOPEN",
+	"LESSKEYIN_SYSTEM": "names a lesskey file, which can set LESSOPEN",
+	// Options of the compressors, whose validators refuse some of them.
+	"GZIP":        "injects gzip options",
+	"XZ_OPT":      "injects xz options",
+	"XZ_DEFAULTS": "injects xz options",
 }
 
 // validateAssigns checks that none of the assignments target a blocked environment variable.
