@@ -81,9 +81,19 @@ several ways to run code the current validation layer cannot see.
 
 ### `nix` profile
 
+- **Store stays read-only; the daemon does every store write.** This is the
+  Nix-in-Docker arrangement (store mounted read-only, daemon socket reachable):
+  `/nix` is already read-only under the worker's `--ro-bind / /`, and the
+  profile sets `NIX_REMOTE=daemon` so relying on the daemon is explicit and a
+  single-user or daemonless setup fails with "cannot connect to daemon" rather
+  than a read-only filesystem error. The daemon is then the trust boundary,
+  which is why the trust check below and the refusal of `store gc` matter: a
+  read-only store stops neither a trusted user's root-run `post-build-hook`
+  nor store-wide garbage collection, both of which go through the socket.
 - **Paths:** `~/.cache/nix` (or `$XDG_CACHE_HOME/nix`) as read plus internal
-  write. A read grant on `/nix/store`, possibly behind an option, so `result/`
-  links can be read and executed.
+  write. Optionally a *read* grant on `/nix/store` in the validation layer's
+  boundary (not the OS sandbox, where it is already readable), so the agent's
+  own commands can read and run `result/` build outputs.
 - **Allowed:** `build`, `eval`, `flake show|metadata|check|lock|update`, `log`,
   `path-info`, `search`, `why-depends`, `print-dev-env`, `store ls|cat`.
 - **Wrappers:** `develop` and `shell` require `-c`/`--command`, validate the
