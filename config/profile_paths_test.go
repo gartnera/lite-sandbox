@@ -84,14 +84,28 @@ func TestDetectPnpmBinds(t *testing.T) {
 		if _, err := os.Stat(globalDir); err != nil {
 			t.Errorf("expected default global dir to be created: %v", err)
 		}
+		// pnpm 12's engine store and envs sit beside the global dir.
+		for _, name := range []string{"package-manager-store", "package-manager-envs"} {
+			dir := filepath.Join(pnpmHome, name)
+			if !slices.Contains(paths, dir) {
+				t.Errorf("expected detected paths to contain %q, got %v", dir, paths)
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("expected %s to be created: %v", name, err)
+			}
+		}
 	})
 
 	t.Run("configured global dir", func(t *testing.T) {
-		globalDir := filepath.Join(t.TempDir(), "pnpm-global")
+		parent := t.TempDir()
+		globalDir := filepath.Join(parent, "pnpm-global")
 		t.Setenv("FAKE_PNPM_GLOBAL_DIR", globalDir)
 		paths := detectPnpmBinds()
 		if !slices.Contains(paths, globalDir) {
 			t.Errorf("expected detected paths to contain configured global dir %q, got %v", globalDir, paths)
+		}
+		if dir := filepath.Join(parent, "package-manager-store"); !slices.Contains(paths, dir) {
+			t.Errorf("expected detected paths to contain engine store %q, got %v", dir, paths)
 		}
 	})
 }
