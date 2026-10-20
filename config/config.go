@@ -267,6 +267,25 @@ func socketFromDockerContext() string {
 	return socketFromDockerHost(meta.Endpoints.Docker.Host)
 }
 
+// BuildxConfigDir returns the directory buildx keeps its state in (builder
+// instances, last-activity stamps, local build history), resolved the way
+// buildx does: $BUILDX_CONFIG, else the buildx directory of the docker config
+// directory ($DOCKER_CONFIG, else ~/.docker). Returns "" when the home
+// directory cannot be determined.
+func BuildxConfigDir() string {
+	if dir := os.Getenv("BUILDX_CONFIG"); dir != "" {
+		return dir
+	}
+	if dir := os.Getenv("DOCKER_CONFIG"); dir != "" {
+		return filepath.Join(dir, "buildx")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".docker", "buildx")
+}
+
 // isUnixSocket reports whether path exists and is a unix socket.
 func isUnixSocket(path string) bool {
 	info, err := os.Stat(path)

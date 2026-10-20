@@ -1783,8 +1783,14 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		dockerMaskPaths = append([]string(nil), s.dockerMaskPaths...)
 	}
 	s.mu.RUnlock()
+	var buildxDenied []os_sandbox.DenyPath
 	if dockerSocketDir != "" {
 		extraBinds = append(extraBinds, dockerSocketDir)
+		var buildxDir string
+		buildxDir, buildxDenied = buildxPaths()
+		if buildxDir != "" {
+			extraBinds = append(extraBinds, buildxDir)
+		}
 	}
 
 	opts := os_sandbox.WorkerOptions{
@@ -1808,7 +1814,34 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		opts.DeniedReadPaths = denyPaths(cfg.EffectiveDeniedReadEntries(), cfg.ScopedDeniedReadEntries())
 		opts.DeniedWritePaths = denyPaths(cfg.EffectiveDeniedWriteEntries())
 	}
+	opts.DeniedWritePaths = append(opts.DeniedWritePaths, buildxDenied...)
 	return opts
+}
+
+// buildxPaths returns the buildx state directory the worker binds writable
+// while the docker proxy is running, and the builder definitions inside it
+// that stay read-only. Every build writes the directory (a last-activity stamp
+// under activity/, build history under refs/, its .lock); buildx fails the
+// build when it cannot. The definitions (instances/, defaults/, current) pick
+// the builder the host's own docker builds use later, so a sandboxed command
+// must not be able to plant one: a remote builder would receive the user's
+// unsandboxed build contexts, secrets and forwarded SSH agent. The directory is
+// created (0700, as buildx does) so it can be bound; "" when it is unknown or
+// cannot be created.
+func buildxPaths() (string, []os_sandbox.DenyPath) {
+	dir := config.BuildxConfigDir()
+	if !filepath.IsAbs(dir) {
+		return "", nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		slog.Warn("buildx config directory unavailable to the sandbox worker", "path", dir, "error", err)
+		return "", nil
+	}
+	return dir, []os_sandbox.DenyPath{
+		{Path: filepath.Join(dir, "instances"), Dir: true},
+		{Path: filepath.Join(dir, "defaults"), Dir: true},
+		{Path: filepath.Join(dir, "current")},
+	}
 }
 
 // denyPaths converts config deny-list entries to the worker's type, merging

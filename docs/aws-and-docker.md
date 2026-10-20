@@ -116,6 +116,16 @@ When enabled, lite-sandbox starts the proxy on a private unix socket, points the
 sandboxed CLI at it with `DOCKER_HOST`, and (under the OS sandbox) masks the
 real daemon socket.
 
+Under the OS sandbox the buildx state directory (`~/.docker/buildx`, or
+`$DOCKER_CONFIG/buildx`, or `$BUILDX_CONFIG`) is writable, because every
+`docker build`, `docker buildx bake` and `docker compose build` records the
+builder's last activity and the build history there, and fails when it can't.
+The builder definitions inside it (`instances/`, `defaults/`, `current`) stay
+read-only: they pick the builder your own docker builds use later on the host,
+outside the sandbox, so a sandboxed command can't create, switch or replace
+builders (`docker buildx create`, `docker buildx use`). The rest of `~/.docker`
+stays read-only.
+
 **Requires the OS sandbox.** Without it, the real socket can't be masked, and a
 command could `unset DOCKER_HOST` (or pass `-H`) and talk to
 `/var/run/docker.sock` directly. The proxy refuses to start unless `os_sandbox`
