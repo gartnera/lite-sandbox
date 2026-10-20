@@ -824,6 +824,62 @@ func TestNestedScript_UndeclaredCommandStillBlocked(t *testing.T) {
 	}
 }
 
+// A script must see its own path as $0 and BASH_SOURCE, so the common
+// `cd "$(dirname "${BASH_SOURCE[0]}")"` idiom finds the script's directory.
+// Regression test: both were unset in the nested interpreter, so the idiom
+// resolved to the working directory and `$SCRIPT_DIR/../../..` left the
+// allowed directories.
+func TestNestedScript_KnowsOwnPath(t *testing.T) {
+	const script = `#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+where() { echo "fn=${BASH_SOURCE[0]}"; }
+echo "zero=$0 source=$BASH_SOURCE args=$*"
+echo "dir=$SCRIPT_DIR"
+echo "root=$ROOT"
+where
+bash -c 'echo "child=[${BASH_SOURCE[0]}]"'
+`
+	tests := []struct {
+		name    string
+		command string
+		invoked string
+		args    string
+	}{
+		{"direct invocation", `./a/b/scripts/s.sh`, "./a/b/scripts/s.sh", ""},
+		{"direct invocation with args", `./a/b/scripts/s.sh x y`, "./a/b/scripts/s.sh", "x y"},
+		{"via bash <script>", `bash a/b/scripts/s.sh`, "a/b/scripts/s.sh", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			scripts := filepath.Join(dir, "a", "b", "scripts")
+			if err := os.MkdirAll(scripts, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(scripts, "s.sh"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			s := newTestSandboxWithLocalBinaryExecution()
+			out, err := executeInDirWithSandbox(t, s, dir, tt.command)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			want := "zero=" + tt.invoked + " source=" + tt.invoked + " args=" + tt.args + "\n" +
+				"dir=" + scripts + "\n" +
+				"root=" + dir + "\n" +
+				"fn=" + tt.invoked + "\n" +
+				"child=[]\n"
+			if out != want {
+				t.Errorf("output:\n%s\nwant:\n%s", out, want)
+			}
+		})
+	}
+}
+
 func TestExecuteScript_BlockedWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "script.sh"), []byte("echo hello\n"), 0755)

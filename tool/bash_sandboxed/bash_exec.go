@@ -452,7 +452,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
 	// Build and run nested interpreter
-	return s.runNestedInterp(nestedCtx, f, hc, paths)
+	return s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile)
 }
 
 // executeScript runs a script file (e.g., ./script.sh) by reading it,
@@ -514,12 +514,14 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 		}
 	}
 
-	return s.runNestedInterp(nestedCtx, f, hc, paths)
+	return s.runNestedInterp(nestedCtx, f, hc, paths, args[0])
 }
 
 // runNestedInterp creates and runs a nested interpreter with the same
-// security handlers as the parent.
-func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths) error {
+// security handlers as the parent. scriptName is the script path as invoked,
+// empty for `bash -c`; it becomes $0 and BASH_SOURCE, which scripts use to
+// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`).
+func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string) error {
 	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context: a nested script is a child
@@ -533,10 +535,18 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		return true
 	})
 
+	environ := expand.ListEnviron(env...)
+	if scriptName != "" {
+		// The interpreter takes $0 from the file name and has no BASH_SOURCE
+		// of its own.
+		f.Name = scriptName
+		environ = scriptEnviron{Environ: environ, source: scriptName}
+	}
+
 	opts := []interp.RunnerOption{
 		interp.Dir(hc.Dir),
 		interp.StdIO(hc.Stdin, hc.Stdout, hc.Stderr),
-		interp.Env(expand.ListEnviron(env...)),
+		interp.Env(environ),
 	}
 
 	opts = append(opts, s.buildSecurityHandlers(paths.readAllowedPaths, paths.writeAllowedPaths, useOSSandbox)...)
@@ -547,6 +557,31 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 	}
 
 	return runner.Run(ctx, f)
+}
+
+// scriptEnviron adds a script's BASH_SOURCE to its environment. The variable is
+// not exported, so the script's children do not inherit it.
+type scriptEnviron struct {
+	expand.Environ
+	source string
+}
+
+func (e scriptEnviron) bashSource() expand.Variable {
+	return expand.Variable{Set: true, Kind: expand.Indexed, List: []string{e.source}}
+}
+
+func (e scriptEnviron) Get(name string) expand.Variable {
+	if name == "BASH_SOURCE" {
+		return e.bashSource()
+	}
+	return e.Environ.Get(name)
+}
+
+func (e scriptEnviron) Each(fn func(name string, vr expand.Variable) bool) {
+	if !fn("BASH_SOURCE", e.bashSource()) {
+		return
+	}
+	e.Environ.Each(fn)
 }
 
 // literalWords wraps each expanded argv string as a single-literal *syntax.Word
