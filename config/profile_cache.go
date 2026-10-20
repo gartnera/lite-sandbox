@@ -24,7 +24,7 @@ const runtimeDetectCacheTTL = time.Hour
 // entries. Bump it whenever a detect function changes which paths it returns,
 // so an upgraded binary re-detects immediately instead of serving stale paths
 // for up to the TTL.
-const runtimeCacheVersion = 3
+const runtimeCacheVersion = 4
 
 type runtimeCacheEntry struct {
 	Paths     []string          `json:"paths"`

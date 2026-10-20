@@ -40,12 +40,13 @@ func detectGoBinds() []string {
 // Returns the pnpm store directory (downloaded packages), the pnpm cache
 // directory (registry metadata and the `pnpm dlx` cache), and the pnpm global
 // directory (global packages, and the pnpm versions pnpm provisions to honor a
-// project's `packageManager` pin), which live in separate trees (e.g.
-// ~/Library/pnpm/store, ~/Library/Caches/pnpm and ~/Library/pnpm/global on
-// macOS). Without the cache dir bound, pnpm invoked inside the sandbox — e.g.
-// by a lefthook job or package script — fails with EPERM creating its cache;
-// without the global dir, a pnpm whose version differs from the project's pin
-// fails with EPERM downloading the pinned one.
+// project's `packageManager` pin) along with pnpm 12's engine store and envs
+// beside it, which live in separate trees (e.g. ~/Library/pnpm/store,
+// ~/Library/Caches/pnpm and ~/Library/pnpm/global on macOS). Without the cache
+// dir bound, pnpm invoked inside the sandbox — e.g. by a lefthook job or
+// package script — fails with EPERM creating its cache; without the global dir
+// and engine store, a pnpm whose version differs from the project's pin fails
+// with EPERM downloading the pinned one.
 func detectPnpmBinds() []string {
 	var paths []string
 
@@ -94,6 +95,18 @@ func detectPnpmBinds() []string {
 	}
 	if p := ensureDir(globalDir); p != "" {
 		paths = append(paths, p)
+	}
+
+	// pnpm 12 installs the version a `packageManager` pin names into an engine
+	// store beside the global dir, not in it, and records the env lockfiles of
+	// other package managers there too (package_manager_home in pnpm's
+	// crates/cli/src/engine_pm/install.rs: the global dir's parent).
+	if globalDir != "" {
+		for _, name := range []string{"package-manager-store", "package-manager-envs"} {
+			if p := ensureDir(filepath.Join(filepath.Dir(globalDir), name)); p != "" {
+				paths = append(paths, p)
+			}
+		}
 	}
 
 	if len(paths) > 0 {

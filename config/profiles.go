@@ -119,7 +119,7 @@ var builtinProfiles = []Profile{
 	},
 	{
 		Name:        "pnpm",
-		Description: "pnpm package manager; the pnpm store, cache and global dir",
+		Description: "pnpm package manager; the pnpm store, cache, global dir and engine store",
 		Commands:    whitelist("pnpm"),
 		paths: toolchainDirs(func() []string {
 			return cachedDetect("pnpm", []string{"PNPM_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LOCALAPPDATA", "HOME"}, detectPnpmBinds)

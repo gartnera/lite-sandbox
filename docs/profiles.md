@@ -117,6 +117,10 @@ The profile detects and grants (writable at the OS sandbox layer):
   global packages there, and the pnpm version it downloads when a project's
   `packageManager` field pins a different one. The pnpm home itself, whose
   `bin` directory is on your `PATH`, is not granted.
+- **pnpm engine store**: `package-manager-store` and `package-manager-envs`
+  beside the global dir (e.g. `~/Library/pnpm/package-manager-store`). pnpm 12
+  installs the pinned `packageManager` version there instead of in the global
+  dir.
 
 Restrictions:
 - `pnpm dlx` is blocked when invoked directly, since it downloads and runs remote packages
