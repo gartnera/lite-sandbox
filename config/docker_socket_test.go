@@ -62,3 +62,21 @@ func TestUpstreamSocket_ExplicitWins(t *testing.T) {
 		t.Fatalf("explicit socket_path should win, got %q", got)
 	}
 }
+
+func TestBuildxConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BUILDX_CONFIG", "")
+	t.Setenv("DOCKER_CONFIG", "")
+	if got, want := BuildxConfigDir(), filepath.Join(home, ".docker", "buildx"); got != want {
+		t.Errorf("default: got %q want %q", got, want)
+	}
+	t.Setenv("DOCKER_CONFIG", "/custom/docker")
+	if got, want := BuildxConfigDir(), "/custom/docker/buildx"; got != want {
+		t.Errorf("DOCKER_CONFIG: got %q want %q", got, want)
+	}
+	t.Setenv("BUILDX_CONFIG", "/custom/buildx")
+	if got, want := BuildxConfigDir(), "/custom/buildx"; got != want {
+		t.Errorf("BUILDX_CONFIG: got %q want %q", got, want)
+	}
+}
