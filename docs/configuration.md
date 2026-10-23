@@ -682,7 +682,8 @@ per directory with the overrides below.
 ## Local binary execution
 
 In `allowlist` mode, running a program by path (`./binary`, `../tool`,
-`/path/to/script`) is blocked by default. To allow it:
+`/path/to/script`, or any name containing a `/`, like `web/build.sh`, which
+bash runs as a path too) is blocked by default. To allow it:
 
 ```yaml
 local_binary_execution:
@@ -696,8 +697,10 @@ lite-sandbox config local-binary-execution enable|disable|show
 A compiled binary (ELF/Mach-O) then runs directly. A script is run the way
 the kernel would run it, as its `#!` interpreter plus the script path, so the
 interpreter goes through the same whitelist and argument checks as a direct
-call. A bare [`commands`](#commands) allow for a script path also lets it run;
-a restricted one (`./gradlew build`) does not lift this gate.
+call. A bare [`commands`](#commands) allow for a script path also lets it run,
+without validating its contents. It matches the script by the path it
+resolves to, so `web/build.sh` and `./web/build.sh` are the same entry. A
+restricted one (`./gradlew build`) does not lift this gate.
 
 ## Per-directory overrides
 

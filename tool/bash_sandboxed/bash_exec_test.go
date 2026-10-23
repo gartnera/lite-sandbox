@@ -1206,3 +1206,76 @@ func TestExecuteScript_NonBareExtraCommandStillValidatesBody(t *testing.T) {
 		t.Fatalf("expected error about 'docker', got: %v", err)
 	}
 }
+
+// TestExecuteScript_BareScriptEntryMatchesAnySpelling verifies that a bare
+// commands allow of a script matches it with or without a leading "./", in
+// both directions, even with local binary execution off. Regression test for
+// an allow recorded as "web/build.sh" (the spelling the whitelist error
+// suggested for an invocation without "./") not matching `./web/build.sh`,
+// whose body was then validated and refused for setting PATH.
+func TestExecuteScript_BareScriptEntryMatchesAnySpelling(t *testing.T) {
+	invocations := []string{
+		`true && ./web/build.sh`,
+		`true && web/build.sh`,
+	}
+	for _, entry := range []string{"web/build.sh", "./web/build.sh"} {
+		t.Run(entry, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "#!/bin/bash\nPATH=\"$PWD:$PATH\"\necho opted-in\n"
+			if err := os.WriteFile(filepath.Join(dir, "web", "build.sh"), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			yes := true
+			s := NewSandbox()
+			s.updateConfig(&config.Config{
+				Commands: []config.CommandEntry{{Command: entry, Allow: &yes}},
+			}, dir)
+			for _, cmd := range invocations {
+				out, err := executeInDirWithSandbox(t, s, dir, cmd)
+				if err != nil {
+					t.Errorf("%s: expected the bare entry to match: %v", cmd, err)
+					continue
+				}
+				if !strings.Contains(out, "opted-in") {
+					t.Errorf("%s: output %q, want it to include 'opted-in'", cmd, out)
+				}
+			}
+		})
+	}
+}
+
+// TestExecuteScript_SlashPathWithoutDotIsAScript verifies that a command name
+// containing a "/" but no leading "./" runs as the script it names, as bash
+// does, so it goes through the same local-binary gate and body validation as
+// `./web/build.sh` rather than slipping past them as an unlisted command name.
+func TestExecuteScript_SlashPathWithoutDotIsAScript(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A read-write redirection is refused in denylist mode too, and runs fine
+	// if the body is not validated.
+	body := "#!/bin/bash\ntrue 3<>scratch\necho ran\n"
+	if err := os.WriteFile(filepath.Join(dir, "web", "build.sh"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"allowlist", "denylist"} {
+		t.Run(mode, func(t *testing.T) {
+			s := NewSandbox()
+			s.updateConfig(&config.Config{
+				Mode:                 mode,
+				LocalBinaryExecution: &config.LocalBinaryExecutionConfig{Enabled: boolPtr(true)},
+			}, dir)
+			_, err := executeInDirWithSandbox(t, s, dir, `true && web/build.sh`)
+			if err == nil {
+				t.Fatal("expected body validation to reject the read-write redirection in web/build.sh")
+			}
+			if !strings.Contains(err.Error(), "read-write redirection") {
+				t.Fatalf("expected error about the read-write redirection, got: %v", err)
+			}
+		})
+	}
+}
