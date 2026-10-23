@@ -739,7 +739,7 @@ func extractFunctionsFromFile(filePath, workDir string, funcs map[string]bool) {
 // 4. Per-command argument validators (e.g., blocking find -exec)
 // 5. Blocked environment variable assignments (PATH, LD_PRELOAD, etc.)
 func (s *Sandbox) validate(f *syntax.File) error {
-	return s.validateWithFunctionsCtx(context.Background(), f, nil)
+	return s.validateWithFunctionsCtx(context.Background(), f, nil, "")
 }
 
 // validateWithWorkDir validates the AST, also collecting function declarations
@@ -751,7 +751,7 @@ func (s *Sandbox) validateWithWorkDir(f *syntax.File, workDir string) error {
 // validateWithWorkDirCtx is validateWithWorkDir with the audit scope on ctx.
 func (s *Sandbox) validateWithWorkDirCtx(ctx context.Context, f *syntax.File, workDir string) error {
 	funcs := collectDeclaredFunctions(f, workDir)
-	return s.validateWithFunctionsCtx(ctx, f, funcs)
+	return s.validateWithFunctionsCtx(ctx, f, funcs, workDir)
 }
 
 // validateFile runs the full static preflight over a parsed AST: the command /
@@ -830,15 +830,16 @@ func validateNoRedundantCd(f *syntax.File, workDir string) error {
 // validateWithFunctions is the core validation logic, optionally accepting
 // a set of declared function names to allow in addition to the command whitelist.
 func (s *Sandbox) validateWithFunctions(f *syntax.File, declaredFuncs map[string]bool) error {
-	return s.validateWithFunctionsCtx(context.Background(), f, declaredFuncs)
+	return s.validateWithFunctionsCtx(context.Background(), f, declaredFuncs, "")
 }
 
 // validateWithFunctionsCtx is validateWithFunctions with the audit scope on
 // ctx. Each finding is routed through Sandbox.report: an enforced finding
 // stops the walk and is returned; an advisory one (a rule the current mode
 // does not enforce) is audited and the walk continues, so in denylist mode an
-// unlisted command still has its arguments and paths checked.
-func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, declaredFuncs map[string]bool) error {
+// unlisted command still has its arguments and paths checked. workDir, when
+// set, resolves script paths against bare extra_commands entries.
+func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, declaredFuncs map[string]bool, workDir string) error {
 	extra := s.getExtraCommands()
 	extraSub := s.getExtraSubCommands()
 	bare := s.getBareExtraCommands()
@@ -900,7 +901,8 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					// Bare entries (no subcommand restriction) always match.
 					// Restricted entries (e.g. "pnpx prettier") only match when the
 					// first non-flag argument matches the restriction.
-					inExtra := extra[cmdName] && (bare[cmdName] || extraSubCommandMatches(extraSub, cmdName, n.Args))
+					inExtra := extra[cmdName] && (bare[cmdName] || extraSubCommandMatches(extraSub, cmdName, n.Args)) ||
+						s.bareAllowsScript(cmdName, workDir)
 					// Process-control commands (kill, pkill) are allowed only when the
 					// OS sandbox is active, where they are contained to sandbox-spawned
 					// processes.
@@ -1053,7 +1055,7 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	// `bash <script>`, or `source <script>`). This mirrors the runtime
 	// ExecHandler bypass so static preflight does not reject a script the user
 	// deliberately opted out of validation for.
-	if s.getBareExtraCommands()[scriptPath] || s.getBareExtraScriptPaths()[path] {
+	if s.bareAllowsScript(scriptPath, workDir) {
 		return nil
 	}
 	if isBinaryExecutable(path) {
@@ -1168,6 +1170,19 @@ func (s *Sandbox) getBareExtraScriptPaths() map[string]bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.bareExtraScriptPaths
+}
+
+// bareAllowsScript reports whether cmdName, invoked from dir, runs a script a
+// bare extra_commands entry names: by the literal invocation string, or — for
+// a path — by the absolute path it resolves to. The latter is what lets
+// `./web/foo/build.sh`, `web/foo/build.sh` and `./build.sh` run from inside
+// `web/foo` all match an entry written as any one of them. A plain name never
+// matches by path: it runs whatever PATH resolves, not the file beside it.
+func (s *Sandbox) bareAllowsScript(cmdName, dir string) bool {
+	if s.getBareExtraCommands()[cmdName] {
+		return true
+	}
+	return isScriptPath(cmdName) && dir != "" && s.getBareExtraScriptPaths()[absPath(cmdName, dir)]
 }
 
 // isExtraCommandInvocation reports whether the command string should bypass

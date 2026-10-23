@@ -33,11 +33,12 @@ type sandboxPaths struct {
 	writeAllowedPaths []string
 }
 
-// isScriptPath returns true if the command name looks like a direct script
-// invocation path: starts with "./", "../", or "/". Plain names like
-// "script.sh" are NOT treated as script paths (use "bash script.sh" for those).
+// isScriptPath returns true if the command name is a direct script invocation
+// path: like bash, any name containing a "/" ("./x.sh", "/bin/x", "web/x.sh")
+// runs that file rather than a PATH lookup. Plain names like "script.sh" are
+// NOT treated as script paths (use "bash script.sh" for those).
 func isScriptPath(name string) bool {
-	return strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/")
+	return strings.Contains(name, "/")
 }
 
 // scriptShebangArgv returns the argv a kernel would prepend when executing a
@@ -638,7 +639,8 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	// Process-control commands (kill, pkill) are permitted only when
 	// the OS sandbox is active, where they are contained.
 	osOnly := osSandboxOnlyCommands[cmdName] && useOSSandbox
-	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !osOnly && !askApproved {
+	bareScript := s.bareAllowsScript(cmdName, interp.HandlerCtx(ctx).Dir)
+	if !s.commandWhitelisted(cmdName) && !s.extraAllowsArgs(cmdName, args[1:]) && !bareScript && !osOnly && !askApproved {
 		// Whitelist and local-binary gates are allowlist-only rules: in
 		// denylist/open mode the finding is audited and the command runs.
 		var gateErr error
@@ -709,14 +711,8 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 		path := absPath(cmdName, hc.Dir)
 		// Bare extra_commands entries are explicitly opted in by the
 		// user — run them directly without reading/validating script
-		// contents. Match either by the literal invocation string
-		// (e.g. the entry was registered as `./my-script.sh` and is
-		// invoked the same way) or by the script's absolute path,
-		// which lets the same script registered as e.g.
-		// `./web/foo/build.sh` still match when invoked as
-		// `./build.sh` from inside `web/foo`. interp tracks cwd in
-		// HandlerContext, so the resolution sees the post-`cd` dir.
-		if s.getBareExtraCommands()[cmdName] || s.getBareExtraScriptPaths()[path] {
+		// contents. See bareAllowsScript for how an invocation matches.
+		if bareScript {
 			return s.dispatchExec(ctx, args, useOSSandbox)
 		}
 		// A subcommand-restricted extra_commands entry (e.g. "./gradlew build")
