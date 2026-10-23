@@ -270,6 +270,14 @@ func (s *Sandbox) montyOsCall(m *montyFS, stdin *stdinSource) montygo.OsCallFunc
 			return map[string]any{}, nil
 		case "os.urandom":
 			return urandom(call)
+
+		// --- unsupported -----------------------------------------------
+		case "Path.scan":
+			// One call for a whole subtree, which the boundary would have to
+			// check entry by entry. Name what the script called, since
+			// "Path.scan" appears nowhere in it.
+			return nil, errors.New("directory scans (Path.glob, Path.rglob, Path.walk, os.walk, " +
+				"os.scandir) are not supported in the sandbox; list directories with Path.iterdir() instead")
 		}
 		// The clocks, sleeps and random seeding never get here: the OS policy
 		// (montyOsPolicy) has monty answer them itself.

@@ -504,21 +504,21 @@ These behave as they would under CPython on the same machine:
 monty implements a **subset of Python**, which is the most likely source of
 surprises. There are no third-party packages: `numpy`, `pandas`, `requests`,
 and the rest can't be imported, and there's no `pip` or `venv`. The standard
-library is partial: `os`, `pathlib`, `json`, `re`, `math`, `random`,
-`datetime`, `time`, `sys`, `typing`, `asyncio`, `dataclasses`, `collections`,
-`copy`, `functools`, `itertools`, `base64`, `binascii`, and `unicodedata` are
-available.
+library is partial: `os` (with `os.path`), `pathlib`, `json`, `re`, `math`,
+`random`, `datetime`, `time`, `sys`, `typing`, `asyncio`, `dataclasses`,
+`collections`, `copy`, `functools`, `itertools`, `base64`, `binascii`, `bisect`,
+`csv`, `hashlib`, `tomllib`, and `unicodedata` are available.
 
 Also unavailable:
 
 | Not supported | Use instead |
 | --- | --- |
-| Iterating a file (`for line in f`) | `f.readlines()` |
+| `Path.glob`/`rglob`, `os.walk`, `os.scandir` | `Path.iterdir()`, recursing yourself |
 | `open()` update modes (`r+`, `w+`, `a+`) | Read, then write separately |
 | `python -m module` (except `py_compile`) | `-c` or a script file |
 | `sys.exit`, `sys.stdout.write` | `print()`, and the shell for exit codes |
 | Class inheritance, `super()`, `@property`, `@classmethod`, `@staticmethod` | Plain functions and classes |
-| Generators, `match`, `del` | Lists and comprehensions |
+| Generators, `del` | Lists and comprehensions |
 | Sorting `Path` objects (`sorted(p.iterdir())`) | `sorted(str(x) for x in p.iterdir())` |
 
 When a program hits one of these, the error names monty and suggests an
@@ -534,8 +534,7 @@ arguments and piped input work as they do in CPython:
 python3 tool.py --verbose data.csv   # sys.argv == ['tool.py', '--verbose', 'data.csv']
 python3 -c "import sys; print(sys.argv)" a b   # ['-c', 'a', 'b']
 
-cat data.json | python3 -c "import sys, json; print(json.load(sys.stdin))"   # no: see below
-cat data.json | python3 -c "import sys, json; print(json.loads(sys.stdin.read()))"
+cat data.json | python3 -c "import sys, json; print(json.load(sys.stdin))"
 ```
 
 `sys.stdin` supports `read()`, `readline()`, and `readlines()`. It's the
@@ -545,9 +544,8 @@ program from stdin, which leaves nothing for the program itself to read, as in
 CPython. Reading `/dev/stdin` by name gets the same stream; any other use of
 that path is subject to the normal boundary.
 
-Two monty gaps to watch for: `json.load(f)` doesn't exist (only `loads`), and
-file objects aren't iterable, so `for line in sys.stdin:` fails. Use
-`sys.stdin.readlines()` instead.
+It is a file object like any other, so `json.load(sys.stdin)` and
+`for line in sys.stdin:` work too.
 
 `import sys`, `import sys as s`, `import sys, json`, and `from sys import argv`
 (or `stdin`) all work. The shim is only added to programs that mention `argv`

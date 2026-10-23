@@ -290,6 +290,46 @@ func TestPythonNoEnvironment(t *testing.T) {
 	}
 }
 
+// Directory scans arrive as one Path.scan OS call for a whole subtree, which
+// the sandbox does not serve; the error must name what the script called.
+func TestPythonDirectoryScansExplainThemselves(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+
+	for _, code := range []string{
+		`from pathlib import Path; print(list(Path('.').glob('*')))`,
+		`import os; print(list(os.walk('.')))`,
+	} {
+		out, err := runPython(t, s, dir, `python3 -c "`+code+`"`)
+		if err == nil {
+			t.Fatalf("%s: expected a failure, got output %q", code, out)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "Path.glob") || !strings.Contains(msg, "Path.iterdir()") {
+			t.Errorf("%s: error does not name the scan and its alternative: %v", code, err)
+		}
+	}
+}
+
+// File objects became iterable and json gained load/dump in monty v1.2.
+func TestPythonFileIterationAndJSONLoad(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "d.json"), []byte("{\"a\": 1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runPython(t, s, dir,
+		`python3 -c "import json; print([l for l in open('d.json')]); print(json.load(open('d.json'))['a'])"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if want := "['{\"a\": 1}\\n']\n1\n"; out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
 func TestParsePythonArgs(t *testing.T) {
 	readScript := func(path string) (string, error) { return "# " + path, nil }
 

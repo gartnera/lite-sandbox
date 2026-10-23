@@ -376,9 +376,10 @@ func pythonLimitationNote(traceback string) string {
 	switch {
 	case strings.Contains(traceback, "ModuleNotFoundError"), strings.Contains(traceback, "ImportError"):
 		return "\n" + pythonIsMontyNote + " Third-party packages cannot be installed or " +
-			"imported — pip and venv do not exist here. The standard library is partial: os, " +
-			"pathlib, json, re, math, random, datetime, time, sys, typing, asyncio, dataclasses, " +
-			"collections, copy, functools, itertools, base64, binascii and unicodedata work.\n" +
+			"imported — pip and venv do not exist here. The standard library is partial: os " +
+			"(with os.path), pathlib, json, re, math, random, datetime, time, sys, typing, " +
+			"asyncio, dataclasses, collections, copy, functools, itertools, base64, binascii, " +
+			"bisect, csv, hashlib, tomllib and unicodedata work.\n" +
 			pythonEscapeHatches
 	case strings.Contains(traceback, "TimeoutError"):
 		return "\nnote: the sandbox stopped the program at the bash tool's command timeout. " +
@@ -395,8 +396,8 @@ func pythonLimitationNote(traceback string) string {
 			"than a bug in this program. Try a simpler formulation, or:\n" + pythonEscapeHatches
 	case isMontySyntaxLimitation(traceback):
 		return "\n" + pythonIsMontyNote + " It implements a subset of the language: class " +
-			"inheritance, super(), @property/@classmethod/@staticmethod, generators, match " +
-			"statements and del are among the things it does not support. Rewrite without them, " +
+			"inheritance, super(), @property/@classmethod/@staticmethod, generators and del are " +
+			"among the things it does not support. Rewrite without them, " +
 			"or:\n" + pythonEscapeHatches
 	}
 	return ""
