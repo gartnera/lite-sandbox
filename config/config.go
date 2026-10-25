@@ -480,6 +480,12 @@ type Config struct {
 	Docker               *DockerConfig               `yaml:"docker,omitempty"`
 	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
+	// OSSandboxHideHome, when enabled (the default), has the OS sandbox worker
+	// hide the user's private state from the programs it runs: $HOME except
+	// the grants (allowlist mode), the user's runtime directory with its
+	// keyring, D-Bus and agent sockets, and the macOS keychain. See
+	// hidden_home.go. Set to false to opt out.
+	OSSandboxHideHome *bool `yaml:"os_sandbox_hide_home,omitempty"`
 	// RejectRedundantCd, when enabled (the default), rejects a command that
 	// begins by cd-ing into the working directory it already runs in — the
 	// `cd /abs/path/to/repo && ...` prefix agents habitually emit even though the
