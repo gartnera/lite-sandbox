@@ -39,5 +39,6 @@ All agents share one sandbox config file. See [docs/installation.md](docs/instal
 - **[Toolchain profiles](docs/profiles.md)**: the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, Flutter, Xcode, and uv.
 - **[AWS & Docker access](docs/aws-and-docker.md)**: brokered AWS credentials and the filtering Docker proxy.
 - **[Background processes](docs/background-processes.md)**: running and managing long-lived commands.
+- **[Interactive shell](docs/shell.md)**: `lite-sandbox shell`, a shell for you that runs commands under the sandbox's rules.
 - **[Security model](docs/security.md)**: validation layers, the optional OS sandbox, and known limitations.
 - **[Development](docs/development.md)**: building, testing, the e2e suite, and the release flow.

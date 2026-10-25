@@ -796,6 +796,16 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			if err := s.report(ctx, layerRuntime, rulePathBoundary, validateExpandedPaths(args, hc.Dir, sets)); err != nil {
 				return nil, err
 			}
+			// A bare cd changes to $HOME, which no argument names for the
+			// check above; without this, `cd; ls` lists a directory outside
+			// the boundary.
+			if len(args) == 1 && args[0] == "cd" {
+				if home := hc.Env.Get("HOME").String(); home != "" {
+					if err := s.report(ctx, layerRuntime, rulePathBoundary, validateExpandedPaths([]string{"cd", home}, hc.Dir, sets)); err != nil {
+						return nil, err
+					}
+				}
+			}
 			// The CallHandler runs for every command — functions, builtins, and
 			// externals — before the interpreter resolves which it is, so it is
 			// the only runtime layer that sees builtins (the ExecHandler runs

@@ -21,6 +21,19 @@ import (
 // before it (and its group) is forcibly SIGKILLed.
 const gracefulKillTimeout = 3 * time.Second
 
+// workerLogLevelEnv carries the host's log level to the worker process.
+const workerLogLevelEnv = "LITE_SANDBOX_WORKER_LOG_LEVEL"
+
+// hostLogLevel is the lowest level the host's default logger records.
+func hostLogLevel(ctx context.Context) slog.Level {
+	for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn} {
+		if slog.Default().Enabled(ctx, level) {
+			return level
+		}
+	}
+	return slog.LevelError
+}
+
 // streamChunkSize is the read buffer size used by the stdin/stdout/stderr
 // pumps. Each read becomes one gob message, so a larger buffer means fewer
 // messages and flushes on high-volume streams. The read buffer is handed
@@ -382,6 +395,9 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	}
 
 	cmd.Stderr = os.Stderr // Pass through stderr for worker logs
+	// The worker logs at the host's level, so its INFO lines stay out of an
+	// interactive shell's terminal unless asked for (--log-level).
+	cmd.Env = append(os.Environ(), workerLogLevelEnv+"="+hostLogLevel(ctx).String())
 
 	// Put the worker in its own process group. On macOS this is what makes the
 	// seatbelt "(deny signal (target others))" rule meaningful — sandbox-spawned
@@ -822,7 +838,13 @@ func (w *Worker) Exec(ctx context.Context, args []string, dir string, env map[st
 		return 1, fmt.Errorf("failed to send exec: %w", err)
 	}
 
-	// Pump stdin in a background goroutine.
+	// Pump stdin in a background goroutine. A terminal never reaches EOF on
+	// its own, so its pump stops when the command does (cmdDone) rather than
+	// holding Exec open, and reading on, until the user types Ctrl-D.
+	cmdDone := make(chan struct{})
+	if fd, ok := stdinTerminal(stdin); ok {
+		stdin = &terminalReader{fd: fd, done: cmdDone}
+	}
 	stdinDone := make(chan error, 1)
 	go func() {
 		stdinDone <- w.pumpStdinForID(id, stdin)
@@ -865,7 +887,8 @@ loop:
 		}
 	}
 
-	// Wait for stdin pump to finish.
+	// The command is done: stop a terminal's pump, then wait for the pump.
+	close(cmdDone)
 	if pumpErr := <-stdinDone; pumpErr != nil && execErr == nil {
 		execErr = pumpErr
 	}

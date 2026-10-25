@@ -309,6 +309,62 @@ func TestWorkerIPCWithStdin(t *testing.T) {
 	}
 }
 
+// TestWorkerIPCDoneBeforeStdinEOF checks a command's done message does not
+// wait for the end of its stdin: a host terminal ends only when the host stops
+// pumping it, which it does on that message.
+func TestWorkerIPCDoneBeforeStdinEOF(t *testing.T) {
+	binary := "../lite-sandbox"
+	if _, err := os.Stat(binary); os.IsNotExist(err) {
+		t.Skipf("lite-sandbox binary not found at %s, skipping test (run 'go build' first)", binary)
+	}
+
+	cmd := exec.Command(binary, "sandbox-worker")
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("failed to create stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start worker: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	bufStdin := bufio.NewWriter(stdin)
+	enc := gob.NewEncoder(bufStdin)
+	dec := gob.NewDecoder(bufio.NewReader(stdout))
+	var ready WorkerMsg
+	if err := dec.Decode(&ready); err != nil || ready.Type != WorkerMsgReady {
+		t.Fatalf("no ready signal: %v (type %d)", err, ready.Type)
+	}
+
+	// Exec without ever sending HostMsgStdinEOF.
+	const execID uint64 = 1
+	if err := enc.Encode(HostMsg{ID: execID, Type: HostMsgExec, Args: []string{"echo", "done"}, Dir: t.TempDir(), Env: map[string]string{}}); err != nil {
+		t.Fatalf("failed to encode exec: %v", err)
+	}
+	if err := bufStdin.Flush(); err != nil {
+		t.Fatalf("failed to flush exec: %v", err)
+	}
+
+	ch := make(chan workerTestResult, 1)
+	go func() {
+		res, _ := readWorkerResult(dec, execID)
+		ch <- res
+	}()
+	select {
+	case res := <-ch:
+		if res.exitCode != 0 || string(res.stdout) != "done\n" {
+			t.Errorf("got exit %d, stdout %q; want 0, %q", res.exitCode, res.stdout, "done\n")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("done waited for the end of stdin")
+	}
+}
+
 // TestWorkerIPCConcurrent tests that multiple executions can run concurrently on a single worker.
 func TestWorkerIPCConcurrent(t *testing.T) {
 	binary := "../lite-sandbox"
