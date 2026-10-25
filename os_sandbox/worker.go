@@ -94,7 +94,11 @@ func setProcGroup(cmd *exec.Cmd) {
 // Multiple executions may be in flight simultaneously, identified by their ID.
 // This is called by the "sandbox-worker" CLI command.
 func RunWorker() error {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(os.Getenv(workerLogLevelEnv))); err != nil {
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
 	slog.Info("sandbox worker started")
@@ -202,7 +206,23 @@ func streamCommand(enc *lockedEncoder[WorkerMsg], id uint64, req HostMsg, stdinR
 		cmd.Env = env
 	}
 
-	cmd.Stdin = stdinReader
+	// The command reads an OS pipe fed from stdinReader rather than
+	// stdinReader itself: for a Stdin that is not a file, cmd.Wait waits for
+	// the copy to finish too, and the host's stdin may be a terminal, which
+	// only ends when the host stops pumping it — after this command's done
+	// message. The copy ends at the host's EOF, or when RunWorker closes the
+	// execution's pipe writer once this returns.
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		return enc.send(WorkerMsg{ID: id, Type: WorkerMsgDone, ExitCode: 1, Error: "failed to create stdin pipe: " + err.Error()})
+	}
+	cmd.Stdin = stdinRead
+	go func() {
+		io.Copy(stdinWrite, stdinReader) //nolint:errcheck // the command may not read it all
+		stdinWrite.Close()
+	}()
+	// The child holds its own copy of the read end from Start on.
+	defer stdinRead.Close()
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

@@ -773,7 +773,18 @@ func (s *Sandbox) validateFile(f *syntax.File, workDir string, readAllowedPaths,
 // result goes through Sandbox.report, which audits it and decides — by rule
 // and mode — whether it is enforced.
 func (s *Sandbox) validateFileCtx(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string) error {
-	if err := s.validateWithWorkDirCtx(ctx, f, workDir); err != nil {
+	return s.validateFileWithFuncsCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, nil)
+}
+
+// validateFileWithFuncsCtx is validateFileCtx with knownFuncs — functions
+// defined before f, by an earlier command of a Session — also counting as
+// declared.
+func (s *Sandbox) validateFileWithFuncsCtx(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, knownFuncs map[string]bool) error {
+	funcs := collectDeclaredFunctions(f, workDir)
+	for name := range knownFuncs {
+		funcs[name] = true
+	}
+	if err := s.validateWithFunctionsCtx(ctx, f, funcs, workDir); err != nil {
 		return err
 	}
 	if s.getConfig().RejectsRedundantCd() {
