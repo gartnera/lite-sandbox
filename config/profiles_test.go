@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -375,5 +376,95 @@ func TestProfileNoSandboxOption(t *testing.T) {
 	goProfile, _ := LookupProfile("go")
 	if e := (&Config{}).ProfileCommandEntries(goProfile); e[0].NoSandbox {
 		t.Errorf("go entries marked no_sandbox: %+v", e)
+	}
+}
+
+// TestGhProfile_ScopedPaths: the gh profile grants gh's config dir and, with
+// the keychain option (on by default), the keyring, each scoped to gh: one
+// scope whose worker has them, hidden from every other command.
+func TestGhProfile_ScopedPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GH_CONFIG_DIR", "")
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+	ghDir := filepath.Join(home, ".config", "gh")
+	keychains := filepath.Join(home, "Library", "Keychains")
+	for _, d := range []string{ghDir, keychains} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bus := filepath.Join(runtimeDir, "bus")
+	if err := os.WriteFile(bus, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var keyring string
+	switch runtime.GOOS {
+	case "darwin":
+		keyring = keychains
+	case "linux":
+		keyring = bus
+	}
+
+	scoped := func(cfg *Config) []string {
+		var out []string
+		for _, e := range cfg.Effective().Paths {
+			if e.Profile != "gh" {
+				continue
+			}
+			if !e.Scoped() || !e.GrantsRead() || e.GrantsWrite() || !slices.Equal(e.Commands, []string{"gh"}) {
+				t.Errorf("gh profile entry %+v is not a read grant scoped to gh", e)
+			}
+			out = append(out, e.Path)
+		}
+		return out
+	}
+
+	on := &Config{Profiles: []ProfileEntry{{Name: "gh"}}}
+	want := []string{ghDir}
+	if keyring != "" {
+		want = append(want, keyring)
+	}
+	if got := scoped(on); !slices.Equal(got, want) {
+		t.Errorf("gh profile paths = %q, want %q", got, want)
+	}
+	scope, ok := on.Effective().ScopeForCommand("gh")
+	if !ok || len(scope.Entries) != len(want) {
+		t.Errorf("gh scope = %+v, want one scope with %d entries", scope, len(want))
+	}
+	if !slices.Contains(on.Effective().WhitelistedCommandList(), "gh") {
+		t.Error("the gh profile does not whitelist gh")
+	}
+
+	off := &Config{Profiles: []ProfileEntry{{Name: "gh", Options: map[string]bool{"keychain": false}}}}
+	if got := scoped(off); !slices.Equal(got, []string{ghDir}) {
+		t.Errorf("gh profile paths with keychain off = %q, want only %s", got, ghDir)
+	}
+
+	t.Setenv("GH_CONFIG_DIR", "/elsewhere/gh")
+	if got := ghConfigDir(); got != "/elsewhere/gh" {
+		t.Errorf("ghConfigDir with GH_CONFIG_DIR = %q", got)
+	}
+	t.Setenv("GH_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "/xdg")
+	if got := ghConfigDir(); got != "/xdg/gh" {
+		t.Errorf("ghConfigDir with XDG_CONFIG_HOME = %q", got)
+	}
+
+	if got := ghKeyringPathsFor("darwin"); !slices.Equal(got, []string{keychains}) {
+		t.Errorf("darwin keyring paths = %q, want %s", got, keychains)
+	}
+	if got := ghKeyringPathsFor("linux"); !slices.Equal(got, []string{bus}) {
+		t.Errorf("linux keyring paths = %q, want %s", got, bus)
+	}
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:abstract=/tmp/x;unix:path=/run/custom/bus,guid=1")
+	if got := sessionBusSocket(); got != "/run/custom/bus" {
+		t.Errorf("sessionBusSocket = %q, want /run/custom/bus", got)
+	}
+	if got := ghKeyringPathsFor("linux"); got != nil {
+		t.Errorf("a missing bus socket was granted: %q", got)
 	}
 }

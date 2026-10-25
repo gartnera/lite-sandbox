@@ -529,3 +529,64 @@ func isXcodeDeveloperDir(dir string) bool {
 	}
 	return false
 }
+
+// ghConfigDir returns the directory gh keeps its configuration and its
+// hosts.yml in, by gh's own precedence: GH_CONFIG_DIR, then
+// $XDG_CONFIG_HOME/gh, then ~/.config/gh. "" when the home directory is
+// unknown.
+func ghConfigDir() string {
+	if d := os.Getenv("GH_CONFIG_DIR"); d != "" {
+		return d
+	}
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "gh")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "gh")
+}
+
+// ghKeyringPathsFor returns the paths gh reaches the system keyring through,
+// where `gh auth login` stores the token by default: on macOS the keychains
+// directory (a grant on it also lets the worker reach the keychain daemon,
+// which /usr/bin/security, gh's keyring client, asks), on Linux the session
+// bus socket the Secret Service (gnome-keyring, KWallet) listens on. Only
+// paths that exist are returned.
+func ghKeyringPathsFor(goos string) []string {
+	var p string
+	switch goos {
+	case "darwin":
+		p = KeychainDir()
+	case "linux":
+		p = sessionBusSocket()
+	}
+	if p == "" {
+		return nil
+	}
+	if _, err := os.Stat(p); err != nil {
+		return nil
+	}
+	return []string{p}
+}
+
+// sessionBusSocket returns the socket of the user's D-Bus session bus: the
+// unix:path= of DBUS_SESSION_BUS_ADDRESS, else the bus in the user's runtime
+// directory, its default location. "" when neither is known.
+func sessionBusSocket() string {
+	for _, part := range strings.Split(os.Getenv("DBUS_SESSION_BUS_ADDRESS"), ";") {
+		if !strings.HasPrefix(part, "unix:") {
+			continue
+		}
+		for _, kv := range strings.Split(strings.TrimPrefix(part, "unix:"), ",") {
+			if p, ok := strings.CutPrefix(kv, "path="); ok && filepath.IsAbs(p) {
+				return p
+			}
+		}
+	}
+	if d := UserRuntimeDir(); d != "" {
+		return filepath.Join(d, "bus")
+	}
+	return ""
+}

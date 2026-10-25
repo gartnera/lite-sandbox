@@ -1,7 +1,7 @@
 # Toolchain Profiles
 
 A profile is a built-in preset of **commands** and **paths** for one toolchain:
-`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, and `montypython`. Profiles are
+`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, and `montypython`. Profiles are
 off by default and enabled one at a time:
 
 ```yaml
@@ -382,6 +382,98 @@ uvx ruff check
 Restrictions:
 - `uv publish` needs a `commands` entry because it uploads to a package index
 - `uv self update` is blocked because it overwrites the uv executable in place
+
+## GitHub CLI (gh)
+
+The `gh` profile whitelists [gh](https://cli.github.com/), and gives its
+credentials to gh **alone**:
+
+```bash
+lite-sandbox config profiles enable gh
+lite-sandbox config profiles set gh keychain false      # optional: don't grant the system keyring
+lite-sandbox config profiles set gh allow_token true    # optional: allow gh auth token (see below)
+```
+
+For example:
+
+```bash
+gh pr list
+gh pr view 123 --comments
+gh pr checks 123
+gh pr create --head my-branch --title "Fix the parser" --body "..."
+gh issue create --title "Bug" --body-file notes.md
+gh run view 42 --log-failed
+gh api repos/{owner}/{repo}/pulls --jq '.[].title'
+```
+
+### How the token is kept from everything else
+
+gh's token lives in its config directory (`hosts.yml` under `GH_CONFIG_DIR`,
+else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) or, by default since
+`gh auth login` uses it, in the system keyring. The profile grants both as
+[grants for one command](configuration.md#grants-for-one-command-commands),
+scoped to gh:
+
+- the config directory, readable;
+- with the `keychain` option (on by default), the keyring: the keychains
+  directory `~/Library/Keychains` on macOS, which also lets gh's worker reach
+  the keychain daemon, and on Linux the socket of the session D-Bus (from
+  `DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`) that the Secret
+  Service (gnome-keyring, KWallet) listens on.
+
+With the OS sandbox on, `gh` then runs in a worker of its own that has these,
+while the shared worker every other command runs in hides them, in every mode.
+A credential stealer in a dependency's install script, a test, or a program
+the agent writes can't read `hosts.yml` or ask the keyring, and a `gh` it
+launches itself runs in the shared worker, without the token. The agent's own
+reads (`cat ~/.config/gh/hosts.yml`, a `gh gist create` or `gh api -F
+key=@file` of a path outside the working directory) are refused by the path
+boundary. Without the OS sandbox nothing is hidden from anything, as with
+every other grant.
+
+`gh auth token`, `gh auth status --show-token`, and `gh auth git-credential`
+print the token where any command can read it, so they are refused. The
+`allow_token` option allows the first two, for a workflow that hands the token
+to another tool (`GH_TOKEN=$(gh auth token) some-tool`); the token then leaves
+gh's worker. The other `auth` subcommands (`login`, `logout`, `refresh`,
+`switch`, `setup-git`) change the credentials or git's config: run them
+yourself, outside the sandbox.
+
+A token in the environment (`GH_TOKEN`, `GITHUB_TOKEN`) isn't covered: the
+server passes its environment to every command, so keep the token in gh's
+config or the keyring instead.
+
+### What gh may run
+
+Only the code gh itself ships runs in its worker. gh's extensions and aliases
+are programs (or shell commands) gh runs with its token, so only gh's
+built-in commands are allowed, and `gh extension` and `gh copilot` (which
+downloads and runs the Copilot CLI) are refused. `gh alias` and `gh config`
+are limited to `list`/`get`.
+
+gh runs git in the working directory, and git runs the hooks, filters,
+`core.fsmonitor`, and `core.sshCommand` that the project's `.git` configures,
+which sandboxed commands can write. That code would run in gh's worker, with
+the token. The git gh runs to read the remotes, the current branch, and its
+config runs none of it, but these invocations make gh check out, fetch, push,
+or update refs, and are refused:
+
+- `gh pr checkout`, `gh repo clone`, `gh gist clone`;
+- `gh pr create` without `--head`: without it gh runs `git status` and pushes
+  the current branch. Push the branch first (or let your own `git push` do
+  it), then `gh pr create --head <branch>`;
+- `gh pr merge -d` and `gh pr close -d` without `-R owner/repo` (with it, only
+  the remote branch is deleted);
+- `gh issue develop` without `--list`;
+- `gh repo create --clone`/`--source`/`--push`, `gh repo fork --clone`/`--remote`,
+  and `gh repo sync` without a destination repository (the local sync);
+- `gh release delete --cleanup-tag`;
+- `gh codespace ssh`/`cp`/`code`/`jupyter`/`ports`/`logs`, which start ssh or
+  forward ports on this machine.
+
+Everything else goes through the GitHub API with your token, so gh can do
+whatever the token allows: `gh api` reaches every endpoint, and `gh pr merge`
+merges. Scope the token accordingly.
 
 ## Monty Python
 

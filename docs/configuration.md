@@ -465,6 +465,9 @@ paths:
 lite-sandbox config paths allow ~/.config/gh --commands gh   # implies --internal
 ```
 
+The [gh profile](profiles.md#github-cli-gh) sets up exactly this for gh, with
+the keyring and a validator that keeps gh from running project code.
+
 The named commands then run in an OS sandbox worker of their own that has the
 path, while the shared worker every other command runs in hides it, in
 **every** mode (like the credential masks). So a program the agent writes
@@ -704,7 +707,7 @@ profiles:
 ```
 
 A profile is a built-in preset of `commands` and `paths` entries for one
-toolchain (`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, and the default-on
+toolchain (`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, and the default-on
 `montypython`), merged into the lists described above before the sandbox sees
 them. Its entries mean what yours do, except that a profile's allow of a
 command name whitelists it (its validators still run) instead of skipping
