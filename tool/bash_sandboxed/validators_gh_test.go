@@ -4,9 +4,11 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +21,7 @@ func TestValidateGhArgs(t *testing.T) {
 	tests := []struct {
 		command    string
 		allowToken bool
+		allowGit   bool
 		errSubstr  string // "" when allowed
 	}{
 		// Read-only and API invocations.
@@ -67,9 +70,9 @@ func TestValidateGhArgs(t *testing.T) {
 		{command: "gh pr create --head my-branch --title t --body b"},
 		{command: "gh pr create -H owner:branch -t t -b b -d"},
 		{command: "gh pr create --head=my-branch --fill"},
-		{command: "gh pr create --title t --body b", errSubstr: "only allowed with --head"},
-		{command: "gh pr create -t t -b -H", errSubstr: "only allowed with --head"}, // -H is the body
-		{command: "gh pr create -b-H -t t", errSubstr: "only allowed with --head"},
+		{command: "gh pr create --title t --body b", errSubstr: "without --head"},
+		{command: "gh pr create -t t -b -H", errSubstr: "without --head"}, // -H is the body
+		{command: "gh pr create -b-H -t t", errSubstr: "without --head"},
 		{command: "gh pr create --bogus x --head b", errSubstr: "unknown flag --bogus"},
 
 		// The token.
@@ -97,24 +100,41 @@ func TestValidateGhArgs(t *testing.T) {
 		{command: "gh cs ports forward 8080:8080", errSubstr: "runs programs on this machine"},
 
 		// Invocations that make gh run git.
-		{command: "gh pr checkout 12", errSubstr: "gh pr checkout is not allowed"},
-		{command: "gh pr co 12", errSubstr: "gh pr checkout is not allowed"},
-		{command: "gh pr merge 12 --delete-branch", errSubstr: "only allowed with -R"},
-		{command: "gh pr merge 12 -sd", errSubstr: "only allowed with -R"},
-		{command: "gh pr close 12 -d", errSubstr: "only allowed with -R"},
-		{command: "gh issue develop 12", errSubstr: "only allowed with --list"},
-		{command: "gh issue develop 12 --checkout", errSubstr: "only allowed with --list"},
-		{command: "gh issue develop 12 -n -l", errSubstr: "only allowed with --list"}, // -l is the name
-		{command: "gh release delete v1 --cleanup-tag", errSubstr: "--cleanup-tag is not allowed"},
+		{command: "gh pr checkout 12", errSubstr: "allow_git true"},
+		{command: "gh pr co 12", errSubstr: "allow_git true"},
+		{command: "gh pr merge 12 --delete-branch", errSubstr: "without -R"},
+		{command: "gh pr merge 12 -sd", errSubstr: "without -R"},
+		{command: "gh pr close 12 -d", errSubstr: "without -R"},
+		{command: "gh issue develop 12", errSubstr: "without --list"},
+		{command: "gh issue develop 12 --checkout", errSubstr: "without --list"},
+		{command: "gh issue develop 12 -n -l", errSubstr: "without --list"}, // -l is the name
+		{command: "gh release delete v1 --cleanup-tag", errSubstr: "allow_git true"},
 		{command: "gh repo clone cli/cli", errSubstr: "gh repo clone is not allowed"},
 		{command: "gh repo create r --clone", errSubstr: "--clone is not allowed"},
 		{command: "gh repo create r -c --private", errSubstr: "-c is not allowed"},
 		{command: "gh repo create r --source=. --push", errSubstr: "is not allowed"},
 		{command: "gh repo fork --remote", errSubstr: "--remote is not allowed"},
 		{command: "gh repo fork cli/cli --clone", errSubstr: "--clone is not allowed"},
-		{command: "gh repo sync", errSubstr: "destination repository"},
-		{command: "gh repo sync --branch main", errSubstr: "destination repository"},
+		{command: "gh repo sync", errSubstr: "without a destination repository"},
+		{command: "gh repo sync --branch main", errSubstr: "without a destination repository"},
 		{command: "gh gist clone abc", errSubstr: "gh gist clone is not allowed"},
+
+		// allow_git lifts the refusals of the invocations that run git, and
+		// only those.
+		{command: "gh pr checkout 12", allowGit: true},
+		{command: "gh pr create --title t --body b", allowGit: true},
+		{command: "gh pr create --fill --some-new-flag", allowGit: true},
+		{command: "gh pr merge 12 -sd", allowGit: true},
+		{command: "gh issue develop 12 --checkout", allowGit: true},
+		{command: "gh release delete v1 --cleanup-tag", allowGit: true},
+		{command: "gh repo clone cli/cli", allowGit: true},
+		{command: "gh repo create r --source=. --push", allowGit: true},
+		{command: "gh repo fork --clone", allowGit: true},
+		{command: "gh repo sync", allowGit: true},
+		{command: "gh gist clone abc", allowGit: true},
+		{command: "gh auth token", allowGit: true, errSubstr: "gh auth token is not allowed"},
+		{command: "gh my-extension", allowGit: true, errSubstr: "only gh's built-in commands"},
+		{command: "gh codespace ssh", allowGit: true, errSubstr: "runs programs on this machine"},
 
 		// The command path must be unambiguous.
 		{command: "gh -R cli/cli pr list", errSubstr: "put the command first"},
@@ -128,7 +148,7 @@ func TestValidateGhArgs(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := f.Stmts[0].Cmd.(*syntax.CallExpr).Args
-			err = validateGhArgs(args, tt.allowToken)
+			err = validateGhArgs(args, ghOptions{allowToken: tt.allowToken, allowGit: tt.allowGit})
 			if tt.errSubstr == "" {
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
@@ -175,7 +195,7 @@ func TestGhProfile_Validation(t *testing.T) {
 		t.Errorf("dynamically built gh auth token should be refused at runtime: %v", err)
 	}
 	_, err = on.Execute(context.Background(), `B="$(echo body)"; gh pr create --title t --body "$B"`, dir, paths, paths)
-	if err == nil || !strings.Contains(err.Error(), "only allowed with --head") {
+	if err == nil || !strings.Contains(err.Error(), "without --head") {
 		t.Errorf("gh pr create without --head should be refused at runtime: %v", err)
 	}
 }
@@ -320,5 +340,92 @@ func TestOSSandboxGhProfile(t *testing.T) {
 	}
 	if out, err := run("cat " + hosts); err == nil || strings.Contains(out, "gho_s3cret") {
 		t.Errorf("the agent read gh's token: %v %q", err, out)
+	}
+}
+
+// TestScopedGitEnv: a scoped worker's git gets the hardening entries after the
+// server's own GIT_CONFIG_COUNT entries, and the server's own ssh, askpass,
+// and editor settings are kept.
+func TestScopedGitEnv(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "me",
+		"GIT_SSH": "/opt/my ssh", "GIT_EDITOR": "vim",
+	}
+	scopedGitEnv(env)
+	if env["GIT_CONFIG_KEY_0"] != "user.name" || env["GIT_CONFIG_VALUE_0"] != "me" {
+		t.Errorf("the server's own config entry was overwritten: %v", env)
+	}
+	if env["GIT_CONFIG_KEY_1"] != "core.hooksPath" || env["GIT_CONFIG_VALUE_1"] != "/dev/null" {
+		t.Errorf("hooksPath not appended after the server's entries: %v", env)
+	}
+	if got, want := env["GIT_CONFIG_COUNT"], strconv.Itoa(1+len(scopedGitConfig)); got != want {
+		t.Errorf("GIT_CONFIG_COUNT = %s, want %s", got, want)
+	}
+	if env["GIT_SSH_COMMAND"] != `'/opt/my ssh'` {
+		t.Errorf("GIT_SSH_COMMAND = %q, want the server's GIT_SSH, quoted", env["GIT_SSH_COMMAND"])
+	}
+	if env["GIT_EDITOR"] != "vim" || env["GIT_ASKPASS"] != "true" || env["GIT_PAGER"] != "cat" {
+		t.Errorf("editor/askpass/pager = %q/%q/%q", env["GIT_EDITOR"], env["GIT_ASKPASS"], env["GIT_PAGER"])
+	}
+}
+
+// TestOSSandboxScopedGitHardening: a git that a scoped CLI starts runs no hook
+// or fsmonitor the project's .git configures, even with allow_git on.
+func TestOSSandboxScopedGitHardening(t *testing.T) {
+	requireOSSandbox(t)
+	work := t.TempDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, "ls-gh-git-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	ghDir := filepath.Join(root, "gh-config")
+	bin := filepath.Join(root, "bin")
+	for _, d := range []string{ghDir, bin} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", work, "-c", "user.email=a@b", "-c", "user.name=a"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitRun("init", "-q")
+	gitRun("commit", "-q", "--allow-empty", "-m", "init")
+	// What a credential stealer would plant: each appends to pwned.
+	pwned := filepath.Join(work, "pwned")
+	hook := filepath.Join(work, ".git", "hooks", "post-checkout")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho hook >> "+pwned+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("config", "core.fsmonitor", "echo fsmonitor >> "+pwned)
+	gitRun("config", "credential.helper", "!echo helper >> "+pwned)
+	// A stand-in gh that, like gh pr checkout, runs git.
+	script := "#!/bin/sh\ngit checkout -q -b from-gh && git status --porcelain >/dev/null && echo ran\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GH_CONFIG_DIR", ghDir)
+
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{
+		OSSandbox: &yes,
+		Profiles:  []config.ProfileEntry{{Name: "gh", Options: map[string]bool{"allow_git": true}}},
+	}, work)
+	defer s.Close()
+	out, err := s.Execute(context.Background(), "gh pr checkout 12", work, []string{work}, []string{work})
+	if err != nil || !strings.Contains(out, "ran") {
+		t.Fatalf("gh pr checkout with allow_git: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(pwned); err == nil {
+		t.Errorf("git in gh's worker ran the project's configured code: %q", b)
 	}
 }

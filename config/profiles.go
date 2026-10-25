@@ -196,6 +196,7 @@ var builtinProfiles = []Profile{
 		Options: []ProfileOption{
 			{Name: "keychain", Default: true, Description: "let gh reach the system keyring (the macOS keychain, the Secret Service's session bus on Linux), where gh auth login stores the token by default"},
 			{Name: "allow_token", Default: false, Description: "allow gh auth token and gh auth status --show-token, which print the token where any command can read it"},
+			{Name: "allow_git", Default: false, Description: "allow the gh commands that run git (pr checkout, pr create without --head, repo clone, ...), whose git runs the hooks and config sandboxed commands can write in .git, with gh's token"},
 		},
 		paths: func() []PathEntry { return ghScoped(ghConfigDir()) },
 		optionPaths: map[string]func() []PathEntry{

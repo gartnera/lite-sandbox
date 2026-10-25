@@ -392,6 +392,7 @@ credentials to gh **alone**:
 lite-sandbox config profiles enable gh
 lite-sandbox config profiles set gh keychain false      # optional: don't grant the system keyring
 lite-sandbox config profiles set gh allow_token true    # optional: allow gh auth token (see below)
+lite-sandbox config profiles set gh allow_git true      # optional: allow gh pr checkout and the rest (see below)
 ```
 
 For example:
@@ -456,7 +457,7 @@ gh runs git in the working directory, and git runs the hooks, filters,
 which sandboxed commands can write. That code would run in gh's worker, with
 the token. The git gh runs to read the remotes, the current branch, and its
 config runs none of it, but these invocations make gh check out, fetch, push,
-or update refs, and are refused:
+or update refs, and are refused unless the `allow_git` option is on:
 
 - `gh pr checkout`, `gh repo clone`, `gh gist clone`;
 - `gh pr create` without `--head`: without it gh runs `git status` and pushes
@@ -467,9 +468,26 @@ or update refs, and are refused:
 - `gh issue develop` without `--list`;
 - `gh repo create --clone`/`--source`/`--push`, `gh repo fork --clone`/`--remote`,
   and `gh repo sync` without a destination repository (the local sync);
-- `gh release delete --cleanup-tag`;
-- `gh codespace ssh`/`cp`/`code`/`jupyter`/`ports`/`logs`, which start ssh or
-  forward ports on this machine.
+- `gh release delete --cleanup-tag`.
+
+`allow_git` allows them all, and gives up part of the isolation in exchange:
+a program that wrote the project's `.git` can get code into gh's worker, and
+with it the token. To narrow that, the git a scoped command starts always
+runs with what git lets the environment switch off switched off: hooks
+(`core.hooksPath=/dev/null`), `core.fsmonitor`, credential helpers other than
+the one gh passes itself, commit and tag signing, signature verification,
+submodule recursion, and every transport but https and ssh (no `ext::`,
+`file://`, or `git://` with `core.gitProxy`); `GIT_SSH_COMMAND`,
+`GIT_ASKPASS`, `GIT_EDITOR`, and `GIT_PAGER` are set (unless the server sets
+them) so `.git/config` can't name those programs. What git has no switch for
+stays open: a filter, merge, or diff driver defined in `.git/config` and
+attached to a path in `.git/info/attributes` or `.gitattributes` runs on
+checkout or pull, and a credential helper can be scoped to any URL. Turn
+`allow_git` on only for projects where nothing untrusted runs, ideally per
+directory (`lite-sandbox config --dir . profiles set gh allow_git true`).
+
+`gh codespace ssh`/`cp`/`code`/`jupyter`/`ports`/`logs`, which start ssh or
+forward ports on this machine, are refused either way.
 
 Everything else goes through the GitHub API with your token, so gh can do
 whatever the token allows: `gh api` reaches every endpoint, and `gh pr merge`

@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -25,14 +26,17 @@ import (
 //     fsmonitor and ssh commands the project's .git configures, which
 //     sandboxed commands can write. So every invocation that makes gh run
 //     such a git (status, checkout, fetch, pull, push, clone, ref updates) is
-//     refused; the git gh runs to read the remotes, the branch and its config
-//     (remote -v, config --get-regexp, symbolic-ref, rev-parse, log, show -s)
-//     runs nothing the project configures. The invocations refused here are
-//     listed in ghRefusals and the checks below.
+//     refused (ghGitError) unless the profile's allow_git option is on, which
+//     trades that away for gh's git workflows; the git gh runs to read the
+//     remotes, the branch and its config (remote -v, config --get-regexp,
+//     symbolic-ref, rev-parse, log, show -s) runs nothing the project
+//     configures. Every scoped worker also runs git with what git lets the
+//     environment switch off switched off (scopedGitEnv), which narrows what
+//     allow_git exposes but cannot close it.
 //
 // Everything else gh does goes through the GitHub API with the user's token:
 // gh can do whatever the token allows (gh api reaches every endpoint).
-func validateGhArgs(args []*syntax.Word, allowToken bool) error {
+func validateGhArgs(args []*syntax.Word, o ghOptions) error {
 	argv := make([]string, len(args))
 	for i, w := range args {
 		v, ok := ghLiteral(w)
@@ -43,7 +47,21 @@ func validateGhArgs(args []*syntax.Word, allowToken bool) error {
 		}
 		argv[i] = v
 	}
-	return checkGhArgv(argv, allowToken)
+	return checkGhArgv(argv, o)
+}
+
+// ghOptions are the gh profile's options the validator reads.
+type ghOptions struct {
+	allowToken bool // allow_token: gh auth token, gh auth status --show-token
+	allowGit   bool // allow_git: the invocations that make gh run git
+}
+
+// ghGitError is the refusal of an invocation that makes gh run git, which the
+// allow_git option lifts.
+type ghGitError struct{ what string }
+
+func (e *ghGitError) Error() string {
+	return fmt.Sprintf("%s is not allowed: it makes gh run git in the working directory, where the hooks and config sandboxed commands can write would run with gh's token; the user can allow it with `lite-sandbox config profiles set gh allow_git true`, which gives up that protection", e.what)
 }
 
 // ghLiteral returns the value of a word made only of literal text, quoted or
@@ -91,7 +109,7 @@ var (
 // ghCommands are gh's built-in top-level commands, each with the check its
 // arguments (after the command name) go through; nil allows every
 // invocation.
-var ghCommands = map[string]func(rest []string, allowToken bool) error{
+var ghCommands = map[string]func(rest []string, o ghOptions) error{
 	"accessibility": nil,
 	"agent-task":    nil,
 	"alias":         ghOnly("alias", "list"),
@@ -127,10 +145,7 @@ var ghCommands = map[string]func(rest []string, allowToken bool) error{
 	"workflow":      nil,
 }
 
-// ghGitReason is why the invocations that make gh run git are refused.
-const ghGitReason = "it makes gh run git in the working directory, where the hooks and config sandboxed commands can write would run with gh's token"
-
-func checkGhArgv(argv []string, allowToken bool) error {
+func checkGhArgv(argv []string, o ghOptions) error {
 	rest := argv[1:]
 	if len(rest) == 0 || ghOnlyHelp(rest) || slices.Equal(rest, []string{"--version"}) {
 		return nil
@@ -149,7 +164,11 @@ func checkGhArgv(argv []string, allowToken bool) error {
 	if check == nil {
 		return nil
 	}
-	return check(rest[1:], allowToken)
+	err := check(rest[1:], o)
+	if gitErr := (*ghGitError)(nil); o.allowGit && errors.As(err, &gitErr) {
+		return nil
+	}
+	return err
 }
 
 // ghOnlyHelp reports whether args are only help flags, which print the usage
@@ -189,8 +208,8 @@ func ghSubcommand(group string, rest []string) (string, []string, error) {
 }
 
 // ghOnly allows only the named subcommands of group (and the group's help).
-func ghOnly(group string, allowed ...string) func([]string, bool) error {
-	return func(rest []string, _ bool) error {
+func ghOnly(group string, allowed ...string) func([]string, ghOptions) error {
+	return func(rest []string, _ ghOptions) error {
 		sub, others, err := ghSubcommand(group, rest)
 		if err != nil || sub == "" {
 			return err
@@ -204,25 +223,24 @@ func ghOnly(group string, allowed ...string) func([]string, bool) error {
 
 // ghRefuse refuses the named subcommands of group, which run programs on
 // this machine (ssh, port forwarding, an editor) or git.
-func ghRefuse(group string, refused ...string) func([]string, bool) error {
-	return func(rest []string, _ bool) error {
+func ghRefuse(group string, refused ...string) func([]string, ghOptions) error {
+	return func(rest []string, _ ghOptions) error {
 		sub, others, err := ghSubcommand(group, rest)
 		if err != nil || sub == "" {
 			return err
 		}
 		if slices.Contains(refused, sub) && !ghOnlyHelp(others) {
-			reason := "it runs programs on this machine with gh's credentials"
 			if sub == "clone" {
-				reason = ghGitReason
+				return &ghGitError{fmt.Sprintf("gh %s clone", group)}
 			}
-			return fmt.Errorf("gh %s %s is not allowed: %s", group, sub, reason)
+			return fmt.Errorf("gh %s %s is not allowed: it runs programs on this machine with gh's credentials", group, sub)
 		}
 		return nil
 	}
 }
 
-func ghRefuseAll(group, reason string) func([]string, bool) error {
-	return func(rest []string, _ bool) error {
+func ghRefuseAll(group, reason string) func([]string, ghOptions) error {
+	return func(rest []string, _ ghOptions) error {
 		if ghOnlyHelp(rest) {
 			return nil
 		}
@@ -313,7 +331,7 @@ func ghParse(args []string, short, valueShort string, long, valueLong []string) 
 // checkGhAuth allows gh auth status, and gh auth token and status
 // --show-token with allow_token; every other auth subcommand prints the token
 // (git-credential) or rewrites the credentials or git's config.
-func checkGhAuth(rest []string, allowToken bool) error {
+func checkGhAuth(rest []string, o ghOptions) error {
 	sub, others, err := ghSubcommand("auth", rest)
 	if err != nil || sub == "" || ghOnlyHelp(others) {
 		return err
@@ -321,12 +339,12 @@ func checkGhAuth(rest []string, allowToken bool) error {
 	const optionHint = "; the user can allow it with `lite-sandbox config profiles set gh allow_token true`, which lets any command read the token it prints"
 	switch sub {
 	case "status":
-		if f := hasAnyFlag(ghFlags(others, "h"), "-t", "--show-token"); f != "" && !allowToken {
+		if f := hasAnyFlag(ghFlags(others, "h"), "-t", "--show-token"); f != "" && !o.allowToken {
 			return fmt.Errorf("gh auth status %s is not allowed: it prints the token%s", f, optionHint)
 		}
 		return nil
 	case "token":
-		if !allowToken {
+		if !o.allowToken {
 			return fmt.Errorf("gh auth token is not allowed: it prints the token%s", optionHint)
 		}
 		return nil
@@ -339,15 +357,18 @@ func checkGhAuth(rest []string, allowToken bool) error {
 // checkGhPr refuses the pr invocations that make gh run git: checkout, a
 // create that would push the current branch (one without --head), and a
 // merge or close that deletes the local branch (-d without -R).
-func checkGhPr(rest []string, _ bool) error {
+func checkGhPr(rest []string, o ghOptions) error {
 	sub, others, err := ghSubcommand("pr", rest)
 	if err != nil || sub == "" || ghOnlyHelp(others) {
 		return err
 	}
 	switch sub {
 	case "checkout":
-		return fmt.Errorf("gh pr checkout is not allowed: %s", ghGitReason)
+		return &ghGitError{"gh pr checkout"}
 	case "create":
+		if o.allowGit {
+			return nil
+		}
 		flags, _, err := ghParse(others, "dewf", "tbFBHrlapmTR",
 			[]string{"draft", "editor", "web", "fill-verbose", "fill", "fill-first", "no-maintainer-edit", "dry-run"},
 			[]string{"title", "body", "body-file", "base", "head", "reviewer", "assignee", "label", "project", "milestone", "recover", "template", "repo"})
@@ -355,13 +376,13 @@ func checkGhPr(rest []string, _ bool) error {
 			return fmt.Errorf("gh pr create: %w", err)
 		}
 		if hasAnyFlag(flags, "-H", "--head") == "" {
-			return fmt.Errorf("gh pr create is only allowed with --head <branch>: without it gh checks the working tree and pushes the current branch, and %s. Push the branch first, then pass --head", ghGitReason)
+			return &ghGitError{"gh pr create without --head <branch> (push the branch first, then pass --head)"}
 		}
 		return nil
 	case "merge", "close":
 		flags := ghFlags(others, "bFtAcR")
 		if hasAnyFlag(flags, "-d", "--delete-branch") != "" && hasAnyFlag(flags, "-R", "--repo") == "" {
-			return fmt.Errorf("gh pr %s --delete-branch is only allowed with -R owner/repo, which deletes only the remote branch: without it gh also checks out the base branch and deletes the local one, and %s", sub, ghGitReason)
+			return &ghGitError{fmt.Sprintf("gh pr %s --delete-branch without -R owner/repo (which deletes only the remote branch)", sub)}
 		}
 	}
 	return nil
@@ -369,9 +390,9 @@ func checkGhPr(rest []string, _ bool) error {
 
 // checkGhIssue allows gh issue develop only with --list: creating a linked
 // branch fetches it into the local repository.
-func checkGhIssue(rest []string, _ bool) error {
+func checkGhIssue(rest []string, o ghOptions) error {
 	sub, others, err := ghSubcommand("issue", rest)
-	if err != nil || sub != "develop" || ghOnlyHelp(others) {
+	if err != nil || sub != "develop" || ghOnlyHelp(others) || o.allowGit {
 		return err
 	}
 	flags, _, err := ghParse(others, "cl", "bniR", []string{"checkout", "list"}, []string{"branch-repo", "base", "name", "issue-repo", "repo"})
@@ -379,20 +400,20 @@ func checkGhIssue(rest []string, _ bool) error {
 		return fmt.Errorf("gh issue develop: %w", err)
 	}
 	if hasAnyFlag(flags, "-l", "--list") == "" {
-		return fmt.Errorf("gh issue develop is only allowed with --list: creating a branch fetches it, and %s", ghGitReason)
+		return &ghGitError{"gh issue develop without --list (creating a branch fetches it)"}
 	}
 	return nil
 }
 
 // checkGhRelease refuses gh release delete --cleanup-tag, which also deletes
 // the local tag.
-func checkGhRelease(rest []string, _ bool) error {
+func checkGhRelease(rest []string, _ ghOptions) error {
 	sub, others, err := ghSubcommand("release", rest)
 	if err != nil || sub != "delete" {
 		return err
 	}
 	if hasAnyFlag(ghFlags(others, "R"), "--cleanup-tag") != "" {
-		return fmt.Errorf("gh release delete --cleanup-tag is not allowed: deleting the local tag %s", strings.TrimPrefix(ghGitReason, "it "))
+		return &ghGitError{"gh release delete --cleanup-tag"}
 	}
 	return nil
 }
@@ -400,22 +421,22 @@ func checkGhRelease(rest []string, _ bool) error {
 // checkGhRepo refuses the repo invocations that make gh run git: clone, a
 // create or fork that clones, pushes, or adds a remote, and a sync of the
 // local repository (one without a destination repository argument).
-func checkGhRepo(rest []string, _ bool) error {
+func checkGhRepo(rest []string, o ghOptions) error {
 	sub, others, err := ghSubcommand("repo", rest)
-	if err != nil || sub == "" || ghOnlyHelp(others) {
+	if err != nil || sub == "" || ghOnlyHelp(others) || o.allowGit {
 		return err
 	}
 	switch sub {
 	case "clone":
-		return fmt.Errorf("gh repo clone is not allowed: %s", ghGitReason)
+		return &ghGitError{"gh repo clone"}
 	case "create":
 		// -h is --homepage here and takes a value.
 		if f := hasAnyFlag(ghFlags(others, "dhtpglsrR"), "-c", "--clone", "-s", "--source", "--push"); f != "" {
-			return fmt.Errorf("gh repo create %s is not allowed: %s", f, ghGitReason)
+			return &ghGitError{"gh repo create " + f}
 		}
 	case "fork":
 		if f := hasAnyFlag(ghFlags(others, "R"), "--clone", "--remote"); f != "" {
-			return fmt.Errorf("gh repo fork %s is not allowed: %s", f, ghGitReason)
+			return &ghGitError{"gh repo fork " + f}
 		}
 	case "sync":
 		_, positional, err := ghParse(others, "", "sb", []string{"force"}, []string{"source", "branch"})
@@ -423,7 +444,7 @@ func checkGhRepo(rest []string, _ bool) error {
 			return fmt.Errorf("gh repo sync: %w", err)
 		}
 		if len(positional) == 0 {
-			return fmt.Errorf("gh repo sync is only allowed with a destination repository (gh repo sync owner/fork): syncing the local repository %s", strings.TrimPrefix(ghGitReason, "it "))
+			return &ghGitError{"gh repo sync without a destination repository (gh repo sync owner/fork)"}
 		}
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +129,7 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
 	s.mu.RUnlock()
 	env := envSliceToMap(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion))
 	env["PATH"] = safePath(env["PATH"], writable)
+	scopedGitEnv(env)
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)
@@ -167,6 +169,76 @@ func scopedBinary(name string, writable func(string) string) (string, error) {
 		}
 	}
 	return abs, nil
+}
+
+// scopedGitConfig is the git configuration a scoped worker runs git with, at
+// the command-line level, where it outranks the repository's own: what the
+// project's .git could otherwise configure to run code (hooks, fsmonitor,
+// credential helpers, signing and verification programs, transports that
+// run a program: ext::, file://, git:// with core.gitProxy) is switched off.
+// credential.helper is reset, which drops the user's global helpers for that
+// git too; a CLI that brings its own (gh's -c credential.<host>.helper)
+// still adds it, since -c is read after the environment's entries.
+var scopedGitConfig = [][2]string{
+	{"core.hooksPath", "/dev/null"},
+	{"core.fsmonitor", "false"},
+	{"credential.helper", ""},
+	{"protocol.allow", "never"},
+	{"protocol.https.allow", "always"},
+	{"protocol.ssh.allow", "always"},
+	{"commit.gpgSign", "false"},
+	{"tag.gpgSign", "false"},
+	{"merge.verifySignatures", "false"},
+	{"log.showSignature", "false"},
+	{"submodule.recurse", "false"},
+	{"fetch.recurseSubmodules", "false"},
+}
+
+// scopedGitEnv adds to env (a scoped worker's environment) what keeps a git
+// the CLI starts from running code the project's .git configures: the
+// scopedGitConfig entries, appended to any GIT_CONFIG_COUNT entries the
+// server already has, and the variables that outrank the program settings
+// git has no off switch for (core.sshCommand, core.askPass, core.editor,
+// core.pager), unless the server sets them itself. It cannot cover
+// everything: filter, merge, and diff drivers are named per path in
+// .gitattributes or .git/info/attributes and defined under any name in
+// .git/config, and a credential helper can be scoped to any URL, so a CLI
+// granted a credential should still not run git in a repository sandboxed
+// commands can write (see the gh profile's allow_git option).
+func scopedGitEnv(env map[string]string) {
+	n, err := strconv.Atoi(env["GIT_CONFIG_COUNT"])
+	if err != nil || n < 0 {
+		n = 0
+	}
+	for _, kv := range scopedGitConfig {
+		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", n)] = kv[0]
+		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", n)] = kv[1]
+		n++
+	}
+	env["GIT_CONFIG_COUNT"] = strconv.Itoa(n)
+	if env["GIT_SSH_COMMAND"] == "" {
+		// GIT_SSH_COMMAND outranks core.sshCommand, which outranks GIT_SSH.
+		env["GIT_SSH_COMMAND"] = "ssh"
+		if p := env["GIT_SSH"]; p != "" {
+			env["GIT_SSH_COMMAND"] = shellQuote(p)
+		}
+	}
+	for k, v := range map[string]string{
+		"GIT_ASKPASS":         "true",
+		"GIT_EDITOR":          "true",
+		"GIT_SEQUENCE_EDITOR": "true",
+		"GIT_PAGER":           "cat",
+		"GIT_TERMINAL_PROMPT": "0",
+	} {
+		if env[k] == "" {
+			env[k] = v
+		}
+	}
+}
+
+// shellQuote quotes s as one word for sh.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // safePath drops the PATH entries sandboxed commands could write (and

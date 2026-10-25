@@ -519,6 +519,11 @@ project's `.git/config` and hooks. gh does this in `pr create`, `pr checkout`,
 `pr merge`, and the `repo` and `issue develop` commands that clone, sync, or
 check out, so allow only subcommands that don't (`gh pr view`, `gh pr list`,
 `gh issue view`, `gh api`), never `gh pr` or `gh issue` as a whole.
+The git a scoped command starts runs with hooks, `core.fsmonitor`, credential
+helpers, signing, and transports other than https and ssh switched off from
+the environment, but git has no switch for filter, merge, and diff drivers,
+so that only narrows the risk (see the gh profile's
+[`allow_git`](profiles.md#what-gh-may-run)).
 Note also that `gh auth login` keeps the token in the system keyring by
 default; the file grant protects a token stored in `hosts.yml` (`gh auth login
 --insecure-storage`, or a host without a keyring).
