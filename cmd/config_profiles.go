@@ -14,7 +14,7 @@ import (
 
 var configProfilesCmd = &cobra.Command{
 	Use:   "profiles",
-	Short: "Manage the toolchain profiles (go, pnpm, rust, deno, flutter, uv, montypython)",
+	Short: "Manage the toolchain profiles (go, pnpm, rust, deno, flutter, xcode, uv, gh, montypython)",
 	Long: `A profile is a built-in preset of commands and paths for one toolchain.
 Enabling it adds the toolchain's commands to the whitelist and grants the
 directories it keeps its caches and SDKs in (detected by asking the toolchain,
@@ -91,7 +91,7 @@ var configProfilesShowCmd = &cobra.Command{
 			}
 			fmt.Fprintf(w, "  %s\t%s\n", e.Command, what)
 		}
-		if entries := p.PathEntries(); len(entries) > 0 {
+		if entries := cfg.ProfilePathEntries(p); len(entries) > 0 {
 			fmt.Fprintln(w, "paths:")
 			for _, e := range entries {
 				fmt.Fprintf(w, "  %s\t%s\n", e.Path, e.Describe())

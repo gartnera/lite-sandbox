@@ -37,7 +37,7 @@ func (c *Config) Effective() *Config {
 	e.MigrateRuntimes()
 	for _, p := range e.EnabledProfiles() {
 		e.Commands = append(e.Commands, e.ProfileCommandEntries(p)...)
-		e.Paths = append(e.Paths, p.PathEntries()...)
+		e.Paths = append(e.Paths, e.ProfilePathEntries(p)...)
 	}
 	e.effective = true
 	return &e

@@ -99,6 +99,11 @@ func validateCommandPaths(cmdName string, args []string, workDir string, sets re
 			return err
 		}
 	}
+	if cmdName == "gh" {
+		if err := validateGhAPIReads(args, workDir, sets.read); err != nil {
+			return err
+		}
+	}
 	if err := validateWriteTargets(cmdName, args, workDir, sets.write); err != nil {
 		return err
 	}
@@ -196,6 +201,12 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 		return grepNonPathArgIndices(args)
 	case "pgrep":
 		return pgrepNonPathArgIndices(args)
+	case "gh":
+		// gh api's endpoint (gh api /user) is a URL path, not a file.
+		if i, _ := ghAPIPaths(args); i > 0 {
+			return map[int]bool{i: true}
+		}
+		return nil
 	case "pidof", "dd":
 		// pidof's operands are program names, matched against running
 		// processes; dd's are KEY=VALUE (if= and of= are checked by

@@ -34,6 +34,14 @@ var profileHooks = map[string]func(s *Sandbox, args []*syntax.Word) error{
 	"uv": func(s *Sandbox, args []*syntax.Word) error {
 		return validateUvArgs(args, s.extraAllowsTokens("uv", "publish"))
 	},
+	// gh runs in a worker of its own holding the token (validators_gh.go).
+	"gh": func(s *Sandbox, args []*syntax.Word) error {
+		cfg := s.getConfig()
+		return validateGhArgs(args, ghOptions{
+			allowToken: cfg.ProfileOption("gh", "allow_token"),
+			allowGit:   cfg.ProfileOption("gh", "allow_git"),
+		})
+	},
 	"python":  validatePythonArgs,
 	"python3": validatePythonArgs,
 	// The xcode profile's tools (validators_xcode.go). swiftc compiles what

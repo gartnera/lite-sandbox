@@ -49,6 +49,9 @@ type Profile struct {
 	// paths returns the profile's paths entries; nil when it needs none. It
 	// may spawn the toolchain, so it runs only when a profile is expanded.
 	paths func() []PathEntry
+	// optionPaths returns, per option, the paths entries the profile adds
+	// while that option is on (see Config.ProfilePathEntries).
+	optionPaths map[string]func() []PathEntry
 }
 
 // whitelist returns allow entries for the named commands: the form a
@@ -94,6 +97,23 @@ func xcodePaths() []PathEntry {
 	}
 	if dir := detectXcodeDeveloperDir(); dir != "" {
 		out = append(out, PathEntry{Path: dir, Read: &yes})
+	}
+	return out
+}
+
+// ghScoped returns the read grants on paths as the gh profile writes them:
+// internal, and scoped to gh, so gh runs in an OS sandbox worker of its own
+// that has them while every other command runs in the shared worker, which
+// hides them (see CommandScope). A credential stealer in a dependency, a test,
+// or a program the agent writes cannot read them, and a gh it launches itself
+// runs in the shared worker, without them.
+func ghScoped(paths ...string) []PathEntry {
+	yes := true
+	var out []PathEntry
+	for _, p := range paths {
+		if p != "" {
+			out = append(out, PathEntry{Path: p, Read: &yes, Internal: true, Commands: []string{"gh"}})
+		}
 	}
 	return out
 }
@@ -168,6 +188,20 @@ var builtinProfiles = []Profile{
 				"XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_BIN_HOME", "HOME",
 			}, detectUvBinds)
 		}),
+	},
+	{
+		Name:        "gh",
+		Description: "GitHub CLI (gh); its config dir and token, and the system keyring, for gh alone",
+		Commands:    whitelist("gh"),
+		Options: []ProfileOption{
+			{Name: "keychain", Default: true, Description: "let gh reach the system keyring (the macOS keychain, the Secret Service's session bus on Linux), where gh auth login stores the token by default"},
+			{Name: "allow_token", Default: false, Description: "allow gh auth token and gh auth status --show-token, which print the token where any command can read it"},
+			{Name: "allow_git", Default: false, Description: "allow the gh commands that run git (pr checkout, pr create without --head, repo clone, ...), whose git runs the hooks and config sandboxed commands can write in .git, with gh's token"},
+		},
+		paths: func() []PathEntry { return ghScoped(ghConfigDir()) },
+		optionPaths: map[string]func() []PathEntry{
+			"keychain": func() []PathEntry { return ghScoped(ghKeyringPathsFor(runtime.GOOS)...) },
+		},
 	},
 	{
 		Name:           "montypython",
@@ -247,6 +281,24 @@ func (p Profile) PathEntries() []PathEntry {
 	out := p.paths()
 	for i := range out {
 		out[i].Profile = p.Name
+	}
+	return out
+}
+
+// ProfilePathEntries returns p's paths entries as this config enables them:
+// PathEntries, plus the entries of each of p's options that is on, marked
+// with the profile's name too.
+func (c *Config) ProfilePathEntries(p Profile) []PathEntry {
+	out := p.PathEntries()
+	for _, o := range p.Options {
+		paths, ok := p.optionPaths[o.Name]
+		if !ok || !c.ProfileOption(p.Name, o.Name) {
+			continue
+		}
+		for _, e := range paths() {
+			e.Profile = p.Name
+			out = append(out, e)
+		}
 	}
 	return out
 }
