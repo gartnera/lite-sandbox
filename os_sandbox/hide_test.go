@@ -59,8 +59,19 @@ func TestBuildBwrapArgs_NoHideDirs(t *testing.T) {
 	}
 }
 
+// realTempDir is t.TempDir() with its symlinks resolved (macOS's /var is
+// /private/var), the form the hide plan reports hidden directories in.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestNewHidePlan(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	home := filepath.Join(root, "home")
 	proj := filepath.Join(home, "proj")
 	other := filepath.Join(root, "other")
@@ -105,7 +116,7 @@ func TestNewHidePlan(t *testing.T) {
 // symlink is hidden at its real path, and that exposed paths spelled through
 // the link still count as inside it.
 func TestNewHidePlan_Symlink(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	real := filepath.Join(root, "real-home")
 	if err := os.MkdirAll(filepath.Join(real, "proj"), 0o755); err != nil {
 		t.Fatal(err)

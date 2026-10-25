@@ -41,7 +41,12 @@ func TestHiddenDirs(t *testing.T) {
 }
 
 func TestHomePathToolchains(t *testing.T) {
-	home := t.TempDir()
+	// Resolved, since links are followed to their real targets (macOS's /var
+	// is /private/var).
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	mkdir := func(rel string) string {
 		p := filepath.Join(home, rel)
 		if err := os.MkdirAll(p, 0o755); err != nil {
