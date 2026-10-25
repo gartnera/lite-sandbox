@@ -148,7 +148,34 @@ type WorkerOptions struct {
 	// DeniedWritePaths stay readable but are mounted read-only over themselves
 	// (bwrap) or denied file-write* (SBPL). Same missing-path handling.
 	DeniedWritePaths []DenyPath
+
+	// HideDirs are directories whose contents are hidden except for what the
+	// other fields expose inside them: WorkDir, ExtraBinds, ROBinds, and the
+	// worker binary. On Linux each becomes an empty tmpfs, the binds are
+	// mounted on top, and the tmpfs is then remounted read-only, so a hidden
+	// path reads as missing (ENOENT) and nothing new can be created beside the
+	// binds; on macOS reads under it are denied (EPERM) except for the binds
+	// and the metadata of their ancestors. A directory that a bind (or
+	// WorkDir) contains, or that does not exist, is not hidden. Deny-list
+	// entries and socket masks that end up hidden are dropped, since there is
+	// nothing left to mask. The caller passes $HOME (allowlist mode) and the
+	// user's runtime directory, so that the code a command runs — a
+	// dependency's install script, a test — cannot read credentials the
+	// static checks never see it open.
+	HideDirs []string
+	// DenyKeychain (macOS) denies lookups of the keychain daemon
+	// (com.apple.securityd.xpc), so the data protection keychain cannot be
+	// queried. The file-based login keychain is read by the client itself,
+	// from ~/Library/Keychains, which the caller hides (HideDirs) or
+	// read-denies alongside. Ignored on Linux, where the Secret Service is
+	// reached through the session D-Bus in the runtime directory (HideDirs).
+	DenyKeychain bool
 }
+
+// KeychainMachServices are the mach services DenyKeychain denies: the
+// keychain daemon behind SecItem (the data protection keychain). Not
+// com.apple.SecurityServer or trustd, which certificate verification uses.
+var KeychainMachServices = []string{"com.apple.securityd.xpc"}
 
 // DenyPath is one deny-list entry with its expected kind, which decides what
 // happens when the path does not exist at worker start: bubblewrap can only
@@ -282,6 +309,29 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 			roMounts = append(roMounts, path)
 		}
 
+		var homeDir string
+		if opts.HomeWritable {
+			if home, err := os.UserHomeDir(); err == nil {
+				if real, err := filepath.EvalSymlinks(home); err == nil {
+					home = real
+				}
+				if err := os.MkdirAll(home, 0755); err == nil {
+					homeDir = home
+				}
+			}
+		}
+
+		// Hidden directories: everything exposed shows through, the worker
+		// binary included (bwrap starts it inside the sandbox). What is
+		// hidden needs no mask, and a mask there would create its mount
+		// point in the hidden tmpfs (and a missing deny-listed directory on
+		// the host).
+		hp := newHidePlan(opts.HideDirs, append(append([]string{realWorkDir, homeDir}, binds...), roMounts...))
+		if hp.hidden(self) {
+			roMounts = append(roMounts, self)
+			hp.exposed = append(hp.exposed, withResolved(self)...)
+		}
+
 		// The deny-list and socket masks are applied last (see buildBwrapArgs)
 		// so an overlapping writable bind cannot re-expose them.
 		plan := bwrapPlan{
@@ -289,26 +339,18 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 			workDir:   realWorkDir,
 			binds:     binds,
 			roBinds:   roMounts,
-			maskPaths: maskPaths,
+			homeDir:   homeDir,
+			hideDirs:  hp.dirs,
+			maskPaths: hp.visiblePaths(maskPaths),
 			maskFile:  maskSourceFile(),
-		}
-		if opts.HomeWritable {
-			if home, err := os.UserHomeDir(); err == nil {
-				if real, err := filepath.EvalSymlinks(home); err == nil {
-					home = real
-				}
-				if err := os.MkdirAll(home, 0755); err == nil {
-					plan.homeDir = home
-				}
-			}
 		}
 		// Deny lists: a directory and a file are masked differently, and only an
 		// existing path can be overlaid (see DenyPath for what happens to a
 		// missing one).
-		readDirs, readFiles, missingRead := prepareDenyPaths(opts.DeniedReadPaths)
+		readDirs, readFiles, missingRead := prepareDenyPaths(hp.visibleDeny(opts.DeniedReadPaths))
 		plan.deniedReadDirs = readDirs
 		plan.deniedReadFiles = readFiles
-		writeDirs, writeFiles, missingWrite := prepareDenyPaths(opts.DeniedWritePaths)
+		writeDirs, writeFiles, missingWrite := prepareDenyPaths(hp.visibleDeny(opts.DeniedWritePaths))
 		plan.deniedWritePaths = append(writeDirs, writeFiles...)
 		if n := len(missingRead) + len(missingWrite); n > 0 {
 			slog.WarnContext(ctx, "deny-list files that do not exist are not masked until created", "read", missingRead, "write", missingWrite)
@@ -319,12 +361,16 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	case "darwin":
 		// Build sandbox-exec command
 		// Generate SBPL profile that allows read-only root and writable workDir + extraBinds.
-		// roBinds are not needed here: the profile's "(allow default)" already
-		// permits reads everywhere except the deny-list and socket masks.
+		// roBinds and the worker binary only matter inside hidden directories,
+		// where they are the reads allowed back.
+		hp := newHidePlan(opts.HideDirs, append(append([]string{realWorkDir, self}, extraBinds...), roBinds...))
 		profile := generateSBPLProfile(realWorkDir, extraBinds, maskPaths, sbplDenylist{
 			homeWritable:     opts.HomeWritable,
 			deniedReadPaths:  denyPathStrings(opts.DeniedReadPaths),
 			deniedWritePaths: denyPathStrings(opts.DeniedWritePaths),
+			hideDirs:         hp.dirs,
+			visible:          hp.exposed,
+			denyKeychain:     opts.DenyKeychain,
 		})
 
 		// sandbox-exec -p <profile> <binary> <args>
@@ -402,6 +448,9 @@ type bwrapPlan struct {
 	// homeDir, when set, is bound writable before every other bind (denylist
 	// mode). Empty in allowlist mode.
 	homeDir string
+	// hideDirs become empty tmpfs mounts before every bind, and are
+	// remounted read-only after all of them (see WorkerOptions.HideDirs).
+	hideDirs []string
 	// Masks, applied last so no bind can re-expose them.
 	maskPaths        []string // --ro-bind /dev/null <socket>
 	deniedReadDirs   []string // --perms 000 --tmpfs <dir> (~/.aws in IMDS mode among them)
@@ -425,6 +474,9 @@ type bwrapPlan struct {
 // Layout:
 //   - --ro-bind / / : read-only root filesystem
 //   - --tmpfs /tmp : writable /tmp (Go and other tools need it for build cache)
+//   - --perms 0755 --tmpfs <dir> : hidden directories ($HOME in allowlist mode,
+//     the user's runtime dir), emptied before the binds below re-expose the
+//     granted paths inside them
 //   - --bind <home> <home> : writable home directory (denylist mode only)
 //   - --ro-bind <path> <path> : read-only internal_readable_paths (mostly
 //     relevant for host paths the /tmp tmpfs would otherwise hide)
@@ -438,6 +490,9 @@ type bwrapPlan struct {
 //     among them, in every mode)
 //   - --ro-bind /dev/null <socket> : mask broker sockets (e.g. the real
 //     Docker daemon socket)
+//   - --remount-ro <dir> : the hidden directories' tmpfs, now that bwrap has
+//     created the mount points the binds need in it; a remount does not
+//     recurse, so the binds keep their own flags
 //   - --dev /dev / --proc /proc : fresh devtmpfs and procfs
 //   - --unshare-all --share-net : isolate everything but the network
 //   - --die-with-parent : the worker dies with the MCP server
@@ -445,6 +500,9 @@ func buildBwrapArgs(p bwrapPlan) []string {
 	args := []string{
 		"--ro-bind", "/", "/",
 		"--tmpfs", "/tmp",
+	}
+	for _, dir := range p.hideDirs {
+		args = append(args, "--perms", "0755", "--tmpfs", dir)
 	}
 	if p.homeDir != "" {
 		args = append(args, "--bind", p.homeDir, p.homeDir)
@@ -481,6 +539,9 @@ func buildBwrapArgs(p bwrapPlan) []string {
 	}
 	for _, m := range p.maskPaths {
 		args = append(args, "--ro-bind", "/dev/null", m)
+	}
+	for _, dir := range p.hideDirs {
+		args = append(args, "--remount-ro", dir)
 	}
 
 	args = append(args,
@@ -532,6 +593,12 @@ type sbplDenylist struct {
 	homeWritable     bool
 	deniedReadPaths  []string
 	deniedWritePaths []string
+	// hideDirs are read-denied but for the visible paths inside them, which
+	// are allowed back (see WorkerOptions.HideDirs).
+	hideDirs []string
+	visible  []string
+	// denyKeychain denies the keychain daemon's mach services.
+	denyKeychain bool
 }
 
 // generateSBPLProfile generates a Scheme-based sandbox profile for macOS sandbox-exec.
@@ -544,6 +611,31 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 
 	sb.WriteString("(version 1)\n")
 	sb.WriteString("(allow default)\n")
+
+	// Hidden directories: reads denied, then allowed back for the visible
+	// paths inside them, along with the metadata of their ancestors up to
+	// the hidden directory (getcwd and realpath stat each component). Last
+	// matching rule wins, so the masks and deny lists below still apply
+	// inside a visible path.
+	for _, d := range dl.hideDirs {
+		sb.WriteString(fmt.Sprintf("(deny file-read* (subpath \"%s\"))\n", d))
+	}
+	seenAncestor := make(map[string]bool)
+	for _, v := range dl.visible {
+		for _, d := range dl.hideDirs {
+			if !within(v, d) {
+				continue
+			}
+			for _, a := range ancestorsWithin(v, d) {
+				if !seenAncestor[a] {
+					seenAncestor[a] = true
+					sb.WriteString(fmt.Sprintf("(allow file-read-metadata (literal \"%s\"))\n", a))
+				}
+			}
+			sb.WriteString(fmt.Sprintf("(allow file-read* (subpath \"%s\"))\n", v))
+			break
+		}
+	}
 
 	// Mask broker sockets (e.g. the real Docker daemon socket): deny both file
 	// access and outbound connection so a sandboxed command can only reach the
@@ -643,6 +735,16 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 
 	// Allow mach lookups (required for macOS services)
 	sb.WriteString("(allow mach-lookup)\n")
+
+	// The keychain daemon, after the allow above (last match wins): with
+	// ~/Library/Keychains hidden the login keychain cannot be opened, and
+	// this keeps SecItem from querying the data protection keychain on the
+	// command's behalf.
+	if dl.denyKeychain {
+		for _, svc := range KeychainMachServices {
+			sb.WriteString(fmt.Sprintf("(deny mach-lookup (global-name \"%s\"))\n", svc))
+		}
+	}
 
 	// Restrict signaling so kill/pkill cannot reach host processes. The SBPL
 	// signal operation classifies targets as self, pgrp (same process group), or

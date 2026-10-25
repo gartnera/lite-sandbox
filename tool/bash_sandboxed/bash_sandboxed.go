@@ -1830,6 +1830,30 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		opts.DeniedWritePaths = denyPaths(cfg.EffectiveDeniedWriteEntries())
 	}
 	opts.DeniedWritePaths = append(opts.DeniedWritePaths, buildxDenied...)
+
+	// Hide the user's private state from the code commands run (see
+	// config/hidden_home.go): $HOME (allowlist mode) and the runtime
+	// directory, with every path a command may legitimately read shown
+	// through — the agent's read grants (cat runs here too), the built-in
+	// visible paths, and the binds above — less the credential files inside
+	// those. The keychain stays out of reach unless a grant exposes it.
+	if cfg.HidesPrivateState() {
+		opts.HideDirs = cfg.HiddenDirs()
+		if len(opts.HideDirs) > 0 {
+			opts.ROBinds = append(opts.ROBinds, cfg.ExpandedReadablePaths()...)
+			opts.ROBinds = append(opts.ROBinds, cfg.HomeVisiblePaths()...)
+			opts.DeniedReadPaths = append(opts.DeniedReadPaths, denyPaths(cfg.HiddenHomeDeniedReadEntries())...)
+		}
+		opts.DenyKeychain = true
+		if kc := config.KeychainDir(); kc != "" {
+			for _, p := range append(append([]string(nil), opts.ExtraBinds...), opts.ROBinds...) {
+				if underAny(kc, p) {
+					opts.DenyKeychain = false
+					break
+				}
+			}
+		}
+	}
 	return opts
 }
 

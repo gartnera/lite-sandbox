@@ -440,9 +440,11 @@ paths:
 
 Use this when a tool needs its own state directory under the OS sandbox but
 you don't want to widen what the agent can touch. It only has an effect when
-`os_sandbox` is enabled. The OS sandbox's filesystem is already broadly
-readable, so an internal read grant mainly matters for host paths hidden by the
-sandbox's `/tmp` overlay on Linux.
+`os_sandbox` is enabled. Outside `$HOME` the OS sandbox's filesystem is
+broadly readable, so there an internal read grant mainly matters for host paths
+hidden by the sandbox's `/tmp` overlay on Linux. Inside `$HOME`, which the OS
+sandbox [hides](#hidden-home-os_sandbox_hide_home), it is how a tool gets to
+read its own configuration (`paths allow ~/.npmrc --internal`).
 
 ### Grants for one command: `commands`
 
@@ -575,6 +577,62 @@ layer already keeps the agent's own commands inside the project; the masks are
 for the programs those commands start. In `allowlist` mode the OS sandbox
 keeps its cwd-confined layout and denials are unused, except for the two
 credential masks above, which apply in every mode.
+
+### Hidden home: `os_sandbox_hide_home`
+
+A dependency's install script, a test, or a local binary runs inside the OS
+sandbox worker and can open any file the worker can, without the AST layer
+ever seeing the path. A credential stealer reads everything it can find under
+`$HOME` (browser profiles, wallets, `~/.config/*`, token files) and asks the
+keyring for the rest. So by default the OS sandbox hides that state from every
+command it runs:
+
+- **`$HOME`** (`allowlist` mode) is empty and read-only, except for:
+  - the working directory, and the main worktree with `git.allow_worktree_parent`;
+  - every `paths` grant: read, write, and internal ones, including the
+    toolchain directories enabled [profiles](profiles.md) grant (`~/go`,
+    `~/.cargo`, the pnpm store, the uv cache, ...);
+  - git's configuration (`~/.gitconfig`, `~/.config/git`), but not its
+    credential store (`~/.git-credentials`, `~/.config/git/credentials`);
+  - `~/.aws` when `aws.allow_raw_credentials` is set;
+  - the toolchains on the `PATH` that are installed under `$HOME`: each such
+    `PATH` directory, the installation a `bin`/`shims` directory belongs to
+    (`~/.nvm/versions/node/v22`, `~/.cargo`, `~/.bun`, `~/.pyenv`), and the
+    installations the links in it point to (`~/.local/bin/ruff` →
+    `~/.local/share/uv/tools/ruff`, and that venv's interpreter). Directories
+    shared by many tools (`~`, `~/.local`, `~/.local/share`, `~/.config`,
+    `~/.cache`, `~/Library`) are never exposed whole;
+  - cargo's registry token (`~/.cargo/credentials.toml`) stays hidden even
+    though `~/.cargo` is shown.
+
+  `denylist` mode keeps `$HOME` writable and relies on its deny lists.
+- **The user's runtime directory** (`$XDG_RUNTIME_DIR`, Linux) is hidden in
+  `denylist` mode too: it holds the session D-Bus (the Secret Service: gnome-keyring,
+  KWallet), the keyring's own sockets, and the gpg and ssh agents.
+- **The macOS keychain** is out of reach in both modes: `~/Library/Keychains`
+  is hidden (or read-denied), and the keychain daemon behind `SecItem`
+  (`com.apple.securityd.xpc`) can't be looked up.
+
+`open` mode, which only audits, hides nothing. A hidden path reads as missing (`No such file or directory`) on Linux and as
+`Operation not permitted` on macOS. To show one again, grant it, scoped to the
+commands that need it where you can:
+
+```bash
+lite-sandbox config paths allow ~/.npmrc --internal                 # every command
+lite-sandbox config paths allow ~/.config/gh --commands gh          # only gh, in its own worker
+lite-sandbox config paths allow ~/Library/Keychains --commands gh   # gh may use the keychain too
+```
+
+A grant on `~/Library/Keychains` also lets the commands that see it reach the
+keychain daemon. `lite-sandbox config os-sandbox show` lists what is hidden
+and the built-in visible paths. To turn hiding off:
+
+```yaml
+os_sandbox_hide_home: false
+```
+
+Or use `lite-sandbox config os-sandbox hide-home enable|disable`. It can be
+set per directory with the [overrides](#per-directory-overrides).
 
 ### Lifting a built-in denial
 
