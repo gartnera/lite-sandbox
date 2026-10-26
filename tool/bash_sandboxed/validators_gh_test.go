@@ -298,9 +298,13 @@ func TestOSSandboxGhProfile(t *testing.T) {
 			c.Close()
 		}
 	}()
+	// Reads what a unix socket sends. Not nc: Ubuntu 26.04 confines
+	// nc.openbsd with an AppArmor profile that refuses connects from inside
+	// any mount namespace ("Failed name lookup - disconnected path").
+	busRead := `python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); sys.stdout.write(s.recv(64).decode())'`
 	// A stand-in gh: prints the token in its config dir and what it reads
 	// from the keyring socket.
-	script := "#!/bin/sh\ncat \"$GH_CONFIG_DIR/hosts.yml\"\nnc -U \"$XDG_RUNTIME_DIR/bus\" </dev/null\n"
+	script := "#!/bin/sh\ncat \"$GH_CONFIG_DIR/hosts.yml\"\n" + busRead + " \"$XDG_RUNTIME_DIR/bus\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +335,7 @@ func TestOSSandboxGhProfile(t *testing.T) {
 	}
 	for _, cmd := range []string{
 		"bash -c 'cat " + hosts + "'",
-		"bash -c 'nc -U " + bus + " </dev/null'",
+		`bash -c "` + busRead + ` ` + bus + `"`,
 		"bash -c 'gh pr list'",
 	} {
 		if out, _ := run(cmd); strings.Contains(out, "gho_s3cret") || strings.Contains(out, "keyring-ok") {

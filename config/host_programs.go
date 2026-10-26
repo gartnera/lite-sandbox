@@ -12,12 +12,18 @@ import (
 // HostProgramDirs returns the directories the host runs programs from, which
 // the OS sandbox worker must never write even where a grant makes their parent
 // writable: a program planted there runs outside the sandbox the next time
-// the user, or the agent's harness, starts it. Those are every absolute
-// directory on pathEnv (the server's PATH, which is the agent's), and, when
-// the go profile is on, Go's install directory: GOBIN, else each GOPATH's
-// bin. The go profile grants GOPATH writable for the module cache, and
-// `go install` puts binaries in $GOPATH/bin — lite-sandbox's own among them
-// when it was installed that way.
+// the agent's harness starts it. Those are the absolute directories on pathEnv
+// (the server's PATH, which is the agent's) up to and including the first one
+// holding lite-sandbox, where a planted lite-sandbox would be what the agents
+// start as their MCP server and hook; and, when the go profile is on, Go's
+// install directory: GOBIN, else each GOPATH's bin. The go profile grants
+// GOPATH writable for the module cache, and `go install` puts binaries in
+// $GOPATH/bin — lite-sandbox's own among them when it was installed that way.
+//
+// PATH directories after lite-sandbox's are left to their grants: a toolchain
+// that writes into its own bin directory (fvm's Flutter SDK rewrites
+// bin/cache on every run) keeps working when it is granted writable. When
+// lite-sandbox is not on pathEnv at all, no PATH directory is returned.
 func (c *Config) HostProgramDirs(pathEnv string) []string {
 	var out []string
 	add := func(dir string) {
@@ -29,8 +35,14 @@ func (c *Config) HostProgramDirs(pathEnv string) []string {
 			out = append(out, dir)
 		}
 	}
-	for _, dir := range filepath.SplitList(pathEnv) {
-		add(dir)
+	pathDirs := filepath.SplitList(pathEnv)
+	for i, dir := range pathDirs {
+		if filepath.IsAbs(dir) && isExecutableFile(filepath.Join(dir, appName)) {
+			for _, d := range pathDirs[:i+1] {
+				add(d)
+			}
+			break
+		}
 	}
 	if c.ProfileEnabled("go") {
 		for _, dir := range cachedDetect("gobin", []string{"GOBIN", "GOPATH", "GOENV", "HOME"}, detectGoBinDirs) {
@@ -38,6 +50,13 @@ func (c *Config) HostProgramDirs(pathEnv string) []string {
 		}
 	}
 	return out
+}
+
+// isExecutableFile reports whether path is (or links to) a file a PATH lookup
+// would run.
+func isExecutableFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
 // detectGoBinDirs returns where `go install` writes binaries: GOBIN when set,
