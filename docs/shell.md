@@ -27,9 +27,11 @@ outside it.
   empty prompt) the shell exits with the last command's status, as bash does.
 - **Output streams as it is produced**, and commands read the terminal. On the
   host, programs like `less` get the real terminal. Under the OS sandbox,
-  commands run in the sandbox worker with pipes, not a terminal. Programs that
-  read input (`cat`, `read`) get what you type while they run, and Ctrl-D ends
-  it. Full-screen programs don't work there.
+  commands run in the sandbox worker, which is detached from the terminal:
+  they read no input from it (as if from `/dev/null`) and can't open
+  `/dev/tty`, so interactive programs and prompts (ssh asking for a password)
+  fail rather than wait. Input from a pipe still reaches them (`echo hi | cat`),
+  and so does the terminal for the shell's own `read` builtin.
 - **Ctrl-C** interrupts the running command, not the shell. At the prompt,
   Ctrl-C discards the current line.
 - **Unfinished commands continue on a `> ` prompt.** This covers an open
