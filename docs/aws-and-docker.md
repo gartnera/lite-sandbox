@@ -124,7 +124,12 @@ The builder definitions inside it (`instances/`, `defaults/`, `current`) stay
 read-only: they pick the builder your own docker builds use later on the host,
 outside the sandbox, so a sandboxed command can't create, switch or replace
 builders (`docker buildx create`, `docker buildx use`). The rest of `~/.docker`
-stays read-only.
+(or `$DOCKER_CONFIG`) stays read-only, and it is readable even though the
+[hidden home](configuration.md#hidden-home-os_sandbox_hide_home) hides the rest
+of `$HOME`, so the CLI finds its `config.json`, contexts and plugins. Every
+sandboxed command can read it, not only `docker`: registry credentials stored
+inline in `config.json` (`auths` without a `credsStore`) are exposed to them, so
+prefer a credential helper.
 
 **Requires the OS sandbox.** Without it, the real socket can't be masked, and a
 command could `unset DOCKER_HOST` (or pass `-H`) and talk to

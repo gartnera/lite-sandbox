@@ -99,6 +99,42 @@ func TestHomePathToolchains(t *testing.T) {
 	}
 }
 
+func TestHomeVisiblePathsDockerConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DOCKER_CONFIG", "")
+	t.Setenv("PATH", "")
+	dockerDir := filepath.Join(home, ".docker")
+	if err := os.MkdirAll(dockerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	if got := (&Config{}).HomeVisiblePaths(); slices.Contains(got, dockerDir) {
+		t.Errorf("docker not configured: %s should stay hidden, got %v", dockerDir, got)
+	}
+	if got := (&Config{Docker: &DockerConfig{Enabled: &no}}).HomeVisiblePaths(); slices.Contains(got, dockerDir) {
+		t.Errorf("docker disabled: %s should stay hidden, got %v", dockerDir, got)
+	}
+	enabled := &Config{Docker: &DockerConfig{Enabled: &yes}}
+	if got := enabled.HomeVisiblePaths(); !slices.Contains(got, dockerDir) {
+		t.Errorf("docker enabled: %s should be visible, got %v", dockerDir, got)
+	}
+	custom := filepath.Join(home, "docker-config")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_CONFIG", custom)
+	if got := enabled.HomeVisiblePaths(); !slices.Contains(got, custom) || slices.Contains(got, dockerDir) {
+		t.Errorf("DOCKER_CONFIG: want %s (and not %s), got %v", custom, dockerDir, got)
+	}
+	if err := os.Remove(custom); err != nil {
+		t.Fatal(err)
+	}
+	if got := enabled.HomeVisiblePaths(); slices.Contains(got, custom) {
+		t.Errorf("a missing config dir cannot be bound, got %v", got)
+	}
+}
+
 func TestHiddenHomeDeniedReadEntries(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

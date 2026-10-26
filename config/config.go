@@ -276,14 +276,25 @@ func BuildxConfigDir() string {
 	if dir := os.Getenv("BUILDX_CONFIG"); dir != "" {
 		return dir
 	}
-	if dir := os.Getenv("DOCKER_CONFIG"); dir != "" {
+	if dir := DockerConfigDir(); dir != "" {
 		return filepath.Join(dir, "buildx")
+	}
+	return ""
+}
+
+// DockerConfigDir returns the docker CLI's configuration directory (its
+// config.json, contexts, and CLI plugins), resolved the way the CLI does:
+// $DOCKER_CONFIG, else ~/.docker. Returns "" when the home directory cannot be
+// determined.
+func DockerConfigDir() string {
+	if dir := os.Getenv("DOCKER_CONFIG"); dir != "" {
+		return dir
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".docker", "buildx")
+	return filepath.Join(home, ".docker")
 }
 
 // isUnixSocket reports whether path exists and is a unix socket.

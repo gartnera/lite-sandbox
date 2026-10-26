@@ -63,6 +63,19 @@ func TestUpstreamSocket_ExplicitWins(t *testing.T) {
 	}
 }
 
+func TestDockerConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DOCKER_CONFIG", "")
+	if got, want := DockerConfigDir(), filepath.Join(home, ".docker"); got != want {
+		t.Errorf("default: got %q want %q", got, want)
+	}
+	t.Setenv("DOCKER_CONFIG", "/custom/docker")
+	if got, want := DockerConfigDir(), "/custom/docker"; got != want {
+		t.Errorf("DOCKER_CONFIG: got %q want %q", got, want)
+	}
+}
+
 func TestBuildxConfigDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

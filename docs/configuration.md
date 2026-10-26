@@ -540,8 +540,8 @@ instead. There are two kinds:
   `~/.config/gh`, `~/Library/Keychains`, and the agents' own credentials
   (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.codex/auth.json`,
   `~/.grok/auth.json`, `~/.grok/mcp_credentials.json`). The
-  SSH private keys in `~/.ssh` (every file there except `known_hosts`,
-  `config`, `authorized_keys`, and `*.pub`, detected by name) are also on this
+  SSH private keys in `~/.ssh` (every file there except `known_hosts[2]`,
+  `config`, `authorized_keys[2]`, and `*.pub`, detected by name) are also on this
   list, one entry per key. The two credential masks (the SSH keys, and `~/.aws`
   under `aws.force_profile`) apply in **every** mode, not only `denylist`.
 - **Write-denied** paths stay readable but can't be modified: shell startup
@@ -603,6 +603,12 @@ command it runs:
   - git's configuration (`~/.gitconfig`, `~/.config/git`), but not its
     credential store (`~/.git-credentials`, `~/.config/git/credentials`);
   - `~/.aws` when `aws.allow_raw_credentials` is set;
+  - the files in `~/.ssh` that are not private keys (`known_hosts`, `config`,
+    `*.pub`, ...), so `git push` over ssh can verify the host and use the
+    ssh agent's keys;
+  - the docker CLI's config directory (`~/.docker`, or `$DOCKER_CONFIG`)
+    when `docker.enabled` is set, read-only but for the buildx state (see
+    [Docker access](aws-and-docker.md#docker-access));
   - the toolchains on the `PATH` that are installed under `$HOME`: each such
     `PATH` directory, the installation a `bin`/`shims` directory belongs to
     (`~/.nvm/versions/node/v22`, `~/.cargo`, `~/.bun`, `~/.pyenv`), and the
