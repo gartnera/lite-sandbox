@@ -74,8 +74,8 @@ Per agent:
              ~/.grok/rules/lite-sandbox.md (all honoring GROK_HOME)
 
 With --with-tool-hook, registers a PreToolUse hook that governs the built-in
-tools instead of the blunt Bash deny: it blocks the built-in Bash tool with a
-message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
+tools instead of the blunt Bash deny: it blocks the built-in Bash and Monitor
+tools with a message redirecting to mcp__lite-sandbox__bash, and denies Read outside the
 sandbox's readable paths and Write/Edit/NotebookEdit outside its writable paths,
 matching the boundaries the bash tool enforces. Applies to claude and codex;
 grok always gets it; opencode has no compatible hook protocol and Crush's
@@ -83,13 +83,13 @@ built-in tools are not governed by the hook, so the flag is a no-op for those
 two.
 
 With --bash-ast-hook-mode, the MCP server is NOT configured. Instead, the PreToolUse
-hook statically parses each built-in Bash command's AST and checks it against the
+hook statically parses each built-in Bash and Monitor command's AST and checks it against the
 sandbox's whitelist and path boundaries, allowing it when it passes and denying it
 otherwise. Note Bash itself still runs UNSANDBOXED — there is no runtime
 enforcement, only this up-front static check — so it is a weaker guarantee than
 routing execution through the MCP tool. Combine it with --with-tool-hook to also
 confine the built-in Read/Write/Edit tools to the sandbox's paths; on its own it
-governs only Bash. Applies to claude, codex and grok (which still confines its
+governs only Bash and Monitor. Applies to claude, codex and grok (which still confines its
 file tools); opencode and crush are skipped in this mode since the check
 requires a hook over their built-in shell.
 

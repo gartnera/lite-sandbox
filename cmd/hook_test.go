@@ -414,6 +414,50 @@ func TestDenyBuiltinBash(t *testing.T) {
 	}
 }
 
+// TestBuiltinMonitor checks that Claude Code's Monitor tool, which runs its
+// command with the same shell as Bash, is governed like Bash: redirected to the
+// MCP tool by default, validated in --validate-bash mode. A WebSocket watch
+// runs no shell and defers to Claude Code's own prompt in both.
+func TestBuiltinMonitor(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	monitor := func(in *hook.MonitorInput) *hook.Event {
+		return &hook.Event{ToolName: hook.ToolMonitor, CWD: cwd, ToolInput: in}
+	}
+
+	got := evaluate(monitor(&hook.MonitorInput{Command: "tail -f build.log"}), hookOptions{})
+	if got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny {
+		t.Fatalf("expected Monitor to be denied, got %+v", got)
+	}
+	reason := got.HookSpecificOutput.PermissionDecisionReason
+	for _, want := range []string{"built-in Monitor tool is disabled", "mcp__lite-sandbox__bash", "run_in_background"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("deny reason does not contain %q: %s", want, reason)
+		}
+	}
+	if evaluate(&hook.Event{ToolName: hook.ToolMonitor, CWD: cwd}, hookOptions{}) == nil {
+		t.Error("expected Monitor to be denied even without parsed tool input")
+	}
+
+	validate := hookOptions{validateBash: true}
+	got = evaluate(monitor(&hook.MonitorInput{Command: "curl https://example.com"}), validate)
+	if got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny ||
+		!strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "did not pass sandbox validation") {
+		t.Errorf("expected a non-whitelisted Monitor command to be denied, got %+v", got)
+	}
+	got = evaluate(monitor(&hook.MonitorInput{Command: "ls -la"}), validate)
+	if got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+		t.Errorf("expected a whitelisted Monitor command to be allowed, got %+v", got)
+	}
+
+	ws := monitor(&hook.MonitorInput{WS: json.RawMessage(`{"url":"wss://example.com/events"}`)})
+	for _, opts := range []hookOptions{{}, validate} {
+		if got := evaluate(ws, opts); got != nil {
+			t.Errorf("validateBash=%v: expected a WebSocket watch to defer, got %s", opts.validateBash, got.HookSpecificOutput.PermissionDecisionReason)
+		}
+	}
+}
+
 // TestEvaluateMCPToolAllow verifies the sandbox's own MCP tools are allowed
 // outright (bypassing the permission prompt, which subagents/skills would
 // otherwise raise — anthropics/claude-code#18950), in both hook modes, while

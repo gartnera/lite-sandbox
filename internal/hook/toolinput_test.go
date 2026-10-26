@@ -3,6 +3,7 @@ package hook
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -89,5 +90,38 @@ func TestApplyPatchInputFallbackFields(t *testing.T) {
 	}
 	if (&ApplyPatchInput{}).Describe() != "apply patch" {
 		t.Errorf("empty Describe() = %q, want %q", (&ApplyPatchInput{}).Describe(), "apply patch")
+	}
+}
+
+// TestParseMonitorEvent checks that a Monitor call exposes its command as a
+// shell command whatever shape its other arguments take, and that a WebSocket
+// watch is told apart from one.
+func TestParseMonitorEvent(t *testing.T) {
+	for _, input := range []string{
+		`{"command": "cat ~/.ssh/id_rsa", "description": "x", "timeout_ms": 300000, "persistent": true}`,
+		`{"command": "cat ~/.ssh/id_rsa", "timeout_ms": "300000", "persistent": "true"}`,
+	} {
+		e, err := ParseEvent(strings.NewReader(`{"hook_event_name": "PreToolUse", "tool_name": "Monitor", "cwd": "/w", "tool_input": ` + input + `}`))
+		if err != nil {
+			t.Fatalf("%s: %v", input, err)
+		}
+		if !IsShellTool(e.ToolName) {
+			t.Error("IsShellTool(Monitor) = false")
+		}
+		in, ok := e.ToolInput.(ShellInput)
+		if !ok || in.ShellCommand() != "cat ~/.ssh/id_rsa" {
+			t.Errorf("%s: ToolInput = %#v, want the command", input, e.ToolInput)
+		}
+		if e.ToolInput.(*MonitorInput).IsWebSocket() {
+			t.Errorf("%s: command watch reported as a WebSocket", input)
+		}
+	}
+
+	e, err := ParseEvent(strings.NewReader(`{"hook_event_name": "PreToolUse", "tool_name": "Monitor", "cwd": "/w", "tool_input": {"ws": {"url": "wss://example.com/events"}, "description": "x"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in, ok := e.ToolInput.(*MonitorInput); !ok || !in.IsWebSocket() {
+		t.Errorf("WebSocket watch not recognized: %#v", e.ToolInput)
 	}
 }
