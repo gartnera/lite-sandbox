@@ -1,7 +1,10 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -104,10 +107,38 @@ func TestAgentSocketDirs(t *testing.T) {
 	}
 }
 
+// TestHostProgramDirs checks that the PATH directories up to and including
+// lite-sandbox's are returned (relative and empty entries skipped, duplicates
+// collapsed), the ones after it are not, and none are without lite-sandbox on
+// PATH.
 func TestHostProgramDirs(t *testing.T) {
+	root := t.TempDir()
+	early := filepath.Join(root, "early")
+	gobin := filepath.Join(root, "go", "bin")
+	fvm := filepath.Join(root, "fvm", "default", "bin")
+	for _, d := range []string{early, gobin, fvm} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory or a non-executable file by the name does not count.
+	if err := os.Mkdir(filepath.Join(early, appName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fvm, appName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gobin, appName), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := &Config{}
-	got := cfg.HostProgramDirs("/usr/bin:relative/bin::/home/u/go/bin/:/usr/bin")
-	if !slices.Equal(got, []string{"/usr/bin", "/home/u/go/bin"}) {
-		t.Errorf("HostProgramDirs = %v", got)
+	sep := string(filepath.ListSeparator)
+	pathEnv := strings.Join([]string{early, "relative/bin", "", early, gobin + "/", fvm, "/usr/bin"}, sep)
+	if got := cfg.HostProgramDirs(pathEnv); !slices.Equal(got, []string{early, gobin}) {
+		t.Errorf("HostProgramDirs = %v, want %v", got, []string{early, gobin})
+	}
+	if got := cfg.HostProgramDirs(strings.Join([]string{early, fvm, "/usr/bin"}, sep)); len(got) != 0 {
+		t.Errorf("HostProgramDirs without lite-sandbox on PATH = %v, want none", got)
 	}
 }

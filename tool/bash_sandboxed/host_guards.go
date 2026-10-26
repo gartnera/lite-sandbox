@@ -49,8 +49,9 @@ func guardHost(cfg *config.Config, opts *os_sandbox.WorkerOptions) {
 }
 
 // hostProgramDenies returns the write denials that keep a worker from
-// replacing a program the host runs: each directory on the server's PATH, and
-// Go's install directory (config.HostProgramDirs), that a writable bind would
+// replacing a program the host runs: each directory on the server's PATH up to
+// lite-sandbox's, and Go's install directory (config.HostProgramDirs), that a
+// writable bind would
 // otherwise expose — the go profile binds GOPATH, which holds GOBIN — and the
 // lite-sandbox binary itself (config.ServerExecutable), which every agent
 // session starts as its MCP server and hook. A program planted in either runs
