@@ -132,10 +132,9 @@ type Sandbox struct {
 	// config's audit flag is on; nil otherwise. Managed by UpdateConfig.
 	audit *audit.Logger
 	// monty is the compiled Python (monty) wasm runtime backing `python`/
-	// `python3`, built on first use and shared across invocations — compiling
-	// it costs ~2s, so a sandbox that never runs Python never pays for it.
-	// It has its own mutex so that one-off compile does not hold the config
-	// lock every other handler reads through. See python.go.
+	// `python3`: the process-wide sharedMonty, fetched on first use. It has its
+	// own mutex so that one-off compile does not hold the config lock every
+	// other handler reads through. See python.go.
 	montyMu sync.Mutex
 	monty   *montygo.Runner
 	// montyPolicy is the OS policy every run gets (see montyOsPolicy), settled
@@ -599,13 +598,11 @@ func (s *Sandbox) Close() error {
 		s.bg.removeOutputDir()
 	}
 
-	// The monty runtime has its own lock (see python.go), so release it
-	// independently of the config lock taken below.
+	// The monty runtime is shared by every sandbox in the process (see
+	// sharedMonty in python.go), so it is dropped here, not closed. It has its
+	// own lock, released independently of the config lock taken below.
 	s.montyMu.Lock()
-	if s.monty != nil {
-		s.monty.Close()
-		s.monty = nil
-	}
+	s.monty = nil
 	s.montyMu.Unlock()
 
 	s.mu.Lock()

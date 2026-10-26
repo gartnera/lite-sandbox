@@ -693,6 +693,7 @@ func TestPythonDeniedInsideWrappers(t *testing.T) {
 // loops on filesystem operations. The command timeout cannot: time spent in
 // host calls does not advance monty's own duration accounting.
 func TestPythonSuspensionLimit(t *testing.T) {
+	t.Parallel()
 	s := newTestSandbox()
 	defer s.Close()
 	dir := t.TempDir()
