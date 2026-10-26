@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -198,6 +199,8 @@ var gitSubcommands = map[string]gitSubcommand{
 		"-f":         {gitLocalWrite, "force creates/replaces a tag"},
 		"--force":    {gitLocalWrite, "force creates/replaces a tag"},
 	}},
+	// Setting a key that names a program is refused whatever the levels;
+	// see validateGitConfigArgs.
 	"config": {perm: gitLocalRead, check: validateGitConfigArgs},
 	"reflog": {perm: gitLocalRead, actions: map[string]gitPerm{
 		"expire": gitLocalWrite,
@@ -236,7 +239,7 @@ var gitSubcommands = map[string]gitSubcommand{
 	"cherry-pick":        gitWrite,
 	"rm":                 gitWrite,
 	"mv":                 gitWrite,
-	"init":               gitWrite,
+	"init":               {perm: gitLocalWrite, flags: map[string]gitFlag{"--template": gitTemplateFlag}},
 	"bisect":             gitWrite,
 	"clean":              gitWrite,
 	"revert":             gitWrite,
@@ -303,9 +306,10 @@ var gitSubcommands = map[string]gitSubcommand{
 	// file:// remote), like fetch-pack.
 	"fetch": {perm: gitRemoteRead, flags: gitUploadPackFlags},
 	"pull":  {perm: gitRemoteRead, flags: gitUploadPackFlags},
-	"clone": {perm: gitRemoteRead, flags: map[string]gitFlag{
+	"clone": {perm: gitRemoteRead, check: validateGitCloneConfig, flags: map[string]gitFlag{
 		"-u":            gitUploadPackFlags["--upload-pack"],
 		"--upload-pack": gitUploadPackFlags["--upload-pack"],
+		"--template":    gitTemplateFlag,
 	}},
 	"ls-remote": {perm: gitRemoteRead, flags: map[string]gitFlag{
 		"--upload-pack": gitUploadPackFlags["--upload-pack"],
@@ -414,6 +418,9 @@ func validateGitArgs(args []*syntax.Word, gitCfg *config.GitConfig) error {
 	if err := checkGitGlobalConfig(args[1:idx], gitCfg); err != nil {
 		return err
 	}
+	if err := checkGitGlobalWorkTree(args[1:idx]); err != nil {
+		return err
+	}
 	spec, ok := gitSubcommands[subcommand]
 	if !ok {
 		return fmt.Errorf("git subcommand %q is not allowed", subcommand)
@@ -458,6 +465,33 @@ func checkGitGlobalConfig(global []*syntax.Word, cfg *config.GitConfig) error {
 		lit := arg.Lit()
 		if lit == "-c" || lit == "--config-env" || strings.HasPrefix(lit, "--config-env=") {
 			return fmt.Errorf("git option %q is not allowed: sets a config value, which can name a program for git to run (local_write is disabled)", lit)
+		}
+	}
+	return nil
+}
+
+// checkGitGlobalWorkTree refuses a global -C or --work-tree inside a .git
+// directory: git checks files out into its work tree, executable bits
+// included, so git --work-tree .git/hooks checkout would plant hooks that a
+// git run outside the sandbox runs. (The path checks skip these values, as
+// they only say where git runs; --git-dir .git is fine.)
+func checkGitGlobalWorkTree(global []*syntax.Word) error {
+	for i := 0; i < len(global); i++ {
+		lit := wordText(global[i])
+		val := ""
+		switch {
+		case lit == "-C" || lit == "--work-tree":
+			if i+1 < len(global) {
+				i++
+				val = wordText(global[i])
+			}
+		case strings.HasPrefix(lit, "--work-tree="):
+			val = strings.TrimPrefix(lit, "--work-tree=")
+		case strings.HasPrefix(lit, "-C"):
+			val = lit[2:]
+		}
+		if slices.Contains(strings.Split(filepath.ToSlash(val), "/"), ".git") {
+			return fmt.Errorf("git option %q with %q is not allowed: a work tree inside .git lets git write hooks there", lit, val)
 		}
 	}
 	return nil
@@ -564,37 +598,6 @@ func validateGitGrepArgs(rest []*syntax.Word, _ *config.GitConfig) error {
 		}
 	}
 	return nil
-}
-
-// gitConfigReadFlags are the git config flags that only read.
-var gitConfigReadFlags = map[string]bool{
-	"--list":          true,
-	"-l":              true,
-	"--get":           true,
-	"--get-all":       true,
-	"--get-regexp":    true,
-	"--get-urlmatch":  true,
-	"--get-color":     true,
-	"--get-colorbool": true,
-}
-
-// validateGitConfigArgs allows git config only to read when local_write is
-// disabled: with one of gitConfigReadFlags, or the list/get actions of
-// newer git (git config get user.name). Older git reads those as a key
-// named "list" or "get", which it rejects as having no section.
-func validateGitConfigArgs(rest []*syntax.Word, cfg *config.GitConfig) error {
-	if cfg.GitLocalWrite() {
-		return nil
-	}
-	if action := gitAction(rest); action == "list" || action == "get" {
-		return nil
-	}
-	for _, arg := range rest {
-		if gitConfigReadFlags[arg.Lit()] {
-			return nil
-		}
-	}
-	return fmt.Errorf("git config is only allowed with list, get, --list, --get, --get-all, --get-regexp, or --get-urlmatch (local_write is disabled)")
 }
 
 // validateGitSymbolicRefArgs refuses git symbolic-ref with two operands —

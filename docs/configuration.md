@@ -1021,6 +1021,32 @@ repository, or handle credentials:
   --allow-unsafe-features` (which read or write files named on stdin or in the
   import stream, out of reach of the path checks).
 
+Setting a config value can't plant a program, whatever the levels. git writes
+`.git/config` itself, past the sandbox's block on `.git`, and the git you run
+later outside the sandbox reads it: a hook path or filter driver set from inside
+would run on the host, with or without the OS sandbox (the program it names can
+live in the working directory or `/tmp`). So `git config` and `git clone
+-c`/`--config` refuse to set the keys that name a program for git to run, a
+file to include, or a place to write: `core.hooksPath`, `core.fsmonitor`,
+`core.pager`, `core.editor`, `core.sshCommand`, `core.askPass`, `core.gitProxy`,
+`core.alternateRefsCommand`, `core.worktree`, `diff.external`,
+`diff.<driver>.textconv`/`command`, `merge.<driver>.driver`,
+`remote.<name>.uploadpack`/`receivepack`/`vcs`, `submodule.<name>.update`,
+`tar.<format>.command`, `sequence.editor`, `interactive.diffFilter`,
+`web.browser`, `help.browser`, `init.templateDir`,
+`uploadpack.packObjectsHook`, `http.cookieFile`/`saveCookies`, and every key of
+`alias`, `include`, `includeIf`, `filter`, `credential`, `pager`, `hook`,
+`gpg`, `sendemail`, `imap`, `difftool`, `mergetool`, `guitool`, `browser`,
+`man`, `instaweb`, `trace2`, and `protocol` (`git config rename-section` to or
+from those sections too). Reading and unsetting them is allowed. `git config
+edit` (`-e`) is refused, since the editor's changes can't be checked. For the
+same reason `init`/`clone --template` and `GIT_TEMPLATE_DIR`, which copy a
+template's hooks into `.git` (also when `git init` re-runs in an existing
+repository), are refused, as are a global `-C` or `--work-tree` inside a `.git`
+directory and `GIT_WORK_TREE`, with which a checkout writes hooks there. The
+global `-c` is not limited this way: it sets a value for that one command,
+which runs in the sandbox.
+
 Long flags are matched by the abbreviations git accepts, so `git branch --del`
 counts as `--delete`, and short flags inside a bundle, so `git branch -qd`
 counts as `-d`.
