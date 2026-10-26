@@ -485,6 +485,19 @@ func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
 	return env
 }
 
+// commandBaseEnv is the environment commands start from: the server's, less
+// the variables named like credentials when the OS sandbox is on
+// (config.Config.SandboxEnv) — the agent's own token among them — so the code
+// a command runs cannot read them. Commands that run on the host bypassing the
+// worker by a bare no_sandbox allow (runRawToWriter) keep the full one.
+func (s *Sandbox) commandBaseEnv() []string {
+	cfg := s.getConfig()
+	if cfg.ScrubsEnv() {
+		return cfg.SandboxEnv(os.Environ())
+	}
+	return os.Environ()
+}
+
 // envSliceToMap converts a "KEY=VALUE" environment slice into a map, dropping
 // entries with no "=" and letting later entries win — the same precedence
 // os/exec applies when it de-duplicates a command's environment.
@@ -1508,7 +1521,7 @@ func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndp
 	// worker protocol. Converting after awsBaseEnv is equivalent to deleting and
 	// re-setting the keys by hand: awsBaseEnv appends its injections last and
 	// later entries win in a map, matching os/exec's own duplicate handling.
-	env := envSliceToMap(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion))
+	env := envSliceToMap(awsBaseEnv(s.commandBaseEnv(), imdsEndpoint, imdsRegion))
 	// awsBaseEnv only injects the region alongside an IMDS endpoint; this path has
 	// always injected it whenever a region is configured, so re-apply it here to
 	// keep the worker environment unchanged. (The two agree in practice: the IMDS
@@ -1615,8 +1628,9 @@ func (s *Sandbox) runInterpToWriter(ctx context.Context, f *syntax.File, workDir
 	// it is injected per command at dispatch time (execInWorker / execOnHost)
 	// so unsandboxed_commands can reach the real daemon while everything else is
 	// routed through the proxy. The host's own DOCKER_HOST (if any) flows through
-	// untouched via os.Environ().
-	env := awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion)
+	// untouched via os.Environ(). With the OS sandbox on, the credentials are
+	// left out (commandBaseEnv).
+	env := awsBaseEnv(s.commandBaseEnv(), imdsEndpoint, imdsRegion)
 
 	// Store sandbox paths in context so nested bash/sh can access them
 	ctx = context.WithValue(ctx, sandboxPathsKey, &sandboxPaths{
@@ -1865,6 +1879,7 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 			}
 		}
 	}
+	guardHost(cfg, &opts)
 	return opts
 }
 

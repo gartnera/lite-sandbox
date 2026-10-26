@@ -13,9 +13,10 @@ var goGlobalValueFlags = map[string]bool{
 	"-C": true,
 }
 
-// validateGoArgs validates go commands. generateAllowed reports whether the
-// config allows `go generate` (a commands entry for it).
-func validateGoArgs(args []*syntax.Word, generateAllowed bool) error {
+// validateGoArgs validates go commands. generateAllowed and installAllowed
+// report whether the config allows `go generate` and `go install` (a commands
+// entry for each).
+func validateGoArgs(args []*syntax.Word, generateAllowed, installAllowed bool) error {
 	subcommand, _, err := findSubcommand("go", args, goGlobalValueFlags)
 	if err != nil {
 		return err
@@ -39,6 +40,13 @@ func validateGoArgs(args []*syntax.Word, generateAllowed bool) error {
 	case "run":
 		return validateGoRunArgs(argsAfterToken(args, "run"))
 	case "install":
+		// go install writes binaries to GOBIN ($GOPATH/bin), a directory on
+		// the host's PATH: a program put there runs outside the sandbox the
+		// next time the user (or the agent's harness) starts it. The OS
+		// sandbox write-denies GOBIN as well; this names the reason up front.
+		if !installAllowed {
+			return fmt.Errorf("go install is not allowed: it writes to GOBIN, which the host runs programs from; build with `go build` instead, or the user can allow it with `lite-sandbox config commands allow \"go install\"`")
+		}
 		return validateGoInstallArgs(argsAfterToken(args, "install"))
 	}
 

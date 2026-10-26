@@ -216,3 +216,22 @@ func TestGenerateSBPLProfile_DenyKeychain(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateSBPLProfile_DenyPreferences checks that cfprefsd's lookups are
+// denied after the blanket mach-lookup allow, and only when asked.
+func TestGenerateSBPLProfile_DenyPreferences(t *testing.T) {
+	profile := generateSBPLProfile("/work", nil, nil, sbplDenylist{denyPreferences: true})
+	allow := strings.Index(profile, "(allow mach-lookup)")
+	for _, svc := range PreferencesMachServices {
+		deny := strings.Index(profile, `(deny mach-lookup (global-name "`+svc+`"))`)
+		if deny < 0 {
+			t.Fatalf("profile does not deny %s\n%s", svc, profile)
+		}
+		if deny < allow {
+			t.Errorf("deny of %s must follow (allow mach-lookup)\n%s", svc, profile)
+		}
+	}
+	if plain := generateSBPLProfile("/work", nil, nil, sbplDenylist{}); strings.Contains(plain, "cfprefsd") {
+		t.Errorf("cfprefsd denied without denyPreferences\n%s", plain)
+	}
+}

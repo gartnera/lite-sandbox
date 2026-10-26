@@ -121,13 +121,16 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
 
 	// The server's environment, as a bare allow gets it (ambient AWS profile
 	// selectors stripped, the brokered endpoint injected), and none of the
-	// agent's variables. PATH keeps only the directories sandboxed commands
-	// cannot write, so the programs the CLI starts (git, ssh, a pager) cannot
-	// be ones the agent planted either.
+	// agent's variables: neither the ones it set in the shell nor the agents'
+	// own credentials (config.WithoutAgentEnv). The user's other credentials
+	// stay, since the scoped CLI may authenticate with them (GH_TOKEN). PATH
+	// keeps only the directories sandboxed commands cannot write, so the
+	// programs the CLI starts (git, ssh, a pager) cannot be ones the agent
+	// planted either.
 	s.mu.RLock()
 	imdsEndpoint, imdsRegion := s.imdsEndpoint, s.imdsRegion
 	s.mu.RUnlock()
-	env := envSliceToMap(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion))
+	env := envSliceToMap(awsBaseEnv(config.WithoutAgentEnv(os.Environ()), imdsEndpoint, imdsRegion))
 	env["PATH"] = safePath(env["PATH"], writable)
 	scopedGitEnv(env)
 

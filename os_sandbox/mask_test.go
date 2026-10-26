@@ -84,3 +84,25 @@ func TestGenerateSBPLProfile_ExtraBinds(t *testing.T) {
 		t.Errorf("SBPL profile missing symlink-resolved extra bind allow %q\nprofile:\n%s", want, profile)
 	}
 }
+
+// TestGenerateSBPLProfile_MaskDirs checks that a masked directory (the agents'
+// socket directory in /tmp) is denied reads, writes and connections after the
+// temp-dir write allow and the network allow, which would otherwise win, and
+// that the masked sockets' connection deny follows the network allow too.
+func TestGenerateSBPLProfile_MaskDirs(t *testing.T) {
+	profile := generateSBPLProfile("/work", nil, []string{"/var/run/docker.sock"}, sbplDenylist{maskDirs: []string{"/tmp/cc-socks"}})
+	tmpAllow := strings.Index(profile, `(allow file-write* (subpath "/tmp"))`)
+	netAllow := strings.Index(profile, "(allow network*)")
+	files := strings.Index(profile, `(deny file-read* file-write* (subpath "/tmp/cc-socks"))`)
+	net := strings.LastIndex(profile, `(deny network-outbound (subpath "/tmp/cc-socks"))`)
+	sock := strings.LastIndex(profile, `(deny network-outbound (literal "/var/run/docker.sock"))`)
+	if files < 0 || net < 0 || sock < 0 {
+		t.Fatalf("profile missing a mask rule\n%s", profile)
+	}
+	if files < tmpAllow {
+		t.Errorf("file deny must follow the /tmp write allow\n%s", profile)
+	}
+	if net < netAllow || sock < netAllow {
+		t.Errorf("connection denies must follow (allow network*)\n%s", profile)
+	}
+}

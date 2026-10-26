@@ -323,11 +323,13 @@ func TestOSSandboxGoRuntime(t *testing.T) {
 
 	s := NewSandbox()
 
-	// Enable OS sandbox and the go profile
+	// Enable OS sandbox and the go profile, and open `go install` (refused by
+	// default) so the OS layer's own denial of GOBIN can be seen below.
 	enabled := true
 	cfg := &config.Config{
 		OSSandbox: &enabled,
 		Profiles:  []config.ProfileEntry{{Name: "go"}},
+		Commands:  []config.CommandEntry{{Command: "go install", Allow: &enabled}},
 	}
 	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
@@ -421,37 +423,34 @@ go 1.21
 		}
 	})
 
-	// Test go install to default GOPATH/bin (tests that GOPATH is writable)
-	t.Run("go install to default GOPATH", func(t *testing.T) {
-		// Get GOPATH from go env
-		cmd := exec.Command("go", "env", "GOPATH")
+	// GOPATH is writable (module cache), but its bin directory is not: a
+	// program put there would run on the host. The binary must not appear.
+	t.Run("go install to default GOPATH/bin is denied", func(t *testing.T) {
+		cmd := exec.Command("go", "env", "GOBIN", "GOPATH")
 		output, err := cmd.Output()
 		if err != nil {
 			t.Skipf("failed to get GOPATH: %v", err)
 		}
-		gopath := strings.TrimSpace(string(output))
+		gobin, gopath, _ := strings.Cut(strings.TrimRight(string(output), "\n"), "\n")
+		if gobin != "" {
+			t.Skip("GOBIN is set")
+		}
+		gopath = filepath.SplitList(strings.TrimSpace(gopath))[0]
 		if gopath == "" {
 			t.Skip("GOPATH is not set")
 		}
 
 		defaultBinPath := filepath.Join(gopath, "bin", "test")
-
-		// Remove the binary if it exists from a previous run
 		os.Remove(defaultBinPath)
 
-		// Install without specifying GOBIN (should use default GOPATH/bin)
 		output2, err := s.Execute(context.Background(), "go install", tmpDir, []string{tmpDir}, []string{tmpDir})
-		if err != nil {
-			t.Fatalf("go install to default GOPATH failed: %v, output: %s", err, output2)
+		if err == nil {
+			t.Fatalf("expected go install to GOPATH/bin to fail, output: %s", output2)
 		}
-
-		// Verify binary was installed to GOPATH/bin
-		if _, err := os.Stat(defaultBinPath); os.IsNotExist(err) {
-			t.Errorf("expected binary to exist at %s after go install", defaultBinPath)
+		if _, err := os.Stat(defaultBinPath); err == nil {
+			os.Remove(defaultBinPath)
+			t.Errorf("binary was installed at %s despite the write denial", defaultBinPath)
 		}
-
-		// Clean up
-		os.Remove(defaultBinPath)
 	})
 }
 
@@ -650,5 +649,35 @@ func TestOSSandboxXcodegen(t *testing.T) {
 	}
 	if _, err := os.Stat(escape); err == nil {
 		t.Errorf("preGenCommand wrote %s outside the sandbox", escape)
+	}
+}
+
+// TestOSSandboxScrubsCredentialEnv checks that a command run in the worker
+// does not see the agent's token, nor a credential the config does not pass
+// through, while it does see a passed-through one.
+func TestOSSandboxScrubsCredentialEnv(t *testing.T) {
+	requireOSSandbox(t)
+	tmpDir := t.TempDir()
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-agent-secret")
+	t.Setenv("LSB_TEST_TOKEN", "kept")
+
+	s := NewSandbox()
+	enabled := true
+	cfg := &config.Config{
+		OSSandbox:               &enabled,
+		OSSandboxEnvPassthrough: []string{"LSB_TEST_TOKEN"},
+	}
+	s.updateConfig(cfg, tmpDir)
+	defer s.Close()
+
+	output, err := s.Execute(context.Background(), "printenv", tmpDir, []string{tmpDir}, []string{tmpDir})
+	if err != nil {
+		t.Fatalf("printenv failed: %v, output: %s", err, output)
+	}
+	if strings.Contains(output, "sk-agent-secret") {
+		t.Errorf("worker command sees ANTHROPIC_AUTH_TOKEN:\n%s", output)
+	}
+	if !strings.Contains(output, "LSB_TEST_TOKEN=kept") {
+		t.Errorf("passed-through variable missing:\n%s", output)
 	}
 }

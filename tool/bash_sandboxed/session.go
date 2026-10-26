@@ -73,7 +73,7 @@ func (ss *Session) reset(dir string) error {
 	opts := []interp.RunnerOption{
 		interp.Dir(dir),
 		interp.StdIO(stdin, ss.stdout, ss.stderr),
-		interp.Env(expand.ListEnviron(awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion)...)),
+		interp.Env(expand.ListEnviron(awsBaseEnv(s.commandBaseEnv(), imdsEndpoint, imdsRegion)...)),
 	}
 	opts = append(opts, s.buildSecurityHandlers(ss.readPaths, ss.writePaths, useOSSandbox)...)
 	runner, err := interp.New(opts...)
