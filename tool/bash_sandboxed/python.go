@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	montygo "github.com/fugue-labs/monty-go"
@@ -49,11 +50,34 @@ const (
 	montyMaxSleep = 24 * time.Hour
 )
 
-// montyRunner returns the process-wide compiled monty runtime, building it on
-// first use, along with the OS policy every run is given. Compiling the wasm module costs ~2s, so it is deliberately lazy:
-// a sandbox that never runs Python never pays for it. Runner.Execute builds a
-// fresh isolated instance per call, so one Runner is safe to share across
+// sharedMonty is the process-wide compiled monty runtime. Compiling the wasm
+// module costs ~2s (more on a slow CI runner), so it is built once, on first
+// use, and never closed: every Sandbox in the process shares it, rather than
+// each one paying for its own compile. Runner.Execute builds a fresh isolated
+// instance per call, so one Runner is safe to share across sandboxes and
 // concurrent invocations.
+var sharedMonty struct {
+	mu     sync.Mutex
+	runner *montygo.Runner
+}
+
+func sharedMontyRunner() (*montygo.Runner, error) {
+	sharedMonty.mu.Lock()
+	defer sharedMonty.mu.Unlock()
+	if sharedMonty.runner == nil {
+		r, err := montygo.New()
+		if err != nil {
+			return nil, err
+		}
+		sharedMonty.runner = r
+	}
+	return sharedMonty.runner, nil
+}
+
+// montyRunner returns the process-wide compiled monty runtime (see
+// sharedMonty), building it on first use, along with the OS policy this
+// sandbox gives every run. It is deliberately lazy: a process that never runs
+// Python never pays for the compile.
 //
 // It takes its own mutex rather than the sandbox's config lock, so the one-off
 // compile does not block every getConfig in the process while it runs.
@@ -63,7 +87,7 @@ func (s *Sandbox) montyRunner() (*montygo.Runner, montygo.OsPolicy, error) {
 	if s.monty != nil {
 		return s.monty, s.montyPolicy, nil
 	}
-	r, err := montygo.New()
+	r, err := sharedMontyRunner()
 	if err != nil {
 		return nil, montygo.OsPolicy{}, fmt.Errorf("python: cannot start the monty interpreter: %w", err)
 	}

@@ -269,6 +269,7 @@ func TestListBackground(t *testing.T) {
 // extra_commands invocation tears down the whole process group, including a
 // grandchild the command forked — not just the direct process.
 func TestBackgroundKillReapsForkedChildren(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("process groups not supported on windows")
 	}
@@ -332,6 +333,7 @@ func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 // background process and its forked grandchild, and blocks until the teardown
 // has actually completed rather than returning while the process is still alive.
 func TestCloseShutsDownBackgroundProcesses(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("process groups not supported on windows")
 	}
