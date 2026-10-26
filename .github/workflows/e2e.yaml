@@ -27,7 +27,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux is pinned so an image roll (new kernel, AppArmor profiles,
+        # bubblewrap) lands as a deliberate change.
+        os: [ubuntu-26.04, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
