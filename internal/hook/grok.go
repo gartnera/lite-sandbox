@@ -96,7 +96,7 @@ func IsGrokTool(name string) bool {
 }
 
 // ShellInput is implemented by every shell tool's input — Claude Code's Bash
-// and Grok's run_terminal_command family — so callers can reach the command
+// and Monitor and Grok's run_terminal_command family — so callers can reach the command
 // without knowing which agent sent it.
 type ShellInput interface {
 	ToolInput
@@ -106,9 +106,10 @@ type ShellInput interface {
 func (b *BashInput) ShellCommand() string { return b.Command }
 
 // IsShellTool reports whether name is a built-in shell tool of a supported
-// agent: Claude Code's (and Codex's) Bash, or one of Grok's.
+// agent: Claude Code's (and Codex's) Bash, Claude Code's Monitor, or one of
+// Grok's.
 func IsShellTool(name string) bool {
-	return name == ToolBash || slices.Contains(grokShellTools, name)
+	return name == ToolBash || name == ToolMonitor || slices.Contains(grokShellTools, name)
 }
 
 // GrokShellInput is the argument shape of Grok's shell tools. Only the command

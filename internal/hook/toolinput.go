@@ -1,6 +1,7 @@
 package hook
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -16,6 +17,9 @@ const (
 	ToolWebFetch  = "WebFetch"
 	ToolWebSearch = "WebSearch"
 	ToolNotebook  = "NotebookEdit"
+	// ToolMonitor runs a command in the background and streams its output
+	// back to the model, so it executes arbitrary shell just like Bash.
+	ToolMonitor = "Monitor"
 	// ToolApplyPatch is Codex CLI's native file-editing tool. Codex has no
 	// Edit/Write tool — it applies changes via apply_patch — so governing writes
 	// for Codex means governing this tool.
@@ -26,6 +30,7 @@ const (
 // Adding support for a new tool is a one-line registration here plus the struct.
 var toolInputFactories = map[string]func() ToolInput{
 	ToolBash:       func() ToolInput { return &BashInput{} },
+	ToolMonitor:    func() ToolInput { return &MonitorInput{} },
 	ToolEdit:       func() ToolInput { return &EditInput{} },
 	ToolWrite:      func() ToolInput { return &WriteInput{} },
 	ToolRead:       func() ToolInput { return &ReadInput{} },
@@ -48,6 +53,29 @@ type BashInput struct {
 func (b *BashInput) Tool() string { return ToolBash }
 func (b *BashInput) Describe() string {
 	return fmt.Sprintf("run shell command: %s", truncate(b.Command, 200))
+}
+
+// MonitorInput is the argument shape for the Monitor tool: a shell command,
+// or a WebSocket to watch (ws) in its place. Only those two are modeled: the
+// rest (description, timeout_ms, persistent) do not change what runs, and
+// decoding them could fail and blind the hook to the command.
+type MonitorInput struct {
+	Command string          `json:"command,omitempty"`
+	WS      json.RawMessage `json:"ws,omitempty"`
+}
+
+func (m *MonitorInput) Tool() string         { return ToolMonitor }
+func (m *MonitorInput) ShellCommand() string { return m.Command }
+
+// IsWebSocket reports whether the call watches a WebSocket rather than
+// running a command. Claude Code refuses a call that sets both.
+func (m *MonitorInput) IsWebSocket() bool { return m.Command == "" && len(m.WS) > 0 }
+
+func (m *MonitorInput) Describe() string {
+	if m.IsWebSocket() {
+		return "watch a WebSocket"
+	}
+	return fmt.Sprintf("run shell command: %s", truncate(m.Command, 200))
 }
 
 // EditInput is the argument shape for the Edit tool.

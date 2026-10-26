@@ -20,17 +20,19 @@ import (
 
 // hookToolMatcher is the tool matcher used when the PreToolUse hook is
 // registered in settings.json (Claude Code) or config.toml (Codex). It covers
-// the built-in Bash tool (which the hook redirects to the MCP tool) and the
-// filesystem tools whose paths we govern. apply_patch is Codex's file-editing
-// tool (Claude never emits it, so it is a harmless no-op there). The hook itself
-// re-checks the tool name, so the matcher is just an optimization that avoids
-// invoking the binary for unrelated tools.
-const hookToolMatcher = "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
+// the built-in shell tools, Bash and Monitor (which the hook redirects to the
+// MCP tool), and the filesystem tools whose paths we govern. apply_patch is
+// Codex's file-editing tool (Claude never emits it, so it is a harmless no-op
+// there). The hook itself re-checks the tool name, so the matcher is just an
+// optimization that avoids invoking the binary for unrelated tools.
+const hookToolMatcher = "Bash|Monitor|Read|Edit|Write|NotebookEdit|Glob|Grep|apply_patch"
 
 // bashValidateMatcher is the matcher used in --bash-ast-hook-mode, where the
-// hook only governs the built-in Bash tool (validating its command rather than
-// redirecting it) and leaves the filesystem tools to Claude Code's normal flow.
-const bashValidateMatcher = "Bash"
+// hook only governs the built-in shell tools (validating their command rather
+// than redirecting it) and leaves the filesystem tools to Claude Code's normal
+// flow. Monitor runs its command in the background with the same shell as
+// Bash, so it is governed alongside it.
+const bashValidateMatcher = "Bash|Monitor"
 
 // mcpToolPrefix identifies the sandbox's own MCP tools (mcp__lite-sandbox__bash
 // and its background-process companions), and mcpToolMatcher is the
@@ -169,8 +171,14 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 		return hook.NewDecision(hook.DecisionAllow,
 			"Pre-approved by lite-sandbox: its MCP tools validate and sandbox every command themselves.")
 	}
-	// Claude Code's and Codex's Bash, or one of Grok Build's shell tools
-	// (run_terminal_command, monitor, ...). The redirect needs only the name.
+	// A Monitor WebSocket watch runs no shell: it is network access by the
+	// agent itself, like WebFetch, and Claude Code asks before opening one.
+	if in, ok := event.ToolInput.(*hook.MonitorInput); ok && in.IsWebSocket() {
+		return nil
+	}
+	// Claude Code's and Codex's Bash, Claude Code's Monitor, or one of Grok
+	// Build's shell tools (run_terminal_command, monitor, ...). The redirect
+	// needs only the name.
 	if hook.IsShellTool(event.ToolName) && !validateBash {
 		return denyBuiltinBash(event)
 	}
@@ -328,9 +336,9 @@ func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
 	))
 }
 
-// denyBuiltinBash blocks the built-in Bash tool and points the model at the
+// denyBuiltinBash blocks a built-in shell tool and points the model at the
 // sandboxed MCP tool, which runs the same command through lite-sandbox's
-// validation and path boundaries. The built-in Bash tool has no sandbox.
+// validation and path boundaries. The built-in shell tools have no sandbox.
 func denyBuiltinBash(event *hook.Event) *hook.Decision {
 	if !hook.IsShellTool(event.ToolName) {
 		return nil
@@ -347,13 +355,17 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 			event.ToolName, grokRedirectHint,
 		))
 	}
+	instead := "run this command with the mcp__lite-sandbox__bash tool"
+	if event.ToolName == hook.ToolMonitor {
+		instead += " and run_in_background set to true, then read the output file it names"
+	}
 	reason := fmt.Sprintf(
-		"Blocked by lite-sandbox: the built-in Bash tool is disabled.\n"+
+		"Blocked by lite-sandbox: the built-in %s tool is disabled.\n"+
 			"Attempted action: %s\n"+
-			"What to do instead: run this command with the mcp__lite-sandbox__bash tool, "+
+			"What to do instead: %s, "+
 			"which executes it through lite-sandbox's validation and path boundaries. "+
-			"The built-in Bash tool bypasses the sandbox and is not permitted.",
-		what,
+			"The built-in %s tool bypasses the sandbox and is not permitted.",
+		event.ToolName, what, instead, event.ToolName,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
 }

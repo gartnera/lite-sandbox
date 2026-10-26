@@ -94,7 +94,7 @@ For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`):
 
 All of these honor `CLAUDE_CONFIG_DIR` the way Claude Code does: when it is set, `settings.json`, `CLAUDE.md`, and `.claude.json` are all written under that directory (Claude Code then keeps its user config at `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`).
 
-Denying the built-in `Bash` tool leaves Claude Code no unvalidated shell, so every command goes through AST validation and, if enabled, the OS sandbox.
+Denying the built-in `Bash` tool leaves Claude Code no unvalidated shell, so every command goes through AST validation and, if enabled, the OS sandbox. Claude Code applies `Bash` permission rules to its [`Monitor`](https://code.claude.com/docs/en/tools-reference#monitor-tool) tool too, which runs a command in the background and streams its output to the model, so the deny covers it as well.
 
 To extend the sandbox to Claude Code's **built-in tools**, add `--with-tool-hook`:
 
@@ -102,7 +102,7 @@ To extend the sandbox to Claude Code's **built-in tools**, add `--with-tool-hook
 lite-sandbox install --with-tool-hook
 ```
 
-This widens the `PreToolUse` hook matcher. Besides allowing the `mcp__lite-sandbox__*` tools, the hook then (1) blocks the built-in `Bash` tool with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is off by default. When on, the hook blocks `Bash` instead of the permission `deny` rule, so the redirect message reaches the model.
+This widens the `PreToolUse` hook matcher. Besides allowing the `mcp__lite-sandbox__*` tools, the hook then (1) blocks the built-in `Bash` and `Monitor` tools with a message redirecting the model to `mcp__lite-sandbox__bash`, and (2) denies `Read` outside the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` outside its writable paths (see [Built-in tool boundaries](#built-in-tool-boundaries)). It is off by default. When on, the hook blocks `Bash` instead of the permission `deny` rule, so the redirect message reaches the model.
 
 To keep using Claude Code's own `Bash` tool with a static check in front of it, add `--bash-ast-hook-mode`:
 
@@ -111,7 +111,7 @@ lite-sandbox install --bash-ast-hook-mode                  # AST-check Bash only
 lite-sandbox install --with-tool-hook --bash-ast-hook-mode # AST-check Bash + confine Read/Write/Edit
 ```
 
-In this mode the hook parses each `Bash` command and checks it against the same whitelist and path boundaries as the bash tool. It allows the command without a permission prompt if it passes and denies it with the validation error if it doesn't; a passing command that runs a [command that asks first](configuration.md#commands-that-ask-first) gets Claude Code's permission prompt instead (Codex, which runs a tool call it is answered `ask` for instead of asking, gets a denial: the hook recognizes its events by the `turn_id` and `model` fields Codex adds). **`Bash` itself still runs unsandboxed.** There is no runtime enforcement, only the static check, so this is weaker than running commands through the MCP tool (see [Built-in tool boundaries](#built-in-tool-boundaries)). Since nothing is redirected to the MCP tool, this mode **does not configure the MCP server** (no MCP allow, no `CLAUDE.md` directive). On its own it governs only `Bash`; add `--with-tool-hook` to also confine the built-in `Read`/`Write`/`Edit` tools.
+In this mode the hook parses each `Bash` and `Monitor` command and checks it against the same whitelist and path boundaries as the bash tool. It allows the command without a permission prompt if it passes and denies it with the validation error if it doesn't; a passing command that runs a [command that asks first](configuration.md#commands-that-ask-first) gets Claude Code's permission prompt instead (Codex, which runs a tool call it is answered `ask` for instead of asking, gets a denial: the hook recognizes its events by the `turn_id` and `model` fields Codex adds). **`Bash` and `Monitor` still run unsandboxed.** There is no runtime enforcement, only the static check, so this is weaker than running commands through the MCP tool (see [Built-in tool boundaries](#built-in-tool-boundaries)). Since nothing is redirected to the MCP tool, this mode **does not configure the MCP server** (no MCP allow, no `CLAUDE.md` directive). On its own it governs only `Bash` and `Monitor`; add `--with-tool-hook` to also confine the built-in `Read`/`Write`/`Edit` tools.
 
 <a id="always-load"></a>
 
@@ -467,7 +467,7 @@ lite-sandbox install --with-tool-hook
 
 This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.json`. On each matching tool call it:
 
-- **redirects `Bash`**: the built-in Bash tool is denied with a message telling the model to use `mcp__lite-sandbox__bash` instead;
+- **redirects `Bash` and `Monitor`**: the built-in shell tools are denied with a message telling the model to use `mcp__lite-sandbox__bash` instead (with `run_in_background` for a `Monitor` watch). A `Monitor` call that watches a WebSocket instead of running a command runs no shell, so it defers to Claude Code's own prompt;
 - **denies reads** (`Read`, and `Grep`/`Glob` with an explicit `path`) outside the readable paths;
 - **denies writes** (`Write`, `Edit`, `NotebookEdit`) outside the writable paths;
 - **allows the sandbox's own tools** (`mcp__lite-sandbox__*`), so they stay prompt-free in subagents and skills, which don't inherit `permissions.allow` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950));
@@ -478,7 +478,7 @@ The path boundaries are computed the same way as the bash tool's (see `cmd/serve
 
 ### Bash: hook vs. permission deny
 
-`PreToolUse` hooks run *after* `permissions.deny`, and a matching deny rule blocks a call whatever the hook returns, so a `deny` rule and the hook can't both handle `Bash`. The two install modes handle it differently:
+`PreToolUse` hooks run *after* `permissions.deny`, and a matching deny rule blocks a call whatever the hook returns, so a `deny` rule and the hook can't both handle `Bash` (nor `Monitor`, which Claude Code checks against the same `Bash` rules). The two install modes handle it differently:
 
 - **`lite-sandbox install`** (default) hard-denies `Bash` with a `permissions.deny` rule. This is the strongest option, but the model only sees a terse rejection; the [`CLAUDE.md` directive](#claude-code) is what points it to the MCP tool.
 - **`lite-sandbox install --with-tool-hook`** leaves `Bash` out of `deny` (removing it if a previous install added it) and lets the hook block it with the redirect message. If the hook fails to run, `Bash` falls back to a normal permission prompt instead of running silently.
@@ -487,11 +487,11 @@ The hook is **fail-open**: on an internal error (unparseable event, missing work
 
 ### AST-check mode (`--bash-ast-hook-mode`)
 
-`--bash-ast-hook-mode` registers the hook as `lite-sandbox hook --validate-bash`, which **statically AST-checks** built-in `Bash` commands instead of redirecting them. On each `Bash` call it parses the command and runs the sandbox's whitelist and path checks, then:
+`--bash-ast-hook-mode` registers the hook as `lite-sandbox hook --validate-bash`, which **statically AST-checks** built-in `Bash` and `Monitor` commands instead of redirecting them. On each such call it parses the command and runs the sandbox's whitelist and path checks, then:
 
 - **allows** the call, skipping the permission prompt, when it passes, so Claude keeps using its own `Bash` tool behind the static check;
 - **denies** it with the validation error when it fails, so the model can fix the command.
 
-This mode configures no MCP server, adds no `Bash` deny, and writes no `CLAUDE.md` directive. On its own it matches only `Bash`; with `--with-tool-hook` it uses the full matcher, so `Bash` is AST-checked and `Read`/`Write`/`Edit` are confined to the sandbox's paths. Switching install modes is idempotent: a later `install`, `--with-tool-hook`, or `--bash-ast-hook-mode` replaces the previous lite-sandbox hook entry.
+This mode configures no MCP server, adds no `Bash` deny, and writes no `CLAUDE.md` directive. On its own it matches only `Bash` and `Monitor`; with `--with-tool-hook` it uses the full matcher, so both are AST-checked and `Read`/`Write`/`Edit` are confined to the sandbox's paths. Switching install modes is idempotent: a later `install`, `--with-tool-hook`, or `--bash-ast-hook-mode` replaces the previous lite-sandbox hook entry.
 
 > **Trade-off: `Bash` runs unsandboxed.** The hook checks the command statically, then the real `Bash` tool runs it unsandboxed. Without runtime enforcement, it misses what the MCP tool's interpreter catches during execution: the `OpenHandler` and expansion checks (e.g. `cat $VAR`), and reads of paths that don't exist at validation time. The AST whitelist (no `curl`/`nc`/`eval`/shell escapes/etc.) and static checks on literal path arguments still apply in full. For the strongest enforcement, use the default or `--with-tool-hook` modes, which run commands through the sandbox.
