@@ -9,11 +9,12 @@ import (
 
 func TestValidateGoArgs(t *testing.T) {
 	tests := []struct {
-		name      string
-		command   string
-		allow     bool
-		wantErr   bool
-		errSubstr string
+		name         string
+		command      string
+		allow        bool
+		allowInstall bool
+		wantErr      bool
+		errSubstr    string
 	}{
 		// Basic allowed commands
 		{
@@ -114,26 +115,42 @@ func TestValidateGoArgs(t *testing.T) {
 
 		// go install variants
 		{
-			name:    "go install local package allowed",
-			command: "go install ./cmd/tool",
-			wantErr: false,
+			name:      "go install blocked by default",
+			command:   "go install ./cmd/tool",
+			wantErr:   true,
+			errSubstr: "go install is not allowed",
 		},
 		{
-			name:    "go install all allowed",
-			command: "go install ./...",
-			wantErr: false,
+			name:         "go install local package allowed when install=true",
+			command:      "go install ./cmd/tool",
+			allowInstall: true,
+			wantErr:      false,
+		},
+		{
+			name:         "go install all allowed when install=true",
+			command:      "go install ./...",
+			allowInstall: true,
+			wantErr:      false,
 		},
 		{
 			name:      "go install with @ blocked",
 			command:   "go install example.com/cmd@latest",
 			wantErr:   true,
-			errSubstr: "remote package references",
+			errSubstr: "go install is not allowed",
 		},
 		{
-			name:      "go install with @version blocked",
-			command:   "go install github.com/user/tool@v1.2.3",
-			wantErr:   true,
-			errSubstr: "remote package references",
+			name:         "go install with @ blocked when install=true",
+			command:      "go install example.com/cmd@latest",
+			allowInstall: true,
+			wantErr:      true,
+			errSubstr:    "remote package references",
+		},
+		{
+			name:         "go install with @version blocked when install=true",
+			command:      "go install github.com/user/tool@v1.2.3",
+			allowInstall: true,
+			wantErr:      true,
+			errSubstr:    "remote package references",
 		},
 
 		// go generate
@@ -185,7 +202,7 @@ func TestValidateGoArgs(t *testing.T) {
 				return true
 			})
 
-			err = validateGoArgs(args, tt.allow)
+			err = validateGoArgs(args, tt.allow, tt.allowInstall)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("expected error containing %q, got nil", tt.errSubstr)

@@ -486,6 +486,11 @@ type Config struct {
 	// keyring, D-Bus and agent sockets, and the macOS keychain. See
 	// hidden_home.go. Set to false to opt out.
 	OSSandboxHideHome *bool `yaml:"os_sandbox_hide_home,omitempty"`
+	// OSSandboxEnvPassthrough names environment variables that the commands
+	// run in the OS sandbox worker keep although they are named like a
+	// credential (NPM_TOKEN for a private registry, say). Every other such
+	// variable is left out of their environment. See sandbox_env.go.
+	OSSandboxEnvPassthrough []string `yaml:"os_sandbox_env_passthrough,omitempty"`
 	// RejectRedundantCd, when enabled (the default), rejects a command that
 	// begins by cd-ing into the working directory it already runs in — the
 	// `cd /abs/path/to/repo && ...` prefix agents habitually emit even though the

@@ -71,6 +71,8 @@ profiles:
 commands:
   - command: go generate   # optional: allow go generate
     allow: true
+  - command: go install    # optional: allow go install (GOBIN stays write-denied)
+    allow: true
 ```
 
 Go commands get the same runtime path validation as other commands, so file paths stay within the allowed directories:
@@ -82,6 +84,15 @@ go build -o mybinary
 ```
 
 `go generate` needs its own `commands` entry because it runs arbitrary commands specified in source files.
+
+`go install` is refused unless it has its own `commands` entry: it writes
+binaries to `GOBIN` (`$GOPATH/bin` by default), a directory on the host's
+`PATH`, and a program planted there runs outside the sandbox the next time it is
+started (lite-sandbox itself lives there when installed with `go install`). Build
+with `go build -o <dir in the project>` instead. Even with the entry, the OS
+sandbox keeps `GOBIN` write-denied although the profile grants `GOPATH`
+writable, so only `GOBIN=<dir in the project> go install` succeeds; see
+[security](security.md#common-isolation-both-platforms).
 
 `e2e/claude/test_go_runtime_e2e.py` has a full example of a Go workflow (module init, testing, git) using only the sandboxed tool.
 

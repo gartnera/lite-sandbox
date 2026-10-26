@@ -18,9 +18,10 @@ import (
 // they are given, the Flutter tools and uvx run code the OS sandbox confines
 // like `go test`.
 var profileHooks = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	// go generate runs the shell commands in //go:generate directives.
+	// go generate runs the shell commands in //go:generate directives; go
+	// install writes the host's GOBIN.
 	"go": func(s *Sandbox, args []*syntax.Word) error {
-		return validateGoArgs(args, s.extraAllowsTokens("go", "generate"))
+		return validateGoArgs(args, s.extraAllowsTokens("go", "generate"), s.extraAllowsTokens("go", "install"))
 	},
 	"pnpm": func(s *Sandbox, args []*syntax.Word) error {
 		return validatePnpmArgs(args, s.extraAllowsTokens("pnpm", "publish"))

@@ -183,12 +183,48 @@ type WorkerOptions struct {
 	// read-denies alongside. Ignored on Linux, where the Secret Service is
 	// reached through the session D-Bus in the runtime directory (HideDirs).
 	DenyKeychain bool
+	// DenyPreferences (macOS) denies lookups of the preferences daemons
+	// (PreferencesMachServices). cfprefsd reads and writes the plists in
+	// ~/Library/Preferences on its client's behalf, so a command that can
+	// reach it writes the host's preferences (`defaults write`) where it
+	// cannot write itself, and reads them where they are hidden. The caller
+	// sets it unless the worker may write ~/Library/Preferences anyway.
+	// Ignored on Linux, which has no such daemon.
+	DenyPreferences bool
+	// MaskDirs are directories made unreachable as a whole: nothing inside
+	// can be read, written, or connected to. They hold the coding agents'
+	// control sockets (Claude Code's /tmp/cc-socks): a command must neither
+	// drive a session through one nor replace one with its own. A directory
+	// that does not exist is left alone on Linux (bubblewrap would create it
+	// on the host); sandbox-exec denies it either way.
+	MaskDirs []string
+
+	// Env is the worker process's environment, which the commands it runs
+	// inherit unless their exec request carries one. nil means the server's
+	// own (os.Environ()).
+	Env []string
 }
 
 // KeychainMachServices are the mach services DenyKeychain denies: the
 // keychain daemon behind SecItem (the data protection keychain). Not
 // com.apple.SecurityServer or trustd, which certificate verification uses.
 var KeychainMachServices = []string{"com.apple.securityd.xpc"}
+
+// PreferencesMachServices are the mach services DenyPreferences denies:
+// cfprefsd's per-user agent (the user's own domains, ~/Library/Preferences)
+// and its daemon (the system and any-user domains).
+var PreferencesMachServices = []string{"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon"}
+
+// existingDirs keeps the paths that are existing directories.
+func existingDirs(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // DenyPath is one deny-list entry with its expected kind, which decides what
 // happens when the path does not exist at worker start: bubblewrap can only
@@ -361,7 +397,7 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		// existing path can be overlaid (see DenyPath for what happens to a
 		// missing one).
 		readDirs, readFiles, missingRead := prepareDenyPaths(hp.visibleDeny(opts.DeniedReadPaths))
-		plan.deniedReadDirs = readDirs
+		plan.deniedReadDirs = append(readDirs, existingDirs(hp.visiblePaths(opts.MaskDirs))...)
 		plan.deniedReadFiles = readFiles
 		writeDirs, writeFiles, missingWrite := prepareDenyPaths(hp.visibleDeny(opts.DeniedWritePaths))
 		plan.deniedWritePaths = append(writeDirs, writeFiles...)
@@ -384,6 +420,8 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 			hideDirs:         hp.dirs,
 			visible:          hp.exposed,
 			denyKeychain:     opts.DenyKeychain,
+			denyPreferences:  opts.DenyPreferences,
+			maskDirs:         opts.MaskDirs,
 		})
 
 		// sandbox-exec -p <profile> <binary> <args>
@@ -397,7 +435,11 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	cmd.Stderr = os.Stderr // Pass through stderr for worker logs
 	// The worker logs at the host's level, so its INFO lines stay out of an
 	// interactive shell's terminal unless asked for (--log-level).
-	cmd.Env = append(os.Environ(), workerLogLevelEnv+"="+hostLogLevel(ctx).String())
+	env := opts.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = append(env[:len(env):len(env)], workerLogLevelEnv+"="+hostLogLevel(ctx).String())
 
 	// Put the worker in its own process group. On macOS this is what makes the
 	// seatbelt "(deny signal (target others))" rule meaningful — sandbox-spawned
@@ -615,6 +657,10 @@ type sbplDenylist struct {
 	visible  []string
 	// denyKeychain denies the keychain daemon's mach services.
 	denyKeychain bool
+	// denyPreferences denies the preferences daemons' mach services.
+	denyPreferences bool
+	// maskDirs are denied reads, writes and connections throughout.
+	maskDirs []string
 }
 
 // generateSBPLProfile generates a Scheme-based sandbox profile for macOS sandbox-exec.
@@ -655,10 +701,10 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 
 	// Mask broker sockets (e.g. the real Docker daemon socket): deny both file
 	// access and outbound connection so a sandboxed command can only reach the
-	// proxy, not the underlying socket directly.
+	// proxy, not the underlying socket directly. The connection deny follows
+	// the network allow below, which would otherwise win.
 	for _, p := range maskPaths {
 		sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (literal \"%s\"))\n", p))
-		sb.WriteString(fmt.Sprintf("(deny network-outbound (literal \"%s\"))\n", p))
 	}
 
 	// Read-denied paths are hidden outright (must come after allow default):
@@ -741,6 +787,14 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 			sb.WriteString(fmt.Sprintf("(deny file-write* (literal \"%s\"))\n", p))
 		}
 	}
+	// Masked directories (the agents' socket directories in /tmp), after
+	// every write allow above so the temp directories' cannot re-open them.
+	// Connections are denied after the network allow below.
+	for _, d := range dl.maskDirs {
+		for _, rd := range withResolved(d) {
+			sb.WriteString(fmt.Sprintf("(deny file-read* file-write* (subpath \"%s\"))\n", rd))
+		}
+	}
 
 	// Allow process execution
 	sb.WriteString("(allow process-exec (subpath \"/\"))\n")
@@ -748,6 +802,16 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 
 	// Allow network access
 	sb.WriteString("(allow network*)\n")
+	// ...but not to the masked sockets and directories: last match wins, so
+	// the denies must follow the allow.
+	for _, p := range maskPaths {
+		sb.WriteString(fmt.Sprintf("(deny network-outbound (literal \"%s\"))\n", p))
+	}
+	for _, d := range dl.maskDirs {
+		for _, rd := range withResolved(d) {
+			sb.WriteString(fmt.Sprintf("(deny network-outbound (subpath \"%s\"))\n", rd))
+		}
+	}
 
 	// Allow mach lookups (required for macOS services)
 	sb.WriteString("(allow mach-lookup)\n")
@@ -758,6 +822,13 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 	// command's behalf.
 	if dl.denyKeychain {
 		for _, svc := range KeychainMachServices {
+			sb.WriteString(fmt.Sprintf("(deny mach-lookup (global-name \"%s\"))\n", svc))
+		}
+	}
+	// The preferences daemons: cfprefsd writes ~/Library/Preferences for its
+	// client, outside the write rules above.
+	if dl.denyPreferences {
+		for _, svc := range PreferencesMachServices {
 			sb.WriteString(fmt.Sprintf("(deny mach-lookup (global-name \"%s\"))\n", svc))
 		}
 	}

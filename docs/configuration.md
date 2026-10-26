@@ -642,6 +642,24 @@ os_sandbox_hide_home: false
 Or use `lite-sandbox config os-sandbox hide-home enable|disable`. It can be
 set per directory with the [overrides](#per-directory-overrides).
 
+### Credentials in the environment: `os_sandbox_env_passthrough`
+
+The commands the OS sandbox worker runs inherit the MCP server's environment,
+which is the agent's: next to `PATH` and `HOME` it carries the agent's own
+token (`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) and whatever you
+exported (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `NPM_TOKEN`). With the OS
+sandbox on, every variable named like a credential is left out (see
+[security](security.md#common-isolation-both-platforms) for the rule), so a
+dependency or test cannot read it. To keep one that a build needs, name it:
+
+```yaml
+os_sandbox_env_passthrough:
+  - NPM_TOKEN
+```
+
+The agent's own credentials should never be passed through. It can be set per
+directory with the [overrides](#per-directory-overrides).
+
 ### Lifting a built-in denial
 
 Your `paths` entries are merged over the built-in deny lists, and a grant on
