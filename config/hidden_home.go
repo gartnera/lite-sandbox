@@ -49,8 +49,9 @@ func (c *Config) HidesPrivateState() bool {
 // hides it still shows, besides the config's grants: git's configuration
 // (~/.gitconfig, $XDG_CONFIG_HOME/git; its credential store is masked by
 // HiddenHomeDeniedReadEntries), ~/.aws when the aws section reads raw
-// credentials, and the toolchains installed under $HOME that the server's
-// PATH names (HomePathToolchains). Paths are absolute and exist.
+// credentials, the docker CLI's config directory when docker is enabled, the
+// non-key files of ~/.ssh (SSHPublicFiles), and the toolchains installed under $HOME that the server's PATH names
+// (HomePathToolchains). Paths are absolute and exist.
 func (c *Config) HomeVisiblePaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -63,7 +64,13 @@ func (c *Config) HomeVisiblePaths() []string {
 	if c != nil && c.AWS.AllowsRawCredentials() {
 		out = append(out, filepath.Join(home, ".aws"))
 	}
+	if c != nil && c.Docker.DockerEnabled() {
+		if dir := DockerConfigDir(); filepath.IsAbs(dir) {
+			out = append(out, dir)
+		}
+	}
 	out = slices.DeleteFunc(out, func(p string) bool { return !pathExists(p) })
+	out = append(out, SSHPublicFiles(home)...)
 	return append(out, HomePathToolchains(home, os.Getenv("PATH"))...)
 }
 

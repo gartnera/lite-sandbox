@@ -22,7 +22,7 @@ func sshHome(t *testing.T) (home string, keys []string) {
 	if err := os.MkdirAll(filepath.Join(sshDir, "sockets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "work_key", "work_key.pub", "known_hosts", "known_hosts.old", "config", "authorized_keys", "authorized_keys2"} {
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "work_key", "work_key.pub", "known_hosts", "known_hosts.old", "known_hosts2", "config", "authorized_keys", "authorized_keys2"} {
 		if err := os.WriteFile(filepath.Join(sshDir, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -46,6 +46,35 @@ func TestSSHPrivateKeyEntries(t *testing.T) {
 	}
 	if SSHPrivateKeyEntries(t.TempDir()) != nil {
 		t.Error("a home without ~/.ssh should yield no entries")
+	}
+}
+
+func TestSSHPublicFiles(t *testing.T) {
+	home, keys := sshHome(t)
+	sshDir := filepath.Join(home, ".ssh")
+	var want []string
+	for _, name := range []string{"authorized_keys", "authorized_keys2", "config", "id_ed25519.pub", "known_hosts", "known_hosts.old", "known_hosts2", "work_key.pub"} {
+		want = append(want, filepath.Join(sshDir, name))
+	}
+	got := SSHPublicFiles(home)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("public files = %v, want %v (private keys and subdirectories must be skipped)", got, want)
+	}
+	// A hidden home shows them, and never the keys.
+	visible := (&Config{}).HomeVisiblePaths()
+	for _, p := range want {
+		if !slices.Contains(visible, p) {
+			t.Errorf("HomeVisiblePaths should show %s: %v", p, visible)
+		}
+	}
+	for _, k := range keys {
+		if slices.Contains(visible, k) {
+			t.Errorf("HomeVisiblePaths must not show the private key %s", k)
+		}
+	}
+	if SSHPublicFiles(t.TempDir()) != nil {
+		t.Error("a home without ~/.ssh should yield no files")
 	}
 }
 
