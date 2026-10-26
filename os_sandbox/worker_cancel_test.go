@@ -29,8 +29,7 @@ func startBareWorker(t *testing.T) *Worker {
 
 	cmd := exec.Command(binary, "sandbox-worker")
 	cmd.Stderr = os.Stderr
-	// Mirror StartWorker: the worker leads its own group so Close can reap it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = workerProcAttr()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -50,7 +49,7 @@ func startBareWorker(t *testing.T) *Worker {
 		stdout:  stdout,
 		enc:     newLockedEncoder[HostMsg](stdin),
 		dec:     gob.NewDecoder(bufio.NewReader(stdout)),
-		pending: make(map[uint64]chan WorkerMsg),
+		pending: make(map[uint64]*pendingExec),
 	}
 
 	var ready WorkerMsg

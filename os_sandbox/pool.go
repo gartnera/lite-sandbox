@@ -42,14 +42,21 @@ func hostLogLevel(ctx context.Context) slog.Level {
 // free to be reused for the next read.
 const streamChunkSize = 64 * 1024
 
+// flowWindow is how many chunks of one execution's stdin, and of its output,
+// may be in flight between host and worker before the receiver acknowledges
+// one (see execFlow). It bounds what one stalled execution can hold, so that
+// neither side's message loop ever waits on it.
+const flowWindow = 8
+
 // HostMsgType identifies messages sent from host to worker.
 type HostMsgType int
 
 const (
-	HostMsgExec     HostMsgType = iota // Start a command (Args, Dir, Env)
-	HostMsgStdin                       // Stdin data chunk (Data)
-	HostMsgStdinEOF                    // No more stdin
-	HostMsgCancel                      // Kill a running command (ID)
+	HostMsgExec      HostMsgType = iota // Start a command (Args, Dir, Env)
+	HostMsgStdin                        // Stdin data chunk (Data)
+	HostMsgStdinEOF                     // No more stdin
+	HostMsgCancel                       // Kill a running command (ID)
+	HostMsgOutputAck                    // One stdout/stderr chunk written out; the worker may send another
 )
 
 // HostMsg is a message sent from the MCP server to a worker process.
@@ -60,16 +67,20 @@ type HostMsg struct {
 	Dir  string            // For HostMsgExec
 	Env  map[string]string // For HostMsgExec
 	Data []byte            // For HostMsgStdin
+	// Deadline, when set, is when the worker kills the command itself
+	// (HostMsgExec), whether or not the host's cancel arrives.
+	Deadline time.Time
 }
 
 // WorkerMsgType identifies messages sent from worker to host.
 type WorkerMsgType int
 
 const (
-	WorkerMsgReady  WorkerMsgType = iota // Worker ready (startup signal)
-	WorkerMsgStdout                      // Stdout data chunk (Data)
-	WorkerMsgStderr                      // Stderr data chunk (Data)
-	WorkerMsgDone                        // Command finished (ExitCode, Error)
+	WorkerMsgReady    WorkerMsgType = iota // Worker ready (startup signal)
+	WorkerMsgStdout                        // Stdout data chunk (Data)
+	WorkerMsgStderr                        // Stderr data chunk (Data)
+	WorkerMsgDone                          // Command finished (ExitCode, Error)
+	WorkerMsgStdinAck                      // One stdin chunk written to the command; the host may send another
 )
 
 // WorkerMsg is a message sent from a worker process back to the MCP server.
@@ -120,8 +131,29 @@ type Worker struct {
 	dead bool
 
 	nextID    uint64
-	pending   map[uint64]chan WorkerMsg
+	pending   map[uint64]*pendingExec
 	pendingMu sync.Mutex
+}
+
+// pendingExec is the host side of one execution's flow control (see execFlow).
+type pendingExec struct {
+	// ch receives the execution's output and done message. The worker sends
+	// at most flowWindow output chunks unacknowledged, so with room for those
+	// and the done message the dispatcher never waits on a slow reader.
+	ch chan WorkerMsg
+	// stdinCredits holds the stdin chunks the worker has room for.
+	stdinCredits chan struct{}
+}
+
+func newPendingExec() *pendingExec {
+	p := &pendingExec{
+		ch:           make(chan WorkerMsg, flowWindow+1),
+		stdinCredits: make(chan struct{}, flowWindow),
+	}
+	for range flowWindow {
+		p.stdinCredits <- struct{}{}
+	}
+	return p
 }
 
 // WorkerOptions configures a sandbox worker's filesystem policy. Both platform
@@ -441,11 +473,7 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	}
 	cmd.Env = append(env[:len(env):len(env)], workerLogLevelEnv+"="+hostLogLevel(ctx).String())
 
-	// Put the worker in its own process group. On macOS this is what makes the
-	// seatbelt "(deny signal (target others))" rule meaningful — sandbox-spawned
-	// processes share this group while the host MCP process does not — and it
-	// lets Close() signal the whole group to reap leaked background processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = workerProcAttr()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -474,7 +502,7 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		stdout:  stdout,
 		enc:     newLockedEncoder[HostMsg](stdin),
 		dec:     gob.NewDecoder(bufStdout),
-		pending: make(map[uint64]chan WorkerMsg),
+		pending: make(map[uint64]*pendingExec),
 	}
 
 	// Wait for ready signal from worker
@@ -494,6 +522,20 @@ func StartWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	go w.runDispatcher()
 
 	return w, nil
+}
+
+// workerProcAttr puts the worker in a session of its own, which also makes it
+// lead its own process group. The new session has no controlling terminal, so
+// nothing in the sandbox can open /dev/tty: a password or host-key prompt
+// (ssh, git) fails at once instead of waiting on a terminal no one is watching
+// (or being stopped by SIGTTIN for reading it from a background group), and
+// nothing can write to the agent's terminal or inject input into it. The
+// process group is what makes the macOS seatbelt "(deny signal (target
+// others))" rule meaningful — sandbox-spawned processes share it while the
+// host MCP process does not — and it lets Close() signal the whole group to
+// reap leaked background processes.
+func workerProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }
 
 // bwrapPlan is the input to buildBwrapArgs: everything the mount layout
@@ -836,7 +878,7 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 	// Restrict signaling so kill/pkill cannot reach host processes. The SBPL
 	// signal operation classifies targets as self, pgrp (same process group), or
 	// others (everything else). The worker is started in its own process group
-	// (Setpgid), so denying "others" confines signals to the processes this
+	// (workerProcAttr), so denying "others" confines signals to the processes this
 	// sandbox spawned while leaving self/pgrp (allowed by "allow default") intact.
 	sb.WriteString("(deny signal (target others))\n")
 
@@ -888,18 +930,20 @@ func (w *Worker) Exec(ctx context.Context, args []string, dir string, env map[st
 	}
 	w.mu.Unlock()
 
-	// Generate unique ID and register a response channel.
+	// Generate unique ID and register the execution.
+	p := newPendingExec()
 	w.pendingMu.Lock()
 	id := w.nextID
 	w.nextID++
-	ch := make(chan WorkerMsg, 64)
-	w.pending[id] = ch
+	w.pending[id] = p
 	w.pendingMu.Unlock()
 
 	slog.DebugContext(ctx, "sending exec to worker", "args", args, "id", id)
 
-	// Send exec message via locked encoder (safe for concurrent callers).
-	if err := w.enc.send(HostMsg{ID: id, Type: HostMsgExec, Args: args, Dir: dir, Env: env}); err != nil {
+	// Send exec message via locked encoder (safe for concurrent callers). The
+	// context's deadline goes along, so the worker enforces it on its own.
+	deadline, _ := ctx.Deadline()
+	if err := w.enc.send(HostMsg{ID: id, Type: HostMsgExec, Args: args, Dir: dir, Env: env, Deadline: deadline}); err != nil {
 		w.pendingMu.Lock()
 		delete(w.pending, id)
 		w.pendingMu.Unlock()
@@ -909,56 +953,59 @@ func (w *Worker) Exec(ctx context.Context, args []string, dir string, env map[st
 		return 1, fmt.Errorf("failed to send exec: %w", err)
 	}
 
-	// Pump stdin in a background goroutine. A terminal never reaches EOF on
-	// its own, so its pump stops when the command does (cmdDone) rather than
-	// holding Exec open, and reading on, until the user types Ctrl-D.
-	cmdDone := make(chan struct{})
-	if fd, ok := stdinTerminal(stdin); ok {
-		stdin = &terminalReader{fd: fd, done: cmdDone}
+	// Pump stdin in a background goroutine. A terminal is never passed to the
+	// worker: its commands are detached from the host's terminal entirely (see
+	// StartWorker), so they read no input from it — an interactive shell's
+	// stdin ends for them at once.
+	if isTerminal(stdin) {
+		stdin = nil
 	}
+	cmdDone := make(chan struct{})
 	stdinDone := make(chan error, 1)
 	go func() {
-		stdinDone <- w.pumpStdinForID(id, stdin)
+		stdinDone <- w.pumpStdinForID(id, stdin, p.stdinCredits, cmdDone)
 	}()
 
-	// Read responses from the per-execution channel until WorkerMsgDone (channel
-	// closed by dispatcher). If ctx is cancelled, tell the worker to kill this
-	// execution's process and keep draining until it reports done — the worker
-	// owns the process, so cancellation must round-trip through it.
+	// Cancellation is sent from its own goroutine: the loop below can be held
+	// up writing to stdout (a pipeline stage that is not reading), and the
+	// worker owns the process, so cancellation must round-trip through it.
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = w.enc.send(HostMsg{ID: id, Type: HostMsgCancel})
+	})
+
+	// Read responses until WorkerMsgDone (channel closed by dispatcher),
+	// acknowledging each output chunk once written so the worker sends more.
+	// A failed write means the reader is gone (`yes | head -1` once head has
+	// exited): the command is cancelled, standing in for the SIGPIPE it would
+	// get writing to the pipe itself, rather than running until the timeout.
 	var exitCode int
 	var execErr error
-	ctxDone := ctx.Done()
-loop:
-	for {
-		select {
-		case msg, ok := <-ch:
-			if !ok {
-				break loop
+	broken := false
+	for msg := range p.ch {
+		switch msg.Type {
+		case WorkerMsgStdout, WorkerMsgStderr:
+			out := stdout
+			if msg.Type == WorkerMsgStderr {
+				out = stderr
 			}
-			switch msg.Type {
-			case WorkerMsgStdout:
-				if stdout != nil && len(msg.Data) > 0 {
-					stdout.Write(msg.Data) //nolint:errcheck
-				}
-			case WorkerMsgStderr:
-				if stderr != nil && len(msg.Data) > 0 {
-					stderr.Write(msg.Data) //nolint:errcheck
-				}
-			case WorkerMsgDone:
-				exitCode = msg.ExitCode
-				if msg.Error != "" {
-					execErr = fmt.Errorf("%s", msg.Error)
+			if out != nil && len(msg.Data) > 0 && !broken {
+				if _, err := out.Write(msg.Data); err != nil {
+					broken = true
+					_ = w.enc.send(HostMsg{ID: id, Type: HostMsgCancel})
 				}
 			}
-		case <-ctxDone:
-			// Disable this case after firing once so we don't busy-loop while
-			// waiting for the worker's done message.
-			ctxDone = nil
-			_ = w.enc.send(HostMsg{ID: id, Type: HostMsgCancel})
+			_ = w.enc.send(HostMsg{ID: id, Type: HostMsgOutputAck})
+		case WorkerMsgDone:
+			exitCode = msg.ExitCode
+			if msg.Error != "" {
+				execErr = fmt.Errorf("%s", msg.Error)
+			}
 		}
 	}
+	stopCancel()
 
-	// The command is done: stop a terminal's pump, then wait for the pump.
+	// The command is done: stop the pump if it is waiting for a credit, then
+	// wait for it.
 	close(cmdDone)
 	if pumpErr := <-stdinDone; pumpErr != nil && execErr == nil {
 		execErr = pumpErr
@@ -967,14 +1014,21 @@ loop:
 	return exitCode, execErr
 }
 
-// pumpStdinForID reads from r in streamChunkSize chunks and sends them to the worker with the given ID,
-// then sends HostMsgStdinEOF. If r is nil, only the EOF is sent.
-func (w *Worker) pumpStdinForID(id uint64, r io.Reader) error {
+// pumpStdinForID reads from r in streamChunkSize chunks and sends them to the
+// worker with the given ID, each against a credit from credits, then sends
+// HostMsgStdinEOF. If r is nil, only the EOF is sent. It stops early, without
+// the EOF, if cmdDone is closed while it waits for a credit.
+func (w *Worker) pumpStdinForID(id uint64, r io.Reader, credits <-chan struct{}, cmdDone <-chan struct{}) error {
 	if r != nil {
 		buf := make([]byte, streamChunkSize)
 		for {
 			n, err := r.Read(buf)
 			if n > 0 {
+				select {
+				case <-credits:
+				case <-cmdDone:
+					return nil
+				}
 				if encErr := w.enc.send(HostMsg{ID: id, Type: HostMsgStdin, Data: buf[:n]}); encErr != nil {
 					return fmt.Errorf("failed to send stdin chunk: %w", encErr)
 				}
@@ -994,7 +1048,8 @@ func (w *Worker) pumpStdinForID(id uint64, r io.Reader) error {
 }
 
 // runDispatcher continuously reads WorkerMsg from the decoder and routes each message
-// to the appropriate pending execution channel. On decode error, all pending channels
+// to the appropriate pending execution. It must never wait on one execution,
+// since every other execution's messages come through it too (see execFlow). On decode error, all pending channels
 // receive a synthetic done-with-error message and are closed.
 func (w *Worker) runDispatcher() {
 	for {
@@ -1006,27 +1061,36 @@ func (w *Worker) runDispatcher() {
 
 			// Drain all pending channels with a synthetic error.
 			w.pendingMu.Lock()
-			for _, ch := range w.pending {
-				ch <- WorkerMsg{Type: WorkerMsgDone, ExitCode: 1, Error: "worker connection lost: " + err.Error()}
-				close(ch)
+			for _, p := range w.pending {
+				p.ch <- WorkerMsg{Type: WorkerMsgDone, ExitCode: 1, Error: "worker connection lost: " + err.Error()}
+				close(p.ch)
 			}
-			w.pending = make(map[uint64]chan WorkerMsg)
+			w.pending = make(map[uint64]*pendingExec)
 			w.pendingMu.Unlock()
 			return
 		}
 
 		w.pendingMu.Lock()
-		ch, ok := w.pending[msg.ID]
+		p, ok := w.pending[msg.ID]
 		if ok && msg.Type == WorkerMsgDone {
 			delete(w.pending, msg.ID)
 		}
 		w.pendingMu.Unlock()
+		if !ok {
+			continue
+		}
 
-		if ok {
-			ch <- msg
-			if msg.Type == WorkerMsgDone {
-				close(ch)
+		if msg.Type == WorkerMsgStdinAck {
+			select {
+			case p.stdinCredits <- struct{}{}:
+			default:
 			}
+			continue
+		}
+		// Never waits: see pendingExec.ch.
+		p.ch <- msg
+		if msg.Type == WorkerMsgDone {
+			close(p.ch)
 		}
 	}
 }
@@ -1044,7 +1108,7 @@ func (w *Worker) Close() error {
 
 	if w.cmd.Process != nil {
 		pid := w.cmd.Process.Pid
-		// The worker leads its own process group (Setpgid at start). Signal the
+		// The worker leads its own process group (workerProcAttr). Signal the
 		// whole group so any background processes it spawned (e.g. servers) are
 		// torn down too, not just the worker leader. Give them a grace period to
 		// exit cleanly on SIGTERM, then SIGKILL whatever is left.
