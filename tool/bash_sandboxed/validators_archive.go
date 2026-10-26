@@ -38,6 +38,9 @@ var tarBlockedShort = map[byte]string{
 	's': "rewrites entry names (bsdtar); means something else in GNU tar",
 	'L': "takes an argument in GNU tar but not in bsdtar",
 	'H': "takes an argument in GNU tar but not in bsdtar",
+	// bsdtar reads -W's argument as a long option ("-W use-compress-program=prog"),
+	// past the long-option checks; in GNU tar it is --verify, a write-mode option.
+	'W': "runs any long option in bsdtar (-W name=value)",
 }
 
 // tarShortWithArg lists the allowed tar short options that take an argument:
