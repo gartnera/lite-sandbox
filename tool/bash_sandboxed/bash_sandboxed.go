@@ -675,6 +675,11 @@ var blockedEnvVars = map[string]string{
 	"GZIP":        "injects gzip options",
 	"XZ_OPT":      "injects xz options",
 	"XZ_DEFAULTS": "injects xz options",
+	// git init and clone copy its hooks into .git/hooks (see gitTemplateFlag).
+	"GIT_TEMPLATE_DIR": "git copies its hooks into .git, where git outside the sandbox runs them",
+	// A work tree inside .git lets git check hooks out there (see
+	// checkGitGlobalWorkTree).
+	"GIT_WORK_TREE": "a work tree inside .git lets git write hooks and config there",
 }
 
 // validateAssigns checks that none of the assignments target a blocked environment variable.

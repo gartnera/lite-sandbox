@@ -800,3 +800,139 @@ func TestExecute_GitPlumbing(t *testing.T) {
 		t.Fatalf("expected expanded --stdin-paths to be rejected, got %v", err)
 	}
 }
+
+// TestValidate_GitConfigProgramKeys tests that, with local_write enabled,
+// git config (and git clone -c) still refuses to set the keys that name a
+// program for git to run, which a git run outside the sandbox would use,
+// and git config edit, whose changes can't be checked.
+func TestValidate_GitConfigProgramKeys(t *testing.T) {
+	blocked := []struct {
+		name    string
+		command string
+		errMsg  string
+	}{
+		{"hooksPath", "git config core.hooksPath /tmp/x", `setting git config key "core.hooksPath" is not allowed`},
+		{"case-insensitive", "git config CORE.HOOKSPATH /tmp/x", `key "CORE.HOOKSPATH"`},
+		{"quoted key", "git config 'core.fsmonitor' ./x", `key "core.fsmonitor"`},
+		{"set subcommand", "git config set core.pager ./x", `key "core.pager"`},
+		{"set with options", "git config set --type=path --all core.editor ./x", `key "core.editor"`},
+		{"set --value", "git config set --value=old core.sshCommand ./x", `key "core.sshCommand"`},
+		{"--add", "git config --add alias.x '!sh -c id'", `key "alias.x"`},
+		{"--replace-all", "git config --replace-all core.askPass ./x", `key "core.askPass"`},
+		{"--local", "git config --local core.gitProxy ./x", `key "core.gitProxy"`},
+		{"--worktree", "git config --worktree core.worktree /home", `key "core.worktree"`},
+		{"--global", "git config --global credential.helper ./x", `key "credential.helper"`},
+		{"--file", "git config --file cfg include.path ./x", `key "include.path"`},
+		{"-f attached", "git config -fcfg includeIf.onbranch:main.path ./x", `key "includeIf.onbranch:main.path"`},
+		{"--file value named like an action", "git config --file --get core.pager ./x", `key "core.pager"`},
+		{"-f value named like a subcommand", "git config -f list core.pager ./x", `key "core.pager"`},
+		{"filter driver", "git config filter.x.smudge ./x", `key "filter.x.smudge"`},
+		{"diff textconv", "git config diff.x.textconv ./x", `key "diff.x.textconv"`},
+		{"diff external", "git config diff.external ./x", `key "diff.external"`},
+		{"merge driver", "git config merge.x.driver ./x", `key "merge.x.driver"`},
+		{"pager", "git config pager.log ./x", `key "pager.log"`},
+		{"config-based hook", "git config hook.x.command ./x", `key "hook.x.command"`},
+		{"gpg program", "git config gpg.ssh.program ./x", `key "gpg.ssh.program"`},
+		{"uploadpack", "git config remote.origin.uploadpack ./x", `key "remote.origin.uploadpack"`},
+		{"submodule update", "git config submodule.x.update '!sh'", `key "submodule.x.update"`},
+		{"sequence editor", "git config sequence.editor ./x", `key "sequence.editor"`},
+		{"protocol", "git config protocol.ext.allow always", `key "protocol.ext.allow"`},
+		{"trace2", "git config trace2.normalTarget /home/u/.bashrc", `key "trace2.normalTarget"`},
+		{"templateDir", "git config init.templateDir ./t", `key "init.templateDir"`},
+		{"after --", "git config -- core.pager ./x", `key "core.pager"`},
+		{"rename-section into filter", "git config rename-section foo filter.x", `git config rename-section to or from "filter.x" is not allowed`},
+		{"--rename-section", "git config --rename-section foo core", `rename-section to or from "core"`},
+		{"--edit", "git config --edit", "git config edit is not allowed"},
+		{"-e", "git config -e", "git config edit is not allowed"},
+		{"--ed abbreviated", "git config --ed", "git config edit is not allowed"},
+		{"edit bundled", "git config -le", "git config edit is not allowed"},
+		{"edit subcommand", "git config edit --local", "git config edit is not allowed"},
+		{"clone -c", "git clone -c core.hooksPath=/tmp/x https://example.com/r.git", `key "core.hooksPath"`},
+		{"clone --config", "git clone --config core.fsmonitor=./x https://example.com/r.git", `key "core.fsmonitor"`},
+		{"clone --config=", "git clone --config=alias.x=!sh https://example.com/r.git", `key "alias.x"`},
+		{"clone --conf abbreviated", "git clone --conf=filter.x.clean=sh https://example.com/r.git", `key "filter.x.clean"`},
+		{"clone -c attached", "git clone -ccore.pager=sh https://example.com/r.git", `key "core.pager"`},
+		{"clone -c bundled", "git clone -qc core.pager=sh https://example.com/r.git", `key "core.pager"`},
+		{"clone --template", "git clone --template=./t https://example.com/r.git", `git clone flag "--template=./t" is not allowed`},
+		{"init --template", "git init --template ./t", `git init flag "--template" is not allowed`},
+		{"init --templ abbreviated", "git init --templ=./t", `git init flag "--templ=./t" is not allowed`},
+		{"GIT_TEMPLATE_DIR", "GIT_TEMPLATE_DIR=./t git init", "setting GIT_TEMPLATE_DIR is not allowed"},
+		// A work tree inside .git checks hooks out there.
+		{"--work-tree into .git", "git --work-tree .git/hooks checkout HEAD -- pre-commit", `git option "--work-tree" with ".git/hooks" is not allowed`},
+		{"--work-tree= into .git", "git --work-tree=sub/.git/hooks checkout HEAD -- pre-commit", `git option "--work-tree=sub/.git/hooks"`},
+		{"-C into .git", "git -C .git/hooks --git-dir=.. checkout HEAD -- pre-commit", `git option "-C" with ".git/hooks" is not allowed`},
+		{"GIT_WORK_TREE", "GIT_WORK_TREE=.git/hooks git checkout HEAD -- pre-commit", "setting GIT_WORK_TREE is not allowed"},
+	}
+	for _, tt := range blocked {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := ParseBash(tt.command)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = newTestSandbox().validate(f)
+			if err == nil {
+				t.Fatalf("expected %q to be refused", tt.command)
+			}
+			if !strings.Contains(err.Error(), tt.errMsg) {
+				t.Fatalf("expected error containing %q, got %q", tt.errMsg, err.Error())
+			}
+		})
+	}
+
+	allowed := []string{
+		"git config user.name 'test'",
+		"git config set user.email a@b.c",
+		"git config --global user.name test",
+		"git config remote.origin.url https://example.com/r.git",
+		"git config branch.main.remote origin",
+		"git config core.autocrlf false",
+		"git config core.excludesFile .gitignore_local",
+		"git config submodule.recurse true",
+		"git config commit.gpgSign false",
+		"git config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'",
+		// Reading or removing a program key is fine.
+		"git config core.hooksPath",
+		"git config --get core.pager",
+		"git config get core.hooksPath",
+		"git config --get-regexp 'alias.*'",
+		"git config --unset core.hooksPath",
+		"git config unset alias.x",
+		"git config --remove-section filter.x",
+		"git config rename-section branch.a branch.b",
+		"git config --list --show-origin",
+		"git clone -c user.name=test https://example.com/r.git",
+		"git clone --depth 1 https://example.com/r.git",
+		"git init",
+		"git -C sub status",
+		"git --git-dir=.git status",
+		"git --git-dir .git --work-tree . status",
+	}
+	for _, cmd := range allowed {
+		t.Run(cmd, func(t *testing.T) {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := newTestSandbox().validate(f); err != nil {
+				t.Fatalf("expected %q to be allowed, got: %v", cmd, err)
+			}
+		})
+	}
+}
+
+// A program key that only appears after expansion is caught at runtime, and
+// git config still sets the keys that run nothing.
+func TestExecute_GitConfigProgramKeys(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSandbox()
+	if _, err := executeInDirWithSandbox(t, s, dir, "git init -q && git config user.name test && git config --get user.name"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	_, err := executeInDirWithSandbox(t, s, dir, `K=core.hooksPath; git config $K /tmp/x`)
+	if err == nil || !strings.Contains(err.Error(), `setting git config key "core.hooksPath" is not allowed`) {
+		t.Fatalf("expected expanded key to be rejected, got %v", err)
+	}
+	if out, err := executeInDirWithSandbox(t, s, dir, "git config --get core.hooksPath || echo unset"); err != nil || !strings.Contains(out, "unset") {
+		t.Fatalf("core.hooksPath was set: %q, %v", out, err)
+	}
+}
