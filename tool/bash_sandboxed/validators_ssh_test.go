@@ -2,6 +2,8 @@ package bash_sandboxed
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -207,7 +209,13 @@ func TestSSHWithoutHosts(t *testing.T) {
 	// An invocation the ssh parse refuses keeps the path checks of the
 	// options that name a local file there: ssh -F prints the lines of a file
 	// it cannot parse as config.
-	for _, cmd := range []string{"ssh -F /etc/hostname anyhost", "ssh -A -F/etc/hostname anyhost", "ssh anyhost -F /etc/hostname"} {
+	// The file must exist: an absolute read path that doesn't is let through
+	// (/etc/hostname is missing on macOS).
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"ssh -F " + outside + " anyhost", "ssh -A -F" + outside + " anyhost", "ssh anyhost -F " + outside} {
 		if err := deny.ValidateCommand(cmd, dir, paths, paths); err == nil {
 			t.Errorf("denylist mode: %s allowed", cmd)
 		}
