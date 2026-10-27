@@ -8,7 +8,11 @@
 // request from its client and forwards it only when it is
 //
 //   - SSH_AGENTC_REQUEST_IDENTITIES: list the public keys;
-//   - SSH_AGENTC_SIGN_REQUEST: sign with one of them (how ssh authenticates);
+//   - SSH_AGENTC_SIGN_REQUEST: sign with one of them, for authentication (the
+//     data ssh signs to log in) or, while AllowGitSigning is on, a git commit
+//     or tag (an SSHSIG signature in the "git" namespace, as ssh-keygen -Y sign
+//     -n git makes for git's gpg.format ssh); an SSHSIG signature in any other
+//     namespace (a file, an email) is refused;
 //   - SSH_AGENTC_EXTENSION "session-bind@openssh.com", which binds the
 //     connection to the server's host key and session (OpenSSH 8.9+ sends it
 //     before signing), for the client's own connection only.
@@ -32,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 // Message types, from the ssh agent protocol.
@@ -54,6 +59,14 @@ const (
 // sessionBind is the one extension the proxy forwards.
 const sessionBind = "session-bind@openssh.com"
 
+// sshsigMagic starts the data of an SSHSIG signature (PROTOCOL.sshsig). The
+// data ssh signs to authenticate starts with the session identifier's length
+// instead, which can never spell it.
+const sshsigMagic = "SSHSIG"
+
+// gitNamespace is the SSHSIG namespace git signs commits and tags in.
+const gitNamespace = "git"
+
 // maxMessageLen bounds a message, as OpenSSH's agent does (AGENT_MAX_LEN).
 const maxMessageLen = 256 * 1024
 
@@ -65,6 +78,9 @@ type Proxy struct {
 	dir      string
 	socket   string
 	ln       net.Listener
+
+	// gitSigning allows SSHSIG signatures in the git namespace.
+	gitSigning atomic.Bool
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
@@ -111,6 +127,10 @@ func (p *Proxy) Socket() string { return p.socket }
 
 // Upstream returns the path of the real agent socket it forwards to.
 func (p *Proxy) Upstream() string { return p.upstream }
+
+// AllowGitSigning turns signing git commits and tags (SSHSIG, namespace git)
+// on or off, for the requests that follow.
+func (p *Proxy) AllowGitSigning(on bool) { p.gitSigning.Store(on) }
 
 // Close stops the proxy, drops its connections, and removes its directory.
 func (p *Proxy) Close() error {
@@ -174,7 +194,7 @@ func (p *Proxy) handle(client net.Conn) {
 		if err != nil {
 			return
 		}
-		if why := st.filter(req); why != "" {
+		if why := st.filter(req, p.gitSigning.Load()); why != "" {
 			slog.Info("ssh agent proxy refused a request", "reason", why)
 			if _, err := client.Write(failure); err != nil {
 				return
@@ -237,15 +257,17 @@ type connState struct {
 }
 
 // filter returns why the request msg (framed) must not reach the agent, or
-// "" when it may.
-func (st *connState) filter(msg []byte) string {
+// "" when it may. gitSigning allows SSHSIG signatures in the git namespace.
+func (st *connState) filter(msg []byte, gitSigning bool) string {
 	if st.forwarded {
 		return "the connection relays the agent to a remote host (agent forwarding)"
 	}
 	body := msg[4:]
 	switch body[0] {
-	case msgRequestIdentities, msgSignRequest:
+	case msgRequestIdentities:
 		return ""
+	case msgSignRequest:
+		return signFilter(body[1:], gitSigning)
 	case msgExtension:
 		name, rest, ok := readString(body[1:])
 		if !ok {
@@ -271,6 +293,44 @@ func (st *connState) filter(msg []byte) string {
 		return "locking or unlocking the agent"
 	}
 	return fmt.Sprintf("message type %d", body[0])
+}
+
+// signFilter checks a sign request's payload (key blob, data, flags): an
+// authentication signature passes, an SSHSIG signature only in the git
+// namespace and while git signing is on.
+func signFilter(b []byte, gitSigning bool) string {
+	_, b, ok := readString(b)
+	if !ok {
+		return "malformed sign request"
+	}
+	data, _, ok := readString(b)
+	if !ok {
+		return "malformed sign request"
+	}
+	ns, isSSHSIG := sshsigNamespace(data)
+	switch {
+	case !isSSHSIG:
+		return ""
+	case ns != gitNamespace:
+		return fmt.Sprintf("signing in the SSHSIG namespace %q", ns)
+	case !gitSigning:
+		return "signing a git commit or tag (git signing is off)"
+	}
+	return ""
+}
+
+// sshsigNamespace returns the namespace of SSHSIG signed data, and whether
+// data is SSHSIG at all. Data that starts with the magic but cannot be parsed
+// is reported as SSHSIG with no namespace, so it is refused.
+func sshsigNamespace(data []byte) (string, bool) {
+	if len(data) < len(sshsigMagic) || string(data[:len(sshsigMagic)]) != sshsigMagic {
+		return "", false
+	}
+	ns, _, ok := readString(data[len(sshsigMagic):])
+	if !ok {
+		return "", true
+	}
+	return string(ns), true
 }
 
 // sessionBindForwarding parses the rest of a session-bind request (host key,

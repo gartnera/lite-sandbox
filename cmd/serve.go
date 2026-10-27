@@ -374,11 +374,11 @@ func startSSHAgentProxy(sandbox *bash_sandboxed.Sandbox) func() {
 	if err != nil {
 		// unrestricted_agent can still hand over the real socket.
 		slog.Warn("restricted ssh agent unavailable", "error", err)
-		sandbox.SetSSHAgent("", upstream)
+		sandbox.SetSSHAgent(nil, upstream)
 		return func() {}
 	}
 	slog.Info("restricted ssh agent", "socket", proxy.Socket(), "upstream", upstream)
-	sandbox.SetSSHAgent(proxy.Socket(), upstream)
+	sandbox.SetSSHAgent(proxy, upstream)
 	return func() { proxy.Close() }
 }
 

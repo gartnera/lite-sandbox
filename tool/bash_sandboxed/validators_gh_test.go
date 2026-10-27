@@ -355,15 +355,23 @@ func TestScopedGitEnv(t *testing.T) {
 		"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "me",
 		"GIT_SSH": "/opt/my ssh", "GIT_EDITOR": "vim",
 	}
-	scopedGitEnv(env)
+	scopedGitEnv(env, false)
 	if env["GIT_CONFIG_KEY_0"] != "user.name" || env["GIT_CONFIG_VALUE_0"] != "me" {
 		t.Errorf("the server's own config entry was overwritten: %v", env)
 	}
 	if env["GIT_CONFIG_KEY_1"] != "core.hooksPath" || env["GIT_CONFIG_VALUE_1"] != "/dev/null" {
 		t.Errorf("hooksPath not appended after the server's entries: %v", env)
 	}
-	if got, want := env["GIT_CONFIG_COUNT"], strconv.Itoa(1+len(scopedGitConfig)); got != want {
+	if got, want := env["GIT_CONFIG_COUNT"], strconv.Itoa(1+len(scopedGitConfig)+len(scopedGitSigningOff)); got != want {
 		t.Errorf("GIT_CONFIG_COUNT = %s, want %s", got, want)
+	}
+	// A worker whose git signs leaves signing as the user set it.
+	signing := map[string]string{}
+	scopedGitEnv(signing, true)
+	for k, v := range signing {
+		if strings.HasPrefix(k, "GIT_CONFIG_KEY_") && strings.HasSuffix(v, "gpgSign") {
+			t.Errorf("signing worker sets %s", v)
+		}
 	}
 	if env["GIT_SSH_COMMAND"] != `'/opt/my ssh'` {
 		t.Errorf("GIT_SSH_COMMAND = %q, want the server's GIT_SSH, quoted", env["GIT_SSH_COMMAND"])

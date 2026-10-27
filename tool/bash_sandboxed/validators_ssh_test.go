@@ -111,23 +111,25 @@ func TestValidateSSHPassCommand(t *testing.T) {
 		command   string
 		errSubstr string
 	}{
-		{command: "sshpass -p hunter2 ssh box uptime"},
-		{command: "sshpass -phunter2 ssh me@box"},
-		{command: "sshpass -e ssh box"},
-		{command: "SSHPASS=x sshpass -e ssh box"},
-		{command: "sshpass -v -P 'Passcode:' -p /not/a/path ssh box cat /etc/hostname"},
-		{command: "sshpass -f ./pw ssh -o PubkeyAuthentication=no box"},
-		{command: "sshpass -d 3 ssh box"},
+		{command: "sshpass -e ssh box uptime"},
+		{command: "export SSHPASS=$(cat pw.txt); sshpass -e ssh me@box"},
+		{command: "sshpass -v -e -P 'Passcode:' ssh box cat /etc/hostname"},
+		{command: "sshpass -ve ssh -o PubkeyAuthentication=no box"},
 		{command: "sshpass -h"},
 		{command: "sshpass -V"},
 
-		{command: "sshpass -p x ssh evil", errSubstr: `ssh to "evil" is not allowed`},
-		{command: "sshpass -p x ssh -A box", errSubstr: "-A is not allowed"},
-		{command: "sshpass -p x scp f box:", errSubstr: `sshpass may only run ssh, not "scp"`},
-		{command: "sshpass -p x bash -c id", errSubstr: "sshpass may only run ssh"},
+		{command: "sshpass -p hunter2 ssh box", errSubstr: "export SSHPASS=$(cat <file>)"},
+		{command: "sshpass -phunter2 ssh box", errSubstr: "-p is not allowed"},
+		{command: "sshpass -e -p x ssh box", errSubstr: "-p is not allowed"},
+		{command: "sshpass -f ./pw ssh box", errSubstr: "-f is not allowed"},
+		{command: "sshpass -d 3 ssh box", errSubstr: "-d is not allowed"},
+		{command: "sshpass ssh box", errSubstr: "without -e is not allowed"},
+		{command: "sshpass -e ssh evil", errSubstr: `ssh to "evil" is not allowed`},
+		{command: "sshpass -e ssh -A box", errSubstr: "-A is not allowed"},
+		{command: "sshpass -e scp f box:", errSubstr: `sshpass may only run ssh, not "scp"`},
+		{command: "sshpass -e bash -c id", errSubstr: "sshpass may only run ssh"},
 		{command: "sshpass -x ssh box", errSubstr: "unknown option"},
-		{command: "sshpass -f /etc/passwd ssh box", errSubstr: "outside allowed directories"},
-		{command: "sshpass -vf/etc/passwd ssh box", errSubstr: "must not be bundled"},
+		{command: "cat /etc/passwd > /dev/null; export SSHPASS=$(cat /etc/passwd)", errSubstr: "outside allowed directories"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -145,12 +147,32 @@ func TestValidateSSHPassCommand(t *testing.T) {
 	}
 }
 
+// TestSSHPassEnv: $SSHPASS reaches sshpass alone, and is a credential the
+// worker's environment leaves out.
+func TestSSHPassEnv(t *testing.T) {
+	if !config.CredentialEnvVar("SSHPASS") {
+		t.Error("SSHPASS is not treated as a credential")
+	}
+	for _, args := range [][]string{{"ssh", "box"}, {"env"}, {"git", "push"}} {
+		env := map[string]string{"SSHPASS": "pw", "HOME": "/h"}
+		stripSSHPass(args, env)
+		if _, ok := env["SSHPASS"]; ok || env["HOME"] != "/h" {
+			t.Errorf("%v kept %v", args, env)
+		}
+	}
+	env := map[string]string{"SSHPASS": "pw"}
+	stripSSHPass([]string{"sshpass", "-e", "ssh", "box"}, env)
+	if env["SSHPASS"] != "pw" {
+		t.Error("sshpass lost SSHPASS")
+	}
+}
+
 // TestSSHWithoutHosts: with no hosts listed, ssh is not on the whitelist
 // (allowlist mode names the remedy), and denylist mode runs it as before.
 func TestSSHWithoutHosts(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{dir}
-	for _, cmd := range []string{"ssh box", "sshpass -p x ssh box"} {
+	for _, cmd := range []string{"ssh box", "sshpass -e ssh box"} {
 		err := newTestSandbox().ValidateCommand(cmd, dir, paths, paths)
 		if err == nil || !strings.Contains(err.Error(), "config ssh hosts add") {
 			t.Errorf("%s without hosts: %v", cmd, err)
@@ -204,21 +226,40 @@ func TestGitContactsRemote(t *testing.T) {
 	}
 }
 
+// fakeAgentProxy stands in for the restricted agent the server serves.
+type fakeAgentProxy struct {
+	socket     string
+	gitSigning bool
+}
+
+func (p *fakeAgentProxy) Socket() string          { return p.socket }
+func (p *fakeAgentProxy) AllowGitSigning(on bool) { p.gitSigning = on }
+
+// routed reports whether args run in the ssh agent's worker.
+func (s *Sandbox) routedToAgent(args []string) bool {
+	scope, _, ok := s.workerScope(args)
+	return ok && s.isSSHAgentScope(scope)
+}
+
 // TestSSHAgentScope: with an agent socket, ssh, sshpass, and git's remote
 // commands go to the agent's worker; local git and everything else do not;
 // every other worker masks the sockets.
 func TestSSHAgentScope(t *testing.T) {
 	s := newTestSandboxWithSSH("box")
-	s.SetSSHAgent("/run/proxy.sock", "/run/agent.sock")
+	proxy := &fakeAgentProxy{socket: "/run/proxy.sock"}
+	s.SetSSHAgent(proxy, "/run/agent.sock")
 	for _, args := range [][]string{{"ssh", "box"}, {"sshpass", "-e", "ssh", "box"}, {"git", "push"}, {"git", "fetch"}} {
-		if !s.scopedInvocation(args) {
+		if !s.routedToAgent(args) {
 			t.Errorf("%v not routed to the agent's worker", args)
 		}
 	}
 	for _, args := range [][]string{{"git", "status"}, {"git", "commit", "-m", "x"}, {"ls"}, {"ssh-add", "-l"}} {
-		if s.scopedInvocation(args) {
-			t.Errorf("%v routed to the agent's worker", args)
+		if _, _, ok := s.workerScope(args); ok {
+			t.Errorf("%v routed to a scoped worker", args)
 		}
+	}
+	if proxy.gitSigning {
+		t.Error("git signing allowed without git_signing")
 	}
 	cfg := s.getConfig()
 	shared := s.sshAgentMasks(cfg)
@@ -236,8 +277,23 @@ func TestSSHAgentScope(t *testing.T) {
 		t.Errorf("host commands get SSH_AUTH_SOCK=%s, want the proxy", env["SSH_AUTH_SOCK"])
 	}
 
-	// unrestricted_agent hands over the real socket.
+	// git_signing sends the signing git commands there too, and tells the
+	// proxy to sign them.
 	yes := true
+	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, GitSigning: &yes}}, "")
+	if !proxy.gitSigning {
+		t.Error("git_signing did not reach the proxy")
+	}
+	for _, args := range [][]string{{"git", "commit", "-m", "x"}, {"git", "tag", "-s", "v1"}, {"git", "-c", "x=y", "rebase", "main"}} {
+		if !s.routedToAgent(args) {
+			t.Errorf("%v not routed to the agent's worker with git_signing", args)
+		}
+	}
+	if s.routedToAgent([]string{"git", "status"}) {
+		t.Error("git status routed to the agent's worker")
+	}
+
+	// unrestricted_agent hands over the real socket.
 	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, UnrestrictedAgent: &yes}}, "")
 	scope, _, _ = s.commandScope("ssh")
 	if !s.isSSHAgentScope(scope) || s.sshAgentSocket != "/run/agent.sock" {
@@ -250,8 +306,12 @@ func TestSSHAgentScope(t *testing.T) {
 	// agent: false: nothing gets it, and host commands lose SSH_AUTH_SOCK.
 	no := false
 	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, Agent: &no}}, "")
-	if s.scopedInvocation([]string{"ssh", "box"}) || s.scopedInvocation([]string{"git", "push"}) {
+	if s.routedToAgent([]string{"ssh", "box"}) || s.routedToAgent([]string{"git", "push"}) {
 		t.Error("agent: false still routes to an agent worker")
+	}
+	// sshpass still gets a worker of its own, without the agent.
+	if scope, _, ok := s.workerScope([]string{"sshpass", "-e", "ssh", "box"}); !ok || scope.Key != "sshpass" {
+		t.Errorf("sshpass with agent: false runs in %+v, %v", scope, ok)
 	}
 	env = map[string]string{"SSH_AUTH_SOCK": "/run/agent.sock"}
 	s.sshAgentHostEnv(env)
@@ -262,8 +322,8 @@ func TestSSHAgentScope(t *testing.T) {
 	// No ssh section: git keeps running where it did, the real agent is not
 	// masked, and the proxy (which serves nobody) is.
 	s.updateConfig(&config.Config{}, "")
-	if s.scopedInvocation([]string{"git", "push"}) {
-		t.Error("git routed to an agent worker without an ssh section")
+	if _, _, ok := s.workerScope([]string{"git", "push"}); ok {
+		t.Error("git routed to a scoped worker without an ssh section")
 	}
 	if m := s.sshAgentMasks(s.getConfig()); len(m) != 1 || m[0] != "/run/proxy.sock" {
 		t.Errorf("without an ssh section the worker masks %v", m)

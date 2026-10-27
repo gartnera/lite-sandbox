@@ -19,6 +19,9 @@ func TestSSHConfigCommands(t *testing.T) {
 		if err := sshAgentUnrestrictCmd.RunE(sshAgentUnrestrictCmd, nil); err != nil {
 			t.Fatal(err)
 		}
+		if err := sshGitSigningEnableCmd.RunE(sshGitSigningEnableCmd, nil); err != nil {
+			t.Fatal(err)
+		}
 	})
 	if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"me@box"}); err == nil {
 		t.Error("user@host accepted")
@@ -35,7 +38,7 @@ func TestSSHConfigCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "build-box, 10.0.0.12") || !strings.Contains(out, "Agent: unrestricted") {
+	if !strings.Contains(out, "build-box, 10.0.0.12") || !strings.Contains(out, "Agent: unrestricted") || !strings.Contains(out, "Git signing: on") {
 		t.Errorf("show: %s", out)
 	}
 

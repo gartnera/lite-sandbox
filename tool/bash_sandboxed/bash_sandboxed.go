@@ -115,6 +115,7 @@ type Sandbox struct {
 	// one the current config grants ssh, sshpass, and git's remote commands
 	// ("" when none). inputCfg is the config UpdateConfig was last given,
 	// before that grant, so SetSSHAgent can re-apply it. See ssh_agent.go.
+	sshAgent         SSHAgentProxy
 	sshAgentProxy    string
 	sshAgentUpstream string
 	sshAgentSocket   string
@@ -303,6 +304,7 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		slog.Info("enabling OS sandbox", "block_aws_credentials", cfg.AWS.UsesIMDS())
 	}
 	s.mu.Unlock()
+	s.applySSHAgentConfig(cfg)
 }
 
 // getConfig returns a snapshot of the current config.
@@ -1332,8 +1334,8 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	unsandboxed := s.execIsUnsandboxed(ctx, args)
 	if useOSSandbox && !unsandboxed {
-		if s.scopedInvocation(args) {
-			return s.execInScopedWorker(ctx, args)
+		if scope, cfg, ok := s.workerScope(args); ok {
+			return s.execInScopedWorker(ctx, args, scope, cfg)
 		}
 		return s.execInWorker(ctx, args)
 	}
@@ -1390,6 +1392,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	if err != nil {
 		return err
 	}
+	stripSSHPass(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
@@ -1745,6 +1748,7 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	stripSSHPass(args, envMap)
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

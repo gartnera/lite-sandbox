@@ -17,6 +17,7 @@ clone, ...) get.
 
   lite-sandbox config ssh hosts add build-box 10.0.0.12
   lite-sandbox config ssh agent unrestrict   # hand over the real agent socket
+  lite-sandbox config ssh git-signing enable # sign commits and tags with the agent
   lite-sandbox config ssh show`,
 }
 
@@ -52,6 +53,11 @@ var sshShowCmd = &cobra.Command{
 			fmt.Printf("  Agent: unrestricted (the real agent socket, for %s alone)\n", agentUsers)
 		default:
 			fmt.Printf("  Agent: restricted (lists and signs only, no forwarding; for %s alone)\n", agentUsers)
+		}
+		if s.GitSigningEnabled() {
+			fmt.Println("  Git signing: on (commit, tag, merge, rebase, ... sign with the agent; their hooks do not run)")
+		} else {
+			fmt.Println("  Git signing: off")
 		}
 		if config.SSHAuthSock() == "" {
 			fmt.Println("  Note: SSH_AUTH_SOCK names no agent socket here")
@@ -157,6 +163,20 @@ var (
 		func(s *config.SSHConfig) { s.UnrestrictedAgent = boolRef(true) })
 )
 
+var sshGitSigningCmd = &cobra.Command{
+	Use:   "git-signing",
+	Short: "Sign git commits and tags with the ssh agent (gpg.format ssh)",
+}
+
+var (
+	sshGitSigningEnableCmd = sshAgentSetter("enable", "Let the git commands that sign (commit, tag, merge, rebase, ...) use the agent; they then run without the project's hooks",
+		"git signing enabled: commit, tag, merge, rebase, cherry-pick, revert, am, and commit-tree sign with the ssh agent, without running the project's hooks",
+		func(s *config.SSHConfig) { s.GitSigning = boolRef(true) })
+	sshGitSigningDisableCmd = sshAgentSetter("disable", "Stop signing git commits and tags with the ssh agent",
+		"git signing disabled",
+		func(s *config.SSHConfig) { s.GitSigning = nil })
+)
+
 var sshDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Remove the ssh section (ssh and sshpass refused, the agent left as before)",
@@ -178,6 +198,7 @@ var sshDisableCmd = &cobra.Command{
 func init() {
 	sshHostsCmd.AddCommand(sshHostsAddCmd, sshHostsRemoveCmd)
 	sshAgentCmd.AddCommand(sshAgentEnableCmd, sshAgentDisableCmd, sshAgentRestrictCmd, sshAgentUnrestrictCmd)
-	sshCmd.AddCommand(sshShowCmd, sshHostsCmd, sshAgentCmd, sshDisableCmd)
+	sshGitSigningCmd.AddCommand(sshGitSigningEnableCmd, sshGitSigningDisableCmd)
+	sshCmd.AddCommand(sshShowCmd, sshHostsCmd, sshAgentCmd, sshGitSigningCmd, sshDisableCmd)
 	configCmd.AddCommand(sshCmd)
 }

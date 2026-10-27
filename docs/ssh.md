@@ -14,6 +14,7 @@ ssh:
     - 10.0.0.12
   agent: true                # give the agent to ssh, sshpass, and git's remote commands (default: true)
   unrestricted_agent: false  # hand them the real agent socket instead of the filter (default: false)
+  git_signing: false         # sign git commits and tags with the agent (default: false)
 ```
 
 ```bash
@@ -23,6 +24,7 @@ lite-sandbox config ssh hosts remove 10.0.0.12
 lite-sandbox config ssh agent disable      # no agent for anything
 lite-sandbox config ssh agent unrestrict   # the real socket (see below)
 lite-sandbox config ssh agent restrict     # back to the filter
+lite-sandbox config ssh git-signing enable # sign commits and tags (see below)
 lite-sandbox config ssh disable            # remove the section
 ```
 
@@ -40,7 +42,7 @@ their argument validator holds them to the list:
 ssh build-box uptime                 # allowed
 ssh deploy@build-box -p 2222 'cat /var/log/app.log | tail'
 ssh -J build-box 10.0.0.12 make test # every jump host must be listed too
-sshpass -p "$PW" ssh 10.0.0.12 true  # sshpass may only run ssh
+sshpass -e ssh 10.0.0.12 true        # password from $SSHPASS (see below); may only run ssh
 ssh other-box                        # refused: not listed
 ```
 
@@ -78,9 +80,27 @@ Without hosts listed, `ssh` and `sshpass` aren't on the whitelist, so
 `allowlist` mode refuses them. `denylist` mode, which doesn't whitelist
 commands, still runs them unchecked until you list a host.
 
-`sshpass -p` puts the password in the command line the agent writes, where
-your agent's transcript keeps it. `sshpass -e` reads it from `SSHPASS`, which the
-agent can set for the command; `-f` reads a file inside the path boundary.
+### sshpass
+
+sshpass takes the password from the environment only (`-e`, which reads
+`SSHPASS`), and the agent loads it there without seeing it:
+
+```bash
+export SSHPASS=$(cat secrets/build-box.pw)   # the file must be readable in the path boundary
+sshpass -e ssh build-box uptime
+```
+
+`-p` would put the password in the command line the agent writes, and so in
+its context and transcript; it is refused, as are `-f`, `-d`, and reading the
+password from stdin (no option), so there is one way to do it. `SSHPASS`
+reaches sshpass alone: it is left out of every other command's environment, so
+a program run later in the same call can't read it, and sshpass runs in an OS
+sandbox worker of its own (the agent's, when it has one), whose processes the
+shared worker can't see. An `SSHPASS` the server was started with counts as a
+credential: commands and the shell don't see it (under the OS sandbox), and
+sshpass gets it when the agent sets none. Nothing stops the agent from
+printing the variable itself (`echo $SSHPASS`); the point is that it never has
+to.
 
 Host keys come from your `~/.ssh/known_hosts`, which the
 [hidden home](configuration.md#hidden-home-os_sandbox_hide_home) shows
@@ -117,7 +137,10 @@ and the [OS sandbox](security.md#os-level-sandboxing-optional) on:
   filter below limits what such a driver could do with the agent.
 - **The agent is filtered** (unless `unrestricted_agent`). lite-sandbox serves
   a socket of its own in front of the agent that forwards only listing the
-  keys, signing with them, and OpenSSH's `session-bind@openssh.com`. Adding,
+  keys, signing with them to authenticate (and, with `git_signing`, to sign a
+  git commit or tag: an SSHSIG signature in the `git` namespace), and OpenSSH's
+  `session-bind@openssh.com`. SSHSIG signatures in any other namespace (a
+  file, an email) are refused, as are adding,
   removing, and locking keys, smartcard keys, and every other extension are
   refused, and a connection ssh binds for forwarding gets nothing, so the keys
   can't be used from a remote host the agent was forwarded to (ssh's `-A` is
@@ -138,5 +161,25 @@ section added later (the config is reloaded on change) applies without a
 restart. With no agent there is nothing to give: `ssh` still runs, with
 password or `sshpass` authentication.
 
-Commit signing with an ssh key (`gpg.format ssh`) isn't covered: `git commit`
-runs in the shared worker, without the agent.
+### Git signing
+
+`git_signing: true` (`lite-sandbox config ssh git-signing enable`) signs commits
+and tags with a key in your agent, with git's ssh signing (`gpg.format ssh`,
+`user.signingKey` naming the public key or `key::ssh-ed25519 ...`, and
+`commit.gpgSign`/`tag.gpgSign` or `-S`/`-s` as you set them):
+
+- `commit`, `tag`, `merge`, `rebase`, `cherry-pick`, `revert`, `am`, and
+  `commit-tree` also run in the agent's worker, where signing isn't switched
+  off. They keep the agent's commit identity (`GIT_AUTHOR_*`,
+  `GIT_COMMITTER_*`) but none of its other variables.
+- **Their hooks don't run** (`pre-commit`, `commit-msg`, `post-rewrite`, ...):
+  hooks are the project's code, and running them there would give it the
+  agent. Run the checks a hook would run as their own commands.
+- The signing program can't come from the project: `gpg.format` is pinned to
+  `ssh`, and `gpg.ssh.program` and `gpg.ssh.defaultKeyCommand` to your system
+  and global values (read outside any repository; `ssh-keygen` and none when
+  unset), at a level that outranks `.git/config`.
+- The filter signs git signatures only while the option is on.
+
+Without it, a signing commit runs in the shared worker, which has no agent, and
+fails.

@@ -18,6 +18,7 @@ import (
 //	    - 10.0.0.12
 //	  agent: true                # default true once the section exists
 //	  unrestricted_agent: false  # default false: the agent goes through a filter
+//	  git_signing: false         # default false: git commit/tag signing with the agent
 //
 // The agent, when on, is given to those commands alone: they run in an OS
 // sandbox worker of their own (a command scope, see CommandScope) that can
@@ -34,6 +35,9 @@ type SSHConfig struct {
 	// UnrestrictedAgent gives them the real agent socket rather than the
 	// filtering proxy (default false).
 	UnrestrictedAgent *bool `yaml:"unrestricted_agent,omitempty"`
+	// GitSigning gives the agent to the git commands that sign commits and
+	// tags too (gpg.format ssh), and lets the proxy sign them (default false).
+	GitSigning *bool `yaml:"git_signing,omitempty"`
 }
 
 // SSHCommands are the commands the ssh section whitelists once it lists a
@@ -96,6 +100,13 @@ func (s *SSHConfig) AgentEnabled() bool {
 // the filtering proxy (default false).
 func (s *SSHConfig) AgentUnrestricted() bool {
 	return s != nil && s.UnrestrictedAgent != nil && *s.UnrestrictedAgent
+}
+
+// GitSigningEnabled reports whether the git commands that sign commits and
+// tags get the agent, and the proxy signs for them: git_signing is on and so
+// is the agent.
+func (s *SSHConfig) GitSigningEnabled() bool {
+	return s.AgentEnabled() && s.GitSigning != nil && *s.GitSigning
 }
 
 // ValidateSSHHost rejects a hosts entry ssh could not take as a destination

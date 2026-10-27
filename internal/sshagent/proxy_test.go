@@ -39,7 +39,7 @@ func TestFilter(t *testing.T) {
 	}
 	for _, m := range allowed {
 		var st connState
-		if why := st.filter(m); why != "" {
+		if why := st.filter(m, false); why != "" {
 			t.Errorf("type %d refused: %s", m[4], why)
 		}
 	}
@@ -60,21 +60,54 @@ func TestFilter(t *testing.T) {
 	}
 	for _, m := range refused {
 		var st connState
-		if why := st.filter(m); why == "" {
+		if why := st.filter(m, false); why == "" {
 			t.Errorf("message %v allowed", m[4:])
 		}
 	}
 }
 
+func sshsigData(ns string) []byte {
+	b := append([]byte(sshsigMagic), sshString(ns)...)
+	return append(b, append(sshString(""), append(sshString("sha512"), sshString("hash")...)...)...)
+}
+
+func TestFilterSSHSIG(t *testing.T) {
+	sign := func(data []byte) []byte {
+		return frame([]byte{msgSignRequest}, sshString("key"), sshString(string(data)), []byte{0, 0, 0, 0})
+	}
+	tests := []struct {
+		data       []byte
+		gitSigning bool
+		allowed    bool
+	}{
+		{sshString("session-id"), false, true}, // authentication
+		{sshsigData("git"), false, false},
+		{sshsigData("git"), true, true},
+		{sshsigData("file"), true, false},
+		{sshsigData("git@example.com"), true, false},
+		{[]byte("SSHSIG\x00\x00"), true, false}, // malformed
+	}
+	for _, tt := range tests {
+		var st connState
+		if got := st.filter(sign(tt.data), tt.gitSigning) == ""; got != tt.allowed {
+			t.Errorf("sign %q (git signing %v): allowed=%v", tt.data, tt.gitSigning, got)
+		}
+	}
+	var st connState
+	if st.filter(frame([]byte{msgSignRequest}, []byte{0, 0}), true) == "" {
+		t.Error("malformed sign request allowed")
+	}
+}
+
 func TestFilterRefusesForwardedConnection(t *testing.T) {
 	var st connState
-	if why := st.filter(sessionBindMsg(true)); why == "" {
+	if why := st.filter(sessionBindMsg(true), false); why == "" {
 		t.Fatal("forwarding session-bind allowed")
 	}
-	if why := st.filter(frame([]byte{msgRequestIdentities})); why == "" {
+	if why := st.filter(frame([]byte{msgRequestIdentities}), false); why == "" {
 		t.Error("listing keys allowed on a forwarded connection")
 	}
-	if why := st.filter(frame([]byte{msgSignRequest}, sshString("k"), sshString("d"), []byte{0, 0, 0, 0})); why == "" {
+	if why := st.filter(frame([]byte{msgSignRequest}, sshString("k"), sshString("d"), []byte{0, 0, 0, 0}), true); why == "" {
 		t.Error("signing allowed on a forwarded connection")
 	}
 }
@@ -149,15 +182,26 @@ func TestProxyWithRealAgent(t *testing.T) {
 		t.Fatalf("proxy socket: %v, %v", fi, err)
 	}
 
-	// Listing and signing work through the proxy.
+	// Listing works through the proxy.
 	if out := run(t, p.Socket(), "ssh-add", "-l"); !strings.Contains(out, "test-key") {
 		t.Fatalf("ssh-add -l through the proxy: %s", out)
 	}
+	// SSHSIG signing: never outside the git namespace, in it only while git
+	// signing is on.
 	data := filepath.Join(t.TempDir(), "data")
 	os.WriteFile(data, []byte("hello"), 0o600)
-	run(t, p.Socket(), "ssh-keygen", "-Y", "sign", "-f", pub, "-n", "file", data)
+	for _, ns := range []string{"file", "git"} {
+		if out, err := command(p.Socket(), "ssh-keygen", "-Y", "sign", "-f", pub, "-n", ns, data).CombinedOutput(); err == nil {
+			t.Errorf("signing in namespace %s with git signing off succeeded: %s", ns, out)
+		}
+	}
+	p.AllowGitSigning(true)
+	if out, err := command(p.Socket(), "ssh-keygen", "-Y", "sign", "-f", pub, "-n", "file", data).CombinedOutput(); err == nil {
+		t.Errorf("signing in namespace file succeeded: %s", out)
+	}
+	run(t, p.Socket(), "ssh-keygen", "-Y", "sign", "-f", pub, "-n", "git", data)
 	if _, err := os.Stat(data + ".sig"); err != nil {
-		t.Fatalf("no signature written: %v", err)
+		t.Fatalf("no git signature written: %v", err)
 	}
 
 	// Changing the agent does not.

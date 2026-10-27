@@ -371,57 +371,67 @@ func validateSSHCommand(s *Sandbox, args []*syntax.Word) error {
 	return checkSSHArgv(argv, cfg)
 }
 
-// sshpassFlagsWithValue are sshpass's options that take a value (getopt
-// string "+f:d:p:P:heVv"; options end at the first operand).
-const sshpassFlagsWithValue = "fdpP"
+// sshpass takes the password only from the environment (-e reads
+// $SSHPASS), which the agent loads without seeing it:
+//
+//	export SSHPASS=$(cat ~/secrets/build-box.pw)
+//	sshpass -e ssh build-box uptime
+//
+// -p would put the password in the command line the agent writes, and the
+// other sources (-f, -d, and stdin with no option) are refused so there is one
+// way to do it. $SSHPASS reaches sshpass alone: every other command's
+// environment leaves it out (stripSSHPass).
+
+// sshpassFix is the remedy a refused sshpass invocation names.
+const sshpassFix = "load the password into the environment without printing it (export SSHPASS=$(cat <file>)) and run sshpass -e ssh ..."
 
 // parseSSHPassArgs returns the index in args of the command sshpass runs
-// (len(args) when there is none: -h, -V), and the indices of sshpass's own
-// words that are not local paths (the password and the prompt).
-func parseSSHPassArgs(args []string) (cmdIdx int, nonPath []int, err error) {
+// (len(args) when there is none: -h, -V), the indices of sshpass's own words
+// that are not local paths (the prompt), and whether -e was given.
+// (getopt string "+f:d:p:P:heVv": options end at the first operand.)
+func parseSSHPassArgs(args []string) (cmdIdx int, nonPath []int, env bool, err error) {
 	i := 1
 	for i < len(args) {
 		a := args[i]
 		if a == "--" {
-			return i + 1, nonPath, nil
+			return i + 1, nonPath, env, nil
 		}
 		if len(a) < 2 || a[0] != '-' {
-			return i, nonPath, nil
+			return i, nonPath, env, nil
 		}
 		next := i + 1
 		for j := 1; j < len(a); j++ {
-			c := a[j]
-			if strings.IndexByte("heVv", c) >= 0 {
-				if c == 'h' || c == 'V' {
-					return len(args), nonPath, nil
+			switch c := a[j]; c {
+			case 'h', 'V':
+				return len(args), nonPath, env, nil
+			case 'v':
+			case 'e':
+				env = true
+			case 'P':
+				valIdx := i
+				if j+1 == len(a) {
+					if i+1 >= len(args) {
+						return 0, nil, false, fmt.Errorf("sshpass option -P needs a value")
+					}
+					valIdx, next = i+1, i+2
 				}
-				continue
-			}
-			if strings.IndexByte(sshpassFlagsWithValue, c) < 0 {
-				return 0, nil, fmt.Errorf("sshpass option -%c is not allowed: unknown option", c)
-			}
-			valIdx := i
-			if j+1 == len(a) {
-				if i+1 >= len(args) {
-					return 0, nil, fmt.Errorf("sshpass option -%c needs a value", c)
-				}
-				valIdx, next = i+1, i+2
-			} else if c == 'f' && j != 1 {
-				return 0, nil, fmt.Errorf("sshpass option -f must not be bundled with other options; write it as its own -f %s", a[j+1:])
-			}
-			if c != 'f' {
 				nonPath = append(nonPath, valIdx)
+				j = len(a)
+			case 'p', 'f', 'd':
+				return 0, nil, false, fmt.Errorf("sshpass option -%c is not allowed: the password comes from the environment only; %s", c, sshpassFix)
+			default:
+				return 0, nil, false, fmt.Errorf("sshpass option -%c is not allowed: unknown option", c)
 			}
-			break
 		}
 		i = next
 	}
-	return len(args), nonPath, nil
+	return len(args), nonPath, env, nil
 }
 
 // validateSSHPassCommand is sshpass's argument validator: like ssh's, it
-// applies once the ssh section lists a host, and then sshpass may only run
-// ssh, whose arguments are checked as ssh's.
+// applies once the ssh section lists a host, and then sshpass takes the
+// password from $SSHPASS (-e) and may only run ssh, whose arguments are
+// checked as ssh's.
 func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	cfg := s.getConfig().SSH
 	if !cfg.HostsConfigured() {
@@ -431,12 +441,15 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	if !ok {
 		return nil
 	}
-	cmdIdx, _, err := parseSSHPassArgs(argv)
+	cmdIdx, _, env, err := parseSSHPassArgs(argv)
 	if err != nil {
 		return err
 	}
 	if cmdIdx >= len(argv) {
 		return nil
+	}
+	if !env {
+		return fmt.Errorf("sshpass without -e is not allowed: it would read the password from stdin; %s", sshpassFix)
 	}
 	if argv[cmdIdx] != "ssh" {
 		return fmt.Errorf("sshpass may only run ssh, not %q", argv[cmdIdx])
@@ -460,10 +473,10 @@ func sshNonPathArgIndices(args []string) map[int]bool {
 	return skip
 }
 
-// sshpassNonPathArgIndices is sshNonPathArgIndices for sshpass: its password
-// and prompt, and the ssh it runs.
+// sshpassNonPathArgIndices is sshNonPathArgIndices for sshpass: its prompt,
+// and the ssh it runs.
 func sshpassNonPathArgIndices(args []string) map[int]bool {
-	cmdIdx, nonPath, err := parseSSHPassArgs(args)
+	cmdIdx, nonPath, _, err := parseSSHPassArgs(args)
 	if err != nil {
 		return nil
 	}

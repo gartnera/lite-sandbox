@@ -964,6 +964,7 @@ ssh:
   hosts: [build-box, 10.0.0.12]
   agent: true                # default true
   unrestricted_agent: false  # default false
+  git_signing: false         # default false
 ```
 
 ## Git Support
