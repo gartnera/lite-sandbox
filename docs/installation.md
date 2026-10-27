@@ -88,7 +88,7 @@ Everything after the agent name is passed to the agent unchanged, so lite-sandbo
 | What `install claude` writes | What `launch claude` passes |
 | --- | --- |
 | MCP server in `~/.claude.json` | `--mcp-config` |
-| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` |
+| Permissions + `PreToolUse` and `PermissionRequest` hooks in `~/.claude/settings.json` | `--settings` |
 | Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
 
 **These are added on top of your own configuration.** Your `settings.json` permission rules still apply (the allow/deny lists are merged), your own MCP servers still load (`--strict-mcp-config` is not passed), your `CLAUDE.md` still reaches the model, and your sign-in state is untouched.
@@ -111,7 +111,8 @@ For Claude Code, `lite-sandbox install` (or `lite-sandbox install claude`):
 1. Adds the MCP server (`lite-sandbox serve-mcp --config-requests`) to `~/.claude.json` (user-scoped) with `"alwaysLoad": true` (see [`--always-load`](#always-load) below)
 2. Adds allow rules for the lite-sandbox MCP tools (`bash`, `kill_shell`, `list_shells`) **and denies the built-in `Bash` tool** in `~/.claude/settings.json`
 3. Registers a `PreToolUse` hook matching `mcp__lite-sandbox__.*` that allows those tools. Subagents and skills don't inherit `permissions.allow` from `settings.json` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), but hooks still fire there, so this keeps the sandbox tools prompt-free inside them. It grants nothing the allow rules don't: the tools validate every command themselves, and a `permissions.deny` rule still overrides a hook allow. The one bash command it doesn't allow is a [config request](configuration.md#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval), a lone `lite-sandbox config ...` that the agent runs to change the sandbox's policy. For that command the hook answers `ask` (unless it only asks for `--help`), so you approve each change (the hook is registered as `lite-sandbox hook --config-requests`). It answers `ask` the same way for a command that runs a [command that asks first](configuration.md#commands-that-ask-first) (`commands` entry with `ask: true`).
-4. Adds a usage directive to `~/.claude/CLAUDE.md`
+4. Registers the same hook for `PermissionRequest`, also matching `mcp__lite-sandbox__.*`, so the sandbox tools stay prompt-free in [plan mode](#plan-mode)
+5. Adds a usage directive to `~/.claude/CLAUDE.md`
 
 All of these honor `CLAUDE_CONFIG_DIR` the way Claude Code does: when it is set, `settings.json`, `CLAUDE.md`, and `.claude.json` are all written under that directory (Claude Code then keeps its user config at `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`).
 
@@ -160,6 +161,14 @@ lite-sandbox install claude --always-load=false
 ```
 
 Codex works the same way. Newer Codex models defer MCP tools behind Codex's `tool_search` by default, so `install codex` sets `omit_tools_from = ["deferred"]` on its server table, which keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag does nothing for opencode, Crush, and Grok Build (which always reaches MCP tools through its `search_tool`/`use_tool` pair), or in `--bash-ast-hook-mode` (which doesn't configure the MCP server).
+
+### Plan mode
+
+In [plan mode](https://code.claude.com/docs/en/permission-modes#analyze-before-you-edit-with-plan-mode), Claude Code [ignores a `PreToolUse` hook's `allow`](https://code.claude.com/docs/en/permissions#hook-approvals-in-plan-mode) for every call it doesn't count as read-only, and in our tests (Claude Code 2.1.312) the `permissions.allow` rules too. An MCP tool counts as read-only only when its server marks it with `readOnlyHint`. The sandbox tools don't carry it, because `bash` can write. So without more, every sandboxed command prompts while you plan, and a `claude -p --permission-mode plan` run refuses them with `Cannot call mcp__lite-sandbox__bash while in plan mode`. Tools another server marks read-only keep running.
+
+The `PermissionRequest` hook fills that gap. Claude Code runs it when it is about to prompt, and its answer still counts in plan mode. In plan mode it allows the sandbox tools, except for the calls the `PreToolUse` hook answered `ask` for (config requests and commands that ask first), which still prompt. Outside plan mode it never answers: the allow rules already cover the sandbox tools there, so a prompt that reaches it was raised on purpose.
+
+Plan mode's block on edits applies to Claude Code's built-in tools, not to commands the sandbox runs. A sandboxed command can write inside the writable paths in plan mode just as in any other mode; the directive plan mode gives the model is what keeps it to exploring. `--bash-ast-hook-mode` configures no MCP server and so registers no `PermissionRequest` hook: there, plan mode prompts for built-in `Bash` commands outside Claude Code's own read-only set, as it does without lite-sandbox.
 
 Restart the agent after running the install command.
 
@@ -449,12 +458,20 @@ tools, so checking on and stopping background commands don't prompt either.
 
 Without the `Bash` deny, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 
-Subagents and skills don't inherit these `allow` entries ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), so also register a `PreToolUse` hook that allows the sandbox tools there:
+Subagents and skills don't inherit these `allow` entries ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950)), so also register a `PreToolUse` hook that allows the sandbox tools there. Plan mode ignores both the `allow` entries and the `PreToolUse` hook's allow for the sandbox tools, so register the same command for `PermissionRequest` too (see [Plan mode](#plan-mode)):
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
+      {
+        "matcher": "mcp__lite-sandbox__.*",
+        "hooks": [
+          {"type": "command", "command": "/path/to/lite-sandbox hook"}
+        ]
+      }
+    ],
+    "PermissionRequest": [
       {
         "matcher": "mcp__lite-sandbox__.*",
         "hooks": [
@@ -504,7 +521,7 @@ The path boundaries are computed the same way as the bash tool's (see `cmd/serve
 - **`lite-sandbox install`** (default) hard-denies `Bash` with a `permissions.deny` rule. This is the strongest option, but the model only sees a terse rejection; the [`CLAUDE.md` directive](#claude-code) is what points it to the MCP tool.
 - **`lite-sandbox install --with-tool-hook`** leaves `Bash` out of `deny` (removing it if a previous install added it) and lets the hook block it with the redirect message. If the hook fails to run, `Bash` falls back to a normal permission prompt instead of running silently.
 
-The hook is **fail-open**: on an internal error (unparseable event, missing working directory) it defers instead of blocking. It reads the config on every call, so boundary changes apply without reinstalling. To remove it, delete the `PreToolUse` entry for `lite-sandbox hook` from `settings.json`.
+The hook is **fail-open**: on an internal error (unparseable event, missing working directory) it defers instead of blocking. It reads the config on every call, so boundary changes apply without reinstalling. To remove it, delete the `PreToolUse` and `PermissionRequest` entries for `lite-sandbox hook` from `settings.json`.
 
 ### AST-check mode (`--bash-ast-hook-mode`)
 

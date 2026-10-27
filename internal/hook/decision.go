@@ -55,3 +55,36 @@ func (d *Decision) Write(w io.Writer) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(d)
 }
+
+// PermissionRequestDecision is the document a PermissionRequest hook writes to
+// stdout (exit 0) to answer Claude Code's permission prompt for the user.
+type PermissionRequestDecision struct {
+	HookSpecificOutput permissionRequestOutput `json:"hookSpecificOutput"`
+}
+
+type permissionRequestOutput struct {
+	HookEventName EventName                 `json:"hookEventName"`
+	Decision      permissionRequestBehavior `json:"decision"`
+}
+
+type permissionRequestBehavior struct {
+	Behavior PermissionDecision `json:"behavior"`
+}
+
+// NewPermissionRequestAllow grants the permission Claude Code was about to ask
+// the user for.
+func NewPermissionRequestAllow() *PermissionRequestDecision {
+	return &PermissionRequestDecision{
+		HookSpecificOutput: permissionRequestOutput{
+			HookEventName: EventPermissionRequest,
+			Decision:      permissionRequestBehavior{Behavior: DecisionAllow},
+		},
+	}
+}
+
+// Write emits the decision as JSON to w.
+func (d *PermissionRequestDecision) Write(w io.Writer) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(d)
+}

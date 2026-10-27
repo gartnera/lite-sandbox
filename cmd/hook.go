@@ -68,7 +68,7 @@ var hookFlags hookOptions
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Evaluate a Claude Code, Codex, or Grok Build PreToolUse event from stdin",
+	Short: "Evaluate a Claude Code, Codex, or Grok Build PreToolUse (or Claude Code PermissionRequest) event from stdin",
 	Long: "Reads a PreToolUse hook event as JSON on stdin (Claude Code's protocol, which " +
 		"Codex and Grok Build also speak) and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
@@ -86,7 +86,10 @@ var hookCmd = &cobra.Command{
 		"--config-requests) knows the user was asked before it runs the change. " +
 		"Likewise a bash tool call that runs a command whose commands entry has ask: true.\n\n" +
 		"With --validate-bash, a built-in Bash command that runs such a command is answered " +
-		"\"ask\" when the agent puts an ask to the user (Claude Code), and denied otherwise.",
+		"\"ask\" when the agent puts an ask to the user (Claude Code), and denied otherwise.\n\n" +
+		"Also reads Claude Code's PermissionRequest event: in plan mode, which ignores " +
+		"PreToolUse allows for calls it does not count as read-only, it allows the sandbox's " +
+		"MCP tools, except the calls it answered \"ask\" for above.",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runHook(cmd, hookFlags)
@@ -118,17 +121,95 @@ func runHook(cmd *cobra.Command, opts hookOptions) error {
 		// tool_input failed to decode but we can still act on tool name.
 		fmt.Fprintf(errOut, "lite-sandbox hook: %v\n", perr)
 	}
-	if event.HookEventName != hook.EventPreToolUse {
-		// Not our event; defer.
-		return nil
+	switch event.HookEventName {
+	case hook.EventPreToolUse:
+		if d := evaluate(event, opts); d != nil {
+			return d.Write(out)
+		}
+	case hook.EventPermissionRequest:
+		if d := evaluatePermissionRequest(event, opts); d != nil {
+			return d.Write(out)
+		}
 	}
+	// Nothing to enforce, or not our event: defer to the normal permission
+	// flow (no JSON).
+	return nil
+}
 
-	decision := evaluate(event, opts)
-	if decision == nil {
-		// Nothing to enforce: defer to normal permission flow (no JSON).
+// evaluatePermissionRequest answers Claude Code's permission prompt for a
+// sandbox MCP tool call in plan mode, or returns nil to leave the prompt to
+// the user. In plan mode Claude Code ignores the allow rules and a PreToolUse
+// allow for every call it does not count as read-only, which includes every
+// MCP tool without readOnlyHint, so each sandbox command would prompt while
+// planning. A PermissionRequest hook's allow still holds there. It allows
+// what the PreToolUse step allowed: a call that step put to the user (a
+// config request, a command that asks first) keeps its prompt. Outside plan
+// mode the allow rules already settle the sandbox's calls, so a prompt there
+// was raised on purpose and is left alone.
+func evaluatePermissionRequest(event *hook.Event, opts hookOptions) *hook.PermissionRequestDecision {
+	if event.PermissionMode != hook.PermissionModePlan || !strings.HasPrefix(event.ToolName, mcpToolPrefix) {
 		return nil
 	}
-	return decision.Write(out)
+	if event.ToolName == mcpToolPrefix+"bash" && hookAsks(event, opts) {
+		return nil
+	}
+	return hook.NewPermissionRequestAllow()
+}
+
+// hookAsks reports whether the PreToolUse step put a sandbox bash call to the
+// user (evaluateConfigRequest, evaluateAskCommand), without issuing its
+// ticket again.
+func hookAsks(event *hook.Event, opts hookOptions) bool {
+	if !opts.configRequests || !event.CanAsk() {
+		return false
+	}
+	command, _, ok := sandboxBashArgs(event)
+	if !ok {
+		return false
+	}
+	if req, ok := configrequest.Parse(command); ok {
+		return !req.IsHelp()
+	}
+	cwd := eventCWD(event)
+	if cwd == "" {
+		return false
+	}
+	sb, prompted := promptedCommands(command, cwd)
+	if sb != nil {
+		sb.Close()
+	}
+	return len(prompted) > 0
+}
+
+// sandboxBashArgs reads a sandbox bash tool call's arguments exactly as the
+// server does (bashToolArgs), so the command the hook judges is the one that
+// runs. ok is false for input the server cannot read either; the server
+// refuses it.
+func sandboxBashArgs(event *hook.Event) (command string, background, ok bool) {
+	var args map[string]any
+	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
+		return "", false, false
+	}
+	return bashToolArgs(args)
+}
+
+// promptedCommands returns the prompted invocations (commands entries with
+// ask: true) that command runs in cwd, with the sandbox built to find them,
+// or a nil sandbox when it runs none. The caller owns Close() on a non-nil
+// sandbox.
+func promptedCommands(command, cwd string) (*bash_sandboxed.Sandbox, []string) {
+	// The hot path for every sandbox bash call: read the settings alone, and
+	// build a sandbox only when some entry asks.
+	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+		return nil, nil
+	}
+	sb := configuredSandbox(cwd)
+	prompted := sb.AskCommands(command)
+	if len(prompted) == 0 {
+		sb.Close()
+		return nil, nil
+	}
+	return sb, prompted
 }
 
 // evaluate returns a decision for a governed tool call, or nil to defer to
@@ -204,14 +285,9 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if !opts.configRequests || event.FromGrok() {
 		return nil
 	}
-	// Read exactly as the server does (bashToolArgs), so the command the hook
-	// judges is the one that runs. Input the server cannot read either is
-	// refused there, so deferring to the usual pre-approval is safe.
-	var args map[string]any
-	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
-		return nil
-	}
-	command, background, ok := bashToolArgs(args)
+	// Input the server cannot read is refused there, so deferring to the usual
+	// pre-approval is safe.
+	command, background, ok := sandboxBashArgs(event)
 	if !ok {
 		return nil
 	}
@@ -259,11 +335,7 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if !opts.configRequests || !event.CanAsk() {
 		return nil
 	}
-	var args map[string]any
-	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
-		return nil
-	}
-	command, _, ok := bashToolArgs(args)
+	command, _, ok := sandboxBashArgs(event)
 	if !ok {
 		return nil
 	}
@@ -271,17 +343,11 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if cwd == "" {
 		return nil
 	}
-	// The hot path for every sandbox bash call: read the settings alone, and
-	// build a sandbox only when some entry asks.
-	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+	sb, prompted := promptedCommands(command, cwd)
+	if sb == nil {
 		return nil
 	}
-	sb := configuredSandbox(cwd)
 	defer sb.Close()
-	prompted := sb.AskCommands(command)
-	if len(prompted) == 0 {
-		return nil
-	}
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))

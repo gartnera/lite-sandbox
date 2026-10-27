@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
@@ -61,6 +62,47 @@ func TestClaudeCode(t *testing.T) {
 	})
 }
 
+// TestClaudeCodePlanMode drives a default install through `claude -p
+// --permission-mode plan`. Plan mode ignores the allow rules and the
+// PreToolUse hook's allow for calls Claude Code does not count as read-only,
+// MCP tools included; lite-sandbox's PermissionRequest hook answers for the
+// sandbox tools instead, so they run without a prompt (a `-p` run with nothing
+// to answer one refuses the call: "Cannot call ... while in plan mode"). A
+// config request keeps its prompt, which nothing answers here, and plan mode
+// still blocks the built-in Write.
+func TestClaudeCodePlanMode(t *testing.T) {
+	requireE2E(t)
+	project := newProject(t)
+	calls := []mockmodel.ToolCall{
+		{Name: claudeSandboxTool, Arguments: map[string]string{"command": "lite-sandbox config commands allow make"}},
+		{Name: "Write", Arguments: map[string]string{"file_path": filepath.Join(project, "plan.txt"), "content": "denied"}},
+		{Name: "mcp__lite-sandbox__list_shells", Arguments: map[string]string{}},
+		{Name: claudeSandboxTool, Arguments: map[string]string{"command": allowedCommand}},
+	}
+	model := startModel(t, calls)
+	_, environ := claudeEnv(t, model)
+	environ = append(environ, "LITE_SANDBOX_CONFIG="+filepath.Join(t.TempDir(), "config.yaml"))
+	installSandbox(t, "claude", environ)
+
+	runAgent(t, project, environ, bins.claude, "-p", "--output-format", "json", "--permission-mode", "plan", prompt)
+
+	results := lastResults(t, model)
+	if len(results) != len(calls) {
+		t.Fatalf("results = %q, want one per call", results)
+	}
+	// The model reads lite-sandbox's reason for asking, and nothing ran.
+	assertResult(t, results, 0, "lite-sandbox config --dir ")
+	if strings.Contains(results[0], "Scoped to") {
+		t.Errorf("the config request ran without approval: %q", results[0])
+	}
+	assertResult(t, results, 1, "while in plan mode")
+	if _, err := os.Stat(filepath.Join(project, "plan.txt")); err == nil {
+		t.Error("Write applied in plan mode")
+	}
+	assertResult(t, results, 2, "No background processes.")
+	assertResult(t, results, 3, allowedOutput)
+}
+
 // TestClaudeCodeLaunch drives `lite-sandbox launch claude`, the temporary
 // alternative to `install`: the MCP server, permissions, hook, and usage
 // directive reach Claude Code through its command line for this one run.
@@ -112,10 +154,11 @@ func TestClaudeCodeLaunchLayersOverUserConfig(t *testing.T) {
 
 	// The user's own settings: a deny for a built-in tool lite-sandbox never
 	// touches, plus a second MCP server (this binary again, under another name)
-	// and a memory file.
+	// and a memory file. The server is alwaysLoad so its tools are offered on
+	// the first turn instead of behind Tool Search.
 	writeFile(t, filepath.Join(configDir, "settings.json"), `{"permissions":{"deny":["Read"]}}`)
 	probe, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		"probe": map[string]any{"command": bins.sandbox, "args": []string{"serve-mcp"}},
+		"probe": map[string]any{"command": bins.sandbox, "args": []string{"serve-mcp"}, "alwaysLoad": true},
 	}})
 	if err != nil {
 		t.Fatal(err)

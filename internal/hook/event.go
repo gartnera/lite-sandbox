@@ -1,5 +1,6 @@
-// Package hook models the Claude Code PreToolUse hook protocol: the JSON
-// event delivered on stdin and the decision document written to stdout.
+// Package hook models the Claude Code PreToolUse and PermissionRequest hook
+// protocol: the JSON event delivered on stdin and the decision document
+// written to stdout.
 //
 // The event is fully parsed into typed structs so callers can reason about
 // exactly what a tool is being asked to do without poking at untyped maps.
@@ -11,12 +12,15 @@ import (
 	"io"
 )
 
-// EventName identifies which lifecycle hook fired. We only handle PreToolUse,
-// but the field is modeled so unexpected events are reported clearly.
+// EventName identifies which lifecycle hook fired. We handle PreToolUse and
+// Claude Code's PermissionRequest; other events are deferred.
 type EventName string
 
 const (
 	EventPreToolUse EventName = "PreToolUse"
+	// EventPermissionRequest fires when Claude Code is about to prompt the
+	// user for a tool call. It carries the same fields as PreToolUse.
+	EventPermissionRequest EventName = "PermissionRequest"
 )
 
 // PermissionMode is the session's current permission posture.
@@ -29,7 +33,8 @@ const (
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
 )
 
-// Event is the fully parsed PreToolUse payload Claude Code sends on stdin.
+// Event is the fully parsed PreToolUse (or PermissionRequest) payload Claude
+// Code sends on stdin.
 //
 // RawToolInput holds the original JSON for the tool arguments; ToolInput is the
 // decoded, tool-specific view. RawToolInput is always populated; ToolInput is

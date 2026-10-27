@@ -613,13 +613,13 @@ func TestConfigurePermissionsToolHook(t *testing.T) {
 	}
 }
 
-func TestConfigurePreToolUseHook(t *testing.T) {
+func TestConfigureClaudeHook(t *testing.T) {
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 	command := "/usr/local/bin/lite-sandbox hook"
 
-	if err := configurePreToolUseHook(tmpDir, command, hookToolMatcher); err != nil {
-		t.Fatalf("configurePreToolUseHook failed: %v", err)
+	if err := configureClaudeHook(tmpDir, claudeHook{hook.EventPreToolUse, hookToolMatcher, command}); err != nil {
+		t.Fatalf("configureClaudeHook failed: %v", err)
 	}
 
 	readPre := func() []any {
@@ -649,8 +649,8 @@ func TestConfigurePreToolUseHook(t *testing.T) {
 	}
 
 	// Idempotent: re-running with same command/matcher does not duplicate.
-	if err := configurePreToolUseHook(tmpDir, command, hookToolMatcher); err != nil {
-		t.Fatalf("second configurePreToolUseHook failed: %v", err)
+	if err := configureClaudeHook(tmpDir, claudeHook{hook.EventPreToolUse, hookToolMatcher, command}); err != nil {
+		t.Fatalf("second configureClaudeHook failed: %v", err)
 	}
 	pre = readPre()
 	if len(pre) != 1 {
@@ -661,10 +661,10 @@ func TestConfigurePreToolUseHook(t *testing.T) {
 	}
 }
 
-// TestReconcilePreToolUseHook verifies that switching install modes replaces the
+// TestReconcileClaudeHooks verifies that switching install modes replaces the
 // lite-sandbox hook entry rather than leaving a stale, conflicting one behind,
 // and that unrelated hooks survive.
-func TestReconcilePreToolUseHook(t *testing.T) {
+func TestReconcileClaudeHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 	binPath := "/usr/local/bin/lite-sandbox"
@@ -706,7 +706,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Install --with-tool-hook.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook", hookToolMatcher); err != nil {
+	if err := reconcileClaudeHooks(tmpDir, binPath, []claudeHook{{hook.EventPreToolUse, hookToolMatcher, binPath + " hook"}}); err != nil {
 		t.Fatalf("reconcile (tool hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook" {
@@ -714,7 +714,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Switch to --bash-ast-hook-mode: the old command must be replaced, not added to.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, binPath+" hook --validate-bash", bashValidateMatcher); err != nil {
+	if err := reconcileClaudeHooks(tmpDir, binPath, []claudeHook{{hook.EventPreToolUse, bashValidateMatcher, binPath + " hook --validate-bash"}}); err != nil {
 		t.Fatalf("reconcile (bash hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 1 || got[0] != binPath+" hook --validate-bash" {
@@ -722,7 +722,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 
 	// Switch to default (no hook): the lite-sandbox entry must be removed.
-	if err := reconcilePreToolUseHook(tmpDir, binPath, "", hookToolMatcher); err != nil {
+	if err := reconcileClaudeHooks(tmpDir, binPath, nil); err != nil {
 		t.Fatalf("reconcile (no hook) failed: %v", err)
 	}
 	if got := liteCmds(); len(got) != 0 {
@@ -730,7 +730,7 @@ func TestReconcilePreToolUseHook(t *testing.T) {
 	}
 }
 
-func TestConfigurePreToolUseHookPreservesExisting(t *testing.T) {
+func TestConfigureClaudeHookPreservesExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")
 
@@ -747,8 +747,8 @@ func TestConfigurePreToolUseHookPreservesExisting(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	if err := configurePreToolUseHook(tmpDir, "/bin/ls hook", hookToolMatcher); err != nil {
-		t.Fatalf("configurePreToolUseHook failed: %v", err)
+	if err := configureClaudeHook(tmpDir, claudeHook{hook.EventPreToolUse, hookToolMatcher, "/bin/ls hook"}); err != nil {
+		t.Fatalf("configureClaudeHook failed: %v", err)
 	}
 
 	data, err := os.ReadFile(settingsPath)
