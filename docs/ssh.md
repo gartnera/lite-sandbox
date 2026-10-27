@@ -113,7 +113,11 @@ disk, a repository's history) without changing it. A host's entry widens that:
 ssh joins the words after the destination with spaces and hands the result to
 the remote user's shell, so the check parses that string as a shell script
 (sh/bash syntax; a host whose login shell is fish or csh reads it differently)
-and every command in it must be read-only:
+and validates it the way a local command is validated, through the same walk
+and the same wrapper and `find` checks, with the read-only commands as its
+whitelist. Nothing sees the remote command again when it runs, so each
+command in it is checked the way a wrapped command (`env cmd`) is, and every
+one must be read-only:
 
 ```bash
 ssh build-box 'journalctl -u app --since today | grep -c ERROR'   # allowed
@@ -136,12 +140,14 @@ ssh build-box 'cat $(ls)'                # refused: no substitutions or variable
   the `ls`/`inspect`/`logs` of `container`, `image`, `network`, `volume`, and
   `compose`), `sed` (no `-i`, `-f`, or `w`/`W`/`e` commands and `s///w`/`e`
   flags), `find` (no `-delete` or `-fprint*`; `-exec` runs a read-only
-  command), `sort` (no `-o`), `uniq` (one operand), `date` (no setting the
+  command, but not a shell, which would run the file names find puts in its
+  script), `sort` (no `-o`), `uniq` (one operand), `date` (no setting the
   clock), `hostname`, `dmesg`, `ss`, `ip` (`show`, `list`, `get`), `file`, and
   `rg` (no `--pre`).
 - **Wrappers** are looked through: `sudo` (not `-e`, `-i`, `-s`, or
-  `VAR=value`), `env`, `timeout`, `nice`, `stdbuf`, `command`, and `sh`/`bash`
-  `-c '...'`, whose script is checked the same way.
+  `VAR=value`), `env`, `timeout`, `nice`, and `stdbuf` (checked as they are
+  locally), `command`, and `sh`/`bash` `-c '...'` (`-l` included), whose
+  script is checked the same way.
 - **The shell around them**: pipes, `&&`, `||`, `;`, `if`, `while`, `case`,
   subshells, and input redirections and heredocs are fine. Output redirections
   may only go to `/dev/null` (or another descriptor, `2>&1`). Variables,
@@ -150,7 +156,8 @@ ssh build-box 'cat $(ls)'                # refused: no substitutions or variable
   host and could turn a word into an option or another command; a command
   prefix may set only locale, time zone, and width variables
   (`LC_ALL=C sort`). Commands are run by bare name, not path. Globs and
-  braces are allowed in the arguments of the plain readers only; quote them
+  braces are allowed in the arguments of the plain readers only (under a
+  wrapper too: `sudo tail /var/log/*.log`); quote them
   elsewhere (`find /var/log -name '*.gz'`, written `ssh box "find /var/log -name '*.gz'"`).
 - **The session itself**: without a command ssh opens a login shell that runs
   whatever reaches its stdin, so a bare `ssh box` is refused unless stdin is

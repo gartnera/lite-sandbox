@@ -22,6 +22,12 @@ func TestValidate_BlockedFindFlags(t *testing.T) {
 		{"find -fprint", `find . -fprint /tmp/out`, `find flag "-fprint" is not allowed`},
 		{"find -fprint0", `find . -fprint0 /tmp/out`, `find flag "-fprint0" is not allowed`},
 		{"find -fprintf", `find . -fprintf /tmp/out '%p'`, `find flag "-fprintf" is not allowed`},
+		// The words are read by their values: find takes a quoted ';' as the
+		// terminator, and a quoted '-delete' or '-exec' as itself.
+		{"find quoted terminator", `find . -exec cat {} ';' -delete`, `find flag "-delete" is not allowed`},
+		{"find double-quoted terminator", `find . -exec cat {} ";" -fprint /tmp/x`, `find flag "-fprint" is not allowed`},
+		{"find quoted -delete", `find . '-delete'`, `find flag "-delete" is not allowed`},
+		{"find quoted -exec", `find . '-exec' perl {} \;`, `command "perl" is not allowed`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

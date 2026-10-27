@@ -386,19 +386,12 @@ func sshJumpHostsAll(jumps []string) []string {
 // is refused: the remote command is checked as written (and again on the
 // runtime layer's expanded argv), and the hook modes run the command with no
 // runtime layer.
-//
-// The runtime layer passes the expanded argv as words with no position
-// (literalWords), whose values are taken as they are.
 func sshLiterals(args []*syntax.Word) ([]string, []bool, error) {
 	argv := make([]string, len(args))
 	glob := make([]bool, len(args))
 	for i, w := range args {
-		if !w.Pos().IsValid() {
-			argv[i] = w.Lit()
-			continue
-		}
-		v, err := remoteWordValue(w)
-		if err != nil {
+		v, bad := literalWord(w)
+		if bad != nil {
 			return nil, nil, fmt.Errorf("%s: a variable, substitution, or $'...' in its words is not allowed: write them out, so the command it runs can be checked", args[0].Lit())
 		}
 		argv[i], glob[i] = v.val, v.glob

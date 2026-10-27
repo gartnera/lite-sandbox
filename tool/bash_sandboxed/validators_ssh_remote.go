@@ -1,8 +1,10 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,12 +21,17 @@ import (
 //
 // ssh joins the words after the destination with spaces and the remote user's
 // shell runs the result, so the check parses that string as a shell script
-// (sh/bash syntax) and walks it. Everything in it must be known before it
-// runs: no variables, command substitution, arithmetic, loops, or function
-// definitions, and each command is a bare name from the read-only list below
-// (or a host commands entry), with literal arguments. Wrappers (sudo, env,
-// timeout, nice, stdbuf, command, and sh/bash -c) are looked through. Output
-// redirections may only go to /dev/null.
+// (sh/bash syntax) and validates it the way a local script is validated
+// (validateWithFunctionsCtx), by a Sandbox whose remotePolicy swaps in what
+// a remote command may do. No runtime layer sees a remote command, so each
+// one is checked the way a wrapped command is (validateSubCommand), on its
+// words' values, and everything in it must be known before it runs: no
+// variables, command substitution, arithmetic, loops, or function
+// definitions. Each command is a bare name from the read-only commands below
+// (or a host commands entry), held by its validator in remoteArgValidators.
+// The wrappers are the local validators (env, timeout, nice, stdbuf, find
+// -exec), plus sudo, command, and sh/bash -c, whose script is validated the
+// same way. Output redirections may only go to /dev/null.
 //
 // Without a command, ssh opens a login shell that runs whatever reaches its
 // stdin, so that is refused unless stdin is closed (-n) or no session runs
@@ -63,78 +70,45 @@ func checkSSHRemote(p sshArgs, argv []string, host *config.SSHHost) error {
 		}
 		return refuse("without a command the remote shell runs whatever reaches its stdin; give the command (ssh %s uptime)", name)
 	}
-	r := remoteChecker{commands: parseHostCommands(host.Commands)}
-	if err := r.script(strings.Join(argv[p.cmdIdx:], " "), 0); err != nil {
+	if err := newRemoteSandbox(host).validateRemoteScript(strings.Join(argv[p.cmdIdx:], " ")); err != nil {
 		return refuse("%v", err)
 	}
 	return nil
 }
 
-// parseHostCommands turns a hosts entry's commands into the leading
-// arguments each allows, by command name; a bare name maps to nil (any
-// arguments). Unlike a commands allow, an invocation with no leading
-// arguments (systemctl --version) is not taken to match: it is left to the
-// read-only check.
-func parseHostCommands(cmds []string) map[string][][]string {
-	out := map[string][][]string{}
-	for _, c := range cmds {
-		f := strings.Fields(c)
-		if len(f) == 0 {
-			continue
-		}
-		if len(f) == 1 {
-			out[f[0]] = nil
-			continue
-		}
-		if prev, ok := out[f[0]]; ok && prev == nil {
-			continue // a bare entry already allows everything
-		}
-		out[f[0]] = append(out[f[0]], f[1:])
+// remotePolicy is what a remote command may do on one host (see
+// Sandbox.remote).
+type remotePolicy struct {
+	// commands are the host's commands entries, parsed like the deny list's.
+	commands map[string][]deniedEntry
+	// depth is the sh -c nesting of the script being validated.
+	depth int
+}
+
+// newRemoteSandbox returns the Sandbox that validates host's remote command.
+func newRemoteSandbox(host *config.SSHHost) *Sandbox {
+	return &Sandbox{
+		cfg:           &config.Config{Mode: string(config.ModeAllowlist)},
+		argValidators: remoteArgValidators,
+		remote:        &remotePolicy{commands: parseDeniedCommands(host.Commands)},
 	}
-	return out
 }
 
-type remoteChecker struct {
-	commands map[string][][]string
-}
-
-// remoteWord is one word of the remote command: its value after the remote
-// shell's quote removal, and whether the shell expands it further (an
-// unquoted glob or brace expansion), so its value is only known there.
-type remoteWord struct {
-	val  string
-	glob bool
-}
-
-func remoteVals(ws []remoteWord) []string {
-	out := make([]string, len(ws))
-	for i, w := range ws {
-		out[i] = w.val
-	}
-	return out
-}
-
-// script parses and checks a remote shell script.
-func (r remoteChecker) script(src string, depth int) error {
-	if depth > remoteScriptDepth {
+// validateRemoteScript parses and validates a remote shell script.
+func (s *Sandbox) validateRemoteScript(src string) error {
+	if s.remote.depth > remoteScriptDepth {
 		return fmt.Errorf("sh -c is nested too deeply")
 	}
-	f, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(src), "")
+	f, err := ParseBash(src)
 	if err != nil {
 		return fmt.Errorf("the remote command does not parse: %v", err)
 	}
-	var walkErr error
-	syntax.Walk(f, func(node syntax.Node) bool {
-		if walkErr != nil {
-			return false
-		}
-		walkErr = r.node(node, depth)
-		return walkErr == nil
-	})
-	return walkErr
+	return s.validateWithFunctionsCtx(context.Background(), f, nil, "")
 }
 
-func (r remoteChecker) node(node syntax.Node, depth int) error {
+// remoteNodeError is the refusal for the script nodes a remote command may
+// not hold, or nil.
+func remoteNodeError(node syntax.Node) error {
 	if err := expansionError(node); err != nil {
 		return err
 	}
@@ -151,14 +125,6 @@ func (r remoteChecker) node(node syntax.Node, depth int) error {
 		return fmt.Errorf("%s is not allowed: it sets shell variables", n.Variant.Value)
 	case *syntax.TestDecl:
 		return fmt.Errorf("@test is not allowed")
-	case *syntax.Stmt:
-		for _, rd := range n.Redirs {
-			if err := remoteRedirect(rd); err != nil {
-				return err
-			}
-		}
-	case *syntax.CallExpr:
-		return r.call(n, depth)
 	}
 	return nil
 }
@@ -188,120 +154,36 @@ func paramName(p *syntax.ParamExp) string {
 	return ""
 }
 
-// remoteRedirect allows input redirections, fd duplication, and output to
-// /dev/null.
-func remoteRedirect(rd *syntax.Redirect) error {
-	switch rd.Op {
-	case syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc, syntax.DplIn, syntax.RdrIn:
-		return nil
-	case syntax.DplOut:
-		w, err := remoteWordValue(rd.Word)
-		if err != nil {
-			return err
-		}
-		if w.val == "" || strings.Trim(w.val, "0123456789-") != "" {
-			return fmt.Errorf("output redirection to %q is not allowed: only to a file descriptor (2>&1) or /dev/null", w.val)
-		}
-		return nil
-	case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll:
-		w, err := remoteWordValue(rd.Word)
-		if err != nil {
-			return err
-		}
-		if w.glob || w.val != "/dev/null" {
-			return fmt.Errorf("output redirection to %q is not allowed: only to /dev/null", w.val)
-		}
-		return nil
-	}
-	return fmt.Errorf("redirection %s is not allowed", rd.Op)
-}
-
-// remoteWordValue returns w's value as the remote shell sees it once quotes
-// are removed. Expansions are refused (the walk reports them first); $'...'
-// and $"..." are refused because shells disagree on them.
-func remoteWordValue(w *syntax.Word) (remoteWord, error) {
-	var out remoteWord
-	var sb strings.Builder
-	for _, part := range w.Parts {
-		switch p := part.(type) {
-		case *syntax.Lit:
-			v, glob := unescapeUnquoted(p.Value)
-			sb.WriteString(v)
-			out.glob = out.glob || glob
-		case *syntax.SglQuoted:
-			if p.Dollar {
-				return out, fmt.Errorf("$'...' quoting is not allowed: use '...'")
-			}
-			sb.WriteString(p.Value)
-		case *syntax.DblQuoted:
-			if p.Dollar {
-				return out, fmt.Errorf(`$"..." quoting is not allowed: use "..."`)
-			}
-			for _, dp := range p.Parts {
-				lit, ok := dp.(*syntax.Lit)
-				if !ok {
-					return out, partError(dp)
-				}
-				sb.WriteString(unescapeDoubleQuoted(lit.Value))
-			}
-		default:
-			return out, partError(part)
-		}
-	}
-	out.val = sb.String()
-	return out, nil
-}
-
+// partError is the refusal for a word part literalWord stopped at.
 func partError(part syntax.WordPart) error {
 	if err := expansionError(part); err != nil {
 		return err
 	}
+	switch p := part.(type) {
+	case *syntax.SglQuoted:
+		return fmt.Errorf("$'...' quoting is not allowed: use '...'")
+	case *syntax.DblQuoted:
+		if p.Dollar {
+			return fmt.Errorf(`$"..." quoting is not allowed: use "..."`)
+		}
+	}
 	return fmt.Errorf("this word is not allowed in the remote command")
 }
 
-// unescapeUnquoted removes the backslashes of an unquoted word part and
-// reports whether it has an unescaped glob character or brace expansion
-// (a { other than find's {} placeholder).
-func unescapeUnquoted(s string) (string, bool) {
-	var sb strings.Builder
-	glob := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\\' && i+1 < len(s) {
-			i++
-			if s[i] != '\n' {
-				sb.WriteByte(s[i])
-			}
-			continue
+// remoteRedirect holds a remote command's output redirections, which
+// validateRedirect leaves to the path checks locally, to /dev/null.
+func remoteRedirect(rd *syntax.Redirect) error {
+	switch rd.Op {
+	case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll:
+		w, bad := literalWord(rd.Word)
+		if bad != nil {
+			return partError(bad)
 		}
-		switch c {
-		case '*', '?', '[':
-			glob = true
-		case '{':
-			if !strings.HasPrefix(s[i:], "{}") {
-				glob = true
-			}
+		if w.glob || w.val != "/dev/null" {
+			return fmt.Errorf("output redirection to %q is not allowed: only to /dev/null", w.val)
 		}
-		sb.WriteByte(c)
 	}
-	return sb.String(), glob
-}
-
-// unescapeDoubleQuoted removes the backslashes that escape a character
-// inside double quotes ($, `, ", \, and a newline).
-func unescapeDoubleQuoted(s string) string {
-	var sb strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) && strings.IndexByte("$`\"\\\n", s[i+1]) >= 0 {
-			i++
-			if s[i] != '\n' {
-				sb.WriteByte(s[i])
-			}
-			continue
-		}
-		sb.WriteByte(s[i])
-	}
-	return sb.String()
+	return nil
 }
 
 // remoteEnvName matches the variables a remote command may set for the
@@ -321,7 +203,9 @@ func checkRemoteAssign(name, val string) error {
 	return nil
 }
 
-func (r remoteChecker) call(c *syntax.CallExpr, depth int) error {
+// call checks one command of the remote script: its assignments, and the
+// command on its words' values (command).
+func (r *remotePolicy) call(s *Sandbox, c *syntax.CallExpr) error {
 	if len(c.Args) == 0 {
 		return fmt.Errorf("assigning shell variables is not allowed")
 	}
@@ -331,9 +215,9 @@ func (r remoteChecker) call(c *syntax.CallExpr, depth int) error {
 		}
 		val := ""
 		if a.Value != nil {
-			w, err := remoteWordValue(a.Value)
-			if err != nil {
-				return err
+			w, bad := literalWord(a.Value)
+			if bad != nil {
+				return partError(bad)
 			}
 			if w.glob {
 				return fmt.Errorf("%s=%s is not allowed: the value may only hold letters, digits, and _.:/@,+-", a.Name.Value, w.val)
@@ -344,259 +228,252 @@ func (r remoteChecker) call(c *syntax.CallExpr, depth int) error {
 			return err
 		}
 	}
-	words := make([]remoteWord, len(c.Args))
+	words := make([]shellWord, len(c.Args))
 	for i, w := range c.Args {
-		v, err := remoteWordValue(w)
-		if err != nil {
-			return err
+		v, bad := literalWord(w)
+		if bad != nil {
+			return partError(bad)
 		}
 		words[i] = v
 	}
-	return r.argv(words, depth)
+	if err := r.checkGlobs(words); err != nil {
+		return err
+	}
+	return r.command(s, literalWords(shellWordVals(words)))
 }
 
 // remoteCommandName is a bare command name: no path, glob, or placeholder.
 var remoteCommandName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.+-]*$`)
+
+// command checks a remote command (args, literal: see literalWords), the
+// remote form of validateSubCommand: a host commands entry allows it as
+// written, and otherwise it must be one of the read-only commands, held by
+// its validator.
+func (r *remotePolicy) command(s *Sandbox, args []*syntax.Word) error {
+	vals := wordLits(args)
+	name := vals[0]
+	if !remoteCommandName.MatchString(name) {
+		return fmt.Errorf("%q is not allowed: run commands by a bare name", name)
+	}
+	if r.allows(vals) || remotePlainReaders[name] {
+		return nil
+	}
+	validator, ok := s.argValidators[name]
+	if !ok {
+		return fmt.Errorf("%s is not one of the read-only commands", name)
+	}
+	return validator(s, args)
+}
+
+// allows reports whether one of the host's commands entries allows argv: a
+// bare entry, or one whose arguments are a prefix of argv's leading non-flag
+// arguments. Unlike a commands allow, an invocation with no non-flag
+// arguments (systemctl --version) is not taken to match: it is left to the
+// read-only check.
+func (r *remotePolicy) allows(argv []string) bool {
+	nonFlag := nonFlagArgs(argv[1:])
+	return slices.ContainsFunc(r.commands[argv[0]], func(e deniedEntry) bool {
+		return e.prefix == nil || hasTokenPrefix(nonFlag, e.prefix)
+	})
+}
 
 // errNoGlob is the refusal for a glob in a command that is not a plain reader.
 func errNoGlob(name, word string) error {
 	return fmt.Errorf("%s %s: unquoted globs and braces are only allowed in the arguments of plain readers (cat, ls, grep, ...); quote it or list the files", name, word)
 }
 
-// argv checks one command and its arguments.
-func (r remoteChecker) argv(words []remoteWord, depth int) error {
-	name := words[0].val
-	if words[0].glob || !remoteCommandName.MatchString(name) {
-		return fmt.Errorf("%q is not allowed: run commands by a bare name", name)
-	}
-	vals := remoteVals(words)
-	if restrictions, ok := r.commands[name]; ok {
-		if restrictions == nil || slices.ContainsFunc(restrictions, func(seq []string) bool {
-			return hasTokenPrefix(nonFlagArgs(vals[1:]), seq)
-		}) {
-			return nil
+// checkGlobs refuses a word the remote shell expands (a glob or brace), whose
+// value is only known there, except in the arguments of a plain reader or of
+// a host commands entry, looked for through the wrappers.
+func (r *remotePolicy) checkGlobs(words []shellWord) error {
+	vals := shellWordVals(words)
+	start := 0
+	for {
+		if words[start].glob {
+			return fmt.Errorf("%q is not allowed: run commands by a bare name", vals[start])
 		}
-	}
-	if wrap, ok := remoteWrappers[name]; ok {
-		idx, err := wrap(vals)
-		if err != nil {
-			return err
+		index, ok := remoteWrapperIndex[vals[start]]
+		if !ok {
+			break
 		}
-		end := idx
-		if idx < 0 || idx > len(words) {
-			end = len(words)
+		idx := index(vals[start:])
+		if idx <= 0 {
+			break
 		}
-		for _, w := range words[1:end] {
+		for _, w := range words[start+1 : start+idx] {
 			if w.glob {
-				return errNoGlob(name, w.val)
+				return errNoGlob(vals[start], w.val)
 			}
 		}
-		if end == len(words) {
-			return nil
-		}
-		return r.argv(words[idx:], depth)
+		start += idx
 	}
-	if shells[name] {
-		return r.shell(words, depth)
-	}
-	check, ok := remoteReadOnly[name]
-	if !ok {
-		return fmt.Errorf("%s is not one of the read-only commands", name)
-	}
-	if check == nil {
+	if remotePlainReaders[vals[start]] || r.allows(vals[start:]) {
 		return nil
 	}
-	for _, w := range words[1:] {
+	for _, w := range words[start+1:] {
 		if w.glob {
-			return errNoGlob(name, w.val)
+			return errNoGlob(vals[start], w.val)
 		}
-	}
-	return check(vals)
-}
-
-var shells = map[string]bool{"sh": true, "bash": true, "dash": true}
-
-// shell checks sh/bash/dash -c SCRIPT, which runs SCRIPT; any other
-// invocation reads commands from stdin or a file.
-func (r remoteChecker) shell(words []remoteWord, depth int) error {
-	name := words[0].val
-	hasC := false
-	for i := 1; i < len(words); i++ {
-		w := words[i]
-		switch {
-		case w.glob:
-			return errNoGlob(name, w.val)
-		case w.val == "--login" || w.val == "--noprofile" || w.val == "--norc" || w.val == "--posix":
-		case (w.val == "-o" || w.val == "+o") && i+1 < len(words):
-			i++
-		case len(w.val) > 1 && (w.val[0] == '-' || w.val[0] == '+') && strings.Trim(w.val[1:], "elnuvxc") == "":
-			hasC = hasC || (w.val[0] == '-' && strings.Contains(w.val, "c"))
-		case hasC:
-			return r.script(w.val, depth+1)
-		default:
-			return fmt.Errorf("%s is only allowed as %s -c 'commands'", name, name)
-		}
-	}
-	return fmt.Errorf("%s is only allowed as %s -c 'commands'", name, name)
-}
-
-// remoteWrappers find the command a wrapper runs: its index in the argv, or
-// -1 when it runs none.
-var remoteWrappers = map[string]func(argv []string) (int, error){
-	"sudo": remoteSudoIndex,
-	"env": func(argv []string) (int, error) {
-		idx := envCommandIndex(argv, argv)
-		if idx == wrapperRejected {
-			return 0, errEnvSplitString()
-		}
-		end := idx
-		if idx < 0 {
-			end = len(argv)
-		}
-		for _, a := range argv[1:end] {
-			if isEnvAssignment(a) {
-				name, val, _ := strings.Cut(a, "=")
-				if err := checkRemoteAssign(name, val); err != nil {
-					return 0, err
-				}
-			}
-		}
-		return idx, nil
-	},
-	"timeout": func(argv []string) (int, error) {
-		idx := optionWrapperCommandIndex(argv, optSpec{short: "ks", long: []string{"kill-after", "signal"}})
-		if idx < 0 {
-			return -1, nil
-		}
-		return idx + 1, nil // past DURATION
-	},
-	"nice": func(argv []string) (int, error) {
-		return optionWrapperCommandIndex(argv, optionWrapperSpecs["nice"]), nil
-	},
-	"stdbuf": func(argv []string) (int, error) {
-		return optionWrapperCommandIndex(argv, optionWrapperSpecs["stdbuf"]), nil
-	},
-	"command": func(argv []string) (int, error) {
-		for i := 1; i < len(argv); i++ {
-			a := argv[i]
-			switch {
-			case a == "--":
-				return i + 1, nil
-			case len(a) < 2 || a[0] != '-':
-				return i, nil
-			case strings.ContainsAny(a, "vV"):
-				return -1, nil // command -v/-V only looks the name up
-			}
-		}
-		return -1, nil
-	},
-}
-
-// remoteSudoIndex returns the command sudo runs. Its options stop at the
-// first operand ("+" getopt); -e (sudoedit), -i, and -s (a shell) are
-// refused, as are VAR=value operands.
-func remoteSudoIndex(argv []string) (int, error) {
-	const (
-		flags  = "ABbEHhKklNnPSVv"
-		values = "CDgprRtTUu"
-	)
-	longFlags := []string{"askpass", "bell", "background", "preserve-env", "set-home", "help", "remove-timestamp", "reset-timestamp", "list", "no-update", "non-interactive", "preserve-groups", "stdin", "version", "validate"}
-	longValues := []string{"close-from", "chdir", "group", "host", "prompt", "chroot", "role", "type", "other-user", "command-timeout", "user"}
-	refused := func(o string) error {
-		return fmt.Errorf("sudo %s is not allowed: it edits files or starts a shell", o)
-	}
-	all := optSpec{long: append(slices.Clone(longFlags), longValues...)}
-	i := 1
-	for ; i < len(argv); i++ {
-		a := argv[i]
-		if a == "--" {
-			i++
-			break
-		}
-		if name, ok := strings.CutPrefix(a, "--"); ok {
-			name, _, hasVal := strings.Cut(name, "=")
-			full := all.longName(name)
-			switch {
-			case slices.Contains(longValues, full):
-				if !hasVal {
-					i++
-				}
-			case slices.Contains(longFlags, full):
-			default:
-				return 0, refused(a)
-			}
-			continue
-		}
-		if len(a) < 2 || a[0] != '-' {
-			break
-		}
-		for j := 1; j < len(a); j++ {
-			c := a[j]
-			if strings.IndexByte(values, c) >= 0 {
-				if j == len(a)-1 {
-					i++
-				}
-				break
-			}
-			if strings.IndexByte(flags, c) < 0 {
-				return 0, refused("-" + string(c))
-			}
-		}
-	}
-	if i >= len(argv) {
-		return -1, nil
-	}
-	if strings.Contains(argv[i], "=") {
-		return 0, fmt.Errorf("sudo %s is not allowed: it sets the command's environment", argv[i])
-	}
-	return i, nil
-}
-
-// remoteOpts checks a command whose options can write or run something:
-// refuse lists those (short letters, and long names matched the way
-// getopt_long matches abbreviations), operands checks the operands.
-type remoteOpts struct {
-	spec       optSpec
-	refuse     string
-	refuseLong []string
-	why        string
-	operands   func(pos []string) error
-}
-
-func (o remoteOpts) check(argv []string) error {
-	pos, _, flags := o.spec.parse(argv, nil)
-	for f := range flags {
-		if len(f) == 1 && strings.Contains(o.refuse, f) {
-			return fmt.Errorf("%s -%s is not allowed: it %s", argv[0], f, o.why)
-		}
-	}
-	if err := o.refusedLong(argv); err != nil {
-		return err
-	}
-	if o.operands != nil {
-		return o.operands(pos)
 	}
 	return nil
 }
 
-// refusedLong refuses a word naming one of the refused long options, or an
-// abbreviation of one (--rot for --rotate), up to "--". A value that only
-// looks like one (-g --flush) is refused too.
-func (o remoteOpts) refusedLong(argv []string) error {
-	for _, a := range argv[1:] {
-		if a == "--" {
-			return nil
+// remoteWrapperIndex finds the command each remote wrapper runs: its index
+// in the wrapper's argv, or a negative number when it runs none. The
+// validators of the wrappers use the same walkers.
+var remoteWrapperIndex = map[string]func(argv []string) int{
+	"sudo": func(argv []string) int {
+		idx, _ := remoteSudoIndex(argv)
+		return idx
+	},
+	"env":     func(argv []string) int { return envCommandIndex(argv, argv) },
+	"timeout": timeoutCommandIndex,
+	"nice":    func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["nice"]) },
+	"stdbuf":  func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["stdbuf"]) },
+	"command": remoteCommandBuiltinIndex,
+}
+
+// remoteBlockedShellFlags are the shell flags a remote sh -c may not take:
+// blockedBashFlags, but a login shell (-l), whose profile a read-only
+// command cannot have written, is allowed.
+var remoteBlockedShellFlags = func() map[string]string {
+	m := maps.Clone(blockedBashFlags)
+	delete(m, "-l")
+	delete(m, "--login")
+	return m
+}()
+
+// remoteShells are the shells a remote command may run a -c script with.
+var remoteShells = map[string]bool{"sh": true, "bash": true, "dash": true}
+
+// validateRemoteShell allows sh/bash/dash -c SCRIPT, and validates SCRIPT as
+// a remote command; any other invocation reads commands from stdin or a
+// file.
+func validateRemoteShell(s *Sandbox, args []*syntax.Word) error {
+	vals := wordLits(args)
+	idx, err := bashCommandStringIndex(vals, remoteBlockedShellFlags)
+	if err != nil {
+		return err
+	}
+	if idx < 0 {
+		return fmt.Errorf("%s is only allowed as %s -c 'commands'", vals[0], vals[0])
+	}
+	s.remote.depth++
+	defer func() { s.remote.depth-- }()
+	return s.validateRemoteScript(vals[idx])
+}
+
+// validateRemoteFind is validateFindArgs, refusing a shell under -exec and
+// friends: find puts the file names it finds into the script, where the
+// shell would run them.
+func validateRemoteFind(s *Sandbox, args []*syntax.Word) error {
+	vals := wordLits(args)
+	for _, a := range findActions(vals) {
+		if a.end > a.start && remoteShells[vals[a.start]] {
+			return fmt.Errorf("find %s %s is not allowed: find puts the file names into the script, where the shell would run them", a.flag, vals[a.start])
 		}
-		name, ok := strings.CutPrefix(a, "--")
-		if !ok {
-			continue
+	}
+	return validateFindArgs(s, args)
+}
+
+// validateRemoteSudo checks sudo's options and the command it runs.
+func validateRemoteSudo(s *Sandbox, args []*syntax.Word) error {
+	idx, err := remoteSudoIndex(wordLits(args))
+	if err != nil || idx < 0 {
+		return err
+	}
+	return validateSubCommand(s, args[idx:])
+}
+
+// sudo's options: those that take a value (sudoSpec), and the flags.
+var (
+	sudoSpec = optSpec{
+		short: "CDgprRtTUu",
+		long:  []string{"close-from", "chdir", "group", "host", "prompt", "chroot", "role", "type", "other-user", "command-timeout", "user"},
+	}
+	sudoFlags     = "ABbEHhKklNnPSVv"
+	sudoLongFlags = []string{"askpass", "bell", "background", "preserve-env", "set-home", "help", "remove-timestamp", "reset-timestamp", "list", "no-update", "non-interactive", "preserve-groups", "stdin", "version", "validate"}
+)
+
+// remoteSudoIndex returns the command sudo runs, or -1. Its options stop at
+// the first operand ("+" getopt, as optionWrapperCommandIndex walks); only
+// the ones above are allowed, so -e (sudoedit), -i, and -s (a shell) are
+// refused, as are VAR=value operands.
+func remoteSudoIndex(argv []string) (int, error) {
+	idx := optionWrapperCommandIndex(argv, sudoSpec)
+	end := idx
+	if idx < 0 {
+		end = len(argv)
+	}
+	allLong := append(slices.Clone(sudoSpec.long), sudoLongFlags...)
+	for _, opt := range scanOptions(argv[:end], sudoSpec, allLong) {
+		name, long := strings.CutPrefix(opt, "--")
+		if long && !slices.Contains(allLong, name) || !long && !strings.Contains(sudoFlags+sudoSpec.short, opt[1:]) {
+			return 0, fmt.Errorf("sudo %s is not allowed: it edits files or starts a shell", opt)
 		}
-		name, _, _ = strings.Cut(name, "=")
-		for _, l := range o.refuseLong {
-			if strings.HasPrefix(l, name) {
-				return fmt.Errorf("%s --%s is not allowed: it %s", argv[0], name, o.why)
+	}
+	if idx < 0 {
+		return -1, nil
+	}
+	if strings.Contains(argv[idx], "=") {
+		return 0, fmt.Errorf("sudo %s is not allowed: it sets the command's environment", argv[idx])
+	}
+	return idx, nil
+}
+
+// validateRemoteCommandBuiltin checks the command the command builtin runs.
+func validateRemoteCommandBuiltin(s *Sandbox, args []*syntax.Word) error {
+	idx := remoteCommandBuiltinIndex(wordLits(args))
+	if idx < 0 {
+		return nil
+	}
+	return validateSubCommand(s, args[idx:])
+}
+
+// remoteCommandBuiltinIndex returns the command the command builtin runs, or
+// -1: command -v/-V only looks the name up.
+func remoteCommandBuiltinIndex(argv []string) int {
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "--":
+			if i+1 < len(argv) {
+				return i + 1
 			}
+			return -1
+		case len(a) < 2 || a[0] != '-':
+			return i
+		case strings.ContainsAny(a, "vV"):
+			return -1
 		}
+	}
+	return -1
+}
+
+// remoteOpts checks a command whose options can write or run something:
+// refuse lists those ("-x", "--name"), matched the way refusedOption matches
+// them (an abbreviated long name included), and operands checks the
+// operands. spec lists the options that take a value.
+type remoteOpts struct {
+	spec     optSpec
+	refuse   []string
+	why      string
+	operands func(pos []string) error
+}
+
+func (o remoteOpts) check(argv []string) error {
+	long := slices.Clone(o.spec.long)
+	for _, r := range o.refuse {
+		if name, ok := strings.CutPrefix(r, "--"); ok && !slices.Contains(long, name) {
+			long = append(long, name)
+		}
+	}
+	if opt := refusedOption(argv, o.spec, long, o.refuse...); opt != "" {
+		return fmt.Errorf("%s %s is not allowed: it %s", argv[0], opt, o.why)
+	}
+	if o.operands != nil {
+		pos, _, _ := o.spec.parse(argv, nil)
+		return o.operands(pos)
 	}
 	return nil
 }
@@ -610,69 +487,16 @@ func noOperands(what string) func([]string) error {
 	}
 }
 
-// remoteReadOnly lists the commands a read-only remote command may run, with
-// the check for their arguments (nil: any arguments, and globs allowed).
-var remoteReadOnly map[string]func(argv []string) error
+// remotePlainReaders are the read-only commands whose arguments are not
+// checked (and may hold globs).
+var remotePlainReaders = map[string]bool{}
+
+// remoteArgValidators are the validators of the other commands a remote
+// command may run: the wrappers, and the commands with options or verbs
+// that write. Their keys and remotePlainReaders are the read-only commands.
+var remoteArgValidators map[string]func(s *Sandbox, args []*syntax.Word) error
 
 func init() {
-	remoteReadOnly = map[string]func([]string) error{
-		"journalctl": remoteOpts{
-			refuseLong: []string{"cursor-file", "vacuum-size", "vacuum-time", "vacuum-files", "sync", "relinquish-var", "smart-relinquish-var", "flush", "rotate", "update-catalog", "setup-keys", "synchronize-on-exit"},
-			why:        "writes or removes journal files",
-		}.check,
-		"systemctl": checkRemoteSystemctl,
-		"git":       checkRemoteGit,
-		"docker":    checkRemoteDocker,
-		"sed":       checkRemoteSed,
-		"find":      checkRemoteFind,
-		"ip":        checkRemoteIP,
-		"sort": remoteOpts{
-			spec:       optSpec{short: "kSTot", long: []string{"random-source", "sort", "batch-size", "files0-from", "key", "buffer-size", "field-separator", "temporary-directory", "parallel", "output", "compress-program"}},
-			refuse:     "o",
-			refuseLong: []string{"output", "compress-program"},
-			why:        "writes a file or runs a program",
-		}.check,
-		"uniq": remoteOpts{
-			spec: optSpec{short: "fsw", long: []string{"skip-fields", "skip-chars", "check-chars"}},
-			operands: func(pos []string) error {
-				if len(pos) > 1 {
-					return fmt.Errorf("uniq with a second operand (%s) writes it", pos[1])
-				}
-				return nil
-			},
-		}.check,
-		"date": checkRemoteDate,
-		"hostname": remoteOpts{
-			spec:       optSpec{short: "F", long: []string{"file"}},
-			refuse:     "bF",
-			refuseLong: []string{"boot", "file"},
-			why:        "sets the host name",
-			operands:   noOperands("sets the host name"),
-		}.check,
-		"dmesg": remoteOpts{
-			spec:       optSpec{short: "Fflns", long: []string{"file", "facility", "level", "console-level", "buffer-size", "since", "until", "time-format"}},
-			refuse:     "cCDEn",
-			refuseLong: []string{"clear", "read-clear", "console-off", "console-on", "console-level"},
-			why:        "clears the kernel log or changes the console",
-		}.check,
-		"ss": remoteOpts{
-			spec:       optSpec{short: "DFN", long: []string{"diag", "filter", "net"}},
-			refuse:     "KD",
-			refuseLong: []string{"kill", "diag"},
-			why:        "closes sockets or writes a file",
-		}.check,
-		"file": remoteOpts{
-			spec:       optSpec{short: "efFmP", long: []string{"exclude", "exclude-quiet", "files-from", "separator", "magic-file", "parameter"}},
-			refuse:     "C",
-			refuseLong: []string{"compile"},
-			why:        "writes a compiled magic file",
-		}.check,
-		"rg": remoteOpts{
-			spec:       optSpec{short: "ABCEefgjMmrTt", long: []string{"pre", "hostname-bin"}},
-			refuseLong: []string{"pre", "hostname-bin"},
-			why:        "runs a program",
-		}.check,
-	}
 	for _, c := range []string{
 		"cat", "head", "tail", "wc", "cut", "tr", "column", "fold", "paste", "rev", "tac", "nl",
 		"expand", "unexpand", "comm", "join", "strings", "od", "hexdump", "base32", "base64",
@@ -684,7 +508,73 @@ func init() {
 		"free", "vmstat", "nproc", "lscpu", "lsblk", "lsmem", "findmnt", "mountpoint", "lsof",
 		"printenv", "getconf", "uname", "arch",
 	} {
-		remoteReadOnly[c] = nil
+		remotePlainReaders[c] = true
+	}
+	// argv adapts a check of the argv's values: the words are literal.
+	argv := func(check func([]string) error) func(*Sandbox, []*syntax.Word) error {
+		return func(_ *Sandbox, args []*syntax.Word) error { return check(wordLits(args)) }
+	}
+	remoteArgValidators = map[string]func(*Sandbox, []*syntax.Word) error{
+		"env":     validateEnvArgs,
+		"timeout": validateTimeoutArgs,
+		"nice":    validateOptionWrapperArgs,
+		"stdbuf":  validateOptionWrapperArgs,
+		"sudo":    validateRemoteSudo,
+		"command": validateRemoteCommandBuiltin,
+		"sh":      validateRemoteShell,
+		"bash":    validateRemoteShell,
+		"dash":    validateRemoteShell,
+		"find":    validateRemoteFind,
+		"journalctl": argv(remoteOpts{
+			refuse: []string{"--cursor-file", "--vacuum-size", "--vacuum-time", "--vacuum-files", "--sync", "--relinquish-var", "--smart-relinquish-var", "--flush", "--rotate", "--update-catalog", "--setup-keys", "--synchronize-on-exit"},
+			why:    "writes or removes journal files",
+		}.check),
+		"systemctl": argv(checkRemoteSystemctl),
+		"git":       argv(checkRemoteGit),
+		"docker":    argv(checkRemoteDocker),
+		"sed":       argv(checkRemoteSed),
+		"ip":        argv(checkRemoteIP),
+		"sort": argv(remoteOpts{
+			spec:   optSpec{short: "kSTot", long: []string{"random-source", "sort", "batch-size", "files0-from", "key", "buffer-size", "field-separator", "temporary-directory", "parallel", "output", "compress-program"}},
+			refuse: []string{"-o", "--output", "--compress-program"},
+			why:    "writes a file or runs a program",
+		}.check),
+		"uniq": argv(remoteOpts{
+			spec: optSpec{short: "fsw", long: []string{"skip-fields", "skip-chars", "check-chars"}},
+			operands: func(pos []string) error {
+				if len(pos) > 1 {
+					return fmt.Errorf("uniq with a second operand (%s) writes it", pos[1])
+				}
+				return nil
+			},
+		}.check),
+		"date": argv(checkRemoteDate),
+		"hostname": argv(remoteOpts{
+			spec:     optSpec{short: "F", long: []string{"file"}},
+			refuse:   []string{"-b", "-F", "--boot", "--file"},
+			why:      "sets the host name",
+			operands: noOperands("sets the host name"),
+		}.check),
+		"dmesg": argv(remoteOpts{
+			spec:   optSpec{short: "Fflns", long: []string{"file", "facility", "level", "console-level", "buffer-size", "since", "until", "time-format"}},
+			refuse: []string{"-c", "-C", "-D", "-E", "-n", "--clear", "--read-clear", "--console-off", "--console-on", "--console-level"},
+			why:    "clears the kernel log or changes the console",
+		}.check),
+		"ss": argv(remoteOpts{
+			spec:   optSpec{short: "DFN", long: []string{"diag", "filter", "net"}},
+			refuse: []string{"-K", "-D", "--kill", "--diag"},
+			why:    "closes sockets or writes a file",
+		}.check),
+		"file": argv(remoteOpts{
+			spec:   optSpec{short: "efFmP", long: []string{"exclude", "exclude-quiet", "files-from", "separator", "magic-file", "parameter"}},
+			refuse: []string{"-C", "--compile"},
+			why:    "writes a compiled magic file",
+		}.check),
+		"rg": argv(remoteOpts{
+			spec:   optSpec{short: "ABCEefgjMmrTt", long: []string{"pre", "hostname-bin"}},
+			refuse: []string{"--pre", "--hostname-bin"},
+			why:    "runs a program",
+		}.check),
 	}
 }
 
@@ -693,10 +583,9 @@ func checkRemoteDate(argv []string) error {
 	// as -s's value.
 	argv = slices.DeleteFunc(slices.Clone(argv), func(a string) bool { return strings.HasPrefix(a, "-I") })
 	return remoteOpts{
-		spec:       optSpec{short: "dfrs", long: []string{"date", "file", "reference", "rfc-3339", "set"}},
-		refuse:     "s",
-		refuseLong: []string{"set"},
-		why:        "sets the clock",
+		spec:   optSpec{short: "dfrs", long: []string{"date", "file", "reference", "rfc-3339", "set"}},
+		refuse: []string{"-s", "--set"},
+		why:    "sets the clock",
 		operands: func(pos []string) error {
 			for _, p := range pos {
 				if !strings.HasPrefix(p, "+") {
@@ -724,9 +613,8 @@ func checkRemoteSystemctl(argv []string) error {
 			"lines", "output", "boot-loader-menu", "boot-loader-entry", "reboot-argument",
 			"kernel-cmdline", "timestamp", "drop-in", "when", "host", "machine", "capsule", "legend",
 		}},
-		refuse:     "H",
-		refuseLong: []string{"host"},
-		why:        "reaches another host",
+		refuse: []string{"-H", "--host"},
+		why:    "reaches another host",
 		operands: func(pos []string) error {
 			if len(pos) > 0 && !slices.Contains(systemctlReadOnly, pos[0]) {
 				return fmt.Errorf("systemctl %s is not a read-only verb (%s)", pos[0], strings.Join(systemctlReadOnly, ", "))
@@ -742,29 +630,42 @@ var gitRemoteReadOnly = []string{
 	"describe", "shortlog", "cat-file", "grep",
 }
 
+// The git global options a remote git may take: with a value, and flags.
+var (
+	gitRemoteGlobalValues = []string{"-C", "--git-dir", "--work-tree", "--namespace"}
+	gitRemoteGlobalFlags  = []string{"-P", "--no-pager", "--bare", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks"}
+)
+
+// checkRemoteGit allows git's read-only subcommands, with only the global
+// options above (no -c, which can make git run a program) and without the
+// options that write a file or run a pager.
 func checkRemoteGit(argv []string) error {
-	i := 1
-	for ; i < len(argv); i++ {
-		a := argv[i]
+	sub, idx, err := findSubcommand("git", literalWords(argv), gitGlobalValueFlags)
+	if err != nil {
+		return err
+	}
+	end := len(argv)
+	if sub != "" {
+		end = idx
+	}
+	for i := 1; i < end; i++ {
+		name, _, hasVal := strings.Cut(argv[i], "=")
 		switch {
-		case a == "-C" || a == "--git-dir" || a == "--work-tree" || a == "--namespace":
+		case slices.Contains(gitRemoteGlobalValues, argv[i]):
 			i++
-		case a == "-P" || a == "--no-pager" || a == "--bare" || a == "--no-replace-objects" ||
-			a == "--literal-pathspecs" || a == "--glob-pathspecs" || a == "--noglob-pathspecs" ||
-			a == "--icase-pathspecs" || a == "--no-optional-locks" ||
-			strings.HasPrefix(a, "--git-dir=") || strings.HasPrefix(a, "--work-tree=") || strings.HasPrefix(a, "--namespace="):
-		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("git %s is not allowed before a read-only subcommand (only -C, -P, --git-dir, --work-tree)", a)
+		case slices.Contains(gitRemoteGlobalFlags, argv[i]):
+		case hasVal && name != "-C" && slices.Contains(gitRemoteGlobalValues, name):
 		default:
-			goto sub
+			return fmt.Errorf("git %s is not allowed before a read-only subcommand (only -C, -P, --git-dir, --work-tree)", argv[i])
 		}
 	}
-	return nil
-sub:
-	if !slices.Contains(gitRemoteReadOnly, argv[i]) {
-		return fmt.Errorf("git %s is not a read-only subcommand (%s)", argv[i], strings.Join(gitRemoteReadOnly, ", "))
+	if sub == "" {
+		return nil
 	}
-	return remoteOpts{refuse: "O", refuseLong: []string{"output", "open-files-in-pager"}, why: "writes a file or runs a pager"}.check(argv[i:])
+	if !slices.Contains(gitRemoteReadOnly, sub) {
+		return fmt.Errorf("git %s is not a read-only subcommand (%s)", sub, strings.Join(gitRemoteReadOnly, ", "))
+	}
+	return remoteOpts{refuse: []string{"-O", "--output", "--open-files-in-pager"}, why: "writes a file or runs a pager"}.check(argv[idx:])
 }
 
 // docker's read-only commands: top-level, and under each management command.
@@ -806,36 +707,6 @@ func checkRemoteDocker(argv []string) error {
 	return nil
 }
 
-// checkRemoteFind refuses find's actions that delete or write, and checks the
-// command -exec and friends run.
-func checkRemoteFind(argv []string) error {
-	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		if reason, ok := blockedFindFlags[a]; ok {
-			return fmt.Errorf("find %s is not allowed: it %s", a, reason)
-		}
-		if !findExecFlags[a] {
-			continue
-		}
-		j := i + 1
-		for j < len(argv) && argv[j] != ";" && argv[j] != "+" {
-			j++
-		}
-		if j == i+1 {
-			return fmt.Errorf("find %s has no command", a)
-		}
-		words := make([]remoteWord, j-i-1)
-		for k := range words {
-			words[k] = remoteWord{val: argv[i+1+k]}
-		}
-		if err := (remoteChecker{}).argv(words, 0); err != nil {
-			return fmt.Errorf("find %s: %w", a, err)
-		}
-		i = j
-	}
-	return nil
-}
-
 // checkRemoteIP allows ip OBJECT [show|list|ls|lst|get|help ...], with the
 // options that do not read commands from a file (-batch, -force).
 func checkRemoteIP(argv []string) error {
@@ -866,16 +737,11 @@ func checkRemoteIP(argv []string) error {
 // checkRemoteSed refuses in-place editing, script files, and the script
 // commands that write a file or run one (w, W, e, and s///w and s///e).
 func checkRemoteSed(argv []string) error {
-	pos, vals, flags := optSpec{short: "efl", long: []string{"expression", "file", "line-length"}}.parse(argv, nil)
-	o := remoteOpts{refuse: "if", refuseLong: []string{"in-place", "file"}, why: "edits files in place or reads the script from a file"}
-	for f := range flags {
-		if len(f) == 1 && strings.Contains(o.refuse, f) {
-			return fmt.Errorf("sed -%s is not allowed: it %s", f, o.why)
-		}
+	spec := optSpec{short: "efl", long: []string{"expression", "file", "line-length"}}
+	if opt := refusedOption(argv, spec, append(slices.Clone(spec.long), "in-place"), "-i", "-f", "--in-place", "--file"); opt != "" {
+		return fmt.Errorf("sed %s is not allowed: it edits files in place or reads the script from a file", opt)
 	}
-	if err := o.refusedLong(argv); err != nil {
-		return err
-	}
+	pos, vals, _ := spec.parse(argv, nil)
 	scripts := append(slices.Clone(vals["e"]), vals["expression"]...)
 	if len(scripts) == 0 && len(pos) > 0 {
 		scripts = pos[:1]

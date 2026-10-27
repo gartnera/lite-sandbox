@@ -192,108 +192,68 @@ var allowedBashFlags = map[string]bool{
 }
 
 // validateBashArgs validates bash/sh command arguments at the AST level.
+// The -c command string's content is fully validated at runtime by
+// executeBash (parse → validate → path checks), to avoid an initialization
+// cycle; a script file's too.
 func validateBashArgs(s *Sandbox, args []*syntax.Word) error {
-	cmdName := wordText(args[0])
-	i := 1
-	foundC := false
-	for i < len(args) {
-		text := wordText(args[i])
+	if _, err := bashCommandStringIndex(wordTexts(args), blockedBashFlags); err != nil {
+		return err
+	}
+	// Bare bash/sh with no -c and no script file reads from stdin
+	if len(args) == 1 {
+		return fmt.Errorf("bare %q (no -c or script file) is not allowed: reads from stdin", wordText(args[0]))
+	}
+	return nil
+}
+
+// bashCommandStringIndex walks a bash/sh invocation's options (lits[0] is
+// the shell) and returns the index of its -c command string, or -1 when it
+// has none: it runs a script file, or reads commands from stdin. The flags
+// in blocked (blockedBashFlags: those that make it interactive, read stdin,
+// or source init files) are refused. Unknown flags are passed over, and a
+// word that is not literal ("") is skipped. Words after the command string
+// are its $0, $1, ...
+func bashCommandStringIndex(lits []string, blocked map[string]string) (int, error) {
+	cmdName := lits[0]
+	cmdString := func(i int) (int, error) {
+		if i >= len(lits) {
+			return 0, fmt.Errorf("%s -c requires a command string argument", cmdName)
+		}
+		return i, nil
+	}
+	for i := 1; i < len(lits); i++ {
+		text := lits[i]
 		if text == "" {
-			i++
 			continue
 		}
-
-		// Check for blocked flags
-		if reason, blocked := blockedBashFlags[text]; blocked {
-			return fmt.Errorf("%s: flag %q is not allowed: %s", cmdName, text, reason)
+		if reason, ok := blocked[text]; ok {
+			return 0, fmt.Errorf("%s: flag %q is not allowed: %s", cmdName, text, reason)
 		}
-
-		// -o takes a value argument (e.g., -o pipefail)
-		if text == "-o" {
-			i += 2
-			continue
-		}
-
-		// -c flag: next arg is the command string
-		if text == "-c" {
-			foundC = true
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("%s -c requires a command string argument", cmdName)
-			}
-			// Static validation only checks flags here. The command string
-			// content is fully validated at runtime by executeBash (parse →
-			// validate → path checks) to avoid an initialization cycle.
-			i++
-			continue
-		}
-
-		// Known safe flags
-		if allowedBashFlags[text] {
-			i++
-			continue
-		}
-
-		// Combined short flags like -ex, -eu, -exu
-		if len(text) > 1 && text[0] == '-' && text[1] != '-' {
-			allValid := true
+		switch {
+		case text == "-o":
+			i++ // takes a value argument (e.g., -o pipefail)
+		case text == "-c":
+			return cmdString(i + 1)
+		case allowedBashFlags[text]:
+		case len(text) > 1 && text[0] == '-' && text[1] != '-':
+			// Combined short flags like -ex, -eu, -exu
+			foundC := false
 			for _, ch := range text[1:] {
 				flag := "-" + string(ch)
-				if _, blocked := blockedBashFlags[flag]; blocked {
-					return fmt.Errorf("%s: flag %q (in %q) is not allowed", cmdName, flag, text)
+				if _, ok := blocked[flag]; ok {
+					return 0, fmt.Errorf("%s: flag %q (in %q) is not allowed", cmdName, flag, text)
 				}
-				if flag == "-c" {
-					foundC = true
-				}
-				if !allowedBashFlags[flag] && flag != "-o" {
-					allValid = false
-				}
+				foundC = foundC || flag == "-c"
 			}
-			if allValid || foundC {
-				if foundC {
-					// -c was in the combined flags; next arg is the command string
-					i++
-					if i >= len(args) {
-						return fmt.Errorf("%s -c requires a command string argument", cmdName)
-					}
-					// Content validated at runtime by executeBash
-				}
-				i++
-				continue
+			if foundC {
+				return cmdString(i + 1)
 			}
-			// If not all valid and no -c, it might be a script file path
-			// Fall through to script file handling below
+		case !strings.HasPrefix(text, "-") && !strings.HasPrefix(text, "+"):
+			// A script file; the remaining args are its arguments.
+			return -1, nil
 		}
-
-		// If we haven't found -c, this could be a script file path
-		if !foundC && !strings.HasPrefix(text, "-") {
-			// Script file — can't validate content statically, runtime will handle it
-			i++
-			// Remaining args are script arguments, skip them
-			break
-		}
-
-		// Allow unknown flags that start with + (set options)
-		if strings.HasPrefix(text, "+") {
-			i++
-			continue
-		}
-
-		// After -c command_string, remaining args are $0, $1, etc.
-		if foundC {
-			i++
-			continue
-		}
-
-		i++
 	}
-
-	// Bare bash/sh with no -c and no script file reads from stdin
-	if !foundC && i == 1 {
-		return fmt.Errorf("bare %q (no -c or script file) is not allowed: reads from stdin", cmdName)
-	}
-
-	return nil
+	return -1, nil
 }
 
 // executeBash runs a bash/sh command by parsing and executing it through
