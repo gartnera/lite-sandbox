@@ -916,3 +916,62 @@ func TestBashSandboxed_DevNullArgument(t *testing.T) {
 		t.Fatalf("expected empty.txt to be an empty file, got %v, %v", fi, err)
 	}
 }
+
+// TestBashSandboxed_StdStreamNames checks that the names bash handles specially
+// in redirections (/dev/stdout and the like) reach the command's own streams,
+// as redirect targets and as arguments, through both the static and the
+// runtime path checks, and that they never open the host process's streams.
+func TestBashSandboxed_StdStreamNames(t *testing.T) {
+	workDir := t.TempDir()
+	os.WriteFile(filepath.Join(workDir, "verify.sh"), []byte("echo a > /dev/stdout\necho b > /dev/stderr\n"), 0o755)
+	for _, tc := range []struct{ cmd, want string }{
+		{"echo hi > /dev/stdout", "hi\n"},
+		{"echo hi >> /dev/stdout; echo after", "hi\nafter\n"},
+		{"echo hi > /dev/fd/1", "hi\n"},
+		{"F=/dev/stdout; echo hi > $F", "hi\n"},
+		{"{ echo out; echo err > /dev/stderr; } 2> err.txt > /dev/null; cat err.txt", "err\n"},
+		{"{ echo out 2> /dev/stdout; } > out.txt; cat out.txt", "out\n"},
+		{"echo hi | tee /dev/stdout", "hi\nhi\n"},
+		{"echo hi | dd of=/dev/stdout status=none", "hi\n"},
+		{"cat < /dev/stdin <<< in", "in\n"},
+		{"bash verify.sh 2> /dev/null", "a\n"},
+	} {
+		t.Run(tc.cmd, func(t *testing.T) {
+			out, err := NewSandbox().Execute(context.Background(), tc.cmd, workDir, []string{workDir}, []string{workDir})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out != tc.want {
+				t.Fatalf("got %q, want %q", out, tc.want)
+			}
+		})
+	}
+	for _, cmd := range []string{
+		"cat < /dev/stdout",
+		"echo hi > /dev/stdin",
+		"echo hi > /dev/fd/3",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			if _, err := NewSandbox().Execute(context.Background(), cmd, workDir, []string{workDir}, []string{workDir}); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+// TestIsStdStreamArg checks that commands run inside the lite-sandbox process,
+// which would open a standard-stream name as the host's own, do not get the
+// argument exemption.
+func TestIsStdStreamArg(t *testing.T) {
+	if !isStdStreamArg("tee", "/dev/stdout") || !isStdStreamArg("cat", "/dev/stdin") {
+		t.Fatal("expected external commands to be exempt")
+	}
+	for _, name := range []string{"awk", "bash", "sh", "python", "python3"} {
+		if isStdStreamArg(name, "/dev/stdin") {
+			t.Fatalf("%s runs in process and must not be exempt", name)
+		}
+	}
+	if isStdStreamArg("tee", "/dev/fd/3") || isStdStreamArg("tee", "/dev/tty") {
+		t.Fatal("only descriptors 0-2 are exempt")
+	}
+}

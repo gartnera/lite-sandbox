@@ -845,6 +845,9 @@ func (s *Sandbox) buildSecurityHandlers(readAllowedPaths, writeAllowedPaths []st
 			return args, nil
 		}),
 		interp.OpenHandler(func(ctx context.Context, path string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
+			if f, ok := openStdStream(ctx, path, flag); ok {
+				return f, nil
+			}
 			hc := interp.HandlerCtx(ctx)
 			if err := s.report(ctx, layerRuntime, rulePathBoundary, validateOpenPath(path, flag, hc.Dir, sets)); err != nil {
 				return nil, err
