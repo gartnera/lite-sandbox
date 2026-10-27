@@ -100,7 +100,7 @@ func validateCommandPaths(cmdName string, args []string, workDir string, sets re
 		}
 	}
 	if cmdName == "gh" {
-		if err := validateGhAPIReads(args, workDir, sets.read); err != nil {
+		if err := validateGhReads(args, workDir, sets.read); err != nil {
 			return err
 		}
 	}
