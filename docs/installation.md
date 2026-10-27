@@ -13,8 +13,8 @@ The script ends by telling you what to run next. If `~/.local/bin` isn't on your
 Pass options after `sh -s --`:
 
 ```bash
-curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --version v0.4.0  # a specific release
-curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --dir /usr/local/bin  # another directory
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --version v0.4.0
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --dir /usr/local/bin
 ```
 
 How the script downloads and verifies the archive depends on the [GitHub CLI](https://cli.github.com):
