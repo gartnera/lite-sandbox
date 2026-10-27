@@ -66,7 +66,7 @@ func ParseStrict(data []byte) (*Config, error) {
 
 // validate runs every check Load applies to a decoded config.
 func (c *Config) validate() error {
-	for _, check := range []func() error{c.validateModes, c.validatePaths, c.validateCommands, c.validateProfiles} {
+	for _, check := range []func() error{c.validateModes, c.validatePaths, c.validateCommands, c.validateProfiles, c.validateSSH} {
 		if err := check(); err != nil {
 			return err
 		}

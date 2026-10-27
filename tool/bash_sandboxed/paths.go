@@ -194,6 +194,10 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 		return pythonNonPathArgIndices(args)
 	case "git":
 		return gitGlobalPathArgIndices(args)
+	case "ssh":
+		return sshNonPathArgIndices(args)
+	case "sshpass":
+		return sshpassNonPathArgIndices(args)
 	case "sed":
 		return sedNonPathArgIndices(args)
 	case "grep", "egrep", "fgrep", "rgrep", "zgrep", "zegrep", "zfgrep",

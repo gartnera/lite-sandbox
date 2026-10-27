@@ -27,6 +27,10 @@ var credentialEnvWords = []string{
 // credentialEnvPairs are adjacent word pairs that mark a credential.
 var credentialEnvPairs = [][2]string{{"API", "KEY"}, {"ACCESS", "KEY"}, {"PRIVATE", "KEY"}, {"AUTH", "KEY"}}
 
+// credentialEnvNames are whole variable names that hold a credential without
+// a credential word in them: sshpass's password.
+var credentialEnvNames = []string{"SSHPASS"}
+
 // agentEnvVars are the agents' own variables that are not named like a
 // credential but give access to the agent: Claude Code's messaging socket,
 // through which another session can be driven.
@@ -41,9 +45,9 @@ var agentEnvPrefixes = []string{"ANTHROPIC_", "CLAUDE_", "OPENAI_", "CODEX_", "X
 // ACCESS_KEY or PRIVATE_KEY in it (AWS_SECRET_ACCESS_KEY, AWS_ACCESS_KEY_ID),
 // or it ends in _KEY (OPENAI_API_KEY, STRIPE_KEY). Matching whole words keeps
 // TOKENIZERS_PARALLELISM and KEYCHAIN_PATH out. An agent variable that grants
-// access without looking like one (AgentEnvVar) counts too.
+// access without looking like one (AgentEnvVar) counts too, as does SSHPASS.
 func CredentialEnvVar(name string) bool {
-	if slices.Contains(agentEnvVars, name) {
+	if slices.Contains(agentEnvVars, name) || slices.Contains(credentialEnvNames, name) {
 		return true
 	}
 	words := strings.Split(strings.ToUpper(name), "_")

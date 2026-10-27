@@ -80,13 +80,9 @@ func (s *Sandbox) commandScope(name string) (config.CommandScope, *config.Config
 	return scope, s.cfg, ok
 }
 
-// execInScopedWorker runs args in the worker of the scope that names args[0].
-func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
-	scope, cfg, ok := s.commandScope(args[0])
-	if !ok {
-		// The config changed since dispatch and no longer scopes the command.
-		return s.execInWorker(ctx, args)
-	}
+// execInScopedWorker runs args in the worker of scope, which workerScope
+// chose from cfg.
+func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string, scope config.CommandScope, cfg *config.Config) error {
 	hc := interp.HandlerCtx(ctx)
 
 	// What sandboxed commands can write: the shared worker's writable paths,
@@ -132,7 +128,8 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
 	s.mu.RUnlock()
 	env := envSliceToMap(awsBaseEnv(config.WithoutAgentEnv(os.Environ()), imdsEndpoint, imdsRegion))
 	env["PATH"] = safePath(env["PATH"], writable)
-	scopedGitEnv(env)
+	scopedGitEnv(env, s.signsInScope(scope, cfg))
+	s.sshScopedEnv(ctx, args, scope, cfg, env)
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)
@@ -189,18 +186,31 @@ var scopedGitConfig = [][2]string{
 	{"protocol.allow", "never"},
 	{"protocol.https.allow", "always"},
 	{"protocol.ssh.allow", "always"},
-	{"commit.gpgSign", "false"},
-	{"tag.gpgSign", "false"},
 	{"merge.verifySignatures", "false"},
 	{"log.showSignature", "false"},
 	{"submodule.recurse", "false"},
 	{"fetch.recurseSubmodules", "false"},
 }
 
+// scopedGitSigningOff switches commit, tag, and push signing off, which run
+// the signing program the config names, and pins the signing programs (and
+// the ssh key command) to false for an explicit -S or push --signed; a
+// worker whose git signs (the ssh agent's, with git_signing) pins those
+// programs to the user's own instead (gitSigningConfig).
+var scopedGitSigningOff = [][2]string{
+	{"commit.gpgSign", "false"},
+	{"tag.gpgSign", "false"},
+	{"push.gpgSign", "false"},
+	{"gpg.program", "false"},
+	{"gpg.ssh.program", "false"},
+	{"gpg.x509.program", "false"},
+	{"gpg.ssh.defaultKeyCommand", "false"},
+}
+
 // scopedGitEnv adds to env (a scoped worker's environment) what keeps a git
 // the CLI starts from running code the project's .git configures: the
-// scopedGitConfig entries, appended to any GIT_CONFIG_COUNT entries the
-// server already has, and the variables that outrank the program settings
+// scopedGitConfig entries (and scopedGitSigningOff unless signs), appended to
+// any GIT_CONFIG_COUNT entries the server already has, and the variables that outrank the program settings
 // git has no off switch for (core.sshCommand, core.askPass, core.editor,
 // core.pager), unless the server sets them itself. It cannot cover
 // everything: filter, merge, and diff drivers are named per path in
@@ -208,17 +218,11 @@ var scopedGitConfig = [][2]string{
 // .git/config, and a credential helper can be scoped to any URL, so a CLI
 // granted a credential should still not run git in a repository sandboxed
 // commands can write (see the gh profile's allow_git option).
-func scopedGitEnv(env map[string]string) {
-	n, err := strconv.Atoi(env["GIT_CONFIG_COUNT"])
-	if err != nil || n < 0 {
-		n = 0
+func scopedGitEnv(env map[string]string, signs bool) {
+	appendGitConfig(env, scopedGitConfig)
+	if !signs {
+		appendGitConfig(env, scopedGitSigningOff)
 	}
-	for _, kv := range scopedGitConfig {
-		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", n)] = kv[0]
-		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", n)] = kv[1]
-		n++
-	}
-	env["GIT_CONFIG_COUNT"] = strconv.Itoa(n)
 	if env["GIT_SSH_COMMAND"] == "" {
 		// GIT_SSH_COMMAND outranks core.sshCommand, which outranks GIT_SSH.
 		env["GIT_SSH_COMMAND"] = "ssh"
@@ -237,6 +241,21 @@ func scopedGitEnv(env map[string]string) {
 			env[k] = v
 		}
 	}
+}
+
+// appendGitConfig appends kvs to env's GIT_CONFIG_COUNT entries, where they
+// outrank every config file and the earlier entries.
+func appendGitConfig(env map[string]string, kvs [][2]string) {
+	n, err := strconv.Atoi(env["GIT_CONFIG_COUNT"])
+	if err != nil || n < 0 {
+		n = 0
+	}
+	for _, kv := range kvs {
+		env[fmt.Sprintf("GIT_CONFIG_KEY_%d", n)] = kv[0]
+		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", n)] = kv[1]
+		n++
+	}
+	env["GIT_CONFIG_COUNT"] = strconv.Itoa(n)
 }
 
 // shellQuote quotes s as one word for sh.

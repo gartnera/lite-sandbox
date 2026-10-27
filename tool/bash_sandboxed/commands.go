@@ -382,6 +382,8 @@ var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) erro
 	"git":     validateGitCommand,
 	"aws":     validateAWSCommand,
 	"docker":  validateDockerCommand,
+	"ssh":     validateSSHCommand,
+	"sshpass": validateSSHPassCommand,
 	"xargs":   validateXargsArgs,
 	"env":     validateEnvArgs,
 	"timeout": validateTimeoutArgs,

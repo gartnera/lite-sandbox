@@ -953,6 +953,20 @@ $ lite-sandbox config paths remove /base/data --dir ~/work/acme
   remove it everywhere with `lite-sandbox config paths remove /base/data`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
 ```
 
+## SSH
+
+The `ssh` section lists the hosts `ssh` and `sshpass` may connect to, and gives
+your ssh agent, through a filter, to them and git's remote commands alone. See
+[SSH access](ssh.md).
+
+```yaml
+ssh:
+  hosts: [build-box, 10.0.0.12]
+  agent: true                # default true
+  unrestricted_agent: false  # default false
+  git_signing: false         # default false
+```
+
 ## Git Support
 
 Git commands are enabled by default, with separate permission levels:
@@ -965,6 +979,10 @@ git:
   remote_write: false          # git push (default: false)
   allow_worktree_parent: false # if cwd is a linked worktree, also allow read+write to the main worktree (default: false)
 ```
+
+Remotes reached over ssh authenticate through your ssh agent, which git's
+remote commands get once the config has an [`ssh` section](ssh.md#the-agent)
+(your private keys are masked from every command).
 
 `git push` is disabled by default since it changes shared state. To allow the
 agent to push:
