@@ -219,13 +219,13 @@ func TestSSHRemoteCommand(t *testing.T) {
 	}
 }
 
-func TestSedScriptReadOnly(t *testing.T) {
+func TestSedScriptCheck(t *testing.T) {
 	for _, ok := range []string{
 		"p", "10,20p", "/re/d", `\%a/b%p`, "$!N;P;D", "1~2p", "0,/x/s//y/", "s/a\\/b/c/gI2",
 		"y/abc/xyz/", "/x/{p;q}", ":a;N;ba", "a hello; w /x", "1i\\\ntext w x", "l 40", "r /etc/hosts", "#n\np",
 		"s/x/y/;  s/a/b/p", "/a/,+3!d",
 	} {
-		if err := sedScriptReadOnly(ok); err != nil {
+		if err := sedScriptCheck(ok, "ewW"); err != nil {
 			t.Errorf("%q: %v", ok, err)
 		}
 	}
@@ -233,7 +233,7 @@ func TestSedScriptReadOnly(t *testing.T) {
 		"w /x", "1W /x", "e id", "s/a/b/w /x", "s/a/b/gw /x", "s/a/b/e", "s/a/b/ge", "s|a|b|pe",
 		"/x/e", "$ e", "p;w x", "/x/!w y", "{p\nw x\n}", "s/a/b", "k", "s/a/b/ w x", ":a w x",
 	} {
-		if err := sedScriptReadOnly(bad); err == nil {
+		if err := sedScriptCheck(bad, "ewW"); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}

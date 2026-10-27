@@ -33,6 +33,12 @@ func TestValidate_AllowedWriteCommands(t *testing.T) {
 		{"sed with rewrite", "sed 's/old/rewrite/' file.txt"},
 		{"sed with World", "sed 's/old/World/' file.txt"},
 		{"sed with sandbox flag", "sed --sandbox 's/old/new/' file.txt"},
+		{"sed in-place notes", "sed -i 's/old/new/' notes.md"},
+		{"sed in-place BSD no backup", "sed -i '' 's/old/new/' file.txt"},
+		{"sed in-place BSD backup", "sed -i .bak 's/old/new/' file.txt"},
+		{"sed -ie", "sed -ie 's/old/new/' file.txt"},
+		{"sed -e with files", "sed -n -e p -e '$=' write.txt each.txt"},
+		{"sed a text", "sed '1a hello; w /x' file.txt"},
 		{"tee file", "echo hi | tee out.txt"},
 		{"tee append", "echo hi | tee -a out.txt"},
 		{"tee multiple files", "echo hi | tee a.txt b.txt"},
@@ -97,10 +103,24 @@ func TestValidate_BlockedSedCommands(t *testing.T) {
 		{"sed r command", "sed 'r infile' file.txt", "not allowed"},
 		{"sed R command", "sed 'R infile' file.txt", "not allowed"},
 		{"sed r after address", "sed '/pattern/r infile' file.txt", "not allowed"},
+		// After an address, or a blank: the script is parsed, not scanned.
+		{"sed e after line", "sed '1e id' file.txt", "not allowed"},
+		{"sed e after blank", "sed '1 e id' file.txt", "not allowed"},
+		{"sed e after range", "sed -n '1,5e id' file.txt", "not allowed"},
+		{"sed w after line", "sed '1w /tmp/x' file.txt", "not allowed"},
+		{"sed w after $", "sed '$w /tmp/x' file.txt", "not allowed"},
+		{"sed w in -e", "sed -e p -e '2w /tmp/x' file.txt", "not allowed"},
+		{"sed unknown command", "sed 'k' file.txt", "only scripts that can be checked"},
+		// BSD's bare -i takes the next argument as the suffix: the script
+		// is the second operand.
+		{"sed BSD in-place w", "sed -i '' '1w /tmp/x' file.txt", "not allowed"},
+		{"sed BSD in-place backup w", "sed -i .bak '1w /tmp/x' file.txt", "not allowed"},
+		{"sed BSD -I w", "sed -I '' '$w /tmp/x' file.txt", "not allowed"},
 		// -f/--file: script files
 		{"sed -f", "sed -f script.sed file.txt", "script files bypass"},
 		{"sed --file", "sed --file script.sed file.txt", "script files bypass"},
 		{"sed --file=", "sed --file=script.sed file.txt", "script files bypass"},
+		{"sed --fi", "sed --fi script.sed file.txt", "script files bypass"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
