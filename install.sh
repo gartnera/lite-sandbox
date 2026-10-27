@@ -4,11 +4,11 @@
 #   curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh
 #   curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --version v0.9.0 --dir /usr/local/bin
 #
-# With the GitHub CLI installed and logged in, the archive is downloaded with
-# `gh release download` and its build provenance attestation is checked with
-# `gh attestation verify` (signed by this repository's release workflow).
-# Otherwise it is downloaded with curl and checked against the release's
-# checksums.txt.
+# With the GitHub CLI (2.67 or later) installed and logged in, the archive is
+# downloaded with `gh release download` and its build provenance attestation is
+# checked with `gh attestation verify` (signed by this repository's release
+# workflow on main). Otherwise it is downloaded with curl and checked against
+# the release's checksums.txt.
 #
 # The archive and checksum names follow .goreleaser.yaml; change them together.
 
@@ -20,7 +20,12 @@ set -eu
 
 REPO=gartnera/lite-sandbox
 BINARY=lite-sandbox
-SIGNER_WORKFLOW="$REPO/.github/workflows/release.yaml"
+# The release workflow run from main is the only accepted attestation signer.
+SIGNER="https://github.com/$REPO/.github/workflows/release.yaml@refs/heads/main"
+# gh 2.49-2.66 can report success for an archive with no attestation
+# (CVE-2025-25204); older versions have no `gh attestation`.
+GH_MIN_MAJOR=2
+GH_MIN_MINOR=67
 
 usage() {
 	cat <<EOF
@@ -62,10 +67,23 @@ detect_platform() {
 	echo "${os}_${arch}"
 }
 
-# gh_available reports whether the GitHub CLI is installed and logged in to
-# github.com; `gh attestation verify` needs an authenticated API client.
+# gh_available reports whether a recent enough GitHub CLI is installed and
+# logged in to github.com; `gh attestation verify` needs an authenticated API
+# client.
 gh_available() {
-	has gh && gh auth status --hostname github.com >/dev/null 2>&1
+	has gh && gh_recent_enough 2>/dev/null && gh auth status --hostname github.com >/dev/null 2>&1
+}
+
+# gh_recent_enough reports whether `gh --version` ("gh version 2.67.0 (...)")
+# is at least GH_MIN_MAJOR.GH_MIN_MINOR.
+gh_recent_enough() {
+	local version major minor
+	version=$(gh --version | awk 'NR == 1 { print $3 }')
+	major=${version%%.*}
+	minor=${version#*.}
+	minor=${minor%%.*}
+	[ "$major" -gt "$GH_MIN_MAJOR" ] ||
+		{ [ "$major" -eq "$GH_MIN_MAJOR" ] && [ "$minor" -ge "$GH_MIN_MINOR" ]; }
 }
 
 # latest_tag prints the tag of the latest release.
@@ -88,7 +106,7 @@ download_with_gh() {
 	log "Downloading $archive with gh"
 	gh release download "$tag" --repo "$REPO" --pattern "$archive" --dir "$dir"
 	log "Verifying the build provenance attestation"
-	gh attestation verify "$dir/$archive" --repo "$REPO" --signer-workflow "$SIGNER_WORKFLOW" >/dev/null ||
+	gh attestation verify "$dir/$archive" --repo "$REPO" --cert-identity "$SIGNER" >/dev/null ||
 		fail "$archive failed attestation verification"
 }
 
@@ -126,6 +144,8 @@ install_binary() {
 	tar -xzf "$archive" -C "$dir" "$BINARY"
 	mkdir -p "$dest_dir"
 	tmp="$dest_dir/.$BINARY.tmp.$$"
+	# The EXIT trap removes it if anything below fails.
+	staged=$tmp
 	cp "$dir/$BINARY" "$tmp"
 	chmod 755 "$tmp"
 	mv -f "$tmp" "$dest_dir/$BINARY"
@@ -133,33 +153,47 @@ install_binary() {
 
 # physical_dir prints dir with symlinks and extra slashes resolved.
 physical_dir() {
-	(cd "$1" 2>/dev/null && pwd -P)
+	(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P)
+}
+
+# on_path reports whether dir is a PATH entry.
+on_path() {
+	local dir="$1" entry
+	local IFS=:
+	for entry in $PATH; do
+		[ -n "$entry" ] && [ "$(physical_dir "$entry")" = "$dir" ] && return 0
+	done
+	return 1
+}
+
+# runs_installed reports whether `lite-sandbox` on PATH is the one in dir.
+runs_installed() {
+	local dir="$1" found
+	found=$(command -v "$BINARY" 2>/dev/null) || return 1
+	[ "$(physical_dir "${found%/*}")" = "$dir" ]
 }
 
 # check_path warns when the installed binary is not what `lite-sandbox`
-# runs: its directory is missing from PATH, or an earlier entry shadows it.
+# runs: its directory is missing from PATH, or another lite-sandbox on PATH
+# would run instead.
 check_path() {
 	local dest_dir="$1" found
-	case ":$PATH:" in
-	*":$dest_dir:"* | *":$dest_dir/:"*) ;;
-	*)
+	if ! on_path "$dest_dir"; then
 		log ""
 		log "warning: $dest_dir is not on your PATH. Add it to your shell profile:"
 		log "  export PATH=\"$dest_dir:\$PATH\""
-		return
-		;;
-	esac
+	fi
 	found=$(command -v "$BINARY" 2>/dev/null || true)
-	if [ -n "$found" ] && [ "$(physical_dir "${found%/*}")" != "$(physical_dir "$dest_dir")" ]; then
+	if [ -n "$found" ] && ! runs_installed "$dest_dir"; then
 		log ""
-		log "warning: $found comes first on your PATH and shadows $dest_dir/$BINARY."
-		log "Remove it, or move $dest_dir earlier in PATH."
+		log "warning: \`$BINARY\` runs $found instead of $dest_dir/$BINARY."
+		log "Remove it, or put $dest_dir earlier in PATH."
 	fi
 }
 
 main() {
 	version=""
-	dest_dir="${HOME:?HOME is not set}/.local/bin"
+	dest_dir=""
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--version)
@@ -168,7 +202,7 @@ main() {
 			shift 2
 			;;
 		--dir)
-			[ $# -ge 2 ] || fail "--dir needs a value"
+			[ $# -ge 2 ] && [ -n "$2" ] || fail "--dir needs a value"
 			dest_dir=$2
 			shift 2
 			;;
@@ -182,15 +216,14 @@ main() {
 			;;
 		esac
 	done
-	# Drop a trailing slash so the PATH check and messages match.
-	[ "$dest_dir" = / ] || dest_dir=${dest_dir%/}
+	[ -n "$dest_dir" ] || dest_dir="${HOME:?HOME is not set; pass --dir}/.local/bin"
 
 	use_gh=0
 	if gh_available; then
 		use_gh=1
 	else
 		has curl || fail "need curl (or a logged-in gh) to download the release"
-		log "gh is not installed or not logged in: skipping attestation verification, checking checksums.txt instead"
+		log "gh $GH_MIN_MAJOR.$GH_MIN_MINOR+ is not installed or not logged in: skipping attestation verification, checking checksums.txt instead"
 	fi
 
 	platform=$(detect_platform)
@@ -202,8 +235,9 @@ main() {
 	esac
 	archive="${BINARY}_${version#v}_${platform}.tar.gz"
 
+	staged=""
 	work=$(mktemp -d)
-	trap 'rm -rf "$work"' EXIT
+	trap 'rm -rf "$work" ${staged:+"$staged"}' EXIT
 
 	if [ "$use_gh" = 1 ]; then
 		download_with_gh "$version" "$archive" "$work"
@@ -211,11 +245,15 @@ main() {
 		download_with_curl "$version" "$archive" "$work"
 	fi
 	install_binary "$work/$archive" "$work" "$dest_dir"
+	# Absolute and symlink-free, so the PATH check and the messages are exact.
+	dest_dir=$(physical_dir "$dest_dir")
 
 	log "Installed $BINARY $version to $dest_dir/$BINARY"
 	check_path "$dest_dir"
+	cmd="$dest_dir/$BINARY"
+	! runs_installed "$dest_dir" || cmd=$BINARY
 	log ""
-	log "Next: run \`$BINARY install\` to configure your agent CLIs (or restart them after an upgrade)."
+	log "Next: run \`$cmd install\` to configure your agent CLIs (or restart them after an upgrade)."
 }
 
 main "$@"

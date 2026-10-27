@@ -6,8 +6,9 @@ Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/l
 
 ```bash
 curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh
-lite-sandbox version   # "lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)"
 ```
+
+The script ends by telling you what to run next. If `~/.local/bin` isn't on your `PATH` yet, it prints the full path to the binary and the `export PATH=...` line to add to your shell profile.
 
 Pass options after `sh -s --`:
 
@@ -18,7 +19,7 @@ curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s 
 
 How the script downloads and verifies the archive depends on the [GitHub CLI](https://cli.github.com):
 
-- **`gh` installed and logged in** (`gh auth status`): it downloads with `gh release download` and checks the archive's [build provenance attestation](#verifying-a-download) with `gh attestation verify`, requiring it to be signed by this repository's release workflow. A failed verification stops the install.
+- **`gh` 2.67 or later, logged in** (`gh auth status`): it downloads with `gh release download` and checks the archive's [build provenance attestation](#verifying-a-download) with `gh attestation verify`, requiring it to be signed by this repository's release workflow running on `main`. A failed verification stops the install. Older `gh` versions are skipped: before 2.49 they have no `gh attestation`, and before 2.67 `gh attestation verify` can pass an archive that has no attestation ([CVE-2025-25204](https://osv.dev/vulnerability/CVE-2025-25204)).
 - **Otherwise**: it downloads with `curl` and checks the archive's SHA-256 against the release's `checksums.txt`. This catches a corrupted download but, unlike the attestation, does not prove where the archive came from.
 
 The binary is replaced atomically, so a running `lite-sandbox serve-mcp` keeps the old build until your agent restarts. Afterwards the script checks your `PATH`: it warns if the install directory isn't on it (with the `export PATH=...` line to add to your shell profile), or if another `lite-sandbox` earlier on `PATH` (for example an old `go install` in `$GOPATH/bin`) would run instead.
