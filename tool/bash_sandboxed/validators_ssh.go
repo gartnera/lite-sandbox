@@ -533,22 +533,24 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	return checkSSHGlobs(argv[cmdIdx:], glob[cmdIdx:], p.cmdIdx)
 }
 
-// validateSSHAppendedArgs refuses an ssh or sshpass that xargs runs with its
-// input appended, unless nothing appended can be read as an option or as
-// sshpass's command: ssh reads options again after the destination, so an
-// appended -oProxyCommand=... or -oHostname=... would escape the host check,
-// and words appended to a sshpass with no command become the command it runs.
-// An ssh that names a remote command (or ends its options with --) takes the
-// appended words as more of that command. With a replace string (-I, -i,
-// --replace, BSD -J) xargs substitutes its input into the words instead, so a
-// word holding the replace string must be part of the remote command, where
-// ssh reads no options. When the destination's remote command is held to
-// read-only commands, the input may not reach the remote command at all: it
-// is checked before xargs runs, and the remote shell would run the input as
-// part of it. xargsOpts are xargs's own words before the command (xargs
-// itself included). Applies once the ssh section lists a host, like the ssh
+// validateSSHWrappedInput refuses an ssh or sshpass that a wrapper (xargs,
+// find -exec) runs with words of its input, unless no input word can be read
+// as an option, a host, or sshpass's command. ssh reads options again after
+// the destination, so an input -oProxyCommand=... or -oHostname=... would
+// escape the host check, and words appended to a sshpass with no command
+// become the command it runs.
+//
+// With replace strings (xargs -I, -i, --replace, BSD -J; find's {}) the
+// input replaces them in the words, so a word holding one must be part of
+// the remote command, where ssh reads no options. Without (xargs's default)
+// the input is appended: an ssh that names a remote command (or ends its
+// options with --) takes it as more of that command. When the destination's
+// remote command is held to read-only commands, the input may not reach the
+// remote command at all: it is checked before the wrapper runs, and the
+// remote shell would run the input as part of it. wrapper names the wrapper
+// for messages. Applies once the ssh section lists a host, like the ssh
 // validator.
-func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
+func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args []*syntax.Word) error {
 	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
 		return nil
 	}
@@ -560,11 +562,6 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 	if name != "ssh" && name != "sshpass" {
 		return nil
 	}
-	opts, _, err := sshLiterals(xargsOpts)
-	if err != nil {
-		return err
-	}
-	replace := xargsReplaceStrings(opts)
 	sshStart := 0
 	if name == "sshpass" {
 		cmdIdx, _, _, err := parseSSHPassArgs(argv)
@@ -572,7 +569,7 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 			return err
 		}
 		if cmdIdx >= len(argv) {
-			return fmt.Errorf("xargs sshpass without a command is not allowed: the input xargs appends would be the command sshpass runs")
+			return fmt.Errorf("%s sshpass without a command is not allowed: the input %s adds would be the command sshpass runs", wrapper, wrapper)
 		}
 		sshStart = cmdIdx
 	}
@@ -583,7 +580,7 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 	host := s.getConfig().SSH.Host(sshDestinationHost(p.dest))
 	readOnly := !p.noDest && !p.noSession && host != nil && !host.Writes()
 	errReadOnly := func() error {
-		return fmt.Errorf("xargs %s with its input in the remote command is not allowed: the command to %s is held to read-only commands, and the remote shell would run the input as part of it; run ssh for each input yourself, or the user can lift the check with --write", name, host.Host)
+		return fmt.Errorf("%s %s with its input in the remote command is not allowed: the command to %s is held to read-only commands, and the remote shell would run the input as part of it; run ssh for each input yourself, or the user can lift the check with --write", wrapper, name, host.Host)
 	}
 	if len(replace) > 0 {
 		for i, w := range argv[1:] {
@@ -598,7 +595,7 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 				}
 				continue
 			}
-			return fmt.Errorf("xargs %s with its input replacing %q is not allowed: ssh could read the input as an option or a host; put the replace string in the remote command only (xargs -I{} ssh host cmd {})", name, w)
+			return fmt.Errorf("%s %s with its input replacing %q is not allowed: ssh could read the input as an option or a host; put the replace string in the remote command only (xargs -I{} ssh host cmd {})", wrapper, name, w)
 		}
 		return nil
 	}
@@ -611,7 +608,24 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 	if p.endOpts || p.cmdIdx < len(argv[sshStart:]) {
 		return nil
 	}
-	return fmt.Errorf("xargs %s without a remote command is not allowed: ssh reads the words xargs appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", name)
+	return fmt.Errorf("%s %s without a remote command is not allowed: ssh reads the words %s appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", wrapper, name, wrapper)
+}
+
+// validateSSHUnderXargs is validateSSHWrappedInput for an ssh or sshpass
+// that xargs runs; xargsOpts are xargs's own words before the command (xargs
+// itself included), which set its replace strings.
+func validateSSHUnderXargs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
+	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
+		return nil
+	}
+	if name := args[0].Lit(); name != "ssh" && name != "sshpass" {
+		return nil
+	}
+	opts, _, err := sshLiterals(xargsOpts)
+	if err != nil {
+		return err
+	}
+	return validateSSHWrappedInput(s, "xargs", xargsReplaceStrings(opts), args)
 }
 
 // xargsReplaceStrings returns the replace strings an xargs invocation's own

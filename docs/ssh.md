@@ -89,13 +89,14 @@ Run by `xargs`, ssh must name its remote command (`xargs ssh box cmd`) or end
 its options with `--`: ssh reads options again after the destination, so the
 words `xargs` appends would otherwise be options (`-oProxyCommand=...`). For
 the same reason `xargs sshpass` must name the command sshpass runs. With a
-replace string (`xargs -I{}`, `-i`, `--replace`), the input may only replace
-words of the remote command (`xargs -I{} ssh box cat {}`), never the
-destination, an option, or the first word after the destination. On a host
-whose remote command is held to read-only commands (below), the input may not
-reach the remote command at all: the check runs before `xargs` does, and the
-remote shell would run the input as part of the command. That leaves
-`xargs` with ssh to `write: true` hosts.
+replace string (`xargs -I{}`, `-i`, `--replace`, and `find -exec`'s `{}`),
+the input may only replace words of the remote command
+(`xargs -I{} ssh box cat {}`), never the destination, an option, or the first
+word after the destination. On a host whose remote command is held to
+read-only commands (below), the input may not reach the remote command at
+all: the check runs before `xargs` or `find` does, and the remote shell would
+run the input as part of the command. That leaves `xargs` and `find -exec`
+with ssh to `write: true` hosts.
 
 ### The remote command
 

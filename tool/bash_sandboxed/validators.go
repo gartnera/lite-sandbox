@@ -167,6 +167,11 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 			if err := validateSubCommand(s, subArgs); err != nil {
 				return fmt.Errorf("find %s: %w", execFlag, err)
 			}
+			// find puts the file names where {} is (with +, several of
+			// them).
+			if err := validateSSHWrappedInput(s, "find "+execFlag, []string{"{}"}, subArgs); err != nil {
+				return err
+			}
 			continue
 		}
 		if reason, blocked := blockedFindFlags[lit]; blocked {
@@ -334,7 +339,7 @@ func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
 	if err := validateSubCommand(s, args[idx:]); err != nil {
 		return err
 	}
-	return validateSSHAppendedArgs(s, args[:idx], args[idx:])
+	return validateSSHUnderXargs(s, args[:idx], args[idx:])
 }
 
 // wordLeadingLit returns the maximal literal prefix of a word: the text of its

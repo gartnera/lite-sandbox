@@ -155,12 +155,12 @@ func TestValidateSSHPassCommand(t *testing.T) {
 	}
 }
 
-// TestSSHUnderXargs: xargs runs ssh itself, so the words it adds to an ssh
-// command are only known when it runs. On a write: true host they may only
+// TestSSHUnderWrappers: xargs and find -exec run ssh themselves, so the
+// words they add to an ssh command are only known when they run. On a write: true host they may only
 // land in the remote command (ssh reads options again after the
 // destination); on a read-only host they may not reach the remote command at
 // all, since the remote shell would run them as part of it.
-func TestSSHUnderXargs(t *testing.T) {
+func TestSSHUnderWrappers(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{dir}
 	write := true
@@ -203,6 +203,17 @@ func TestSSHUnderXargs(t *testing.T) {
 		{command: "xargs -I{} ssh ro {}", errSubstr: "run commands by a bare name"},
 		{command: "xargs -I{} ssh ro uptime"},
 		{command: "xargs ssh -V"},
+
+		// find -exec replaces {} with the file names it finds.
+		{command: `find . -exec ssh box cat {} \;`},
+		{command: `find . -exec ssh box -- {} +`},
+		{command: `find . -exec ssh box {} \;`, errSubstr: "with its input replacing"},
+		{command: `find . -exec ssh -o{} box true \;`, errSubstr: "has no value"},
+		{command: `find . -exec sshpass -e ssh box {} \;`, errSubstr: "with its input replacing"},
+		{command: `find . -exec ssh ro uptime \;`},
+		{command: `find . -exec ssh ro cat {} \;`, errSubstr: "with its input in the remote command"},
+		{command: `find . -execdir ssh ro 'cat {}' \;`, errSubstr: "not allowed"},
+		{command: `find . -exec ssh ro cat {} +`, errSubstr: "with its input in the remote command"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
