@@ -133,6 +133,7 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string) error {
 	env := envSliceToMap(awsBaseEnv(config.WithoutAgentEnv(os.Environ()), imdsEndpoint, imdsRegion))
 	env["PATH"] = safePath(env["PATH"], writable)
 	scopedGitEnv(env)
+	s.sshAgentScopedEnv(ctx, scope, env)
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)

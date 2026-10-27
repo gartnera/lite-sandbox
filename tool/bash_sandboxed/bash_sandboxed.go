@@ -110,6 +110,15 @@ type Sandbox struct {
 	// worker (e.g. /var/run/docker.sock) so the proxy is the only reachable
 	// daemon and cannot be bypassed.
 	dockerMaskPaths []string
+	// sshAgentProxy is the restricted ssh agent socket the server serves and
+	// sshAgentUpstream the real agent's (SetSSHAgent); sshAgentSocket is the
+	// one the current config grants ssh, sshpass, and git's remote commands
+	// ("" when none). inputCfg is the config UpdateConfig was last given,
+	// before that grant, so SetSSHAgent can re-apply it. See ssh_agent.go.
+	sshAgentProxy    string
+	sshAgentUpstream string
+	sshAgentSocket   string
+	inputCfg         *config.Config
 	// whitelistedCommands are the commands the config's commands list adds to
 	// the whitelist (each enabled profile's, see config.Config.Effective). They
 	// are validated like the built-in allowedCommands, unlike an allow.
@@ -167,6 +176,11 @@ func NewSandbox() *Sandbox {
 // from. workDir is still needed to anchor bare script paths and the
 // OS-sandbox worker's working directory.
 func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
+	// The ssh agent's socket is granted to the commands that get it as a
+	// scoped grant, so they run in a worker of their own (ssh_agent.go).
+	inputCfg := cfg
+	agentSocket := s.sshAgentGrant(cfg)
+	cfg = cfg.WithSSHAgent(agentSocket)
 	m := make(map[string]bool, len(cfg.Commands))
 	whitelisted := make(map[string]bool)
 	sub := make(map[string][][]string)
@@ -223,12 +237,21 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			processEntry(e.Command, e.NoSandbox)
 		}
 	}
+	// The ssh section's hosts whitelist ssh and sshpass, whose validators
+	// then hold them to those hosts.
+	if cfg.SSH.HostsConfigured() {
+		for _, name := range config.SSHCommands {
+			whitelisted[name] = true
+		}
+	}
 	s.mu.Lock()
 	// The OS sandbox toggle and the AWS credential mask are read straight off
 	// s.cfg wherever they are needed, so only the previous value of the toggle
 	// has to be captured here (for the enable-transition log below).
 	prevOSSandbox := s.cfg.OSSandboxEnabled()
 	s.cfg = cfg
+	s.inputCfg = inputCfg
+	s.sshAgentSocket = agentSocket
 	// Auditing follows the config: open the logger when it turns on, drop it
 	// when it turns off. The path is resolved once; LITE_SANDBOX_AUDIT_LOG
 	// overrides it (see audit.DefaultPath).
@@ -1309,7 +1332,7 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	unsandboxed := s.execIsUnsandboxed(ctx, args)
 	if useOSSandbox && !unsandboxed {
-		if len(args) > 0 && s.isScopedCommand(args[0]) {
+		if s.scopedInvocation(args) {
 			return s.execInScopedWorker(ctx, args)
 		}
 		return s.execInWorker(ctx, args)
@@ -1366,6 +1389,10 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	envMap, err := s.commandEnv(hc, injectDockerProxy)
 	if err != nil {
 		return err
+	}
+	if injectDockerProxy {
+		// A sandboxed command, run on the host because the OS sandbox is off.
+		s.sshAgentHostEnv(envMap)
 	}
 	env := make([]string, 0, len(envMap))
 	for k, v := range envMap {
@@ -1857,6 +1884,8 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		opts.DeniedWritePaths = denyPaths(cfg.EffectiveDeniedWriteEntries())
 	}
 	opts.DeniedWritePaths = append(opts.DeniedWritePaths, buildxDenied...)
+	// The ssh agent sockets this worker is not granted (ssh_agent.go).
+	opts.MaskPaths = append(opts.MaskPaths, s.sshAgentMasks(cfg)...)
 
 	// Hide the user's private state from the code commands run (see
 	// config/hidden_home.go): $HOME (allowlist mode) and the runtime

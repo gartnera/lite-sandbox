@@ -61,6 +61,7 @@ func init() {
 // returns the status the shell exits with: the last command's, as bash does.
 func runShell(hasCommand bool, command string) (int, error) {
 	sandbox := bash_sandboxed.NewSandbox()
+	defer startSSHAgentProxy(sandbox)()
 
 	workDir, err := os.Getwd()
 	if err != nil {

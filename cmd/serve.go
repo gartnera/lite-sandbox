@@ -20,6 +20,7 @@ import (
 	"github.com/gartnera/lite-sandbox/internal/approval"
 	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
+	"github.com/gartnera/lite-sandbox/internal/sshagent"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
@@ -298,12 +299,13 @@ func systemTempPath() string {
 	return tmp
 }
 
-// dockerSocketBaseDir returns the base directory for the docker proxy socket.
+// socketBaseDir returns the base directory for the sockets the server serves
+// (the docker proxy's, the restricted ssh agent's).
 // XDG_RUNTIME_DIR is the standard per-user runtime socket location (user-owned
 // 0700, tmpfs on Linux, auto-cleaned on logout); its short path also keeps the
 // socket well under macOS's ~104-byte sun_path limit. Falls back to the system
 // temp dir when it is unset or missing (e.g. on macOS).
-func dockerSocketBaseDir() string {
+func socketBaseDir() string {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" && dirExists(d) {
 		return d
 	}
@@ -324,7 +326,7 @@ func startDockerProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readP
 	// Resolve the upstream socket once and reuse it for both the proxy and
 	// the OS-sandbox mask so they can't disagree.
 	upstream := cfg.Docker.UpstreamSocket()
-	socketDir, err := os.MkdirTemp(dockerSocketBaseDir(), "ls-docker-")
+	socketDir, err := os.MkdirTemp(socketBaseDir(), "ls-docker-")
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create docker proxy socket dir: %w", err)
 	}
@@ -356,10 +358,35 @@ func startDockerProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readP
 	return dockerSrv.Endpoint(), cleanup, nil
 }
 
+// startSSHAgentProxy serves the restricted ssh agent (internal/sshagent) in
+// front of the user's agent ($SSH_AUTH_SOCK) and hands both sockets to the
+// sandbox, which gives one of them to ssh, sshpass, and git's remote commands
+// when the config's ssh section asks for it, and masks both from every other
+// command. It runs whether or not the config has an ssh section now, so one
+// added later (the config is hot-reloaded) applies without a restart. The
+// returned cleanup stops it; it is a no-op when there is no agent.
+func startSSHAgentProxy(sandbox *bash_sandboxed.Sandbox) func() {
+	upstream := config.SSHAuthSock()
+	if upstream == "" {
+		return func() {}
+	}
+	proxy, err := sshagent.Start(socketBaseDir(), upstream)
+	if err != nil {
+		// unrestricted_agent can still hand over the real socket.
+		slog.Warn("restricted ssh agent unavailable", "error", err)
+		sandbox.SetSSHAgent("", upstream)
+		return func() {}
+	}
+	slog.Info("restricted ssh agent", "socket", proxy.Socket(), "upstream", upstream)
+	sandbox.SetSSHAgent(proxy.Socket(), upstream)
+	return func() { proxy.Close() }
+}
+
 func runServe(opts serveOptions) error {
 	slog.Info("starting MCP server")
 
 	sandbox := bash_sandboxed.NewSandbox()
+	defer startSSHAgentProxy(sandbox)()
 
 	// Get current working directory for worker pool initialization
 	cwd, err := os.Getwd()
