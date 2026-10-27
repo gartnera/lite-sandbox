@@ -192,12 +192,19 @@ var scopedGitConfig = [][2]string{
 	{"fetch.recurseSubmodules", "false"},
 }
 
-// scopedGitSigningOff switches commit and tag signing off, which runs the
-// signing program the config names; a worker whose git signs (the ssh
-// agent's, with git_signing) pins that program instead (gitSigningConfig).
+// scopedGitSigningOff switches commit, tag, and push signing off, which run
+// the signing program the config names, and pins the signing programs (and
+// the ssh key command) to false for an explicit -S or push --signed; a
+// worker whose git signs (the ssh agent's, with git_signing) pins those
+// programs to the user's own instead (gitSigningConfig).
 var scopedGitSigningOff = [][2]string{
 	{"commit.gpgSign", "false"},
 	{"tag.gpgSign", "false"},
+	{"push.gpgSign", "false"},
+	{"gpg.program", "false"},
+	{"gpg.ssh.program", "false"},
+	{"gpg.x509.program", "false"},
+	{"gpg.ssh.defaultKeyCommand", "false"},
 }
 
 // scopedGitEnv adds to env (a scoped worker's environment) what keeps a git

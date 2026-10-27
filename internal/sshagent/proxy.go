@@ -183,11 +183,18 @@ func (p *Proxy) serve() {
 func (p *Proxy) handle(client net.Conn) {
 	defer client.Close()
 	var up net.Conn
-	defer func() {
-		if up != nil {
-			up.Close()
+	// dropUp closes the connection to the agent and forgets it.
+	dropUp := func() {
+		if up == nil {
+			return
 		}
-	}()
+		up.Close()
+		p.mu.Lock()
+		delete(p.conns, up)
+		p.mu.Unlock()
+		up = nil
+	}
+	defer dropUp()
 	var st connState
 	for {
 		req, err := readMessage(client)
@@ -211,11 +218,21 @@ func (p *Proxy) handle(client net.Conn) {
 				}
 				continue
 			}
+			// Close closes it too, so a request the agent never answers
+			// (a key added with confirmation) cannot hold Close up.
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				up.Close()
+				up = nil
+				return
+			}
+			p.conns[up] = struct{}{}
+			p.mu.Unlock()
 		}
 		resp, err := relay(up, req)
 		if err != nil {
-			up.Close()
-			up = nil
+			dropUp()
 			resp = failure
 		}
 		if _, err := client.Write(resp); err != nil {

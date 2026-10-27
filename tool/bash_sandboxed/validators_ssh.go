@@ -130,6 +130,7 @@ type sshArgs struct {
 	dest    string   // the destination as given
 	jumps   []string // -J and -o ProxyJump values
 	noDest  bool     // -V or -Q: ssh exits without connecting
+	endOpts bool     // "--" ended the options
 	cmdIdx  int      // index of the first word of the remote command, or len(args)
 	pathIdx []int    // indices of words that name a local file (-i's value)
 }
@@ -145,6 +146,7 @@ func parseSSHArgs(args []string) (sshArgs, error) {
 		a := args[i]
 		if !terminated && a == "--" {
 			terminated = true
+			p.endOpts = true
 			i++
 			continue
 		}
@@ -406,6 +408,12 @@ func parseSSHPassArgs(args []string) (cmdIdx int, nonPath []int, env bool, err e
 				return len(args), nonPath, env, nil
 			case 'v':
 			case 'e':
+				// sshpass 1.10 takes an optional variable name (-e[NAME]):
+				// -eh or -eV would name a variable there, not ask for help,
+				// and sshpass would then run whatever command follows.
+				if j+1 < len(a) {
+					return 0, nil, false, fmt.Errorf("sshpass option -e must be written on its own (sshpass 1.10 reads %q as the name of the password's variable); %s", a[j+1:], sshpassFix)
+				}
 				env = true
 			case 'P':
 				valIdx := i
@@ -455,6 +463,47 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 		return fmt.Errorf("sshpass may only run ssh, not %q", argv[cmdIdx])
 	}
 	return checkSSHArgv(argv[cmdIdx:], cfg)
+}
+
+// validateSSHAppendedArgs refuses an ssh or sshpass that xargs runs with its
+// input appended, unless nothing appended can be read as an option or as
+// sshpass's command: ssh reads options again after the destination, so an
+// appended -oProxyCommand=... or -oHostname=... would escape the host check,
+// and words appended to a sshpass with no command become the command it runs.
+// An ssh that names a remote command (or ends its options with --) takes the
+// appended words as more of that command. Applies once the ssh section lists
+// a host, like the ssh validator.
+func validateSSHAppendedArgs(s *Sandbox, args []*syntax.Word) error {
+	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
+		return nil
+	}
+	argv, ok := sshLiterals(args)
+	if !ok {
+		return nil // re-checked at runtime on the expanded argv
+	}
+	name := argv[0]
+	switch name {
+	case "sshpass":
+		cmdIdx, _, _, err := parseSSHPassArgs(argv)
+		if err != nil {
+			return err
+		}
+		if cmdIdx >= len(argv) {
+			return fmt.Errorf("xargs sshpass without a command is not allowed: the input xargs appends would be the command sshpass runs")
+		}
+		argv = argv[cmdIdx:]
+	case "ssh":
+	default:
+		return nil
+	}
+	p, err := parseSSHArgs(argv)
+	if err != nil {
+		return err
+	}
+	if p.noDest || p.endOpts || p.cmdIdx < len(argv) {
+		return nil
+	}
+	return fmt.Errorf("xargs %s without a remote command is not allowed: ssh reads the words xargs appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", name)
 }
 
 // sshNonPathArgIndices returns the indices of an ssh argv that are not local

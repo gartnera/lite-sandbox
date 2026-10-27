@@ -27,8 +27,11 @@ import (
 //   - only git's remote commands, and with git_signing those that sign, go to
 //     that worker (workerScope): other git commands keep running in the
 //     shared worker with the project's hooks, while one run in the agent's
-//     worker gets them switched off (scopedGitEnv), so code the project's .git
-//     names cannot reach the agent.
+//     worker gets them switched off (scopedGitEnv), with what else git lets
+//     the environment switch off. That does not cover a filter, merge, or
+//     diff driver the project's .git/config defines (nor a credential helper
+//     scoped to a URL), which does run there and can reach the agent; the
+//     restricted agent limits what it can do with it.
 //
 // Without the OS sandbox there are no workers to keep the socket from; the
 // commands run on the host get SSH_AUTH_SOCK pointed at the agent socket the

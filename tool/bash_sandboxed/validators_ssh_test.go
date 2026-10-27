@@ -86,6 +86,11 @@ func TestValidateSSHCommand(t *testing.T) {
 		{command: "ssh -o Include=/x box", errSubstr: "Include"},
 		{command: "ssh -qi./id box", errSubstr: "must not be bundled"},
 		{command: "ssh -i /etc/passwd box", errSubstr: "outside allowed directories"},
+		{command: "xargs ssh box uptime"},
+		{command: "xargs ssh box --"},
+		{command: "xargs -I{} ssh box {}"},
+		{command: "xargs ssh box", errSubstr: "xargs ssh without a remote command"},
+		{command: "xargs -n1 ssh -p 22 box", errSubstr: "xargs ssh without a remote command"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -129,6 +134,11 @@ func TestValidateSSHPassCommand(t *testing.T) {
 		{command: "sshpass -e scp f box:", errSubstr: `sshpass may only run ssh, not "scp"`},
 		{command: "sshpass -e bash -c id", errSubstr: "sshpass may only run ssh"},
 		{command: "sshpass -x ssh box", errSubstr: "unknown option"},
+		{command: "sshpass -eh bash -c id", errSubstr: "-e must be written on its own"},
+		{command: "sshpass -eV bash -c id", errSubstr: "-e must be written on its own"},
+		{command: "xargs sshpass -e ssh box uptime"},
+		{command: "xargs sshpass -e", errSubstr: "xargs sshpass without a command"},
+		{command: "xargs sshpass -e ssh box", errSubstr: "xargs sshpass without a remote command"},
 		{command: "cat /etc/passwd > /dev/null; export SSHPASS=$(cat /etc/passwd)", errSubstr: "outside allowed directories"},
 	}
 	for _, tt := range tests {

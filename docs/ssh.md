@@ -76,6 +76,11 @@ this machine, are refused:
   the forwarding keys are refused unless set to their off value
   (`ForwardAgent=no`, `ProxyCommand=none`, `UserKnownHostsFile=/dev/null`, ...).
 
+Run by `xargs`, ssh must name its remote command (`xargs ssh box cmd`) or end
+its options with `--`: ssh reads options again after the destination, so the
+words `xargs` appends would otherwise be options (`-oProxyCommand=...`). For
+the same reason `xargs sshpass` must name the command sshpass runs.
+
 Without hosts listed, `ssh` and `sshpass` aren't on the whitelist, so
 `allowlist` mode refuses them. `denylist` mode, which doesn't whitelist
 commands, still runs them unchecked until you list a host.
@@ -89,6 +94,9 @@ sshpass takes the password from the environment only (`-e`, which reads
 export SSHPASS=$(cat secrets/build-box.pw)   # the file must be readable in the path boundary
 sshpass -e ssh build-box uptime
 ```
+
+`-e` is written on its own (`-e -v`, not `-ev`): sshpass 1.10 reads the
+letters after it as the name of the variable holding the password.
 
 `-p` would put the password in the command line the agent writes, and so in
 its context and transcript; it is refused, as are `-f`, `-d`, and reading the

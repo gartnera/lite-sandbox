@@ -331,7 +331,10 @@ func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
 	if idx < 0 {
 		return nil
 	}
-	return validateSubCommand(s, args[idx:])
+	if err := validateSubCommand(s, args[idx:]); err != nil {
+		return err
+	}
+	return validateSSHAppendedArgs(s, args[idx:])
 }
 
 // wordLeadingLit returns the maximal literal prefix of a word: the text of its
