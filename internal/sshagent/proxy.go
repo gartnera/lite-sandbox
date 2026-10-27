@@ -73,6 +73,10 @@ const sshsigMagic = "SSHSIG"
 // gitNamespace is the SSHSIG namespace git signs commits and tags in.
 const gitNamespace = "git"
 
+// maxSocketPath is the size of sockaddr_un's sun_path on macOS and the BSDs
+// (108 on Linux), which holds the path and its terminating NUL.
+const maxSocketPath = 104
+
 // maxMessageLen bounds a message, as OpenSSH's agent does (AGENT_MAX_LEN).
 const maxMessageLen = 256 * 1024
 
@@ -112,6 +116,10 @@ func Start(baseDir, upstream string) (*Proxy, error) {
 		dir = resolved
 	}
 	socket := filepath.Join(dir, "agent.sock")
+	if len(socket) >= maxSocketPath {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("ssh agent proxy socket path %s is %d bytes, over the %d unix sockets allow", socket, len(socket), maxSocketPath-1)
+	}
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		os.RemoveAll(dir)

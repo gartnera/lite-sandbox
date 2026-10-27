@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// shortTempDir holds the tests' sockets: unix socket paths are limited to
+// 104 bytes on macOS, which $TMPDIR (/var/folders/.../T, resolved under
+// /private) and a socket directory inside it come close to.
+const shortTempDir = "/tmp"
+
 func frame(body ...[]byte) []byte {
 	var b []byte
 	for _, p := range body {
@@ -139,7 +144,7 @@ func startAgent(t *testing.T) (sock, pub string) {
 		}
 	}
 	// A short directory: unix socket paths are limited to ~104 bytes.
-	dir, err := os.MkdirTemp("", "agt")
+	dir, err := os.MkdirTemp(shortTempDir, "agt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +247,7 @@ func TestProxyWithoutAgent(t *testing.T) {
 	if _, err := exec.LookPath("ssh-add"); err != nil {
 		t.Skip("ssh-add not installed")
 	}
-	dir, err := os.MkdirTemp("", "agt")
+	dir, err := os.MkdirTemp(shortTempDir, "agt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,5 +260,21 @@ func TestProxyWithoutAgent(t *testing.T) {
 	// The agent is unreachable: requests fail rather than hang.
 	if out, err := command(p.Socket(), "ssh-add", "-l").CombinedOutput(); err == nil {
 		t.Errorf("ssh-add -l succeeded with no agent: %s", out)
+	}
+}
+
+// TestStartRefusesLongSocketPath: a socket path over sun_path's size is
+// refused by name, not with bind's bare "invalid argument".
+func TestStartRefusesLongSocketPath(t *testing.T) {
+	base := filepath.Join(t.TempDir(), strings.Repeat("d", 100))
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Start(base, "/nonexistent/agent.sock")
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("Start with a long path: %v", err)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Errorf("left %d entries behind", len(entries))
 	}
 }
