@@ -75,7 +75,7 @@ release:
     ## Install
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/{{ .Tag }}/install.sh | sh -s -- --version {{ .Tag }}
+    curl -fsSL https://github.com/gartnera/lite-sandbox/raw/{{ .Tag }}/install.sh | sh -s -- --version {{ .Tag }}
     ```
 
     Then run `lite-sandbox install` to configure your agent CLIs. To upgrade an existing install, run `lite-sandbox update --version {{ .Tag }}` and restart your agent.

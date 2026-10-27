@@ -5,15 +5,15 @@
 Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. The install script picks the archive for your platform and installs the binary to `~/.local/bin`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh
 lite-sandbox version   # "lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)"
 ```
 
 Pass options after `sh -s --`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh -s -- --version v0.4.0  # a specific release
-curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh -s -- --dir /usr/local/bin  # another directory
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --version v0.4.0  # a specific release
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --dir /usr/local/bin  # another directory
 ```
 
 How the script downloads and verifies the archive depends on the [GitHub CLI](https://cli.github.com):

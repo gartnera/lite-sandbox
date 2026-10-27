@@ -5,8 +5,8 @@ An MCP (Model Context Protocol) server that gives AI coding agents a `bash` tool
 ## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh  # Install the latest release to ~/.local/bin
-lite-sandbox install                                                                       # Configure every detected agent CLI, then restart them
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh  # Install the latest release to ~/.local/bin
+lite-sandbox install                                                            # Configure every detected agent CLI, then restart them
 ```
 
 The script downloads the prebuilt binary for Linux or macOS (amd64/arm64) from the latest [GitHub release](https://github.com/gartnera/lite-sandbox/releases). With the [GitHub CLI](https://cli.github.com) logged in, it uses `gh` to download and verify the release's build provenance attestation; otherwise it checks the download against `checksums.txt`. See [docs/installation.md](docs/installation.md#getting-the-binary) for options. `lite-sandbox update` upgrades an installed binary to the latest release, and `lite-sandbox version` shows the current one.

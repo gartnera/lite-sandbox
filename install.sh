@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install the lite-sandbox binary from a GitHub release.
 #
-#   curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh -s -- --version v0.9.0 --dir /usr/local/bin
+#   curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh
+#   curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh -s -- --version v0.9.0 --dir /usr/local/bin
 #
 # With the GitHub CLI installed and logged in, the archive is downloaded with
 # `gh release download` and its build provenance attestation is checked with
