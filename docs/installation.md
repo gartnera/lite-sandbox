@@ -2,16 +2,36 @@
 
 ## Getting the binary
 
-Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. Download the archive for your platform and put the `lite-sandbox` binary on your `PATH`, or build from source:
+Every merge to `main` publishes a [GitHub release](https://github.com/gartnera/lite-sandbox/releases) with prebuilt binaries for Linux and macOS on amd64 and arm64, as `lite-sandbox_<version>_<os>_<arch>.tar.gz` archives plus a `checksums.txt`. The install script picks the archive for your platform and installs the binary to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh
+lite-sandbox version   # "lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)"
+```
+
+Pass options after `sh -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh -s -- --version v0.4.0  # a specific release
+curl -fsSL https://raw.githubusercontent.com/gartnera/lite-sandbox/main/install.sh | sh -s -- --dir /usr/local/bin  # another directory
+```
+
+How the script downloads and verifies the archive depends on the [GitHub CLI](https://cli.github.com):
+
+- **`gh` installed and logged in** (`gh auth status`): it downloads with `gh release download` and checks the archive's [build provenance attestation](#verifying-a-download) with `gh attestation verify`, requiring it to be signed by this repository's release workflow. A failed verification stops the install.
+- **Otherwise**: it downloads with `curl` and checks the archive's SHA-256 against the release's `checksums.txt`. This catches a corrupted download but, unlike the attestation, does not prove where the archive came from.
+
+The binary is replaced atomically, so a running `lite-sandbox serve-mcp` keeps the old build until your agent restarts. Afterwards the script checks your `PATH`: it warns if the install directory isn't on it (with the `export PATH=...` line to add to your shell profile), or if another `lite-sandbox` earlier on `PATH` (for example an old `go install` in `$GOPATH/bin`) would run instead.
+
+To build from source instead:
 
 ```bash
 go install github.com/gartnera/lite-sandbox@latest   # latest release, into $GOPATH/bin
-lite-sandbox version                                 # "lite-sandbox v0.4.0"; a release binary adds the commit and date
 ```
 
 ### Verifying a download
 
-Releases are immutable, and each asset has a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) showing it was built from this repository by the release workflow. To verify an archive:
+Releases are immutable, and each asset has a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) showing it was built from this repository by the release workflow. The install script checks it when `gh` is available. To verify an archive by hand:
 
 ```bash
 gh attestation verify lite-sandbox_<version>_<os>_<arch>.tar.gz -R gartnera/lite-sandbox
