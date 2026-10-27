@@ -5,11 +5,11 @@ An MCP (Model Context Protocol) server that gives AI coding agents a `bash` tool
 ## Quick start
 
 ```bash
-go install github.com/gartnera/lite-sandbox@latest  # Install the lite-sandbox binary (to $GOPATH/bin)
-lite-sandbox install                                 # Configure every detected agent CLI, then restart them
+curl -fsSL https://github.com/gartnera/lite-sandbox/raw/main/install.sh | sh  # Install the latest release to ~/.local/bin
+lite-sandbox install                                                            # Configure every detected agent CLI, then restart them
 ```
 
-Prebuilt binaries for Linux and macOS (amd64/arm64) are attached to every [GitHub release](https://github.com/gartnera/lite-sandbox/releases). `lite-sandbox update` upgrades an installed binary to the latest release, and `lite-sandbox version` shows the current one.
+The script downloads the prebuilt binary for Linux or macOS (amd64/arm64) from the latest [GitHub release](https://github.com/gartnera/lite-sandbox/releases). With a logged-in [GitHub CLI](https://cli.github.com) (2.67+), it uses `gh` to download and verify the release's build provenance attestation; otherwise it checks the download against `checksums.txt`. See [docs/installation.md](docs/installation.md#getting-the-binary) for options. `lite-sandbox update` upgrades an installed binary to the latest release, and `lite-sandbox version` shows the current one.
 
 The default is the strictest mode: only whitelisted commands run, and toolchain profiles (Go, Rust, uv, ...) are opt-in. To start looser and tighten over time, see [docs/adoption.md](docs/adoption.md).
 

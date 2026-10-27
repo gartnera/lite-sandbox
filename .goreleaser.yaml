@@ -6,8 +6,8 @@
 # everything to a draft GitHub release for the tag with GitHub-generated notes.
 # The workflow then attests the assets and publishes the draft.
 #
-# `lite-sandbox update` (internal/selfupdate) relies on the archive and
-# checksum file names below — change them together.
+# `lite-sandbox update` (internal/selfupdate) and install.sh rely on the
+# archive and checksum file names below — change them together.
 #
 # Local dry run (no tag or token needed):  goreleaser release --snapshot --clean
 version: 2
@@ -39,14 +39,14 @@ archives:
   - id: default
     formats:
       - tar.gz
-    # Keep in sync with selfupdate.AssetName.
+    # Keep in sync with selfupdate.AssetName and install.sh.
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
       - README.md
 
 checksum:
-  # Keep in sync with selfupdate.ChecksumsFile.
+  # Keep in sync with selfupdate.ChecksumsFile and install.sh.
   name_template: checksums.txt
   algorithm: sha256
 
@@ -69,19 +69,18 @@ release:
   replace_existing_draft: true
   # A tag like v1.0.0-rc1 is published as a pre-release; plain tags are full releases.
   prerelease: auto
+  # GitHub renders single newlines in release notes as line breaks, so keep
+  # each paragraph on one line.
   header: |
     ## Install
 
     ```bash
-    lite-sandbox update            # already installed: switch to this release
+    curl -fsSL https://github.com/gartnera/lite-sandbox/raw/{{ .Tag }}/install.sh | sh -s -- --version {{ .Tag }}
     ```
 
-    Or download the archive for your platform below, verify it against
-    `checksums.txt`, and put the `lite-sandbox` binary on your `PATH`. Then run
-    `lite-sandbox install` (a first install) or restart your agent (an upgrade).
+    Then run `lite-sandbox install` to configure your agent CLIs. To upgrade an existing install, run `lite-sandbox update --version {{ .Tag }}` and restart your agent.
 
-    Every asset carries a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
-    tying it to this repository and the workflow run that built it:
+    Every asset carries a signed [build provenance attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations) tying it to this repository and the workflow run that built it. The install script verifies it when the GitHub CLI is logged in. To verify an archive by hand:
 
     ```bash
     gh attestation verify {{ .ProjectName }}_{{ .Version }}_<os>_<arch>.tar.gz -R gartnera/lite-sandbox

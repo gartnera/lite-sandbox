@@ -51,7 +51,7 @@ When several PRs are released together (for example, when a failed run on one co
 - **Manual release**: *Actions → Release → Run workflow* on `main`. The `bump` input overrides the labels.
 - The binaries embed the tag, short commit, and commit date (RFC 3339) in `internal/version` via `-ldflags -X`, and `lite-sandbox version` prints them (`lite-sandbox v0.4.0 (1a2b3c4, 2026-09-05T18:11:02Z)`). Other builds fall back to Go build info: a `go install`ed binary reports its module version, and a `go build` in a checkout reports the tag at HEAD, or a pseudo-version for an untagged commit (so `lite-sandbox update` treats a local build of a tagged commit as up to date). Only a build with no version information reports `dev`.
 
-`lite-sandbox update` (`internal/selfupdate`, built on the GitHub release downloader in `internal/ghrelease` that the e2e suite also uses) depends on the asset names GoReleaser produces (`lite-sandbox_<version>_<os>_<arch>.tar.gz` and `checksums.txt`), so change `.goreleaser.yaml` and `selfupdate.AssetName`/`ChecksumsFile` together.
+`lite-sandbox update` (`internal/selfupdate`, built on the GitHub release downloader in `internal/ghrelease` that the e2e suite also uses) and `install.sh` depend on the asset names GoReleaser produces (`lite-sandbox_<version>_<os>_<arch>.tar.gz` and `checksums.txt`), so change `.goreleaser.yaml`, `selfupdate.AssetName`/`ChecksumsFile`, and `install.sh` together. `install.sh` also only accepts attestations signed by `.github/workflows/release.yaml` running on `main`, so update it if that workflow is renamed or releases move to another branch.
 
 To dry-run the release build locally without a tag or token:
 

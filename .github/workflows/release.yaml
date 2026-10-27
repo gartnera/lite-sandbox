@@ -116,6 +116,9 @@ jobs:
       # the repository's attestation store, not on the release, so this can run
       # against the draft. Anyone can check an asset with
       #   gh attestation verify <asset> -R gartnera/lite-sandbox
+      # install.sh only accepts attestations signed by this workflow file
+      # running on main, so renaming it, or releasing from another branch,
+      # breaks verification there.
       - name: Attest build provenance
         if: steps.version.outputs.tag != ''
         uses: actions/attest@v4
