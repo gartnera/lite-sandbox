@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SSHConfig controls ssh access: the hosts ssh and sshpass may connect to,
@@ -16,6 +18,8 @@ import (
 //	  hosts:                     # ssh/sshpass may connect to these, as typed
 //	    - build-box              # (an alias of ~/.ssh/config, or a host name)
 //	    - 10.0.0.12
+//	    - host: deploy-box       # the mapping form: what the remote command may do
+//	      commands: [systemctl restart]
 //	  agent: true                # default true once the section exists
 //	  unrestricted_agent: false  # default false: the agent goes through a filter
 //	  git_signing: false         # default false: git commit/tag signing with the agent
@@ -28,7 +32,7 @@ import (
 // keys, other extensions, and use over a forwarded connection.
 // unrestricted_agent hands those commands the real socket instead.
 type SSHConfig struct {
-	Hosts []string `yaml:"hosts,omitempty"`
+	Hosts []SSHHost `yaml:"hosts,omitempty"`
 	// Agent gives ssh, sshpass, and git's remote commands the ssh agent
 	// (default true when the section is present).
 	Agent *bool `yaml:"agent,omitempty"`
@@ -38,6 +42,104 @@ type SSHConfig struct {
 	// GitSigning gives the agent to the git commands that sign commits and
 	// tags too (gpg.format ssh), and lets the proxy sign them (default false).
 	GitSigning *bool `yaml:"git_signing,omitempty"`
+}
+
+// SSHHost is one entry of the ssh section's hosts list: a host ssh may
+// connect to, plus what the command it runs there may do. The command is held
+// to read-only commands by default (see the sandbox's remote command check);
+// like a paths entry, the entry widens that:
+//
+//	hosts:
+//	  - build-box                # read-only remote commands
+//	  - host: deploy-box         # also systemctl restart (any arguments) and
+//	    commands:                # docker ps, beyond the read-only commands
+//	      - systemctl restart
+//	      - docker ps
+//	  - host: scratch-vm         # the remote command is not checked
+//	    write: true
+//
+// An entry with neither is written as the bare host.
+type SSHHost struct {
+	Host string `yaml:"host"`
+	// Write lifts the remote command check: the command runs as written.
+	Write *bool `yaml:"write,omitempty"`
+	// Commands are allowed in the remote command beyond the read-only ones: a
+	// command name, or a name and the leading arguments it is limited to
+	// ("systemctl restart"), like a commands entry. Their arguments are not
+	// checked.
+	Commands []string `yaml:"commands,omitempty"`
+}
+
+// sshHostFields is SSHHost without its YAML methods, for decoding and encoding
+// the mapping form.
+type sshHostFields SSHHost
+
+// UnmarshalYAML accepts both the bare-host form ("build-box") and the mapping
+// form.
+func (h *SSHHost) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		*h = SSHHost{Host: n.Value}
+		return nil
+	}
+	var f sshHostFields
+	if err := n.Decode(&f); err != nil {
+		return err
+	}
+	*h = SSHHost(f)
+	return nil
+}
+
+// MarshalYAML writes an entry that only lists its host as the bare host.
+func (h SSHHost) MarshalYAML() (any, error) {
+	if h.Write == nil && len(h.Commands) == 0 {
+		return h.Host, nil
+	}
+	return sshHostFields(h), nil
+}
+
+// MergeKey makes the entry a keyedEntry: a merge: true override restates a
+// base entry by naming the same host.
+func (h SSHHost) MergeKey() string { return normalizeSSHHost(h.Host) }
+
+// Writes reports whether the remote command goes unchecked (write: true).
+func (h *SSHHost) Writes() bool { return h != nil && h.Write != nil && *h.Write }
+
+// Describe renders what the remote command may do on the host, for listings.
+func (h SSHHost) Describe() string {
+	switch {
+	case h.Writes():
+		return "any remote command"
+	case len(h.Commands) > 0:
+		return "read-only remote commands, and " + strings.Join(h.Commands, ", ")
+	}
+	return "read-only remote commands"
+}
+
+// Validate rejects an entry ssh could not take as a destination, or a
+// commands entry that names no command.
+func (h SSHHost) Validate() error {
+	if err := ValidateSSHHost(h.Host); err != nil {
+		return err
+	}
+	for _, c := range h.Commands {
+		if err := ValidateSSHHostCommand(c); err != nil {
+			return fmt.Errorf("ssh host %q: %w", h.Host, err)
+		}
+	}
+	return nil
+}
+
+// ValidateSSHHostCommand rejects a host commands entry that does not start
+// with a bare command name.
+func ValidateSSHHostCommand(c string) error {
+	f := strings.Fields(c)
+	if len(f) == 0 {
+		return fmt.Errorf("empty commands entry")
+	}
+	if strings.HasPrefix(f[0], "-") || strings.ContainsAny(f[0], "/$`'\"=;&|<>(){}*?[]") {
+		return fmt.Errorf("commands entry %q must start with a bare command name", c)
+	}
+	return nil
 }
 
 // SSHCommands are the commands the ssh section whitelists once it lists a
@@ -69,16 +171,25 @@ func (s *SSHConfig) AllowsHost(host string) bool {
 	if s == nil {
 		return false
 	}
+	return s.Host(host) != nil
+}
+
+// Host returns the hosts entry for host, as given on the command line
+// (without user@ or :port), matched as AllowsHost does, or nil.
+func (s *SSHConfig) Host(host string) *SSHHost {
+	if s == nil {
+		return nil
+	}
 	host = normalizeSSHHost(host)
 	if host == "" {
-		return false
+		return nil
 	}
-	for _, h := range s.Hosts {
-		if normalizeSSHHost(h) == host {
-			return true
+	for i := range s.Hosts {
+		if normalizeSSHHost(s.Hosts[i].Host) == host {
+			return &s.Hosts[i]
 		}
 	}
-	return false
+	return nil
 }
 
 func normalizeSSHHost(h string) string {
@@ -130,10 +241,15 @@ func (c *Config) validateSSH() error {
 		if s == nil {
 			return nil
 		}
+		seen := map[string]bool{}
 		for _, h := range s.Hosts {
-			if err := ValidateSSHHost(h); err != nil {
+			if err := h.Validate(); err != nil {
 				return err
 			}
+			if seen[h.MergeKey()] {
+				return fmt.Errorf("ssh host %q is listed twice; combine the entries into one", h.Host)
+			}
+			seen[h.MergeKey()] = true
 		}
 		return nil
 	}
@@ -149,19 +265,37 @@ func (c *Config) validateSSH() error {
 }
 
 // AddSSHHost adds host to the ssh section, creating it, and reports whether it
-// was new.
-func (c *Config) AddSSHHost(host string) (bool, error) {
-	if err := ValidateSSHHost(host); err != nil {
+// changed anything. An entry for a listed host takes write when set, and the
+// commands it does not list yet.
+func (c *Config) AddSSHHost(host string, write bool, commands ...string) (bool, error) {
+	entry := SSHHost{Host: host, Commands: commands}
+	if write {
+		entry.Write = &write
+	}
+	if err := entry.Validate(); err != nil {
 		return false, err
 	}
 	if c.SSH == nil {
 		c.SSH = &SSHConfig{}
 	}
-	if c.SSH.AllowsHost(host) {
-		return false, nil
+	h := c.SSH.Host(host)
+	if h == nil {
+		c.SSH.Hosts = append(c.SSH.Hosts, entry)
+		return true, nil
 	}
-	c.SSH.Hosts = append(c.SSH.Hosts, host)
-	return true, nil
+	changed := false
+	if write && !h.Writes() {
+		h.Write = entry.Write
+		changed = true
+	}
+	for _, cmd := range commands {
+		norm := strings.Join(strings.Fields(cmd), " ")
+		if !slices.ContainsFunc(h.Commands, func(c string) bool { return strings.Join(strings.Fields(c), " ") == norm }) {
+			h.Commands = append(h.Commands, norm)
+			changed = true
+		}
+	}
+	return changed, nil
 }
 
 // RemoveSSHHost removes host from the ssh section and reports whether it was
@@ -171,8 +305,8 @@ func (c *Config) RemoveSSHHost(host string) bool {
 		return false
 	}
 	n := len(c.SSH.Hosts)
-	c.SSH.Hosts = slices.DeleteFunc(c.SSH.Hosts, func(h string) bool {
-		return normalizeSSHHost(h) == normalizeSSHHost(host)
+	c.SSH.Hosts = slices.DeleteFunc(c.SSH.Hosts, func(h SSHHost) bool {
+		return h.MergeKey() == normalizeSSHHost(host)
 	})
 	if len(c.SSH.Hosts) == 0 {
 		c.SSH.Hosts = nil

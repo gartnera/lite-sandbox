@@ -55,6 +55,9 @@ func ParseStrict(data []byte) (*Config, error) {
 	if err := checkProfileKeys(&root); err != nil {
 		return nil, err
 	}
+	if err := checkSSHHostKeys(&root); err != nil {
+		return nil, err
+	}
 	if err := cfg.validateOverrides(); err != nil {
 		return nil, err
 	}
@@ -121,6 +124,44 @@ func checkProfileKeys(doc *yaml.Node) error {
 		}
 		return nil
 	}
+	if err := check(root); err != nil {
+		return err
+	}
+	if overrides := mappingValue(root, "overrides"); overrides != nil && overrides.Kind == yaml.SequenceNode {
+		for _, o := range overrides.Content {
+			if err := check(o); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkSSHHostKeys rejects a key the mapping form of an ssh hosts entry does
+// not define, in the base config and in every override.
+func checkSSHHostKeys(doc *yaml.Node) error {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil
+	}
+	known := yamlFieldNames(reflect.TypeOf(sshHostFields{}))
+	check := func(m *yaml.Node) error {
+		hosts := mappingValue(mappingValue(m, "ssh"), "hosts")
+		if hosts == nil || hosts.Kind != yaml.SequenceNode {
+			return nil
+		}
+		for _, e := range hosts.Content {
+			if e.Kind != yaml.MappingNode {
+				continue
+			}
+			for i := 0; i+1 < len(e.Content); i += 2 {
+				if k := e.Content[i]; !known[k.Value] {
+					return fmt.Errorf("line %d: field %s not found in ssh hosts entry (fields: %s)", k.Line, k.Value, strings.Join(sortedKeys(known), ", "))
+				}
+			}
+		}
+		return nil
+	}
+	root := doc.Content[0]
 	if err := check(root); err != nil {
 		return err
 	}

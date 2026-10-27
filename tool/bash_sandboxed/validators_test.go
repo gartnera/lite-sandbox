@@ -141,6 +141,8 @@ func TestValidate_Env(t *testing.T) {
 		{"env -i curl", `env -i curl x`, `command "curl" is not allowed`},
 		{"env -u curl", `env -u PATH curl x`, `command "curl" is not allowed`},
 		{"env -uNAME curl", `env -uPATH curl x`, `command "curl" is not allowed`},
+		{"env --uns abbreviated", `env --uns cat curl x`, `command "curl" is not allowed`},
+		{"env --ch abbreviated", `env --ch /tmp curl x`, `command "curl" is not allowed`},
 		{"env --unset= curl", `env --unset=PATH curl x`, `command "curl" is not allowed`},
 		{"env --unset NAME curl", `env --unset PATH curl x`, `command "curl" is not allowed`},
 		{"env -C dir curl", `env -C /tmp curl x`, `command "curl" is not allowed`},
@@ -154,6 +156,7 @@ func TestValidate_Env(t *testing.T) {
 		{"env time", `env time curl x`, `not allowed as a wrapped subcommand`},
 		{"env -S separate", `env -S 'curl x'`, `--split-string is not allowed`},
 		{"env -iS", `env -iS 'curl x'`, `--split-string is not allowed`},
+		{"env --sp abbreviated", `env --sp 'curl x'`, `--split-string is not allowed`},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.name, func(t *testing.T) {

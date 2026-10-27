@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/spf13/cobra"
@@ -16,6 +15,7 @@ the ssh agent ssh, sshpass, and git's remote commands (fetch, pull, push,
 clone, ...) get.
 
   lite-sandbox config ssh hosts add build-box 10.0.0.12
+  lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart'
   lite-sandbox config ssh agent unrestrict   # hand over the real agent socket
   lite-sandbox config ssh git-signing enable # sign commits and tags with the agent
   lite-sandbox config ssh show`,
@@ -37,8 +37,10 @@ var sshShowCmd = &cobra.Command{
 		}
 		fmt.Println("SSH Configuration:")
 		if s.HostsConfigured() {
-			fmt.Printf("  Hosts: %s\n", strings.Join(s.Hosts, ", "))
-			fmt.Println("  ssh and sshpass may connect to these hosts only (forwarding and local commands refused)")
+			fmt.Println("  Hosts (ssh and sshpass may connect to these only; forwarding and local commands refused):")
+			for _, h := range s.Hosts {
+				fmt.Printf("    %s: %s\n", h.Host, h.Describe())
+			}
 		} else {
 			fmt.Println("  Hosts: none (ssh and sshpass are not allowed)")
 		}
@@ -71,24 +73,44 @@ var sshHostsCmd = &cobra.Command{
 	Short: "Manage the hosts ssh and sshpass may connect to",
 }
 
+var (
+	sshHostsAddWrite    bool
+	sshHostsAddCommands []string
+)
+
 var sshHostsAddCmd = &cobra.Command{
 	Use:   "add <host>...",
 	Short: "Allow ssh and sshpass to connect to hosts (as typed: an alias of ~/.ssh/config or a host name)",
-	Args:  cobra.MinimumNArgs(1),
+	Long: `Allow ssh and sshpass to connect to hosts, as typed: an alias of
+~/.ssh/config or a host name. The command ssh runs there is held to read-only
+commands; --command allows a command beyond those (with any arguments, or
+limited to the leading arguments given), and --write lifts the check.
+
+  lite-sandbox config ssh hosts add build-box
+  lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
+  lite-sandbox config ssh hosts add scratch-vm --write
+
+On a host already listed, the flags add to its entry.`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 		for _, h := range args {
-			added, err := cfg.AddSSHHost(h)
+			listed := cfg.SSH.AllowsHost(h)
+			changed, err := cfg.AddSSHHost(h, sshHostsAddWrite, sshHostsAddCommands...)
 			if err != nil {
 				return err
 			}
-			if added {
-				fmt.Printf("Added ssh host %s\n", h)
-			} else {
-				fmt.Printf("ssh host %s is already allowed\n", h)
+			entry := cfg.SSH.Host(h)
+			switch {
+			case !listed:
+				fmt.Printf("Added ssh host %s: %s\n", h, entry.Describe())
+			case changed:
+				fmt.Printf("Updated ssh host %s: %s\n", h, entry.Describe())
+			default:
+				fmt.Printf("ssh host %s is already allowed: %s\n", h, entry.Describe())
 			}
 		}
 		return saveConfig(cfg)
@@ -196,6 +218,8 @@ var sshDisableCmd = &cobra.Command{
 }
 
 func init() {
+	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands)")
+	sshHostsAddCmd.Flags().StringArrayVar(&sshHostsAddCommands, "command", nil, "allow a remote command beyond the read-only ones: a name, or a name and its leading arguments ('systemctl restart'); repeatable")
 	sshHostsCmd.AddCommand(sshHostsAddCmd, sshHostsRemoveCmd)
 	sshAgentCmd.AddCommand(sshAgentEnableCmd, sshAgentDisableCmd, sshAgentRestrictCmd, sshAgentUnrestrictCmd)
 	sshGitSigningCmd.AddCommand(sshGitSigningEnableCmd, sshGitSigningDisableCmd)

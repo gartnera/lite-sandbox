@@ -11,7 +11,11 @@ import (
 )
 
 func newTestSandboxWithSSH(hosts ...string) *Sandbox {
-	return newTestSandboxWithConfig(&config.Config{SSH: &config.SSHConfig{Hosts: hosts}})
+	entries := make([]config.SSHHost, len(hosts))
+	for i, h := range hosts {
+		entries[i] = config.SSHHost{Host: h}
+	}
+	return newTestSandboxWithConfig(&config.Config{SSH: &config.SSHConfig{Hosts: entries}})
 }
 
 func TestValidateSSHCommand(t *testing.T) {
@@ -22,30 +26,30 @@ func TestValidateSSHCommand(t *testing.T) {
 		command   string
 		errSubstr string // "" when allowed
 	}{
-		{command: "ssh box"},
+		{command: "ssh box true"},
 		{command: "ssh box uptime"},
-		{command: "ssh me@box"},
-		{command: "ssh -l me -p 2222 box"},
-		{command: "ssh -p2222 BOX"},
-		{command: "ssh ssh://me@box:2222"},
+		{command: "ssh me@box true"},
+		{command: "ssh -l me -p 2222 box true"},
+		{command: "ssh -p2222 BOX true"},
+		{command: "ssh ssh://me@box:2222 true"},
 		{command: "ssh 10.0.0.12 cat /etc/hostname"},
 		{command: "ssh box ls -la /var/log"},
 		{command: "ssh box -- ls -A"},
 		{command: "ssh -- box ls"},
 		{command: "ssh box -p 22 -o BatchMode=yes uptime"},
 		{command: "ssh -T -n -q -v -C -4 box true"},
-		{command: "ssh -o ConnectTimeout=5 -o 'StrictHostKeyChecking accept-new' box"},
-		{command: "ssh -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no box"},
-		{command: "ssh -o ForwardAgent=no -o ControlMaster=no -S none -F none box"},
-		{command: "ssh -J jump box"},
-		{command: "ssh -J me@jump:22,ssh://10.0.0.12 box"},
-		{command: "ssh -o ProxyJump=jump box"},
-		{command: "ssh ::1"},
-		{command: "ssh me@[::1]"},
+		{command: "ssh -o ConnectTimeout=5 -o 'StrictHostKeyChecking accept-new' box true"},
+		{command: "ssh -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no box true"},
+		{command: "ssh -o ForwardAgent=no -o ControlMaster=no -S none -F none box true"},
+		{command: "ssh -J jump box true"},
+		{command: "ssh -J me@jump:22,ssh://10.0.0.12 box true"},
+		{command: "ssh -o ProxyJump=jump box true"},
+		{command: "ssh ::1 true"},
+		{command: "ssh me@[::1] true"},
 		{command: "ssh -V"},
 		{command: "ssh -Q cipher"},
 		{command: "ssh -G box"},
-		{command: "ssh -i ./id_test box"},
+		{command: "ssh -i ./id_test box true"},
 
 		{command: "ssh evil", errSubstr: `ssh to "evil" is not allowed`},
 		{command: "ssh me@evil uptime", errSubstr: `"evil"`},
@@ -87,24 +91,7 @@ func TestValidateSSHCommand(t *testing.T) {
 		{command: "ssh -o PKCS11Provider=/x.so box", errSubstr: "PKCS11Provider"},
 		{command: "ssh -o Include=/x box", errSubstr: "Include"},
 		{command: "ssh -qi./id box", errSubstr: "must not be bundled"},
-		{command: "ssh -i /etc/passwd box", errSubstr: "outside allowed directories"},
-		{command: "xargs ssh box uptime"},
-		{command: "xargs ssh box --"},
-		// With a replace string, xargs's input replaces words in place: as
-		// the first word after the destination, ssh would read
-		// -oProxyCommand=... from it.
-		{command: "xargs -I{} ssh box {}", errSubstr: "with its input replacing"},
-		{command: "xargs -I {} ssh box {}", errSubstr: "with its input replacing"},
-		{command: "xargs -0I@ ssh box @", errSubstr: "with its input replacing"},
-		{command: "xargs -i ssh box {}", errSubstr: "with its input replacing"},
-		{command: "xargs --replace=X ssh -o User=X box uptime", errSubstr: "with its input replacing"},
-		{command: "xargs -I{} ssh {} uptime", errSubstr: "is not allowed"},
-		{command: "xargs -I{} ssh box cat {}"},
-		{command: "xargs -I{} ssh box -- {}"},
-		{command: "xargs -I{} sshpass -e ssh box echo {}"},
-		{command: "xargs -I{} ssh box"},
-		{command: "xargs ssh box", errSubstr: "xargs ssh without a remote command"},
-		{command: "xargs -n1 ssh -p 22 box", errSubstr: "xargs ssh without a remote command"},
+		{command: "ssh -i /etc/passwd box true", errSubstr: "outside allowed directories"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -131,9 +118,9 @@ func TestValidateSSHPassCommand(t *testing.T) {
 		errSubstr string
 	}{
 		{command: "sshpass -e ssh box uptime"},
-		{command: "export SSHPASS=$(cat pw.txt); sshpass -e ssh me@box"},
+		{command: "export SSHPASS=$(cat pw.txt); sshpass -e ssh me@box true"},
 		{command: "sshpass -v -e -P 'Passcode:' ssh box cat /etc/hostname"},
-		{command: "sshpass -ve ssh -o PubkeyAuthentication=no box"},
+		{command: "sshpass -ve ssh -o PubkeyAuthentication=no box true"},
 		{command: "sshpass -h"},
 		{command: "sshpass -V"},
 
@@ -150,10 +137,72 @@ func TestValidateSSHPassCommand(t *testing.T) {
 		{command: "sshpass -x ssh box", errSubstr: "unknown option"},
 		{command: "sshpass -eh bash -c id", errSubstr: "-e must be written on its own"},
 		{command: "sshpass -eV bash -c id", errSubstr: "-e must be written on its own"},
+		{command: "cat /etc/passwd > /dev/null; export SSHPASS=$(cat /etc/passwd)", errSubstr: "outside allowed directories"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			err := s.ValidateCommand(tt.command, dir, paths, paths)
+			if tt.errSubstr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.errSubstr)
+			}
+		})
+	}
+}
+
+// TestSSHUnderXargs: xargs runs ssh itself, so the words it adds to an ssh
+// command are only known when it runs. On a write: true host they may only
+// land in the remote command (ssh reads options again after the
+// destination); on a read-only host they may not reach the remote command at
+// all, since the remote shell would run them as part of it.
+func TestSSHUnderXargs(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	write := true
+	s := newTestSandboxWithConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []config.SSHHost{
+		{Host: "box", Write: &write},
+		{Host: "ro"},
+	}}})
+	tests := []struct {
+		command   string
+		errSubstr string // "" when allowed
+	}{
+		{command: "xargs ssh box uptime"},
+		{command: "xargs ssh box --"},
+		// With a replace string, xargs's input replaces words in place: as
+		// the first word after the destination, ssh would read
+		// -oProxyCommand=... from it.
+		{command: "xargs -I{} ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs -I {} ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs -0I@ ssh box @", errSubstr: "with its input replacing"},
+		{command: "xargs -i ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs --replace=X ssh -o User=X box uptime", errSubstr: "with its input replacing"},
+		{command: "xargs -I{} ssh {} uptime", errSubstr: "is not allowed"},
+		{command: "xargs -I{} ssh box cat {}"},
+		{command: "xargs -I{} ssh box -- {}"},
+		{command: "xargs -I{} sshpass -e ssh box echo {}"},
+		{command: "xargs -I{} ssh box"},
+		{command: "xargs ssh box", errSubstr: "xargs ssh without a remote command"},
+		{command: "xargs -n1 ssh -p 22 box", errSubstr: "xargs ssh without a remote command"},
 		{command: "xargs sshpass -e ssh box uptime"},
 		{command: "xargs sshpass -e", errSubstr: "xargs sshpass without a command"},
 		{command: "xargs sshpass -e ssh box", errSubstr: "xargs sshpass without a remote command"},
-		{command: "cat /etc/passwd > /dev/null; export SSHPASS=$(cat /etc/passwd)", errSubstr: "outside allowed directories"},
+
+		{command: "xargs ssh ro uptime", errSubstr: "with its input in the remote command"},
+		{command: "xargs ssh ro --", errSubstr: "without a command"},
+		{command: "xargs -I{} ssh ro cat {}", errSubstr: "with its input in the remote command"},
+		{command: "xargs -I{} ssh ro -- {}", errSubstr: "run commands by a bare name"},
+		{command: "xargs -I{} ssh ro 'cat {}'", errSubstr: "with its input replacing"},
+		{command: "xargs -I{} sshpass -e ssh ro echo {}", errSubstr: "with its input in the remote command"},
+		{command: "xargs sshpass -e ssh ro uptime", errSubstr: "with its input in the remote command"},
+		{command: "xargs -I{} ssh ro {}", errSubstr: "run commands by a bare name"},
+		{command: "xargs -I{} ssh ro uptime"},
+		{command: "xargs ssh -V"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -221,21 +270,22 @@ func TestSSHWithoutHosts(t *testing.T) {
 		}
 	}
 	// Listing hosts holds denylist mode to them too.
-	denyHosts := newTestSandboxWithConfig(&config.Config{Mode: string(config.ModeDenylist), SSH: &config.SSHConfig{Hosts: []string{"box"}}})
+	denyHosts := newTestSandboxWithConfig(&config.Config{Mode: string(config.ModeDenylist), SSH: &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}}})
 	if err := denyHosts.ValidateCommand("ssh anyhost", dir, paths, paths); err == nil {
 		t.Error("denylist mode with hosts listed allowed an unlisted host")
 	}
 }
 
-// TestSSHRuntimeValidation: a destination known only after expansion is
-// checked on the expanded argv, before anything runs.
+// TestSSHRuntimeValidation: a destination or remote command known only after
+// expansion is refused, and the expanded argv is checked again before
+// anything runs.
 func TestSSHRuntimeValidation(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{dir}
 	s := newTestSandboxWithSSH("box")
-	for _, cmd := range []string{`H=evil; ssh "$H" true`, `O=-A; ssh $O box true`, `timeout 5 ssh evil true`} {
+	for _, cmd := range []string{`H=evil; ssh "$H" true`, `O=-A; ssh $O box true`, `timeout 5 ssh evil true`, `C=rm; ssh box $C x`, `timeout 5 ssh box 'rm x'`} {
 		_, err := s.Execute(context.Background(), cmd, dir, paths, paths)
-		if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		if err == nil || !strings.Contains(err.Error(), "not allowed") && !strings.Contains(err.Error(), "read-only commands only") {
 			t.Errorf("%s: %v", cmd, err)
 		}
 	}
@@ -318,7 +368,7 @@ func TestSSHAgentScope(t *testing.T) {
 	// git_signing sends the signing git commands there too, and tells the
 	// proxy to sign them.
 	yes := true
-	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, GitSigning: &yes}}, "")
+	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}, GitSigning: &yes}}, "")
 	if !proxy.gitSigning {
 		t.Error("git_signing did not reach the proxy")
 	}
@@ -332,7 +382,7 @@ func TestSSHAgentScope(t *testing.T) {
 	}
 
 	// unrestricted_agent hands over the real socket.
-	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, UnrestrictedAgent: &yes}}, "")
+	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}, UnrestrictedAgent: &yes}}, "")
 	scope, _, _ = s.commandScope("ssh")
 	if !s.isSSHAgentScope(scope) || s.sshAgentSocket != "/run/agent.sock" {
 		t.Errorf("unrestricted agent grants %q", s.sshAgentSocket)
@@ -343,7 +393,7 @@ func TestSSHAgentScope(t *testing.T) {
 
 	// agent: false: nothing gets it, and host commands lose SSH_AUTH_SOCK.
 	no := false
-	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []string{"box"}, Agent: &no}}, "")
+	s.updateConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}, Agent: &no}}, "")
 	if s.routedToAgent([]string{"ssh", "box"}) || s.routedToAgent([]string{"git", "push"}) {
 		t.Error("agent: false still routes to an agent worker")
 	}

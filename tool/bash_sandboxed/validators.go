@@ -395,6 +395,13 @@ var envConsumingShortFlags = map[byte]bool{
 // That option builds a whole argv from a single string (intended for shebang
 // lines), which would smuggle an otherwise-blocked command past validation, so
 // it is rejected outright.
+// envLongOptions are GNU env's long options, for expanding an abbreviation
+// (--uns for --unset) the way getopt_long does.
+var envLongOptions = optSpec{long: []string{
+	"ignore-environment", "null", "unset", "chdir", "split-string", "block-signal",
+	"default-signal", "ignore-signal", "list-signal-handling", "debug", "help", "version",
+}}
+
 func errEnvSplitString() error {
 	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
 }
@@ -425,12 +432,8 @@ func envCommandIndex(lits, assignLits []string) int {
 			return wrapperNoCommand
 		}
 		if strings.HasPrefix(lit, "--") {
-			name := lit[2:]
-			hasInlineValue := false
-			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				name = name[:eq]
-				hasInlineValue = true
-			}
+			name, _, hasInlineValue := strings.Cut(lit[2:], "=")
+			name = envLongOptions.longName(name)
 			if name == "split-string" {
 				return wrapperRejected
 			}

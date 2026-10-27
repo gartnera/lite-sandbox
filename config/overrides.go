@@ -22,10 +22,10 @@ import (
 //   - true: the override is DEEP-MERGED into the base — it recurses into struct
 //     sections and applies only the fields it sets, inheriting the rest. This
 //     lets an override change, say, just `docker.allow_privileged` while keeping
-//     the base's `docker.enabled`. The keyed list sections `paths` and
-//     `commands` merge entry by entry (see keyedEntry): the base's statements
-//     carry into the directory and the override restates only the paths and
-//     commands it changes. Every other leaf (scalars, `*bool` flags, and the
+//     the base's `docker.enabled`. The keyed list sections `paths`,
+//     `commands`, and `ssh.hosts` merge entry by entry (see keyedEntry): the
+//     base's statements carry into the directory and the override restates
+//     only the paths, commands, and hosts it changes. Every other leaf (scalars, `*bool` flags, and the
 //     deprecated one-list-per-kind keys such as writable_paths) is still taken
 //     from the override when set, otherwise inherited.
 type DirectoryOverride struct {
@@ -177,7 +177,7 @@ func overlayConfig(base, over *Config, deep bool) {
 // inheriting the rest without ever mutating the shared base struct. Every other
 // kind is a leaf: over's value is taken when it is "set" (a non-nil pointer,
 // slice, or map, or a non-zero scalar), otherwise base is kept. The exception
-// is a keyed list section (`paths`, `commands`), which is combined entry by
+// is a keyed list section (`paths`, `commands`, `ssh.hosts`), combined entry by
 // entry rather than replaced — see keyedEntry.
 func mergeField(base, over reflect.Value) {
 	switch over.Kind() {
@@ -223,7 +223,7 @@ func mergeField(base, over reflect.Value) {
 
 // keyedEntry is implemented by the element type of a keyed list section: one
 // whose entries are independent statements about a subject — `paths` about a
-// path, `commands` about a command — rather than an ordered sequence whose
+// path, `commands` about a command, `ssh.hosts` about a host — rather than an ordered sequence whose
 // meaning is the list as a whole. MergeKey returns the subject in the form the
 // sandbox matches on, so two spellings of one path (~/x and /home/u/x) or one
 // command ("uv  run" and "uv run") are the same statement.
