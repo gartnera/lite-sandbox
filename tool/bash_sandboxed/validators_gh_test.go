@@ -373,6 +373,19 @@ func TestScopedGitEnv(t *testing.T) {
 			t.Errorf("signing worker sets %s", v)
 		}
 	}
+	// ... but still pins the OpenPGP and X.509 programs, which git tag -v and
+	// merge --verify-signatures run whatever gpg.format says.
+	pinned := map[string]bool{}
+	for k, v := range signing {
+		if n, ok := strings.CutPrefix(k, "GIT_CONFIG_KEY_"); ok && signing["GIT_CONFIG_VALUE_"+n] == "false" {
+			pinned[v] = true
+		}
+	}
+	for _, key := range []string{"gpg.program", "gpg.x509.program"} {
+		if !pinned[key] {
+			t.Errorf("signing worker leaves %s to the project's config", key)
+		}
+	}
 	if env["GIT_SSH_COMMAND"] != `'/opt/my ssh'` {
 		t.Errorf("GIT_SSH_COMMAND = %q, want the server's GIT_SSH, quoted", env["GIT_SSH_COMMAND"])
 	}

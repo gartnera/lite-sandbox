@@ -88,7 +88,19 @@ func TestValidateSSHCommand(t *testing.T) {
 		{command: "ssh -i /etc/passwd box", errSubstr: "outside allowed directories"},
 		{command: "xargs ssh box uptime"},
 		{command: "xargs ssh box --"},
-		{command: "xargs -I{} ssh box {}"},
+		// With a replace string, xargs's input replaces words in place: as
+		// the first word after the destination, ssh would read
+		// -oProxyCommand=... from it.
+		{command: "xargs -I{} ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs -I {} ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs -0I@ ssh box @", errSubstr: "with its input replacing"},
+		{command: "xargs -i ssh box {}", errSubstr: "with its input replacing"},
+		{command: "xargs --replace=X ssh -o User=X box uptime", errSubstr: "with its input replacing"},
+		{command: "xargs -I{} ssh {} uptime", errSubstr: "is not allowed"},
+		{command: "xargs -I{} ssh box cat {}"},
+		{command: "xargs -I{} ssh box -- {}"},
+		{command: "xargs -I{} sshpass -e ssh box echo {}"},
+		{command: "xargs -I{} ssh box"},
 		{command: "xargs ssh box", errSubstr: "xargs ssh without a remote command"},
 		{command: "xargs -n1 ssh -p 22 box", errSubstr: "xargs ssh without a remote command"},
 	}
@@ -191,6 +203,14 @@ func TestSSHWithoutHosts(t *testing.T) {
 	deny := newTestSandboxWithConfig(&config.Config{Mode: string(config.ModeDenylist)})
 	if err := deny.ValidateCommand("ssh -A anyhost cat /etc/hostname", dir, paths, paths); err != nil {
 		t.Errorf("denylist mode without an ssh section: %v", err)
+	}
+	// An invocation the ssh parse refuses keeps the path checks of the
+	// options that name a local file there: ssh -F prints the lines of a file
+	// it cannot parse as config.
+	for _, cmd := range []string{"ssh -F /etc/hostname anyhost", "ssh -A -F/etc/hostname anyhost", "ssh anyhost -F /etc/hostname"} {
+		if err := deny.ValidateCommand(cmd, dir, paths, paths); err == nil {
+			t.Errorf("denylist mode: %s allowed", cmd)
+		}
 	}
 	// Listing hosts holds denylist mode to them too.
 	denyHosts := newTestSandboxWithConfig(&config.Config{Mode: string(config.ModeDenylist), SSH: &config.SSHConfig{Hosts: []string{"box"}}})

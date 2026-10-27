@@ -79,7 +79,10 @@ this machine, are refused:
 Run by `xargs`, ssh must name its remote command (`xargs ssh box cmd`) or end
 its options with `--`: ssh reads options again after the destination, so the
 words `xargs` appends would otherwise be options (`-oProxyCommand=...`). For
-the same reason `xargs sshpass` must name the command sshpass runs.
+the same reason `xargs sshpass` must name the command sshpass runs. With a
+replace string (`xargs -I{}`, `-i`, `--replace`), the input may only replace
+words of the remote command (`xargs -I{} ssh box cat {}`), never the
+destination, an option, or the first word after the destination.
 
 Without hosts listed, `ssh` and `sshpass` aren't on the whitelist, so
 `allowlist` mode refuses them. `denylist` mode, which doesn't whitelist
@@ -148,7 +151,8 @@ and the [OS sandbox](security.md#os-level-sandboxing-optional) on:
   keys, signing with them to authenticate (and, with `git_signing`, to sign a
   git commit or tag: an SSHSIG signature in the `git` namespace), and OpenSSH's
   `session-bind@openssh.com`. SSHSIG signatures in any other namespace (a
-  file, an email) are refused, as are adding,
+  file, an email), and signatures over anything but an ssh login (an ssh
+  certificate, another protocol's challenge), are refused, as are adding,
   removing, and locking keys, smartcard keys, and every other extension are
   refused, and a connection ssh binds for forwarding gets nothing, so the keys
   can't be used from a remote host the agent was forwarded to (ssh's `-A` is
@@ -186,7 +190,9 @@ and tags with a key in your agent, with git's ssh signing (`gpg.format ssh`,
 - The signing program can't come from the project: `gpg.format` is pinned to
   `ssh`, and `gpg.ssh.program` and `gpg.ssh.defaultKeyCommand` to your system
   and global values (read outside any repository; `ssh-keygen` and none when
-  unset), at a level that outranks `.git/config`.
+  unset), at a level that outranks `.git/config`. `gpg.program` and
+  `gpg.x509.program`, which `git tag -v` and `merge --verify-signatures` run
+  for OpenPGP and X.509 signatures, stay pinned to `false`.
 - The filter signs git signatures only while the option is on.
 
 Without it, a signing commit runs in the shared worker, which has no agent, and

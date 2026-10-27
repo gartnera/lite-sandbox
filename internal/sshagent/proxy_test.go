@@ -34,7 +34,7 @@ func sessionBindMsg(forwarding bool) []byte {
 func TestFilter(t *testing.T) {
 	allowed := [][]byte{
 		frame([]byte{msgRequestIdentities}),
-		frame([]byte{msgSignRequest}, sshString("key"), sshString("data"), []byte{0, 0, 0, 0}),
+		frame([]byte{msgSignRequest}, sshString("key"), sshString(string(userauthData())), []byte{0, 0, 0, 0}),
 		sessionBindMsg(false),
 	}
 	for _, m := range allowed {
@@ -66,6 +66,12 @@ func TestFilter(t *testing.T) {
 	}
 }
 
+// userauthData is what ssh signs to log in: the session identifier, then
+// SSH_MSG_USERAUTH_REQUEST and its fields.
+func userauthData() []byte {
+	return append(append(sshString("session-id"), msgUserauthRequest), sshString("user")...)
+}
+
 func sshsigData(ns string) []byte {
 	b := append([]byte(sshsigMagic), sshString(ns)...)
 	return append(b, append(sshString(""), append(sshString("sha512"), sshString("hash")...)...)...)
@@ -80,7 +86,10 @@ func TestFilterSSHSIG(t *testing.T) {
 		gitSigning bool
 		allowed    bool
 	}{
-		{sshString("session-id"), false, true}, // authentication
+		{userauthData(), false, true},                            // authentication
+		{sshString("session-id"), true, false},                   // not a login
+		{[]byte("data"), true, false},                            // not a login
+		{append(sshString(""), msgUserauthRequest), true, false}, // no session id
 		{sshsigData("git"), false, false},
 		{sshsigData("git"), true, true},
 		{sshsigData("file"), true, false},

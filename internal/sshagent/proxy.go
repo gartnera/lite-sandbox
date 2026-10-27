@@ -12,7 +12,9 @@
 //     data ssh signs to log in) or, while AllowGitSigning is on, a git commit
 //     or tag (an SSHSIG signature in the "git" namespace, as ssh-keygen -Y sign
 //     -n git makes for git's gpg.format ssh); an SSHSIG signature in any other
-//     namespace (a file, an email) is refused;
+//     namespace (a file, an email), and data that is neither (an ssh
+//     certificate a CA key would sign, another protocol's challenge), is
+//     refused;
 //   - SSH_AGENTC_EXTENSION "session-bind@openssh.com", which binds the
 //     connection to the server's host key and session (OpenSSH 8.9+ sends it
 //     before signing), for the client's own connection only.
@@ -54,6 +56,10 @@ const (
 	msgAddIDConstrained   = 25
 	msgAddSmartcardConstr = 26
 	msgExtension          = 27
+
+	// msgUserauthRequest is SSH_MSG_USERAUTH_REQUEST, from the ssh transport
+	// protocol: the byte after the session identifier in login data.
+	msgUserauthRequest = 50
 )
 
 // sessionBind is the one extension the proxy forwards.
@@ -326,6 +332,8 @@ func signFilter(b []byte, gitSigning bool) string {
 	}
 	ns, isSSHSIG := sshsigNamespace(data)
 	switch {
+	case !isSSHSIG && !isUserauthRequest(data):
+		return "signing data that is neither an ssh login nor an SSHSIG signature"
 	case !isSSHSIG:
 		return ""
 	case ns != gitNamespace:
@@ -348,6 +356,15 @@ func sshsigNamespace(data []byte) (string, bool) {
 		return "", true
 	}
 	return string(ns), true
+}
+
+// isUserauthRequest reports whether data is what ssh signs to log in with a
+// key (RFC 4252 section 7): the session identifier, then
+// SSH_MSG_USERAUTH_REQUEST. Anything else (an ssh certificate a CA key would
+// sign, another protocol's challenge) is not a login.
+func isUserauthRequest(data []byte) bool {
+	sid, rest, ok := readString(data)
+	return ok && len(sid) > 0 && len(rest) > 0 && rest[0] == msgUserauthRequest
 }
 
 // sessionBindForwarding parses the rest of a session-bind request (host key,
