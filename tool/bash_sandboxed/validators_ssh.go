@@ -471,9 +471,13 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 // appended -oProxyCommand=... or -oHostname=... would escape the host check,
 // and words appended to a sshpass with no command become the command it runs.
 // An ssh that names a remote command (or ends its options with --) takes the
-// appended words as more of that command. Applies once the ssh section lists
-// a host, like the ssh validator.
-func validateSSHAppendedArgs(s *Sandbox, args []*syntax.Word) error {
+// appended words as more of that command. With a replace string (-I, -i,
+// --replace, BSD -J) xargs substitutes its input into the words instead, so a
+// word holding the replace string must be part of the remote command, where
+// ssh reads no options. xargsOpts are xargs's own words before the command
+// (xargs itself included). Applies once the ssh section lists a host, like
+// the ssh validator.
+func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
 		return nil
 	}
@@ -482,8 +486,16 @@ func validateSSHAppendedArgs(s *Sandbox, args []*syntax.Word) error {
 		return nil // re-checked at runtime on the expanded argv
 	}
 	name := argv[0]
-	switch name {
-	case "sshpass":
+	if name != "ssh" && name != "sshpass" {
+		return nil
+	}
+	opts, ok := sshLiterals(xargsOpts)
+	if !ok {
+		return nil // re-checked at runtime on the expanded argv
+	}
+	replace := xargsReplaceStrings(opts)
+	sshStart := 0
+	if name == "sshpass" {
 		cmdIdx, _, _, err := parseSSHPassArgs(argv)
 		if err != nil {
 			return err
@@ -491,35 +503,142 @@ func validateSSHAppendedArgs(s *Sandbox, args []*syntax.Word) error {
 		if cmdIdx >= len(argv) {
 			return fmt.Errorf("xargs sshpass without a command is not allowed: the input xargs appends would be the command sshpass runs")
 		}
-		argv = argv[cmdIdx:]
-	case "ssh":
-	default:
-		return nil
+		sshStart = cmdIdx
 	}
-	p, err := parseSSHArgs(argv)
+	p, err := parseSSHArgs(argv[sshStart:])
 	if err != nil {
 		return err
 	}
-	if p.noDest || p.endOpts || p.cmdIdx < len(argv) {
+	if len(replace) > 0 {
+		for i, w := range argv[1:] {
+			i++ // index in argv
+			if !slices.ContainsFunc(replace, func(r string) bool { return strings.Contains(w, r) }) {
+				continue
+			}
+			j := i - sshStart // index in the ssh argv
+			if i > sshStart && (j > p.cmdIdx || (j == p.cmdIdx && p.endOpts)) && !p.noDest {
+				continue
+			}
+			return fmt.Errorf("xargs %s with its input replacing %q is not allowed: ssh could read the input as an option or a host; put the replace string in the remote command only (xargs -I{} ssh host cmd {})", name, w)
+		}
+		return nil
+	}
+	if p.noDest || p.endOpts || p.cmdIdx < len(argv[sshStart:]) {
 		return nil
 	}
 	return fmt.Errorf("xargs %s without a remote command is not allowed: ssh reads the words xargs appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", name)
 }
 
+// xargsReplaceStrings returns the replace strings an xargs invocation's own
+// words (opts, "xargs" first) set: -I R, -IR, BSD -J R, GNU -i[R] and
+// --replace[=R] (both "{}" without R).
+func xargsReplaceStrings(opts []string) []string {
+	var out []string
+	for i := 1; i < len(opts); i++ {
+		a := opts[i]
+		if a == "--" || len(a) < 2 || a[0] != '-' {
+			break
+		}
+		if name, ok := strings.CutPrefix(a, "--"); ok {
+			name, val, hasVal := strings.Cut(name, "=")
+			if name != "" && strings.HasPrefix("replace", name) {
+				if !hasVal {
+					val = "{}"
+				}
+				out = append(out, val)
+			}
+			continue
+		}
+	bundle:
+		for j := 1; j < len(a); j++ {
+			rest := a[j+1:]
+			switch c := a[j]; c {
+			case 'I', 'J':
+				if rest == "" && i+1 < len(opts) {
+					i++
+					rest = opts[i]
+				}
+				out = append(out, rest)
+				break bundle
+			case 'i':
+				if rest == "" {
+					rest = "{}"
+				}
+				out = append(out, rest)
+				break bundle
+			case 'e', 'l':
+				// GNU optional values: the rest of the word.
+				break bundle
+			default:
+				if xargsArgConsumingFlags["-"+string(c)] {
+					if rest == "" {
+						i++
+					}
+					break bundle
+				}
+			}
+		}
+	}
+	return out
+}
+
 // sshNonPathArgIndices returns the indices of an ssh argv that are not local
 // paths: everything but -i's value, so the destination, option values, and
 // the remote command (cat /etc/hosts reads the remote host's file) are left
-// to the validator.
+// to the validator. An invocation the parse refuses still runs in denylist
+// mode without hosts (the validator leaves it alone there), so the values of
+// all the options that name a local file (-i, -F, -E, -S) stay checked.
 func sshNonPathArgIndices(args []string) map[int]bool {
 	skip := make(map[int]bool, len(args))
 	for i := 1; i < len(args); i++ {
 		skip[i] = true
 	}
-	p, _ := parseSSHArgs(args)
-	for _, i := range p.pathIdx {
+	pathIdx := sshLocalPathIndices(args)
+	if p, err := parseSSHArgs(args); err == nil {
+		pathIdx = p.pathIdx
+	}
+	for _, i := range pathIdx {
 		delete(skip, i)
 	}
 	return skip
+}
+
+// sshLocalPathIndices returns the indices of the words that hold the value of
+// an ssh option naming a local file (-i, -F, -E, -S), the option word itself
+// when the value is attached (-F./cfg), scanning the options before and after
+// the destination the way ssh does, without refusing any.
+func sshLocalPathIndices(args []string) []int {
+	var out []int
+	seenDest := false
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			if seenDest {
+				break // the remote command
+			}
+			seenDest = true
+			continue
+		}
+		for j := 1; j < len(a); j++ {
+			c := a[j]
+			if strings.IndexByte(sshFlagsWithValue, c) < 0 {
+				continue
+			}
+			valIdx := i
+			if j+1 == len(a) {
+				i++
+				valIdx = i
+			}
+			if strings.IndexByte("iFES", c) >= 0 && valIdx < len(args) {
+				out = append(out, valIdx)
+			}
+			break
+		}
+	}
+	return out
 }
 
 // sshpassNonPathArgIndices is sshNonPathArgIndices for sshpass: its prompt,

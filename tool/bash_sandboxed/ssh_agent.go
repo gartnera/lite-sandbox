@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -268,9 +269,14 @@ var gitSigningGlobalKeys = []struct{ key, fallback string }{
 // user's own signing program. env is the worker's environment, whose PATH
 // and git variables the lookup uses.
 func gitSigningConfig(env map[string]string) [][2]string {
+	keys := make([]string, len(gitSigningGlobalKeys))
+	for i, k := range gitSigningGlobalKeys {
+		keys[i] = k.key
+	}
+	user := gitUserConfig(env, keys)
 	out := [][2]string{{"gpg.format", "ssh"}}
 	for _, k := range gitSigningGlobalKeys {
-		v, ok := gitUserConfig(env, k.key)
+		v, ok := user[strings.ToLower(k.key)]
 		if !ok {
 			v = k.fallback
 		}
@@ -279,14 +285,21 @@ func gitSigningConfig(env map[string]string) [][2]string {
 	return out
 }
 
-// gitUserConfig reads key from the user's system and global git config, the
-// way git would outside any repository.
-func gitUserConfig(env map[string]string, key string) (string, bool) {
+// gitUserConfig reads keys from the user's system and global git config, the
+// way git would outside any repository, in one git run. The result is keyed
+// by the lowercase key name; a key set more than once has its last value, as
+// git reads it.
+func gitUserConfig(env map[string]string, keys []string) map[string]string {
+	out := make(map[string]string)
 	git, err := exec.LookPath("git")
 	if err != nil {
-		return "", false
+		return out
 	}
-	cmd := exec.Command(git, "config", "--get", key)
+	quoted := make([]string, len(keys))
+	for i, k := range keys {
+		quoted[i] = regexp.QuoteMeta(strings.ToLower(k))
+	}
+	cmd := exec.Command(git, "config", "-z", "--get-regexp", "^("+strings.Join(quoted, "|")+")$")
 	cmd.Dir = "/"
 	for k, v := range env {
 		switch k {
@@ -296,14 +309,20 @@ func gitUserConfig(env map[string]string, key string) (string, bool) {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Env = append(cmd.Env, "GIT_CEILING_DIRECTORIES=/")
-	out, err := cmd.Output()
+	stdout, err := cmd.Output()
 	if err != nil {
 		if _, exit := err.(*exec.ExitError); !exit {
-			slog.Warn("reading git signing config", "key", key, "error", err)
+			slog.Warn("reading git signing config", "error", err)
 		}
-		return "", false
+		return out
 	}
-	return strings.TrimSuffix(string(out), "\n"), true
+	// -z: each entry is the key, a newline, the value, and a NUL.
+	for _, entry := range strings.Split(string(stdout), "\x00") {
+		if k, v, ok := strings.Cut(entry, "\n"); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // sshAgentHostEnv points a sandboxed command run on the host (no OS sandbox)

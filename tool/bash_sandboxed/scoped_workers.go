@@ -190,20 +190,24 @@ var scopedGitConfig = [][2]string{
 	{"log.showSignature", "false"},
 	{"submodule.recurse", "false"},
 	{"fetch.recurseSubmodules", "false"},
+	// The OpenPGP and X.509 programs, which git picks by the signature it
+	// verifies (git tag -v, merge --verify-signatures), not by gpg.format:
+	// pinned even where git signs, since the agent signs only ssh signatures.
+	// gpg.program also stands for gpg.openpgp.program.
+	{"gpg.program", "false"},
+	{"gpg.x509.program", "false"},
 }
 
 // scopedGitSigningOff switches commit, tag, and push signing off, which run
-// the signing program the config names, and pins the signing programs (and
-// the ssh key command) to false for an explicit -S or push --signed; a
-// worker whose git signs (the ssh agent's, with git_signing) pins those
-// programs to the user's own instead (gitSigningConfig).
+// the signing program the config names, and pins the ssh signing program (and
+// key command) to false for an explicit -S or push --signed; a worker whose
+// git signs (the ssh agent's, with git_signing) pins those to the user's own
+// instead (gitSigningConfig).
 var scopedGitSigningOff = [][2]string{
 	{"commit.gpgSign", "false"},
 	{"tag.gpgSign", "false"},
 	{"push.gpgSign", "false"},
-	{"gpg.program", "false"},
 	{"gpg.ssh.program", "false"},
-	{"gpg.x509.program", "false"},
 	{"gpg.ssh.defaultKeyCommand", "false"},
 }
 
