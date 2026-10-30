@@ -370,18 +370,27 @@ func TestValidate_BlockedTarFlags(t *testing.T) {
 		command string
 		errMsg  string
 	}{
-		{"tar create", "tar -cf archive.tar .", "tar flag '-c' is not allowed"},
 		{"tar append", "tar -rf archive.tar file", "tar flag '-r' is not allowed"},
 		{"tar update", "tar -uf archive.tar file", "tar flag '-u' is not allowed"},
 		{"tar catenate", "tar -Af archive.tar other.tar", "tar flag '-A' is not allowed"},
 		{"tar delete", "tar --delete -f archive.tar file", `tar flag "--delete" is not allowed`},
-		{"tar create long", "tar --create -f archive.tar .", `tar flag "--create" is not allowed`},
-		{"tar create abbreviated", "tar --cre -f archive.tar .", `tar flag "--cre" is not allowed`},
 		{"tar append long", "tar --append -f archive.tar file", `tar flag "--append" is not allowed`},
 		{"tar update long", "tar --update -f archive.tar file", `tar flag "--update" is not allowed`},
-		{"tar old style create", "tar czf archive.tar.gz .", "tar flag 'c' is not allowed"},
-		{"tar no mode flag", "tar -f archive.tar", "tar is only allowed in list (-t/--list) or extract"},
-		{"tar verbose only", "tar -v", "tar is only allowed in list (-t/--list) or extract"},
+		{"tar no mode flag", "tar -f archive.tar", "tar is only allowed in list (-t/--list), extract"},
+		{"tar verbose only", "tar -v", "tar is only allowed in list (-t/--list), extract"},
+		// Create mode: the archive must be named, and the inputs left as they are.
+		{"tar create without -f", "tar -cz dir", "tar -c needs -f/--file"},
+		{"tar create old style without f", "tar cz dir", "tar -c needs -f/--file"},
+		{"tar create and extract", "tar -cxf archive.tar dir", "cannot be combined"},
+		{"tar create remove files", "tar -cf archive.tar --remove-files dir", `tar flag "--remove-files" is not allowed`},
+		{"tar create remove files abbreviated", "tar -cf archive.tar --remove dir", `tar flag "--remove" is not allowed`},
+		{"tar create atime preserve", "tar -cf archive.tar --atime-preserve=replace dir", "is not allowed"},
+		{"tar create dereference", "tar -chf archive.tar dir", "-h/--dereference is not allowed"},
+		{"tar create dereference long", "tar -cf archive.tar --dereference dir", "-h/--dereference is not allowed"},
+		{"tar create dereference old style", "tar chf archive.tar dir", "-h/--dereference is not allowed"},
+		{"tar create remote archive", "tar -cf host:archive.tar dir", "remote archive"},
+		{"tar create files from", "tar -cf archive.tar -T list.txt", "tar flag '-T' is not allowed"},
+		{"tar create compress program", "tar -cf archive.tar --use-compress-program=prog dir", "is not allowed"},
 		// Options that run programs, in list mode as well as extract.
 		{"tar compress program short", "tar -tf archive.tar -I prog", "tar flag '-I' is not allowed"},
 		{"tar compress program long", "tar -tf archive.tar --use-compress-program=prog", `tar flag "--use-compress-program=prog" is not allowed`},

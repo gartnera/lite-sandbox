@@ -74,6 +74,12 @@ func TestValidateGhArgs(t *testing.T) {
 		{command: "gh pr create -t t -b -H", errSubstr: "without --head"}, // -H is the body
 		{command: "gh pr create -b-H -t t", errSubstr: "without --head"},
 		{command: "gh pr create --bogus x --head b", errSubstr: "unknown flag --bogus"},
+		{command: "gh pr create --head b --attach ./a.png --attach './b.png#The error state'"},
+		{command: "gh pr create --attach=./a.png -H b"},
+		{command: "gh pr create --attach -H -t t", errSubstr: "without --head"}, // -H is the file
+		{command: "gh pr new --title t --body b", errSubstr: "without --head"},
+		{command: "gh pr new --head b --fill"},
+		{command: "gh repo new r --clone", errSubstr: "--clone is not allowed"},
 
 		// The token.
 		{command: "gh auth token", errSubstr: "gh auth token is not allowed"},
@@ -220,6 +226,19 @@ func TestGhAPIPaths(t *testing.T) {
 			t.Errorf("ghAPIPaths(%q) = %d, %q; want %d, %q", tt.args, endpoint, files, tt.endpoint, tt.files)
 		}
 	}
+	for _, tt := range []struct {
+		args  []string
+		files []string
+	}{
+		{[]string{"gh", "pr", "create", "--attach", "a.png", "--attach=b.png#alt"}, []string{"a.png", "b.png#alt", "b.png"}},
+		{[]string{"gh", "pr", "comment", "1", "--attach", "../s#/../x#y"}, []string{"../s#/../x#y", "../s#/../x", "../s"}},
+		{[]string{"gh", "issue", "create", "--attach", "#a", "--", "--attach", "b"}, []string{"#a"}},
+		{[]string{"gh", "pr", "create", "--attach"}, nil},
+	} {
+		if files := ghAttachFiles(tt.args); !slices.Equal(files, tt.files) {
+			t.Errorf("ghAttachFiles(%q) = %q; want %q", tt.args, files, tt.files)
+		}
+	}
 
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "hosts.yml")
@@ -235,6 +254,11 @@ func TestGhAPIPaths(t *testing.T) {
 		"gh api -X POST /gists -F files[a][content]=@" + outside,
 		"gh api -X POST /gists --input " + outside,
 		"gh gist create " + outside,
+		"gh pr create -H b --attach " + outside,
+		"gh pr comment 1 --attach=" + outside + "#alt",
+		// The whole word cleans to a path in the working directory; gh opens
+		// the part before the #.
+		"gh issue create --attach " + outside + "#/.." + strings.Repeat("/..", strings.Count(outside, "/")) + dir,
 	} {
 		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil || !strings.Contains(err.Error(), "outside allowed directories") {
 			t.Errorf("%s: want a path boundary error, got %v", cmd, err)
@@ -248,6 +272,9 @@ func TestGhAPIPaths(t *testing.T) {
 	}
 	if err := s.ValidateCommand("gh api -X POST /gists -F files[a][content]=@notes.md", dir, paths, paths); err != nil {
 		t.Errorf("a field read from the working directory: %v", err)
+	}
+	if err := s.ValidateCommand("gh pr create -H b --attach './shot.png#The ../../ error'", dir, paths, paths); err != nil {
+		t.Errorf("an attachment from the working directory: %v", err)
 	}
 }
 

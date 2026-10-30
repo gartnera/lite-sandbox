@@ -438,9 +438,9 @@ while the shared worker every other command runs in hides them, in every mode.
 A credential stealer in a dependency's install script, a test, or a program
 the agent writes can't read `hosts.yml` or ask the keyring, and a `gh` it
 launches itself runs in the shared worker, without the token. The agent's own
-reads (`cat ~/.config/gh/hosts.yml`, a `gh gist create` or `gh api -F
-key=@file` of a path outside the working directory) are refused by the path
-boundary. Without the OS sandbox nothing is hidden from anything, as with
+reads (`cat ~/.config/gh/hosts.yml`, a `gh gist create`, `gh api -F
+key=@file`, or `--attach file#alt text` of a path outside the working
+directory) are refused by the path boundary. Without the OS sandbox nothing is hidden from anything, as with
 every other grant.
 
 `gh auth token`, `gh auth status --show-token`, and `gh auth git-credential`

@@ -87,7 +87,8 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 // validateCommandPaths checks every path a single command touches: its
 // path-like arguments (against the read or write set, per writeCommands), the
 // arguments it writes (against the write set, see validateWriteTargets), for
-// tar, unzip, and zip, what they write (see validateArchiveWrites), and, for
+// tar, unzip, and zip, what they write (see validateArchiveWrites) and what a
+// creating tar reads (see validateTarCreateReads), and, for
 // a wrapper (timeout, env, nice, ...), the paths of the command it runs, which
 // never passes back through the interpreter.
 func validateCommandPaths(cmdName string, args []string, workDir string, sets resolvedPathSets) error {
@@ -100,7 +101,12 @@ func validateCommandPaths(cmdName string, args []string, workDir string, sets re
 		}
 	}
 	if cmdName == "gh" {
-		if err := validateGhAPIReads(args, workDir, sets.read); err != nil {
+		if err := validateGhReads(args, workDir, sets.read); err != nil {
+			return err
+		}
+	}
+	if cmdName == "tar" {
+		if err := validateTarCreateReads(args, workDir, sets.read); err != nil {
 			return err
 		}
 	}
@@ -130,7 +136,7 @@ func validateWriteTargets(cmdName string, args []string, workDir string, write [
 		return nil
 	}
 	for _, t := range writeTargets(cmdName, args, nonPathArgIndices(cmdName, args)) {
-		if t == "" || t == "-" {
+		if t == "" || t == "-" || isStdStreamArg(cmdName, t) {
 			continue // non-literal (re-checked after expansion), or stdout
 		}
 		if err := checkPathBoundary(t, t, workDir, true, write); err != nil {
@@ -173,7 +179,7 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 		if pathToCheck == ".git" || strings.HasPrefix(pathToCheck, ".git/") || strings.HasPrefix(pathToCheck, ".git\\") {
 			return fmt.Errorf("path %q accesses .git directory which is not allowed", arg)
 		}
-		if pathToCheck == "" || !looksLikePath(pathToCheck) {
+		if pathToCheck == "" || !looksLikePath(pathToCheck) || isStdStreamArg(cmdName, pathToCheck) {
 			continue
 		}
 		if err := checkBoundary(arg, pathToCheck, workDir, isWriteCmd, allowed); err != nil {
@@ -311,6 +317,11 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 			}
 			// /dev/null is always allowed for output
 			if lit == "/dev/null" {
+				continue
+			}
+			// The standard streams are served from the command's own
+			// (see openStdStream).
+			if isStdStreamRedirect(lit, r.Op != syntax.RdrIn) {
 				continue
 			}
 			resolved := ResolvePath(lit, workDir)

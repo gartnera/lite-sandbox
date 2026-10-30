@@ -8,10 +8,12 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// tar and unzip may list or extract. Extraction writes, so besides the flag
-// checks here the extraction root is validated against the write set by
-// validateArchiveWrites (called from the path layer, which knows the
-// working directory). The entries inside an archive cannot be seen statically;
+// tar may list, extract, or create; unzip may list or extract. Extraction
+// writes, so besides the flag checks here the extraction root is validated
+// against the write set by validateArchiveWrites (called from the path layer,
+// which knows the working directory). Creation writes only the -f archive,
+// which validateArchiveWrites also checks, and reads its operands, which
+// validateTarCreateReads checks against the read set. The entries inside an archive cannot be seen statically;
 // they are kept under the extraction root by the tools' own defaults (leading
 // "/" and "../" are stripped, and writes through symlinks the archive creates
 // are refused), which is why the options that turn those defaults off are
@@ -24,7 +26,6 @@ import (
 // tarBlockedShort lists tar short options that are never allowed, in either
 // the dash form (-x...) or the old-style bundle (xf...).
 var tarBlockedShort = map[byte]string{
-	'c': "creates archives",
 	'r': "appends to archives",
 	'u': "updates archives",
 	'A': "appends archives to an archive",
@@ -60,7 +61,6 @@ var tarShortWithArg = map[byte]bool{
 // option is rejected when it is a prefix of any of these, since both tars
 // accept unambiguous abbreviations (e.g. --to-com for --to-command).
 var tarBlockedLong = map[string]string{
-	"create":                 "creates archives",
 	"append":                 "appends to archives",
 	"update":                 "updates archives",
 	"delete":                 "deletes from archives",
@@ -87,6 +87,8 @@ var tarBlockedLong = map[string]string{
 	"volno-file":             "writes to an arbitrary file",
 	"incremental":            "incremental mode",
 	"listed-incremental":     "incremental mode",
+	"remove-files":           "deletes the files it adds to the archive",
+	"atime-preserve":         "changes the access times of the files it reads",
 }
 
 // tarExactLong lists allowed long options that are also prefixes of a blocked
@@ -100,10 +102,19 @@ var tarExactLong = map[string]bool{
 
 // tarInvocation is what parseTarArgs learns from a tar command line.
 type tarInvocation struct {
-	list, extract bool
+	list, extract, create bool
 	// dirs holds the -C/--directory values in order ("" for a value that is
 	// not a literal, which the static pass cannot check).
 	dirs []string
+	// archives holds the -f/--file values ("" for a non-literal value);
+	// hasArchive records that -f was given at all.
+	archives   []string
+	hasArchive bool
+	// operands holds the non-option arguments: in create mode, the files read.
+	operands []string
+	// dereference records -h/--dereference, which in create mode follows
+	// symlinks out of the operands.
+	dereference bool
 }
 
 // parseTarArgs parses a tar argv (args[0] is the command name). Arguments that
@@ -117,6 +128,7 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 		case "C":
 			inv.dirs = append(inv.dirs, v)
 		case "f":
+			inv.archives = append(inv.archives, v)
 			// GNU tar treats host:path (a colon before any slash) as a remote
 			// archive reached through rsh.
 			if colon := strings.IndexByte(v, ':'); colon >= 0 {
@@ -131,6 +143,9 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 	// like an option is rejected: which argument it binds to is exactly where
 	// implementations (and option permutation) could disagree.
 	nextValue := func(i *int, opt string) error {
+		if opt == "f" {
+			inv.hasArchive = true
+		}
 		if *i+1 >= len(args) {
 			return nil
 		}
@@ -163,6 +178,10 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 				inv.list = true
 			case strings.HasPrefix("extract", name) || strings.HasPrefix("get", name):
 				inv.extract = true
+			case len(name) >= 2 && strings.HasPrefix("create", name):
+				inv.create = true
+			case len(name) >= 3 && strings.HasPrefix("dereference", name):
+				inv.dereference = true
 			case name == "file" || name == "cd" || (len(name) >= 2 && strings.HasPrefix("directory", name)):
 				opt := "f"
 				if name != "file" {
@@ -170,6 +189,9 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 				}
 				var err error
 				if hasValue {
+					if opt == "f" {
+						inv.hasArchive = true
+					}
 					err = value(opt, v)
 				} else {
 					err = nextValue(&i, opt)
@@ -190,10 +212,17 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 					inv.list = true
 				case 'x':
 					inv.extract = true
+				case 'c':
+					inv.create = true
+				case 'h':
+					inv.dereference = true
 				}
 				if tarShortWithArg[c] {
 					var err error
 					if rest := flags[j+1:]; rest != "" {
+						if c == 'f' {
+							inv.hasArchive = true
+						}
 						err = value(string(c), rest)
 					} else {
 						err = nextValue(&i, string(c))
@@ -217,6 +246,10 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 					inv.list = true
 				case 'x':
 					inv.extract = true
+				case 'c':
+					inv.create = true
+				case 'h':
+					inv.dereference = true
 				}
 				if tarShortWithArg[c] {
 					if err := nextValue(&i, string(c)); err != nil {
@@ -224,17 +257,32 @@ func parseTarArgs(args []string) (tarInvocation, error) {
 					}
 				}
 			}
+		default:
+			inv.operands = append(inv.operands, arg)
 		}
 	}
-	if !inv.list && !inv.extract {
-		return inv, fmt.Errorf("tar is only allowed in list (-t/--list) or extract (-x/--extract) mode")
+	if !inv.list && !inv.extract && !inv.create {
+		return inv, fmt.Errorf("tar is only allowed in list (-t/--list), extract (-x/--extract), or create (-c/--create) mode")
+	}
+	if inv.create {
+		if inv.list || inv.extract {
+			return inv, fmt.Errorf("tar -c cannot be combined with -t or -x")
+		}
+		// Without -f the archive is $TAPE or a compiled-in default that varies
+		// by system (stdout, /dev/st0, /dev/sa0), so name it.
+		if !inv.hasArchive {
+			return inv, fmt.Errorf("tar -c needs -f/--file naming the archive (-f - for stdout)")
+		}
+		if inv.dereference {
+			return inv, fmt.Errorf("tar flag -h/--dereference is not allowed with -c: follows symlinks out of the files being archived")
+		}
 	}
 	return inv, nil
 }
 
-// validateTarArgs allows tar in list or extract mode and blocks the options
-// that create or modify archives, run programs, or let entries escape the
-// extraction directory.
+// validateTarArgs allows tar in list, extract, or create mode and blocks the
+// options that modify existing archives, delete or change the files read, run
+// programs, or let entries escape the extraction directory.
 func validateTarArgs(_ *Sandbox, args []*syntax.Word) error {
 	inv, err := parseTarArgs(wordLits(args))
 	if err != nil {
@@ -469,38 +517,99 @@ func validateZipArgs(_ *Sandbox, args []*syntax.Word) error {
 	return err
 }
 
+// tarDirs returns the directories tar's -C/--directory values change to,
+// in order. tar changes directory for each -C in turn, so a relative value is
+// relative to the one before it; the values from a non-literal one on are
+// left out (they are checked at runtime, on the expanded argv).
+func tarDirs(inv tarInvocation, workDir string) []string {
+	var dirs []string
+	cur := workDir
+	for _, d := range inv.dirs {
+		if d == "" {
+			cur = ""
+			continue
+		}
+		if cur == "" {
+			continue
+		}
+		if filepath.IsAbs(d) {
+			cur = d
+		} else {
+			cur = filepath.Join(cur, d)
+		}
+		dirs = append(dirs, cur)
+	}
+	return dirs
+}
+
+// validateTarCreateReads checks what a creating tar reads against the read
+// set: each -C directory and each operand. An operand is relative to the -C
+// before it (GNU tar and bsdtar both apply -C in order in create mode); rather
+// than track which -C that is, every operand is checked against the working
+// directory and every -C directory. bsdtar reads an @archive operand as an
+// archive whose entries it copies, so the name after the @ is checked too.
+func validateTarCreateReads(args []string, workDir string, read []resolvedAllowedPath) error {
+	inv, err := parseTarArgs(args)
+	if err != nil || !inv.create {
+		return nil
+	}
+	dirs := tarDirs(inv, workDir)
+	for _, d := range dirs {
+		if err := checkBoundary(d, d, workDir, false, read); err != nil {
+			return err
+		}
+	}
+	bases := append([]string{workDir}, dirs...)
+	for _, op := range inv.operands {
+		if op == "" {
+			continue // non-literal; checked at runtime
+		}
+		names := []string{op}
+		if rest, ok := strings.CutPrefix(op, "@"); ok && rest != "" && rest != "-" {
+			names = append(names, rest)
+		}
+		for _, name := range names {
+			for _, base := range bases {
+				if err := checkBoundary(op, name, base, false, read); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // validateArchiveWrites checks that tar, unzip, and zip write only inside the
 // write set. An extracting tar or unzip writes into the working directory
 // (always checked, since what an archive holds lands there unless redirected,
 // and the check should not hinge on getting that redirection right) plus every
-// -C/--directory (tar) or -d (unzip) destination; zip writes its archive.
-// Parse errors are left to the argument validators.
+// -C/--directory (tar) or -d (unzip) destination; a creating tar and zip write
+// their archive. Parse errors are left to the argument validators.
 func validateArchiveWrites(cmdName string, args []string, workDir string, write []resolvedAllowedPath) error {
 	var dirs []string
 	switch cmdName {
 	case "tar":
 		inv, err := parseTarArgs(args)
-		if err != nil || !inv.extract {
+		if err != nil {
 			return nil
 		}
-		// tar changes directory for each -C in turn, so a relative value is
-		// relative to the one before it.
-		cur := workDir
-		for _, d := range inv.dirs {
-			if d == "" {
-				cur = ""
-				continue
+		if inv.create {
+			// Both tars open the archive before acting on any -C, so it is
+			// relative to the working directory.
+			for _, a := range inv.archives {
+				if a == "" || a == "-" || isStdStreamArg(cmdName, a) {
+					continue
+				}
+				if err := checkPathBoundary(a, a, workDir, true, write); err != nil {
+					return err
+				}
 			}
-			if cur == "" {
-				continue // follows a non-literal -C; checked at runtime
-			}
-			if filepath.IsAbs(d) {
-				cur = d
-			} else {
-				cur = filepath.Join(cur, d)
-			}
-			dirs = append(dirs, cur)
+			return nil
 		}
+		if !inv.extract {
+			return nil
+		}
+		dirs = tarDirs(inv, workDir)
 	case "unzip":
 		inv, err := parseUnzipArgs(args)
 		if err != nil || !inv.extract {

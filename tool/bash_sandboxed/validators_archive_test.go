@@ -202,6 +202,94 @@ func TestValidatePaths_ZipArchiveWriteChecked(t *testing.T) {
 	}
 }
 
+func TestValidate_TarCreateAllowed(t *testing.T) {
+	for _, cmd := range []string{
+		"tar -cf archive.tar dir",
+		"tar -czf archive.tgz opt1 bridge_mod",
+		"tar czf archive.tgz dir",
+		"tar -c -f archive.tar dir",
+		"tar --create --file=archive.tar dir",
+		"tar --cre --file archive.tar dir",
+		"tar -cJvf archive.tar.xz dir --exclude '*.log'",
+		"tar -cf - dir",
+		"tar -czf - -C dir .",
+		"tar -cf archive.tar --hard-dereference dir",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := newTestSandbox().validate(f); err != nil {
+				t.Fatalf("expected %q to be allowed, got: %v", cmd, err)
+			}
+		})
+	}
+}
+
+func TestValidatePaths_TarCreate(t *testing.T) {
+	workDir := t.TempDir()
+	readOnlyDir := t.TempDir()
+	secretDir := t.TempDir()
+	os.MkdirAll(filepath.Join(workDir, "sub", "inner"), 0o755)
+	os.WriteFile(filepath.Join(readOnlyDir, "data.txt"), []byte("hi"), 0o644)
+	os.WriteFile(filepath.Join(secretDir, "secret"), []byte("s"), 0o644)
+	os.WriteFile(filepath.Join(secretDir, "a.tar"), []byte("s"), 0o644)
+	os.Symlink(secretDir, filepath.Join(workDir, "secretlink"))
+	readPaths := []string{workDir, readOnlyDir}
+	writePaths := []string{workDir}
+
+	for _, cmd := range []string{
+		"tar -czf out.tgz dir",
+		"tar -czf out.tgz " + readOnlyDir,
+		"tar -czf out.tgz -C " + readOnlyDir + " data.txt",
+		"tar -C " + readOnlyDir + " -czf out.tgz .",
+		"tar -czf " + workDir + "/out.tgz sub",
+		"tar -czf - " + readOnlyDir,
+		"tar -cf /dev/stdout sub",
+		"tar -cf out.tar -C sub inner",
+	} {
+		t.Run("allowed/"+cmd, func(t *testing.T) {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := validatePaths(f, workDir, readPaths, writePaths); err != nil {
+				t.Fatalf("expected %q to be allowed, got: %v", cmd, err)
+			}
+		})
+	}
+	for _, cmd := range []string{
+		// The archive is written, so it must be in the write set; -C does not
+		// move it.
+		"tar -czf " + readOnlyDir + "/out.tgz dir",
+		"tar -czf" + readOnlyDir + "/out.tgz dir",
+		"tar --create --file=" + readOnlyDir + "/out.tgz dir",
+		"tar czf " + readOnlyDir + "/out.tgz dir",
+		"tar -C " + readOnlyDir + " -czf " + readOnlyDir + "/out.tgz .",
+		// What it reads must be in the read set.
+		"tar -czf out.tgz " + secretDir,
+		"tar -czf out.tgz -C " + secretDir + " .",
+		"tar -czf out.tgz -C " + secretDir + " secret",
+		"tar -czf out.tgz secretlink",
+		"tar -czf out.tgz secretlink/secret",
+		"tar -czf out.tgz -C sub ../../" + filepath.Base(secretDir),
+		"tar -czf out.tgz -C secretlink .",
+		"tar -czf out.tgz @" + secretDir + "/a.tar",
+	} {
+		t.Run("blocked/"+cmd, func(t *testing.T) {
+			f, err := ParseBash(cmd)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err = validatePaths(f, workDir, readPaths, writePaths)
+			if err == nil || !strings.Contains(err.Error(), "outside allowed directories") {
+				t.Fatalf("expected %q to be blocked, got %v", cmd, err)
+			}
+		})
+	}
+}
+
 func TestValidate_ArchiveEnvInjectionBlocked(t *testing.T) {
 	tests := []string{
 		"TAR_OPTIONS=--to-command=sh tar -xf archive.tar",
@@ -256,6 +344,29 @@ func TestBashSandboxed_ArchiveExtraction(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		assertFileContent(t, filepath.Join(workDir, "out/dir/hello.txt"), "hello tar\n")
+	})
+
+	t.Run("tar creates an archive", func(t *testing.T) {
+		if _, err := run("tar -czf out.tgz -C out dir"); err != nil {
+			t.Fatalf("tar -c failed: %v", err)
+		}
+		out, err := run("tar -tzf out.tgz")
+		if err != nil {
+			t.Fatalf("tar -t failed: %v", err)
+		}
+		if !strings.Contains(out, "dir/hello.txt") {
+			t.Fatalf("archive listing missing dir/hello.txt: %q", out)
+		}
+	})
+
+	t.Run("tar -c archive via variable outside the boundary", func(t *testing.T) {
+		_, err := run("D=" + readOnlyDir + "; tar -czf \"$D/out.tgz\" -C out dir")
+		if err == nil || !strings.Contains(err.Error(), "outside allowed directories") {
+			t.Fatalf("expected the archive outside the write set to be refused, got %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(readOnlyDir, "out.tgz")); statErr == nil {
+			t.Fatal("tar wrote an archive into the read-only directory")
+		}
 	})
 
 	t.Run("tar -C via variable outside the boundary", func(t *testing.T) {

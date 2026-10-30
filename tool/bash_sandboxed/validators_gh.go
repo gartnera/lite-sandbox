@@ -80,8 +80,9 @@ var (
 		"extensions": "extension",
 	}
 	ghSubcommandAliases = map[string]string{
-		"co": "checkout", // gh pr co
-		"ls": "list",
+		"co":  "checkout", // gh pr co
+		"ls":  "list",
+		"new": "create", // gh pr new, gh repo new, ...
 	}
 )
 
@@ -350,7 +351,7 @@ func checkGhPr(rest []string, o ghOptions) error {
 		}
 		flags, _, err := ghParse(others, "dewf", "tbFBHrlapmTR",
 			[]string{"draft", "editor", "web", "fill-verbose", "fill", "fill-first", "no-maintainer-edit", "dry-run"},
-			[]string{"title", "body", "body-file", "base", "head", "reviewer", "assignee", "label", "project", "milestone", "recover", "template", "repo"})
+			[]string{"title", "body", "body-file", "base", "head", "reviewer", "assignee", "label", "project", "milestone", "recover", "template", "repo", "attach"})
 		if err != nil {
 			return fmt.Errorf("gh pr create: %w", err)
 		}
@@ -489,14 +490,48 @@ func ghAPIPaths(args []string) (endpoint int, files []string) {
 	return endpoint, files
 }
 
-// validateGhAPIReads checks the files gh api's -F key=@file values read
-// against the read set. The generic pass resolves the whole key=@file word as
-// one relative name, which is always inside the working directory, so
-// without this gh (which holds the token) could be pointed at any file its
-// worker can read, its own hosts.yml included.
-func validateGhAPIReads(args []string, workDir string, read []resolvedAllowedPath) error {
+// ghAttachFiles returns the files gh's --attach values (gh pr create, pr
+// comment, issue edit, ...) may read. gh reads '<file>#<alt text>', taking the
+// longest prefix ending before a # that exists as the file, so every such
+// prefix is returned along with the whole value: the generic pass resolves
+// the whole word, which can stay inside the working directory while the
+// prefix gh opens does not (../secret#/../x).
+func ghAttachFiles(args []string) []string {
+	var files []string
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		files = append(files, v)
+		for i := strings.LastIndex(v, "#"); i > 0; i = strings.LastIndex(v[:i], "#") {
+			files = append(files, v[:i])
+		}
+	}
+	for i := 1; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--":
+			return files
+		case a == "--attach":
+			if i+1 < len(args) {
+				i++
+				add(args[i])
+			}
+		case strings.HasPrefix(a, "--attach="):
+			add(strings.TrimPrefix(a, "--attach="))
+		}
+	}
+	return files
+}
+
+// validateGhReads checks the files gh api's -F key=@file values and the
+// --attach values read against the read set. The generic pass resolves the
+// whole key=@file word as one relative name, which is always inside the
+// working directory, and misses the file an --attach value names (see
+// ghAttachFiles), so without this gh (which holds the token) could be pointed
+// at any file its worker can read, its own hosts.yml included.
+func validateGhReads(args []string, workDir string, read []resolvedAllowedPath) error {
 	_, files := ghAPIPaths(args)
-	for _, f := range files {
+	for _, f := range append(files, ghAttachFiles(args)...) {
 		if err := checkBoundary(f, f, workDir, false, read); err != nil {
 			return err
 		}

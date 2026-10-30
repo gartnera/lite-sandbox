@@ -85,6 +85,7 @@ var allowedCommands = map[string]bool{
 	"sha256sum": true,
 	"sha1sum":   true,
 	"md5sum":    true,
+	"md5":       true, // macOS/BSD; no option writes a file
 	"shasum":    true,
 	"cksum":     true,
 	"b2sum":     true,
@@ -230,9 +231,9 @@ var allowedCommands = map[string]bool{
 	"xz":      true,
 	"unxz":    true,
 
-	// Archive inspection, extraction, and zip creation (arg validators for
-	// tar/unzip/zip/ar; what tar/unzip extract into and the archive zip writes
-	// are write-checked, see validators_archive.go)
+	// Archive inspection, extraction, and creation (arg validators for
+	// tar/unzip/zip/ar; what tar/unzip extract into and the archives tar -c
+	// and zip write are write-checked, see validators_archive.go)
 	"tar":     true,
 	"unzip":   true,
 	"zip":     true,
