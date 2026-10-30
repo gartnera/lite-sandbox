@@ -38,7 +38,39 @@ func TestSSHConfigCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "build-box, 10.0.0.12") || !strings.Contains(out, "Agent: unrestricted") || !strings.Contains(out, "Git signing: on") {
+	if !strings.Contains(out, "build-box: read-only remote commands") || !strings.Contains(out, "10.0.0.12: read-only remote commands") || !strings.Contains(out, "Agent: unrestricted") || !strings.Contains(out, "Git signing: on") {
+		t.Errorf("show: %s", out)
+	}
+
+	// --command and --write widen a host's entry, and add to a listed one.
+	t.Cleanup(func() { sshHostsAddWrite, sshHostsAddCommands = false, nil })
+	captureStdout(t, func() {
+		sshHostsAddCommands = []string{"systemctl restart"}
+		if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"deploy-box", "10.0.0.12"}); err != nil {
+			t.Fatal(err)
+		}
+		sshHostsAddWrite, sshHostsAddCommands = true, nil
+		if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"scratch-vm"}); err != nil {
+			t.Fatal(err)
+		}
+		sshHostsAddWrite = false
+	})
+	cfg, _ = config.Load()
+	if h := cfg.SSH.Host("deploy-box"); h == nil || h.Writes() || len(h.Commands) != 1 || h.Commands[0] != "systemctl restart" {
+		t.Errorf("deploy-box: %+v", h)
+	}
+	if h := cfg.SSH.Host("10.0.0.12"); h == nil || len(h.Commands) != 1 {
+		t.Errorf("10.0.0.12 did not take the command: %+v", h)
+	}
+	if h := cfg.SSH.Host("scratch-vm"); h == nil || !h.Writes() {
+		t.Errorf("scratch-vm: %+v", h)
+	}
+	out = captureStdout(t, func() {
+		if err := sshShowCmd.RunE(sshShowCmd, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "deploy-box: read-only remote commands, and systemctl restart") || !strings.Contains(out, "scratch-vm: any remote command") {
 		t.Errorf("show: %s", out)
 	}
 

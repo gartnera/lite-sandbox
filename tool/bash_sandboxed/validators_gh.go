@@ -67,29 +67,8 @@ func (e *ghGitError) Error() string {
 // ghLiteral returns the value of a word made only of literal text, quoted or
 // not, and false for a word with an expansion in it.
 func ghLiteral(w *syntax.Word) (string, bool) {
-	var sb strings.Builder
-	for _, part := range w.Parts {
-		switch p := part.(type) {
-		case *syntax.Lit:
-			sb.WriteString(p.Value)
-		case *syntax.SglQuoted:
-			if p.Dollar {
-				return "", false
-			}
-			sb.WriteString(p.Value)
-		case *syntax.DblQuoted:
-			for _, dp := range p.Parts {
-				lit, ok := dp.(*syntax.Lit)
-				if !ok {
-					return "", false
-				}
-				sb.WriteString(lit.Value)
-			}
-		default:
-			return "", false
-		}
-	}
-	return sb.String(), true
+	v, bad := literalWord(w)
+	return v.val, bad == nil
 }
 
 // ghCommandAliases and ghSubcommandAliases map the built-in aliases of gh's

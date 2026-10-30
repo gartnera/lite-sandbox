@@ -22,6 +22,12 @@ func TestValidate_BlockedFindFlags(t *testing.T) {
 		{"find -fprint", `find . -fprint /tmp/out`, `find flag "-fprint" is not allowed`},
 		{"find -fprint0", `find . -fprint0 /tmp/out`, `find flag "-fprint0" is not allowed`},
 		{"find -fprintf", `find . -fprintf /tmp/out '%p'`, `find flag "-fprintf" is not allowed`},
+		// The words are read by their values: find takes a quoted ';' as the
+		// terminator, and a quoted '-delete' or '-exec' as itself.
+		{"find quoted terminator", `find . -exec cat {} ';' -delete`, `find flag "-delete" is not allowed`},
+		{"find double-quoted terminator", `find . -exec cat {} ";" -fprint /tmp/x`, `find flag "-fprint" is not allowed`},
+		{"find quoted -delete", `find . '-delete'`, `find flag "-delete" is not allowed`},
+		{"find quoted -exec", `find . '-exec' perl {} \;`, `command "perl" is not allowed`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -141,6 +147,8 @@ func TestValidate_Env(t *testing.T) {
 		{"env -i curl", `env -i curl x`, `command "curl" is not allowed`},
 		{"env -u curl", `env -u PATH curl x`, `command "curl" is not allowed`},
 		{"env -uNAME curl", `env -uPATH curl x`, `command "curl" is not allowed`},
+		{"env --uns abbreviated", `env --uns cat curl x`, `command "curl" is not allowed`},
+		{"env --ch abbreviated", `env --ch /tmp curl x`, `command "curl" is not allowed`},
 		{"env --unset= curl", `env --unset=PATH curl x`, `command "curl" is not allowed`},
 		{"env --unset NAME curl", `env --unset PATH curl x`, `command "curl" is not allowed`},
 		{"env -C dir curl", `env -C /tmp curl x`, `command "curl" is not allowed`},
@@ -154,6 +162,7 @@ func TestValidate_Env(t *testing.T) {
 		{"env time", `env time curl x`, `not allowed as a wrapped subcommand`},
 		{"env -S separate", `env -S 'curl x'`, `--split-string is not allowed`},
 		{"env -iS", `env -iS 'curl x'`, `--split-string is not allowed`},
+		{"env --sp abbreviated", `env --sp 'curl x'`, `--split-string is not allowed`},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.name, func(t *testing.T) {

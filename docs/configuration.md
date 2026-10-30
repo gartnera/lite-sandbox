@@ -845,10 +845,10 @@ Resolution rules:
   `docker.enabled`). Either way, sections the override doesn't mention are
   inherited unchanged, and leaf values it does set (scalars, flags, and the
   deprecated one-list-per-kind path and command keys) come from the override.
-- **`paths` and `commands` merge entry by entry.** Under `merge: true` these
-  lists are combined per path or per command rather than taken whole: the
-  base's entries carry over, an override entry for the same path or command
-  **replaces** that entry, and entries for new paths or commands are added.
+- **`paths`, `commands`, and `ssh.hosts` merge entry by entry.** Under
+  `merge: true` these lists are combined per path, command, or host rather
+  than taken whole: the base's entries carry over, an override entry for the
+  same path, command, or host **replaces** that entry, and new ones are added.
   Paths and commands are matched the way the sandbox matches them (`~/x` and
   its expanded form are the same path; `uv  run` and `uv run` are the same
   command). An override can restate an inherited entry (grant less, or deny
@@ -961,7 +961,12 @@ your ssh agent, through a filter, to them and git's remote commands alone. See
 
 ```yaml
 ssh:
-  hosts: [build-box, 10.0.0.12]
+  hosts:
+    - build-box              # the remote command is held to read-only commands
+    - host: deploy-box       # ...and may also run these, with any arguments
+      commands: [systemctl restart]
+    - host: scratch-vm       # the remote command is not checked
+      write: true
   agent: true                # default true
   unrestricted_agent: false  # default false
   git_signing: false         # default false

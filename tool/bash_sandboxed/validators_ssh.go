@@ -13,8 +13,9 @@ import (
 // ssh and sshpass are allowed once the config's ssh section lists a host
 // (config.SSHConfig), and then only to the listed hosts: the destination and
 // every jump host must be one of them, exactly as typed (an alias of
-// ~/.ssh/config or a host name). The remote command is not checked; it runs
-// on a host the user listed.
+// ~/.ssh/config or a host name). The remote command is held to read-only
+// commands unless the destination's hosts entry widens it (see
+// validators_ssh_remote.go).
 //
 // The options that make ssh reach anything but the destination, or run
 // something on this machine, are refused: port and socket forwarding (-L, -R,
@@ -133,6 +134,14 @@ type sshArgs struct {
 	endOpts bool     // "--" ended the options
 	cmdIdx  int      // index of the first word of the remote command, or len(args)
 	pathIdx []int    // indices of words that name a local file (-i's value)
+
+	// What the session runs, for the remote command check.
+	noSession     bool     // -G (prints the config), -N or SessionType=none: nothing runs
+	subsystem     bool     // -s or SessionType=subsystem: the command names a subsystem
+	stdinNull     bool     // -n or StdinNull=yes: a login shell reads no commands
+	tty           bool     // -t or RequestTTY=yes/force: the remote side gets a terminal
+	remoteCommand bool     // -o RemoteCommand
+	setEnv        []string // -o SetEnv values
 }
 
 // parseSSHArgs parses args (command name at index 0) and returns the
@@ -182,8 +191,17 @@ func (p *sshArgs) parseBundle(args []string, i int) (int, error) {
 			return 0, fmt.Errorf("ssh option -%c is not allowed: %s", c, why)
 		}
 		if strings.IndexByte(sshFlagsNoValue, c) >= 0 {
-			if c == 'V' {
+			switch c {
+			case 'V':
 				p.noDest = true
+			case 'G', 'N':
+				p.noSession = true
+			case 's':
+				p.subsystem = true
+			case 'n':
+				p.stdinNull = true
+			case 't':
+				p.tty = true
 			}
 			continue
 		}
@@ -256,8 +274,22 @@ func (p *sshArgs) configOption(opt string) error {
 	if allowed != nil && !slices.ContainsFunc(allowed, func(v string) bool { return strings.EqualFold(v, val) }) {
 		return fmt.Errorf("ssh option -o %s=%s is not allowed: only %s", opt[:end], val, strings.Join(allowed, " or "))
 	}
-	if key == "proxyjump" && !strings.EqualFold(val, "none") {
-		p.jumps = append(p.jumps, val)
+	switch key {
+	case "proxyjump":
+		if !strings.EqualFold(val, "none") {
+			p.jumps = append(p.jumps, val)
+		}
+	case "sessiontype":
+		p.noSession = p.noSession || strings.EqualFold(val, "none")
+		p.subsystem = p.subsystem || strings.EqualFold(val, "subsystem")
+	case "stdinnull":
+		p.stdinNull = p.stdinNull || strings.EqualFold(val, "yes")
+	case "requesttty":
+		p.tty = p.tty || strings.EqualFold(val, "yes") || strings.EqualFold(val, "force")
+	case "remotecommand":
+		p.remoteCommand = !strings.EqualFold(val, "none")
+	case "setenv":
+		p.setEnv = append(p.setEnv, val)
 	}
 	return nil
 }
@@ -332,6 +364,12 @@ func checkSSHArgv(argv []string, cfg *config.SSHConfig) error {
 			return tagRule(ruleArgValidator, "ssh", fmt.Errorf("ssh to %q is not allowed: it is not one of the ssh hosts; the user can add it with `%s`", h, sshHostsFix(h)))
 		}
 	}
+	if p.noDest {
+		return nil
+	}
+	if err := checkSSHRemote(p, argv, cfg.Host(sshDestinationHost(p.dest))); err != nil {
+		return tagRule(ruleArgValidator, "ssh", err)
+	}
 	return nil
 }
 
@@ -343,19 +381,34 @@ func sshJumpHostsAll(jumps []string) []string {
 	return out
 }
 
-// sshLiterals returns the words' values, and false when one is only known
-// after expansion: the runtime layer re-runs the validator on the expanded
-// argv.
-func sshLiterals(args []*syntax.Word) ([]string, bool) {
+// sshLiterals returns the words' values, and whether each is an unquoted glob
+// or brace the local shell expands. A word that is only known after expansion
+// is refused: the remote command is checked as written (and again on the
+// runtime layer's expanded argv), and the hook modes run the command with no
+// runtime layer.
+func sshLiterals(args []*syntax.Word) ([]string, []bool, error) {
 	argv := make([]string, len(args))
+	glob := make([]bool, len(args))
 	for i, w := range args {
-		v, ok := ghLiteral(w)
-		if !ok {
-			return nil, false
+		v, bad := literalWord(w)
+		if bad != nil {
+			return nil, nil, fmt.Errorf("%s: a variable, substitution, or $'...' in its words is not allowed: write them out, so the command it runs can be checked", args[0].Lit())
 		}
-		argv[i] = v
+		argv[i], glob[i] = v.val, v.glob
 	}
-	return argv, true
+	return argv, glob, nil
+}
+
+// checkSSHGlobs refuses a glob the local shell would expand in the remote
+// command (from index cmdIdx of the ssh argv): it would turn into this
+// machine's file names.
+func checkSSHGlobs(argv []string, glob []bool, cmdIdx int) error {
+	for i := cmdIdx; i < len(argv); i++ {
+		if glob[i] {
+			return fmt.Errorf("ssh %s: an unquoted glob or brace expands on this machine; quote it for the remote shell ('cat /var/log/*.log')", argv[i])
+		}
+	}
+	return nil
 }
 
 // validateSSHCommand is ssh's argument validator. Without a host in the ssh
@@ -366,11 +419,15 @@ func validateSSHCommand(s *Sandbox, args []*syntax.Word) error {
 	if !cfg.HostsConfigured() {
 		return nil
 	}
-	argv, ok := sshLiterals(args)
-	if !ok {
-		return nil
+	argv, glob, err := sshLiterals(args)
+	if err != nil {
+		return err
 	}
-	return checkSSHArgv(argv, cfg)
+	if err := checkSSHArgv(argv, cfg); err != nil {
+		return err
+	}
+	p, _ := parseSSHArgs(argv)
+	return checkSSHGlobs(argv, glob, p.cmdIdx)
 }
 
 // sshpass takes the password only from the environment (-e reads
@@ -445,9 +502,9 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	if !cfg.HostsConfigured() {
 		return nil
 	}
-	argv, ok := sshLiterals(args)
-	if !ok {
-		return nil
+	argv, glob, err := sshLiterals(args)
+	if err != nil {
+		return err
 	}
 	cmdIdx, _, env, err := parseSSHPassArgs(argv)
 	if err != nil {
@@ -462,38 +519,42 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	if argv[cmdIdx] != "ssh" {
 		return fmt.Errorf("sshpass may only run ssh, not %q", argv[cmdIdx])
 	}
-	return checkSSHArgv(argv[cmdIdx:], cfg)
+	if err := checkSSHArgv(argv[cmdIdx:], cfg); err != nil {
+		return err
+	}
+	p, _ := parseSSHArgs(argv[cmdIdx:])
+	return checkSSHGlobs(argv[cmdIdx:], glob[cmdIdx:], p.cmdIdx)
 }
 
-// validateSSHAppendedArgs refuses an ssh or sshpass that xargs runs with its
-// input appended, unless nothing appended can be read as an option or as
-// sshpass's command: ssh reads options again after the destination, so an
-// appended -oProxyCommand=... or -oHostname=... would escape the host check,
-// and words appended to a sshpass with no command become the command it runs.
-// An ssh that names a remote command (or ends its options with --) takes the
-// appended words as more of that command. With a replace string (-I, -i,
-// --replace, BSD -J) xargs substitutes its input into the words instead, so a
-// word holding the replace string must be part of the remote command, where
-// ssh reads no options. xargsOpts are xargs's own words before the command
-// (xargs itself included). Applies once the ssh section lists a host, like
-// the ssh validator.
-func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
+// validateSSHWrappedInput refuses an ssh or sshpass that a wrapper (xargs,
+// find -exec) runs with words of its input, unless no input word can be read
+// as an option, a host, or sshpass's command. ssh reads options again after
+// the destination, so an input -oProxyCommand=... or -oHostname=... would
+// escape the host check, and words appended to a sshpass with no command
+// become the command it runs.
+//
+// With replace strings (xargs -I, -i, --replace, BSD -J; find's {}) the
+// input replaces them in the words, so a word holding one must be part of
+// the remote command, where ssh reads no options. Without (xargs's default)
+// the input is appended: an ssh that names a remote command (or ends its
+// options with --) takes it as more of that command. When the destination's
+// remote command is held to read-only commands, the input may not reach the
+// remote command at all: it is checked before the wrapper runs, and the
+// remote shell would run the input as part of it. wrapper names the wrapper
+// for messages. Applies once the ssh section lists a host, like the ssh
+// validator.
+func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args []*syntax.Word) error {
 	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
 		return nil
 	}
-	argv, ok := sshLiterals(args)
-	if !ok {
-		return nil // re-checked at runtime on the expanded argv
+	argv, _, err := sshLiterals(args)
+	if err != nil {
+		return err
 	}
 	name := argv[0]
 	if name != "ssh" && name != "sshpass" {
 		return nil
 	}
-	opts, ok := sshLiterals(xargsOpts)
-	if !ok {
-		return nil // re-checked at runtime on the expanded argv
-	}
-	replace := xargsReplaceStrings(opts)
 	sshStart := 0
 	if name == "sshpass" {
 		cmdIdx, _, _, err := parseSSHPassArgs(argv)
@@ -501,13 +562,18 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 			return err
 		}
 		if cmdIdx >= len(argv) {
-			return fmt.Errorf("xargs sshpass without a command is not allowed: the input xargs appends would be the command sshpass runs")
+			return fmt.Errorf("%s sshpass without a command is not allowed: the input %s adds would be the command sshpass runs", wrapper, wrapper)
 		}
 		sshStart = cmdIdx
 	}
 	p, err := parseSSHArgs(argv[sshStart:])
 	if err != nil {
 		return err
+	}
+	host := s.getConfig().SSH.Host(sshDestinationHost(p.dest))
+	readOnly := !p.noDest && !p.noSession && host != nil && !host.Writes()
+	errReadOnly := func() error {
+		return fmt.Errorf("%s %s with its input in the remote command is not allowed: the command to %s is held to read-only commands, and the remote shell would run the input as part of it; run ssh for each input yourself, or the user can lift the check with --write", wrapper, name, host.Host)
 	}
 	if len(replace) > 0 {
 		for i, w := range argv[1:] {
@@ -517,16 +583,42 @@ func validateSSHAppendedArgs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 			}
 			j := i - sshStart // index in the ssh argv
 			if i > sshStart && (j > p.cmdIdx || (j == p.cmdIdx && p.endOpts)) && !p.noDest {
+				if readOnly {
+					return errReadOnly()
+				}
 				continue
 			}
-			return fmt.Errorf("xargs %s with its input replacing %q is not allowed: ssh could read the input as an option or a host; put the replace string in the remote command only (xargs -I{} ssh host cmd {})", name, w)
+			return fmt.Errorf("%s %s with its input replacing %q is not allowed: ssh could read the input as an option or a host; put the replace string in the remote command only (xargs -I{} ssh host cmd {})", wrapper, name, w)
 		}
 		return nil
 	}
-	if p.noDest || p.endOpts || p.cmdIdx < len(argv[sshStart:]) {
+	if p.noDest {
 		return nil
 	}
-	return fmt.Errorf("xargs %s without a remote command is not allowed: ssh reads the words xargs appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", name)
+	if readOnly {
+		return errReadOnly()
+	}
+	if p.endOpts || p.cmdIdx < len(argv[sshStart:]) {
+		return nil
+	}
+	return fmt.Errorf("%s %s without a remote command is not allowed: ssh reads the words %s appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", wrapper, name, wrapper)
+}
+
+// validateSSHUnderXargs is validateSSHWrappedInput for an ssh or sshpass
+// that xargs runs; xargsOpts are xargs's own words before the command (xargs
+// itself included), which set its replace strings.
+func validateSSHUnderXargs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
+	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
+		return nil
+	}
+	if name := args[0].Lit(); name != "ssh" && name != "sshpass" {
+		return nil
+	}
+	opts, _, err := sshLiterals(xargsOpts)
+	if err != nil {
+		return err
+	}
+	return validateSSHWrappedInput(s, "xargs", xargsReplaceStrings(opts), args)
 }
 
 // xargsReplaceStrings returns the replace strings an xargs invocation's own

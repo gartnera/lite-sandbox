@@ -2,7 +2,10 @@ package config
 
 import (
 	"slices"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestSSHConfigAccessors(t *testing.T) {
@@ -11,7 +14,7 @@ func TestSSHConfigAccessors(t *testing.T) {
 		t.Fatal("a missing ssh section must allow nothing")
 	}
 	no := false
-	s := &SSHConfig{Hosts: []string{"Build-Box", "[::1]"}}
+	s := &SSHConfig{Hosts: []SSHHost{{Host: "Build-Box"}, {Host: "[::1]"}}}
 	if !s.HostsConfigured() || !s.AgentEnabled() || s.AgentUnrestricted() {
 		t.Fatalf("defaults wrong: %+v", s)
 	}
@@ -51,13 +54,13 @@ func TestParseRejectsBadSSHHosts(t *testing.T) {
 
 func TestAddRemoveSSHHost(t *testing.T) {
 	c := &Config{}
-	if added, err := c.AddSSHHost("box"); err != nil || !added {
+	if added, err := c.AddSSHHost("box", false); err != nil || !added {
 		t.Fatalf("AddSSHHost = %v, %v", added, err)
 	}
-	if added, _ := c.AddSSHHost("BOX"); added {
+	if added, _ := c.AddSSHHost("BOX", false); added {
 		t.Error("duplicate host added")
 	}
-	if _, err := c.AddSSHHost("me@box"); err == nil {
+	if _, err := c.AddSSHHost("me@box", false); err == nil {
 		t.Error("user@host accepted")
 	}
 	if !c.RemoveSSHHost("Box") || c.SSH.Hosts != nil {
@@ -68,8 +71,111 @@ func TestAddRemoveSSHHost(t *testing.T) {
 	}
 }
 
+func TestAddSSHHostOptions(t *testing.T) {
+	c := &Config{}
+	if changed, err := c.AddSSHHost("box", false, "systemctl  restart"); err != nil || !changed {
+		t.Fatalf("AddSSHHost = %v, %v", changed, err)
+	}
+	if changed, _ := c.AddSSHHost("BOX", false, "systemctl restart"); changed {
+		t.Error("a command already listed changed the entry")
+	}
+	if changed, _ := c.AddSSHHost("box", true, "docker ps"); !changed {
+		t.Error("write and a new command did not change the entry")
+	}
+	h := c.SSH.Host("box")
+	if !h.Writes() || !slices.Equal(h.Commands, []string{"systemctl  restart", "docker ps"}) {
+		t.Fatalf("entry = %+v", h)
+	}
+	if changed, _ := c.AddSSHHost("box", false); changed {
+		t.Error("adding a listed host without options changed it")
+	}
+	for _, bad := range []string{"", "-x", "/bin/rm", "$X", "a;b"} {
+		if _, err := c.AddSSHHost("other", false, bad); err == nil {
+			t.Errorf("commands entry %q accepted", bad)
+		}
+	}
+}
+
+func TestSSHHostEntryForms(t *testing.T) {
+	src := `ssh:
+  hosts:
+    - build-box
+    - host: deploy-box
+      commands: [systemctl restart, docker ps]
+    - host: scratch-vm
+      write: true
+`
+	cfg, err := ParseStrict([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts := cfg.SSH.Hosts
+	if len(hosts) != 3 || hosts[0].Host != "build-box" || hosts[0].Writes() || len(hosts[0].Commands) != 0 {
+		t.Fatalf("bare entry: %+v", hosts)
+	}
+	if hosts[1].Host != "deploy-box" || !slices.Equal(hosts[1].Commands, []string{"systemctl restart", "docker ps"}) {
+		t.Errorf("commands entry: %+v", hosts[1])
+	}
+	if !hosts[2].Writes() || !cfg.SSH.AllowsHost("Scratch-VM") {
+		t.Errorf("write entry: %+v", hosts[2])
+	}
+	out, err := yaml.Marshal(cfg.SSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "- build-box\n") || !strings.Contains(string(out), "host: scratch-vm") {
+		t.Errorf("marshaled:\n%s", out)
+	}
+
+	for name, bad := range map[string]string{
+		"listed twice": "ssh:\n  hosts: [box, {host: BOX, write: true}]\n",
+		"unknown key":  "ssh:\n  hosts:\n    - host: box\n      command: [ls]\n",
+		"bad command":  "ssh:\n  hosts:\n    - host: box\n      commands: ['rm;ls']\n",
+		"override key": "overrides:\n  - path: /x\n    ssh:\n      hosts:\n        - {host: box, writes: true}\n",
+		"missing host": "ssh:\n  hosts:\n    - write: true\n",
+	} {
+		if _, err := ParseStrict([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestSSHHostsMergePerEntry(t *testing.T) {
+	src := `ssh:
+  hosts:
+    - build-box
+    - host: deploy-box
+      commands: [systemctl restart]
+overrides:
+  - path: /work
+    merge: true
+    ssh:
+      hosts:
+        - host: build-box
+          write: true
+        - extra-box
+`
+	cfg, err := ParseStrict([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.ForDirectory("/work").SSH
+	if h := s.Host("build-box"); h == nil || !h.Writes() {
+		t.Errorf("build-box not restated by the override: %+v", s.Hosts)
+	}
+	if h := s.Host("deploy-box"); h == nil || len(h.Commands) != 1 {
+		t.Errorf("deploy-box dropped by the merge: %+v", s.Hosts)
+	}
+	if !s.AllowsHost("extra-box") {
+		t.Errorf("extra-box not added: %+v", s.Hosts)
+	}
+	if h := cfg.ForDirectory("/elsewhere").SSH.Host("build-box"); h == nil || h.Writes() {
+		t.Errorf("the override applied outside its path: %+v", h)
+	}
+}
+
 func TestWithSSHAgentScopesTheSocket(t *testing.T) {
-	c := (&Config{SSH: &SSHConfig{Hosts: []string{"box"}}}).Effective()
+	c := (&Config{SSH: &SSHConfig{Hosts: []SSHHost{{Host: "box"}}}}).Effective()
 	got := c.WithSSHAgent("/run/agent.sock")
 	if got == c {
 		t.Fatal("agent grant not added")

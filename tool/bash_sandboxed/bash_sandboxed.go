@@ -135,6 +135,11 @@ type Sandbox struct {
 	// validateSubCommand can look up per-command validators at runtime
 	// without creating a package-level initialization cycle.
 	argValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+	// remote, when set, makes this a checker of one ssh host's remote command
+	// rather than of local commands: the walk and the wrapped-command checks
+	// are the same, with the policy's commands, validators, and rules (see
+	// validators_ssh_remote.go).
+	remote *remotePolicy
 	// bg tracks background ("run_in_background") processes started via
 	// ExecuteBackground, mirroring the Claude Code Bash/KillShell tools.
 	bg *backgroundManager
@@ -717,6 +722,25 @@ func validateAssigns(assigns []*syntax.Assign) error {
 	return nil
 }
 
+// checkEnvAssign checks a NAME=VALUE that env sets for the command it runs:
+// a blocked variable locally, and for a remote command anything but the
+// variables checkRemoteAssign allows.
+func (s *Sandbox) checkEnvAssign(name, val string) error {
+	if s.remote != nil {
+		return checkRemoteAssign(name, val)
+	}
+	return blockedEnvVarError(name)
+}
+
+// checkRedirect is validateRedirect, plus, for a remote command, the hold of
+// its output redirections to /dev/null (remoteRedirect).
+func (s *Sandbox) checkRedirect(r *syntax.Redirect) error {
+	if err := validateRedirect(r); err != nil || s.remote == nil {
+		return err
+	}
+	return remoteRedirect(r)
+}
+
 // blockedEnvVarError returns the error for assigning a blocked environment
 // variable, or nil when name may be set.
 func blockedEnvVarError(name string) error {
@@ -907,14 +931,23 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 		if validationErr != nil {
 			return false
 		}
+		if s.remote != nil && fail(layerStatic, ruleStructural, remoteNodeError(node)) {
+			return false
+		}
 		switch n := node.(type) {
 		case *syntax.Stmt:
 			for _, r := range n.Redirs {
-				if fail(layerStatic, ruleStructural, validateRedirect(r)) {
+				if fail(layerStatic, ruleStructural, s.checkRedirect(r)) {
 					return false
 				}
 			}
 		case *syntax.CallExpr:
+			if s.remote != nil {
+				// Nothing sees a remote command again when it runs, so each
+				// is checked the way a wrapped command is, on its words'
+				// values.
+				return !fail(layerStatic, ruleArgValidator, s.remote.call(s, n))
+			}
 			if fail(layerStatic, ruleStructural, validateAssigns(n.Assigns)) {
 				return false
 			}
@@ -978,7 +1011,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					if !inExtra {
 						// The command's own argument validator applies in every
 						// enforcing mode.
-						if validator, ok := commandArgValidators[cmdName]; ok {
+						if validator, ok := s.argValidators[cmdName]; ok {
 							if fail(layerStatic, ruleArgValidator, validator(s, n.Args)) {
 								return false
 							}

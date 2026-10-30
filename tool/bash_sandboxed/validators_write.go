@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,8 +27,9 @@ func validateRmArgs(_ *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
-// validateSedArgs checks that sed expressions don't contain dangerous commands
-// and blocks -f/--file since script files contain unvalidated commands.
+// validateSedArgs checks that sed's scripts don't contain dangerous commands
+// (sedScriptCheck) and blocks -f/--file since script files contain
+// unvalidated commands.
 //
 // Dangerous sed commands blocked:
 //   - e: executes pattern space as a shell command (GNU extension, complete sandbox bypass)
@@ -38,59 +40,25 @@ func validateRmArgs(_ *Sandbox, args []*syntax.Word) error {
 // but BSD sed does not support this flag, so we parse expressions instead
 // to stay portable across both implementations.
 func validateSedArgs(_ *Sandbox, args []*syntax.Word) error {
-	for _, arg := range args[1:] {
-		text := wordText(arg)
-		if text == "" {
-			continue
+	texts := wordTexts(args)
+	if opt := refusedOption(texts, sedSpec, sedLongOpts, "-f", "--file"); opt != "" {
+		return fmt.Errorf("sed flag %q is not allowed: script files bypass command validation", opt)
+	}
+	scripts, maybe := sedScripts(texts)
+	for _, s := range maybe {
+		if err := sedScriptCheck(s, "erRwW"); err == nil || errors.Is(err, errSedRefused) {
+			scripts = append(scripts, s)
 		}
-		if text == "-f" || text == "--file" || strings.HasPrefix(text, "--file=") {
-			return fmt.Errorf("sed flag %q is not allowed: script files bypass command validation", text)
-		}
-		// Skip flags
-		if strings.HasPrefix(text, "-") {
-			continue
-		}
-		if containsSedDangerousCmd(text) {
+	}
+	for _, s := range scripts {
+		switch err := sedScriptCheck(s, "erRwW"); {
+		case errors.Is(err, errSedRefused):
 			return fmt.Errorf("sed commands 'e', 'r', 'R', 'w', 'W' are not allowed: they can execute commands or access files outside path validation")
+		case err != nil:
+			return fmt.Errorf("sed script %q is not allowed: %v; only scripts that can be checked run", s, err)
 		}
 	}
 	return nil
-}
-
-// containsSedDangerousCmd checks if a sed expression contains commands that
-// execute shell commands or read/write files with embedded filenames.
-func containsSedDangerousCmd(expr string) bool {
-	for i := 0; i < len(expr); i++ {
-		c := expr[i]
-		if c != 'e' && c != 'r' && c != 'R' && c != 'w' && c != 'W' {
-			continue
-		}
-		// These commands are valid when:
-		// - At the start of the expression (standalone command)
-		// - After a sed delimiter (/, ;, newline, |, !)
-		// For 'e' as an s/// flag, it appears right after the closing delimiter
-		// For w/W/r/R, they're followed by a space/tab and filename
-		inCmdPosition := i == 0
-		if !inCmdPosition {
-			prev := expr[i-1]
-			inCmdPosition = prev == '/' || prev == ';' || prev == '\n' || prev == '|' || prev == '!'
-		}
-		if !inCmdPosition {
-			continue
-		}
-		// 'e' as s///e flag: no following space needed
-		if c == 'e' {
-			// At end of expression or followed by a delimiter/flag char
-			if i+1 >= len(expr) || expr[i+1] == ';' || expr[i+1] == '\n' || expr[i+1] == ' ' || expr[i+1] == '\t' {
-				return true
-			}
-		}
-		// r/R/w/W require a space or tab before the filename
-		if (c == 'r' || c == 'R' || c == 'w' || c == 'W') && i+1 < len(expr) && (expr[i+1] == ' ' || expr[i+1] == '\t') {
-			return true
-		}
-	}
-	return false
 }
 
 // wordText extracts the literal text content from a Word node,

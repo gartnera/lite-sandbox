@@ -10,8 +10,14 @@ whitelist, and the agent is left as it was.
 ```yaml
 ssh:
   hosts:                     # ssh and sshpass may connect to these hosts only
-    - build-box              # as typed: an alias from ~/.ssh/config, or a host name
-    - 10.0.0.12
+    - build-box              # as typed: an alias from ~/.ssh/config, or a host name;
+    - 10.0.0.12              # the remote command is held to read-only commands
+    - host: deploy-box       # the mapping form widens that:
+      commands:              # these too, with any arguments
+        - systemctl restart
+        - docker compose up
+    - host: scratch-vm
+      write: true            # the remote command is not checked
   agent: true                # give the agent to ssh, sshpass, and git's remote commands (default: true)
   unrestricted_agent: false  # hand them the real agent socket instead of the filter (default: false)
   git_signing: false         # sign git commits and tags with the agent (default: false)
@@ -20,6 +26,8 @@ ssh:
 ```bash
 lite-sandbox config ssh show
 lite-sandbox config ssh hosts add build-box 10.0.0.12
+lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
+lite-sandbox config ssh hosts add scratch-vm --write
 lite-sandbox config ssh hosts remove 10.0.0.12
 lite-sandbox config ssh agent disable      # no agent for anything
 lite-sandbox config ssh agent unrestrict   # the real socket (see below)
@@ -41,9 +49,9 @@ their argument validator holds them to the list:
 ```bash
 ssh build-box uptime                 # allowed
 ssh deploy@build-box -p 2222 'cat /var/log/app.log | tail'
-ssh -J build-box 10.0.0.12 make test # every jump host must be listed too
+ssh -J build-box 10.0.0.12 uptime    # every jump host must be listed too
 sshpass -e ssh 10.0.0.12 true        # password from $SSHPASS (see below); may only run ssh
-ssh other-box                        # refused: not listed
+ssh other-box uptime                 # refused: not listed
 ```
 
 The destination is matched as you'd type it, exactly and case-insensitively, the
@@ -51,11 +59,12 @@ way ssh's own `Host` blocks match: an alias from `~/.ssh/config` stands for
 whatever that config makes of it (its `HostName`, `Port`, `ProxyJump`, ...),
 since it's your file and sandboxed commands can't write it. `build-box` doesn't
 allow `build-box.example.com`, and a user or port is not part of the match.
-Entries are bare names or addresses: no `user@`, patterns, or lists.
+Entries are bare names or addresses: no `user@`, patterns, or lists, and a host
+is listed once.
 
-The remote command isn't checked: it runs on a host you listed. Its words aren't
-treated as local paths either, so `ssh box cat /etc/hosts` reads the remote
-file. `-i` is the one argument held to the local path boundary.
+The remote command's words aren't treated as local paths, so
+`ssh box cat /etc/hosts` reads the remote file. `-i` is the one argument held
+to the local path boundary.
 
 The options that let ssh reach anything but the destination, or run something on
 this machine, are refused:
@@ -80,9 +89,89 @@ Run by `xargs`, ssh must name its remote command (`xargs ssh box cmd`) or end
 its options with `--`: ssh reads options again after the destination, so the
 words `xargs` appends would otherwise be options (`-oProxyCommand=...`). For
 the same reason `xargs sshpass` must name the command sshpass runs. With a
-replace string (`xargs -I{}`, `-i`, `--replace`), the input may only replace
-words of the remote command (`xargs -I{} ssh box cat {}`), never the
-destination, an option, or the first word after the destination.
+replace string (`xargs -I{}`, `-i`, `--replace`, and `find -exec`'s `{}`),
+the input may only replace words of the remote command
+(`xargs -I{} ssh box cat {}`), never the destination, an option, or the first
+word after the destination. On a host whose remote command is held to
+read-only commands (below), the input may not reach the remote command at
+all: the check runs before `xargs` or `find` does, and the remote shell would
+run the input as part of the command. That leaves `xargs` and `find -exec`
+with ssh to `write: true` hosts.
+
+### The remote command
+
+By default the command ssh runs on a host is held to read-only commands, so
+listing a host lets the agent look around it (logs, service status, processes,
+disk, a repository's history) without changing it. A host's entry widens that:
+
+- `commands` allows commands beyond the read-only ones, as a `commands` entry
+  does: a name (`make`, any arguments) or a name and the leading arguments it
+  is limited to (`systemctl restart`, `docker compose up`). Their arguments
+  aren't checked.
+- `write: true` lifts the check: the remote command runs as written.
+
+ssh joins the words after the destination with spaces and hands the result to
+the remote user's shell, so the check parses that string as a shell script
+(sh/bash syntax; a host whose login shell is fish or csh reads it differently)
+and validates it the way a local command is validated, through the same walk
+and the same wrapper and `find` checks, with the read-only commands as its
+whitelist. Nothing sees the remote command again when it runs, so each
+command in it is checked the way a wrapped command (`env cmd`) is, and every
+one must be read-only:
+
+```bash
+ssh build-box 'journalctl -u app --since today | grep -c ERROR'   # allowed
+ssh build-box 'cd /srv/app && git log --oneline -5'               # allowed
+ssh build-box sudo systemctl status nginx                         # allowed
+ssh build-box 'tail -n 50 /var/log/app/*.log'                     # allowed: the remote shell globs
+ssh build-box systemctl restart nginx    # refused, unless the entry lists `systemctl restart`
+ssh build-box 'cat x > /tmp/y'           # refused: output goes to /dev/null only
+ssh build-box 'cat $(ls)'                # refused: no substitutions or variables
+```
+
+- **The read-only commands** are the plain readers (`cat`, `head`, `tail`,
+  `grep`, `ls`, `find`, `stat`, `du`, `df`, `wc`, `sort`, `uniq`, `cut`, `jq`,
+  `diff`, `ps`, `uptime`, `free`, `uname`, `id`, `lsof`, ...), and these, with
+  their writing options refused: `journalctl` (no `--vacuum-*`, `--rotate`,
+  `--flush`, `--cursor-file`, ...), `systemctl` (the read-only verbs: `status`,
+  `show`, `cat`, `list-units`, `is-active`, ..., and no `-H`), `git` (`status`,
+  `log`, `show`, `diff`, `blame`, `grep`, `ls-files`, `rev-parse`, ...; no `-c`
+  or `--output`), `docker` (`ps`, `logs`, `inspect`, `images`, `stats`, and
+  the `ls`/`inspect`/`logs` of `container`, `image`, `network`, `volume`, and
+  `compose`), `sed` (no `-i`, `-f`, or `w`/`W`/`e` commands and `s///w`/`e`
+  flags), `find` (no `-delete` or `-fprint*`; `-exec` runs a read-only
+  command, but not a shell, which would run the file names find puts in its
+  script), `sort` (no `-o`), `uniq` (one operand), `date` (no setting the
+  clock), `hostname`, `dmesg`, `ss`, `ip` (`show`, `list`, `get`), `file`, and
+  `rg` (no `--pre`).
+- **Wrappers** are looked through: `sudo` (not `-e`, `-i`, `-s`, or
+  `VAR=value`), `env`, `timeout`, `nice`, and `stdbuf` (checked as they are
+  locally), `command`, and `sh`/`bash` `-c '...'` (`-l` included), whose
+  script is checked the same way.
+- **The shell around them**: pipes, `&&`, `||`, `;`, `if`, `while`, `case`,
+  subshells, and input redirections and heredocs are fine. Output redirections
+  may only go to `/dev/null` (or another descriptor, `2>&1`). Variables,
+  command and process substitution, arithmetic, `for` loops, functions, and
+  assignments are refused, since their values are only known on the remote
+  host and could turn a word into an option or another command; a command
+  prefix may set only locale, time zone, and width variables
+  (`LC_ALL=C sort`). Commands are run by bare name, not path. Globs and
+  braces are allowed in the arguments of the plain readers only (under a
+  wrapper too: `sudo tail /var/log/*.log`); quote them
+  elsewhere (`find /var/log -name '*.gz'`, written `ssh box "find /var/log -name '*.gz'"`).
+- **The session itself**: without a command ssh opens a login shell that runs
+  whatever reaches its stdin, so a bare `ssh box` is refused unless stdin is
+  closed (`-n`) or nothing runs (`-N`). A terminal (`-t`, `RequestTTY`) is
+  refused too, unless with `-n`: a pager (`systemctl` and `git` start `less`
+  on a terminal) would run commands sent to it. A subsystem (`-s`, such as
+  sftp), `-o RemoteCommand`, and `-o SetEnv` are refused.
+
+The words of an `ssh` (or `sshpass`) command must be written out: a variable
+or substitution in them is refused, and so is an unquoted glob or brace in the
+remote command, which this machine's shell would expand into its own file
+names (quote it so the remote shell does). The check covers the command line;
+a `RemoteCommand` or `RequestTTY` your `~/.ssh/config` sets for an alias is
+yours, and ssh applies it as you wrote it.
 
 Without hosts listed, `ssh` and `sshpass` aren't on the whitelist, so
 `allowlist` mode refuses them. `denylist` mode, which doesn't whitelist

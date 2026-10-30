@@ -96,7 +96,7 @@ func testOSSandboxSSHAgent(t *testing.T, mode config.Mode) {
 	s.updateConfig(&config.Config{
 		Mode:      string(mode),
 		OSSandbox: &yes,
-		SSH:       &config.SSHConfig{Hosts: []string{"box"}},
+		SSH:       &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}},
 		Commands:  []config.CommandEntry{{Command: "bash", Allow: &yes}}, // stands in for a program the agent runs
 		// The stand-ins' directory, which the worker's own /tmp would hide.
 		Paths: []config.PathEntry{{Path: bin, Read: &yes, Internal: true}},
@@ -111,7 +111,7 @@ func testOSSandboxSSHAgent(t *testing.T, mode config.Mode) {
 		return out
 	}
 
-	for _, cmd := range []string{"ssh box", "git fetch origin"} {
+	for _, cmd := range []string{"ssh box uptime", "git fetch origin"} {
 		out := run(cmd)
 		if !strings.Contains(out, "sock="+proxy.Socket()) || !strings.Contains(out, "sandbox-test-key") {
 			t.Errorf("%s did not reach the agent through the proxy: %q", cmd, out)

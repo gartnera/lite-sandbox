@@ -131,48 +131,65 @@ var findExecFlags = map[string]bool{
 	"-okdir":   true,
 }
 
-// isFindExecTerminator reports whether lit is a find -exec sequence terminator.
-// find accepts \; (backslash-semicolon) or + as terminators.
-func isFindExecTerminator(lit string) bool {
-	return lit == ";" || lit == `\;` || lit == "+"
+// isFindExecTerminator reports whether a word's value (see wordValues) ends
+// a find -exec command: find takes ";" or "+", which the shell hands it from
+// \; or ';'.
+func isFindExecTerminator(v string) bool {
+	return v == ";" || v == "+"
+}
+
+// findAction is one action of a find expression that the validators look
+// at: a -exec, -execdir, -ok, or -okdir, with the command it runs at
+// [start, end) of find's argv, or a blockedFindFlags entry.
+type findAction struct {
+	flag       string
+	start, end int
+}
+
+// findActions walks a find invocation by its words' values (vals[0] is
+// "find"; see wordValues) and returns its actions in order, skipping the
+// words of the commands -exec and friends run. A command with no terminator
+// runs to the end.
+func findActions(vals []string) []findAction {
+	var out []findAction
+	for i := 1; i < len(vals); i++ {
+		lit := vals[i]
+		if findExecFlags[lit] {
+			j := i + 1
+			for j < len(vals) && !isFindExecTerminator(vals[j]) {
+				j++
+			}
+			out = append(out, findAction{flag: lit, start: i + 1, end: j})
+			i = j
+			continue
+		}
+		if _, blocked := blockedFindFlags[lit]; blocked {
+			out = append(out, findAction{flag: lit})
+		}
+	}
+	return out
 }
 
 // validateFindArgs checks that find is not called with dangerous flags.
 // For -exec/-execdir/-ok/-okdir, the embedded subcommand is extracted and
 // validated recursively against the command whitelist.
 func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
-	i := 1 // skip command name
-	for i < len(args) {
-		lit := args[i].Lit()
-		if lit == "" {
-			i++
-			continue
+	for _, a := range findActions(wordValues(args)) {
+		if reason, blocked := blockedFindFlags[a.flag]; blocked {
+			return fmt.Errorf("find flag %q is not allowed: %s", a.flag, reason)
 		}
-		if findExecFlags[lit] {
-			execFlag := lit
-			i++
-			var subArgs []*syntax.Word
-			for i < len(args) {
-				subLit := args[i].Lit()
-				if isFindExecTerminator(subLit) {
-					i++
-					break
-				}
-				subArgs = append(subArgs, args[i])
-				i++
-			}
-			if len(subArgs) == 0 {
-				return fmt.Errorf("find %s has no command to execute", execFlag)
-			}
-			if err := validateSubCommand(s, subArgs); err != nil {
-				return fmt.Errorf("find %s: %w", execFlag, err)
-			}
-			continue
+		subArgs := args[a.start:a.end]
+		if len(subArgs) == 0 {
+			return fmt.Errorf("find %s has no command to execute", a.flag)
 		}
-		if reason, blocked := blockedFindFlags[lit]; blocked {
-			return fmt.Errorf("find flag %q is not allowed: %s", lit, reason)
+		if err := validateSubCommand(s, subArgs); err != nil {
+			return fmt.Errorf("find %s: %w", a.flag, err)
 		}
-		i++
+		// find puts the file names where {} is (with +, several of
+		// them).
+		if err := validateSSHWrappedInput(s, "find "+a.flag, []string{"{}"}, subArgs); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -217,6 +234,9 @@ var subCommandDenylist = map[string]bool{
 func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if len(args) == 0 {
 		return fmt.Errorf("empty command")
+	}
+	if s.remote != nil {
+		return s.remote.command(s, args)
 	}
 	cmdName := args[0].Lit()
 	if cmdName == "" {
@@ -334,7 +354,7 @@ func validateXargsArgs(s *Sandbox, args []*syntax.Word) error {
 	if err := validateSubCommand(s, args[idx:]); err != nil {
 		return err
 	}
-	return validateSSHAppendedArgs(s, args[:idx], args[idx:])
+	return validateSSHUnderXargs(s, args[:idx], args[idx:])
 }
 
 // wordLeadingLit returns the maximal literal prefix of a word: the text of its
@@ -395,6 +415,13 @@ var envConsumingShortFlags = map[byte]bool{
 // That option builds a whole argv from a single string (intended for shebang
 // lines), which would smuggle an otherwise-blocked command past validation, so
 // it is rejected outright.
+// envLongOptions are GNU env's long options, for expanding an abbreviation
+// (--uns for --unset) the way getopt_long does.
+var envLongOptions = optSpec{long: []string{
+	"ignore-environment", "null", "unset", "chdir", "split-string", "block-signal",
+	"default-signal", "ignore-signal", "list-signal-handling", "debug", "help", "version",
+}}
+
 func errEnvSplitString() error {
 	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
 }
@@ -425,12 +452,8 @@ func envCommandIndex(lits, assignLits []string) int {
 			return wrapperNoCommand
 		}
 		if strings.HasPrefix(lit, "--") {
-			name := lit[2:]
-			hasInlineValue := false
-			if eq := strings.IndexByte(name, '='); eq >= 0 {
-				name = name[:eq]
-				hasInlineValue = true
-			}
+			name, _, hasInlineValue := strings.Cut(lit[2:], "=")
+			name = envLongOptions.longName(name)
 			if name == "split-string" {
 				return wrapperRejected
 			}
@@ -499,8 +522,8 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 		if !isEnvAssignment(lit) {
 			continue
 		}
-		name, _, _ := strings.Cut(lit, "=")
-		if err := blockedEnvVarError(name); err != nil {
+		name, val, _ := strings.Cut(lit, "=")
+		if err := s.checkEnvAssign(name, val); err != nil {
 			return err
 		}
 	}
