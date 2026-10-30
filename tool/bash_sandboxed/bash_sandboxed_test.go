@@ -565,6 +565,7 @@ func TestValidate_AllowedCommands(t *testing.T) {
 		{"look", "look prefix file.txt"},
 		// New commands: file info
 		{"shasum", "shasum -a 256 file.txt"},
+		{"md5", "md5 -q file.txt"},
 		{"pathchk", "pathchk -p file.txt"},
 		// New commands: text processing
 		{"tsort", "tsort deps.txt"},
