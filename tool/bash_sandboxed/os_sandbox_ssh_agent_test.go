@@ -259,3 +259,102 @@ func TestOSSandboxGitSigning(t *testing.T) {
 		t.Error("the planted gpg.ssh.program ran")
 	}
 }
+
+// TestOSSandboxCopyAgent: with a host that allows writes, a real rsync runs
+// in the agent's worker, reaches the agent through the proxy, and copies
+// files; run from bash it gets no agent.
+func TestOSSandboxCopyAgent(t *testing.T) {
+	requireOSSandbox(t)
+	if runtime.GOOS != "linux" {
+		t.Skip("checked on the bubblewrap backend")
+	}
+	for _, bin := range []string{"ssh-agent", "ssh-add", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not installed", bin)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, "ls-copy-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	agentSock, _ := startTestAgent(t, root)
+	proxy, err := sshagent.Start(root, agentSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxy.Close() })
+
+	// A stand-in for ssh that reports the agent it reaches on stderr and
+	// runs the remote command here, so the copy's far end is local.
+	bin := t.TempDir()
+	script := `#!/bin/sh
+echo "sock=$SSH_AUTH_SOCK home=$HOME." >&2
+ssh-add -l >&2
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-l|-p|-o|-i|-J|-c|-F) shift 2 ;;
+	--) shift; break ;;
+	-*) shift ;;
+	*) break ;;
+	esac
+done
+shift # the host
+exec sh -c "$*"
+`
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_AUTH_SOCK", agentSock)
+
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "src", "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	s := NewSandbox()
+	s.SetSSHAgent(proxy, agentSock)
+	s.updateConfig(&config.Config{
+		Mode:      string(config.ModeAllowlist),
+		OSSandbox: &yes,
+		SSH:       &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box", Write: &yes}}},
+		Commands:  []config.CommandEntry{{Command: "bash", Allow: &yes}},
+		Paths:     []config.PathEntry{{Path: bin, Read: &yes, Internal: true}},
+	}, work)
+	defer s.Close()
+	paths := []string{work}
+	run := func(cmd string) string {
+		out, err := s.Execute(context.Background(), cmd, work, paths, paths)
+		if err != nil {
+			out += "\nerror: " + err.Error()
+		}
+		return out
+	}
+
+	// scp runs ssh by its absolute path (/usr/bin/ssh), which the stand-in
+	// cannot take the place of; it goes to the same worker as rsync
+	// (TestCopyAgentScope).
+	cmd := "rsync -a ./src/ box:" + work + "/rsynced/"
+	out := run(cmd)
+	if !strings.Contains(out, "sock="+proxy.Socket()) || !strings.Contains(out, "sandbox-test-key") {
+		t.Errorf("%s did not reach the agent through the proxy: %q", cmd, out)
+	}
+	if got, err := os.ReadFile(filepath.Join(work, "rsynced", "a.txt")); err != nil || string(got) != "hello\n" {
+		t.Errorf("%s copied %q, %v: %q", cmd, got, err, out)
+	}
+	// popt reads aliases from $HOME/.popt, so rsync runs without $HOME.
+	if !strings.Contains(out, "home=.") {
+		t.Errorf("%s ran with $HOME set: %q", cmd, out)
+	}
+	if out := run("bash -c 'rsync -a ./src/ box:" + work + "/viabash/'"); strings.Contains(out, "sandbox-test-key") {
+		t.Errorf("rsync run by bash reached the agent: %q", out)
+	}
+}

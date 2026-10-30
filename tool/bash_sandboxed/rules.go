@@ -222,11 +222,15 @@ func (s *Sandbox) enforcesAllowlist() bool {
 // relays to the user, so it names only the narrow remedy — never a mode
 // change, which is the user's decision to make from the audit report.
 func commandNotAllowed(name string) error {
-	// ssh comes from the ssh section's hosts list, not an allow that would
-	// skip its host check.
+	// ssh, scp, and rsync come from the ssh section's hosts list, not an
+	// allow that would skip their host check.
 	if slices.Contains(config.SSHCommands, name) {
 		const fix = "lite-sandbox config ssh hosts add <host>"
 		return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed (no ssh hosts are configured); the user can allow ssh to a host with `%s`", name, fix))
+	}
+	if slices.Contains(config.SSHCopyCommands, name) {
+		const fix = "lite-sandbox config ssh hosts add <host> --write"
+		return tagRuleFix(ruleCommandWhitelist, name, fix, fmt.Errorf("command %q is not allowed (no ssh host allows writes); the user can allow copying to and from a host with `%s`", name, fix))
 	}
 	// A toolchain command comes from a profile: enabling the profile whitelists
 	// it with its validators, which is the remedy to offer rather than an allow

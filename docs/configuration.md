@@ -546,7 +546,8 @@ instead. There are two kinds:
   under `aws.force_profile`) apply in **every** mode, not only `denylist`.
 - **Write-denied** paths stay readable but can't be modified: shell startup
   files (`~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.config/fish/config.fish`, …),
-  `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.npmrc`,
+  `~/.gitconfig` and `~/.config/git/config`, `~/.ssh`, `~/.popt` (rsync's
+  option aliases), `~/.npmrc`,
   `~/.docker/config.json`, persistence locations (`~/.local/bin`, user systemd
   units, `~/.config/autostart`, `~/.config/environment.d`, LaunchAgents), and
   the files that could loosen the policy or erase evidence: lite-sandbox's own
@@ -955,8 +956,9 @@ $ lite-sandbox config paths remove /base/data --dir ~/work/acme
 
 ## SSH
 
-The `ssh` section lists the hosts `ssh` and `sshpass` may connect to, and gives
-your ssh agent, through a filter, to them and git's remote commands alone. See
+The `ssh` section lists the hosts `ssh` and `sshpass` may connect to (and
+`scp` and `rsync`, for the hosts that allow writes), and gives your ssh agent,
+through a filter, to them and git's remote commands alone. See
 [SSH access](ssh.md).
 
 ```yaml
@@ -965,8 +967,8 @@ ssh:
     - build-box              # the remote command is held to read-only commands
     - host: deploy-box       # ...and may also run these, with any arguments
       commands: [systemctl restart]
-    - host: scratch-vm       # the remote command is not checked
-      write: true
+    - host: scratch-vm       # the remote command is not checked, and
+      write: true            # scp and rsync may copy to and from it
   agent: true                # default true
   unrestricted_agent: false  # default false
   git_signing: false         # default false

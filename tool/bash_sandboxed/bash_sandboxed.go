@@ -243,10 +243,16 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			processEntry(e.Command, e.NoSandbox)
 		}
 	}
-	// The ssh section's hosts whitelist ssh and sshpass, whose validators
-	// then hold them to those hosts.
+	// The ssh section's hosts whitelist ssh and sshpass, and a host that
+	// allows writes scp and rsync, whose validators then hold them to those
+	// hosts.
 	if cfg.SSH.HostsConfigured() {
 		for _, name := range config.SSHCommands {
+			whitelisted[name] = true
+		}
+	}
+	if cfg.SSH.WriteHostsConfigured() {
+		for _, name := range config.SSHCopyCommands {
 			whitelisted[name] = true
 		}
 	}
@@ -702,6 +708,12 @@ var blockedEnvVars = map[string]string{
 	"GZIP":        "injects gzip options",
 	"XZ_OPT":      "injects xz options",
 	"XZ_DEFAULTS": "injects xz options",
+	// rsync runs these as programs, or writes partial files where this
+	// names, past its validator.
+	"RSYNC_RSH":          "rsync runs it as the remote shell",
+	"RSYNC_CONNECT_PROG": "rsync runs it as a command",
+	"RSYNC_SHELL":        "rsync runs RSYNC_CONNECT_PROG with it",
+	"RSYNC_PARTIAL_DIR":  "rsync writes partial files where it names, past the path checks",
 	// git init and clone copy its hooks into .git/hooks (see gitTemplateFlag).
 	"GIT_TEMPLATE_DIR": "git copies its hooks into .git, where git outside the sandbox runs them",
 	// A work tree inside .git lets git check hooks out there (see
@@ -1426,6 +1438,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		return err
 	}
 	stripSSHPass(args, envMap)
+	stripRsyncHome(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)

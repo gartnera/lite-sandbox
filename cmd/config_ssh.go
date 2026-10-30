@@ -10,9 +10,9 @@ import (
 var sshCmd = &cobra.Command{
 	Use:   "ssh",
 	Short: "Manage ssh hosts and the ssh agent",
-	Long: `Manage the ssh section: the hosts ssh and sshpass may connect to, and
-the ssh agent ssh, sshpass, and git's remote commands (fetch, pull, push,
-clone, ...) get.
+	Long: `Manage the ssh section: the hosts ssh and sshpass may connect to (and
+scp and rsync, for the hosts that allow writes), and the ssh agent they and
+git's remote commands (fetch, pull, push, clone, ...) get.
 
   lite-sandbox config ssh hosts add build-box 10.0.0.12
   lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart'
@@ -32,7 +32,7 @@ var sshShowCmd = &cobra.Command{
 		s := cfg.SSH
 		if s == nil {
 			fmt.Println("SSH: not configured")
-			fmt.Println("  ssh and sshpass are not allowed (allowlist mode); the agent is left as it was")
+			fmt.Println("  ssh, sshpass, scp, and rsync are not allowed (allowlist mode); the agent is left as it was")
 			return nil
 		}
 		fmt.Println("SSH Configuration:")
@@ -44,8 +44,14 @@ var sshShowCmd = &cobra.Command{
 		} else {
 			fmt.Println("  Hosts: none (ssh and sshpass are not allowed)")
 		}
+		if s.HostsConfigured() && !s.WriteHostsConfigured() {
+			fmt.Println("  scp and rsync: not allowed (no host allows writes; add one with --write)")
+		}
 		agentUsers := "git's remote commands"
-		if s.HostsConfigured() {
+		switch {
+		case s.WriteHostsConfigured():
+			agentUsers = "ssh, sshpass, scp, rsync, and git's remote commands"
+		case s.HostsConfigured():
 			agentUsers = "ssh, sshpass, and git's remote commands"
 		}
 		switch {
@@ -84,7 +90,8 @@ var sshHostsAddCmd = &cobra.Command{
 	Long: `Allow ssh and sshpass to connect to hosts, as typed: an alias of
 ~/.ssh/config or a host name. The command ssh runs there is held to read-only
 commands; --command allows a command beyond those (with any arguments, or
-limited to the leading arguments given), and --write lifts the check.
+limited to the leading arguments given), and --write lifts the check and lets
+scp and rsync copy files to and from the host.
 
   lite-sandbox config ssh hosts add build-box
   lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
@@ -218,7 +225,7 @@ var sshDisableCmd = &cobra.Command{
 }
 
 func init() {
-	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands)")
+	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands), and scp and rsync copy to and from the host")
 	sshHostsAddCmd.Flags().StringArrayVar(&sshHostsAddCommands, "command", nil, "allow a remote command beyond the read-only ones: a name, or a name and its leading arguments ('systemctl restart'); repeatable")
 	sshHostsCmd.AddCommand(sshHostsAddCmd, sshHostsRemoveCmd)
 	sshAgentCmd.AddCommand(sshAgentEnableCmd, sshAgentDisableCmd, sshAgentRestrictCmd, sshAgentUnrestrictCmd)

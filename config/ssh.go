@@ -10,9 +10,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SSHConfig controls ssh access: the hosts ssh and sshpass may connect to,
-// and how the user's ssh agent reaches ssh, sshpass, and the ssh that git's
-// remote commands (fetch, pull, push, clone, ...) start.
+// SSHConfig controls ssh access: the hosts ssh and sshpass (and, for the
+// hosts that allow writes, scp and rsync) may connect to, and how the user's
+// ssh agent reaches them and the ssh that git's remote commands (fetch, pull,
+// push, clone, ...) start.
 //
 //	ssh:
 //	  hosts:                     # ssh/sshpass may connect to these, as typed
@@ -55,13 +56,14 @@ type SSHConfig struct {
 //	    commands:                # docker ps, beyond the read-only commands
 //	      - systemctl restart
 //	      - docker ps
-//	  - host: scratch-vm         # the remote command is not checked
-//	    write: true
+//	  - host: scratch-vm         # the remote command is not checked, and
+//	    write: true              # scp and rsync may copy to and from it
 //
 // An entry with neither is written as the bare host.
 type SSHHost struct {
 	Host string `yaml:"host"`
-	// Write lifts the remote command check: the command runs as written.
+	// Write lifts the remote command check: the command runs as written. It
+	// also lets scp and rsync copy files to and from the host.
 	Write *bool `yaml:"write,omitempty"`
 	// Commands are allowed in the remote command beyond the read-only ones: a
 	// command name, or a name and the leading arguments it is limited to
@@ -108,7 +110,7 @@ func (h *SSHHost) Writes() bool { return h != nil && h.Write != nil && *h.Write 
 func (h SSHHost) Describe() string {
 	switch {
 	case h.Writes():
-		return "any remote command"
+		return "any remote command; scp and rsync"
 	case len(h.Commands) > 0:
 		return "read-only remote commands, and " + strings.Join(h.Commands, ", ")
 	}
@@ -143,25 +145,40 @@ func ValidateSSHHostCommand(c string) error {
 }
 
 // SSHCommands are the commands the ssh section whitelists once it lists a
-// host. sshpass is only allowed to run ssh.
+// host. sshpass is only allowed to run ssh, scp, and rsync.
 var SSHCommands = []string{"ssh", "sshpass"}
+
+// SSHCopyCommands are the commands the ssh section whitelists once one of its
+// hosts allows writes: they copy files to and from those hosts only.
+var SSHCopyCommands = []string{"scp", "rsync"}
 
 // SSHAgentCommands returns the commands that get the ssh agent: git, whose
 // remote commands start ssh (only those are routed to the agent's worker; see
-// the sandbox's scopedInvocation), and ssh and sshpass once hosts are listed —
-// without hosts their host check does not run (denylist mode still runs them),
-// so they do not get the agent either.
+// the sandbox's scopedInvocation), ssh and sshpass once hosts are listed, and
+// scp and rsync once a host allows writes — without hosts their host check
+// does not run (denylist mode still runs them), so they do not get the agent
+// either.
 func (s *SSHConfig) SSHAgentCommands() []string {
+	out := []string{"git"}
 	if s.HostsConfigured() {
-		return []string{"git", "ssh", "sshpass"}
+		out = append(out, SSHCommands...)
 	}
-	return []string{"git"}
+	if s.WriteHostsConfigured() {
+		out = append(out, SSHCopyCommands...)
+	}
+	return out
 }
 
 // HostsConfigured reports whether ssh and sshpass are allowed: the section
 // lists at least one host.
 func (s *SSHConfig) HostsConfigured() bool {
 	return s != nil && len(s.Hosts) > 0
+}
+
+// WriteHostsConfigured reports whether scp and rsync are allowed: one of the
+// section's hosts allows writes.
+func (s *SSHConfig) WriteHostsConfigured() bool {
+	return s != nil && slices.ContainsFunc(s.Hosts, func(h SSHHost) bool { return h.Writes() })
 }
 
 // AllowsHost reports whether host, as given on the command line (without

@@ -496,7 +496,8 @@ func parseSSHPassArgs(args []string) (cmdIdx int, nonPath []int, env bool, err e
 // validateSSHPassCommand is sshpass's argument validator: like ssh's, it
 // applies once the ssh section lists a host, and then sshpass takes the
 // password from $SSHPASS (-e) and may only run ssh, whose arguments are
-// checked as ssh's.
+// checked as ssh's, or, once a host allows writes, scp or rsync, checked as
+// theirs.
 func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	cfg := s.getConfig().SSH
 	if !cfg.HostsConfigured() {
@@ -516,8 +517,17 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 	if !env {
 		return fmt.Errorf("sshpass without -e is not allowed: it would read the password from stdin; %s", sshpassFix)
 	}
+	if slices.Contains(config.SSHCopyCommands, argv[cmdIdx]) {
+		if !cfg.WriteHostsConfigured() {
+			return commandNotAllowed(argv[cmdIdx])
+		}
+		if err := checkCopyGlobs(argv[cmdIdx:], glob[cmdIdx:]); err != nil {
+			return err
+		}
+		return checkCopyArgv(argv[cmdIdx:], cfg)
+	}
 	if argv[cmdIdx] != "ssh" {
-		return fmt.Errorf("sshpass may only run ssh, not %q", argv[cmdIdx])
+		return fmt.Errorf("sshpass may only run ssh, scp, or rsync, not %q", argv[cmdIdx])
 	}
 	if err := checkSSHArgv(argv[cmdIdx:], cfg); err != nil {
 		return err
@@ -528,7 +538,8 @@ func validateSSHPassCommand(s *Sandbox, args []*syntax.Word) error {
 
 // validateSSHWrappedInput refuses an ssh or sshpass that a wrapper (xargs,
 // find -exec) runs with words of its input, unless no input word can be read
-// as an option, a host, or sshpass's command. ssh reads options again after
+// as an option, a host, or sshpass's command, and any scp or rsync a wrapper
+// runs (errCopyWrapped). ssh reads options again after
 // the destination, so an input -oProxyCommand=... or -oHostname=... would
 // escape the host check, and words appended to a sshpass with no command
 // become the command it runs.
@@ -552,6 +563,9 @@ func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args 
 		return err
 	}
 	name := argv[0]
+	if slices.Contains(config.SSHCopyCommands, name) {
+		return errCopyWrapped(wrapper, name)
+	}
 	if name != "ssh" && name != "sshpass" {
 		return nil
 	}
@@ -563,6 +577,9 @@ func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args 
 		}
 		if cmdIdx >= len(argv) {
 			return fmt.Errorf("%s sshpass without a command is not allowed: the input %s adds would be the command sshpass runs", wrapper, wrapper)
+		}
+		if slices.Contains(config.SSHCopyCommands, argv[cmdIdx]) {
+			return errCopyWrapped(wrapper, argv[cmdIdx])
 		}
 		sshStart = cmdIdx
 	}
@@ -604,6 +621,14 @@ func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args 
 	return fmt.Errorf("%s %s without a remote command is not allowed: ssh reads the words %s appends after the destination as options; name the command (xargs ssh host cmd) or end the options with --", wrapper, name, wrapper)
 }
 
+// errCopyWrapped refuses an scp or rsync that a wrapper runs with words of
+// its input: rsync reads options anywhere, and an input word with a colon
+// is a remote operand, so the input could name a host or an option the
+// check never sees.
+func errCopyWrapped(wrapper, name string) error {
+	return fmt.Errorf("%s %s is not allowed: the input %s adds could name a host or an option; run %s directly (rsync takes a list of files with --files-from)", wrapper, name, wrapper, name)
+}
+
 // validateSSHUnderXargs is validateSSHWrappedInput for an ssh or sshpass
 // that xargs runs; xargsOpts are xargs's own words before the command (xargs
 // itself included), which set its replace strings.
@@ -611,7 +636,7 @@ func validateSSHUnderXargs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 	if len(args) == 0 || !s.getConfig().SSH.HostsConfigured() {
 		return nil
 	}
-	if name := args[0].Lit(); name != "ssh" && name != "sshpass" {
+	if name := args[0].Lit(); name != "ssh" && name != "sshpass" && !slices.Contains(config.SSHCopyCommands, name) {
 		return nil
 	}
 	opts, _, err := sshLiterals(xargsOpts)
@@ -734,7 +759,7 @@ func sshLocalPathIndices(args []string) []int {
 }
 
 // sshpassNonPathArgIndices is sshNonPathArgIndices for sshpass: its prompt,
-// and the ssh it runs.
+// and the ssh, scp, or rsync it runs.
 func sshpassNonPathArgIndices(args []string) map[int]bool {
 	cmdIdx, nonPath, _, err := parseSSHPassArgs(args)
 	if err != nil {
@@ -744,8 +769,15 @@ func sshpassNonPathArgIndices(args []string) map[int]bool {
 	for _, i := range nonPath {
 		skip[i] = true
 	}
-	if cmdIdx < len(args) && args[cmdIdx] == "ssh" {
-		for i := range sshNonPathArgIndices(args[cmdIdx:]) {
+	if cmdIdx < len(args) {
+		var inner map[int]bool
+		switch args[cmdIdx] {
+		case "ssh":
+			inner = sshNonPathArgIndices(args[cmdIdx:])
+		case "scp", "rsync":
+			inner = copyNonPathArgIndices(args[cmdIdx:])
+		}
+		for i := range inner {
 			skip[cmdIdx+i] = true
 		}
 	}

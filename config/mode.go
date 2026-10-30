@@ -207,6 +207,9 @@ func DefaultDeniedWritePaths() []DeniedPath {
 		file(filepath.Join(home, ".gitconfig")),
 		file(filepath.Join(xdg, "git", "config")),
 		dir(filepath.Join(home, ".ssh")),
+		// popt's option aliases, which the user's own rsync reads: an alias
+		// can add -e with any program (sandboxed rsync runs without $HOME).
+		file(filepath.Join(home, ".popt")),
 		file(filepath.Join(home, ".npmrc")),
 		file(filepath.Join(home, ".docker", "config.json")),
 		// Persistence vectors: things the host runs or puts on PATH later.
