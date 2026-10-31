@@ -1,6 +1,6 @@
 # Mocked-server e2e
 
-Drives the real Crush, Codex, Claude Code, opencode, and Grok Build binaries through `lite-sandbox install <agent>` (and `lite-sandbox launch <agent>`, except Grok) and a non-interactive run, with an in-process mock standing in for the model. Run it with `LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v`.
+Drives the real Crush, Codex, Claude Code, opencode (v1 and v2), and Grok Build binaries through `lite-sandbox install <agent>` (and `lite-sandbox launch <agent>`, except Grok) and a non-interactive run, with an in-process mock standing in for the model. Run it with `LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v`.
 
 - `mockmodel/` serves the three wire protocols the agents speak (OpenAI chat completions, OpenAI Responses, Anthropic Messages), including Responses custom tools such as Codex's freeform `apply_patch`, and normalizes every request into a protocol-agnostic `Turn`, so the tests never see the protocol.
 - The mock is scripted: it asks the agent to run a blocked command (`curl`), then an allowed one, and answers with the last tool result; the tests assert on the tools offered, the sandbox's rejection and output, and that the installer's directive reached the model.

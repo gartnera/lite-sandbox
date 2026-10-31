@@ -187,12 +187,13 @@ func opencodeConfig(t *testing.T, spec launchSpec) map[string]any {
 	return nil
 }
 
-// TestOpencodeLaunchSpec checks the inline config: the MCP server, the bash
+// TestOpencodeLaunchSpec checks v1's inline config: the MCP server, the bash
 // deny, and an instructions file holding the directive in lite-sandbox's
 // cache (not opencode's config directory).
 func TestOpencodeLaunchSpec(t *testing.T) {
 	home := isolateUserDirs(t)
 	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	stubOpencodeVersion(t, "1.18.29\n", nil)
 
 	spec, err := opencodeLaunchSpec(testBin, []string{"run", "hi"})
 	if err != nil {

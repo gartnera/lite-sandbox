@@ -55,7 +55,11 @@ Per agent:
             trusted, and trust can only be granted in its /hooks screen. The
             bypass applies to every enabled hook for the session, your own
             included; --with-tool-hook=false avoids it.
-  opencode  OPENCODE_CONFIG_CONTENT (MCP server, bash denied, directive file).
+  opencode  OPENCODE_CONFIG_CONTENT (MCP server, built-in shell denied,
+            directive file), in the format of the installed major. For v2
+            also --standalone: v2 otherwise hands the session to its shared
+            background service, which never sees this environment (--server is
+            refused for the same reason).
   crush     CRUSH_GLOBAL_CONFIG pointing at a generated directory whose
             crushrc sources your own global crushrc (and links your
             crush.json), then adds the MCP server and denies bash.

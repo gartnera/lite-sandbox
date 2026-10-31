@@ -56,10 +56,12 @@ Per agent:
              ~/.codex/config.toml (honoring CODEX_HOME) and adds a usage
              directive to ~/.codex/AGENTS.md; Codex has no permission deny, so
              the hook is what blocks the built-in shell
-  opencode — registers the MCP server, denies the built-in bash tool, and
+  opencode — registers the MCP server, denies the built-in shell tool, and
              auto-allows the sandbox tools in ~/.config/opencode/opencode.json
-             (honoring XDG_CONFIG_HOME), and adds a usage directive to
-             ~/.config/opencode/AGENTS.md
+             (honoring XDG_CONFIG_HOME, and OPENCODE_CONFIG_DIR for v2), and
+             adds a usage directive to ~/.config/opencode/AGENTS.md; writes
+             opencode v2's config format when ` + "`opencode --version`" + ` reports v2
+             (or the config already uses it), else v1's, which v2 also reads
   crush    — registers the MCP server, hides the built-in bash tool
              (permissions deny bash), and auto-allows the sandbox tools in
              ~/.config/crush/crushrc (or the legacy crush.json, whichever
@@ -110,8 +112,9 @@ on demand — the built-in shell is denied/redirected, so the sandbox bash tool 
 needed on essentially every turn. For claude it sets alwaysLoad on the MCP server
 entry; for codex it sets omit_tools_from = ["deferred"]. Pass --always-load=false
 to let the tools be deferred. The flag is a no-op for opencode, crush and grok
-(Grok always reaches MCP tools through its search_tool / use_tool pair), and
-in --bash-ast-hook-mode (which does not configure the MCP server).`,
+(Grok always reaches MCP tools through its search_tool / use_tool pair; opencode
+v2 through Code Mode's execute tool), and in --bash-ast-hook-mode (which does
+not configure the MCP server).`,
 	ValidArgs: []string{"claude", "codex", "opencode", "crush", "grok"},
 	Args:      cobra.OnlyValidArgs,
 	RunE:      runInstall,
@@ -221,7 +224,10 @@ func detectOpencode() bool {
 	if cliOnPath("opencode") {
 		return true
 	}
-	dir, err := opencodeConfigDir()
+	if dir, err := opencodeConfigDir(); err == nil && dirExists(dir) {
+		return true
+	}
+	dir, err := opencodeV2ConfigDir()
 	return err == nil && dirExists(dir)
 }
 
