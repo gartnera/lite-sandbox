@@ -18,7 +18,8 @@ ssh:
         - systemctl restart
         - docker compose up
     - host: scratch-vm
-      write: true            # the remote command is not checked; scp and rsync may copy to and from it
+      write: true            # the remote command is not checked; scp and rsync may copy to and from it;
+                             # ssh may forward ports and share connections with it
   agent: true                # give the agent to ssh, sshpass, scp, rsync, and git's remote commands (default: true)
   unrestricted_agent: false  # hand them the real agent socket instead of the filter (default: false)
   git_signing: false         # sign git commits and tags with the agent (default: false)
@@ -64,27 +65,71 @@ Entries are bare names or addresses: no `user@`, patterns, or lists, and a host
 is listed once.
 
 The remote command's words aren't treated as local paths, so
-`ssh box cat /etc/hosts` reads the remote file. `-i` is the one argument held
-to the local path boundary.
+`ssh box cat /etc/hosts` reads the remote file. `-i` is held to the local path
+boundary, and a control socket (`-S`, `ControlPath`) to the write set.
 
 The options that let ssh reach anything but the destination, or run something on
 this machine, are refused:
 
-- port, socket, and tunnel forwarding: `-L`, `-R`, `-D`, `-W`, `-w`, `-g`;
+- stdio and tunnel forwarding (`-W`, `-w`), and `-g` (other machines connecting
+  to forwarded ports); port forwarding and connection sharing are allowed to
+  `write: true` hosts only ([below](#port-forwarding-and-connection-sharing));
 - agent, X11, and credential forwarding: `-A`, `-X`, `-Y`, `-K`;
 - `-I` (a PKCS#11 library ssh loads into itself), `-F` other than `-F none`
   (a config file's `ProxyCommand`, `LocalCommand`, or `Match exec` would run
-  here), connection sharing (`-M`, `-O`, and `-S` other than `-S none`),
-  `-f` (backgrounds past the command; use `run_in_background`), and `-E`
-  (writes a log file; `-v` logs to stderr);
+  here), `-f` (backgrounds past the command; use `run_in_background`, or
+  `ControlPersist` for a master), and `-E` (writes a log file; `-v` logs to
+  stderr);
 - `-o` keys outside a fixed list: connection and authentication settings
   (`BatchMode`, `ConnectTimeout`, `Port`, `User`, `StrictHostKeyChecking`,
   `PubkeyAuthentication`, `ServerAliveInterval`, `SetEnv`, `RemoteCommand`,
   `RequestTTY`, ...) are allowed; `ProxyCommand`, `LocalCommand`,
   `KnownHostsCommand`, `Hostname`, `IdentityAgent`, `IdentityFile` (use `-i`),
-  `SendEnv` (which would send the environment's credentials), `Include`, and
-  the forwarding keys are refused unless set to their off value
-  (`ForwardAgent=no`, `ProxyCommand=none`, `UserKnownHostsFile=/dev/null`, ...).
+  `SendEnv` (which would send the environment's credentials), `Include`,
+  `GatewayPorts`, and the agent and X11 forwarding keys are refused unless set
+  to their off value (`ForwardAgent=no`, `ProxyCommand=none`,
+  `UserKnownHostsFile=/dev/null`, ...).
+
+### Port forwarding and connection sharing
+
+To a `write: true` host, ssh may forward ports and share a connection. These
+reach past the remote command check (a forward reaches anything the remote host
+does, or this machine from there), so a host held to read-only commands gets
+neither.
+
+```bash
+ssh -N -L 8080:localhost:80 scratch-vm         # run with run_in_background
+ssh -N -D 1080 scratch-vm                      # a SOCKS proxy through the host
+ssh -N -R 9000:localhost:3000 scratch-vm       # the host reaches this machine's port 3000
+ssh -M -S cm-%C -o ControlPersist=10m -N scratch-vm   # a master that outlives the command
+ssh -S cm-%C scratch-vm uptime                 # reuses it
+ssh -S cm-%C -O forward -L 8081:localhost:81 scratch-vm
+ssh -S cm-%C -O exit scratch-vm
+```
+
+- `-L`, `-D`, and `-o LocalForward`/`DynamicForward` listen on loopback only:
+  a bind address must be `localhost`, `127.0.0.1`, or `::1`, or left out (ssh
+  then binds loopback, unless your own `~/.ssh/config` sets `GatewayPorts`).
+  `0.0.0.0`, `*`, and an empty address are refused.
+- No forward listens on or connects to a Unix socket on this machine
+  (`-L ./app.sock:...`, `-R 9000:/var/run/docker.sock`); the remote side may be
+  one (`-L 8080:/run/app.sock`).
+- `-R` and `-o RemoteForward` may forward to any address this machine reaches,
+  including `-R 9000` (a SOCKS proxy for the remote host).
+- A control path must contain `%C` (ssh's hash of the local host, remote host,
+  port, user, and jump hosts), and no other token, `~`, or variable: a client
+  reaches whatever master listens at its path, whichever host it names, so a
+  fixed path would let `ssh -S sock other-host cmd` be checked as other-host's
+  command while it runs on the master's host. With `%C` a client only finds a
+  master to the host it names. The socket is held to the write set; a relative
+  path keeps it under the 104-byte socket path limit (`-S cm-%C`).
+- Starting a master (`-M`, `ControlMaster yes`/`auto`, `ControlPersist`) needs a
+  control path on the command line. `-MM` and `ControlMaster ask`/`autoask`
+  (which run `ssh-askpass` here) are refused, and so is `-O proxy`; `-O check`,
+  `conninfo`, `channels`, `forward`, `cancel`, `exit`, and `stop` are allowed,
+  with `-O forward`'s forwards checked as above.
+- `scp` and `rsync -e` don't take these options; forward and share connections
+  with ssh.
 
 Run by `xargs`, ssh must name its remote command (`xargs ssh box cmd`) or end
 its options with `--`: ssh reads options again after the destination, so the

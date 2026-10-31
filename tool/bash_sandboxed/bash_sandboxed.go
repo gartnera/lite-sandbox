@@ -1084,7 +1084,7 @@ func (s *Sandbox) ValidateCommandContext(ctx context.Context, command string, wo
 	if err := s.validateFileCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return err
 	}
-	if err := s.validateScriptContents(f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
+	if err := s.validateScriptContents(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
 		return err
 	}
 	return nil
@@ -1096,8 +1096,9 @@ func (s *Sandbox) ValidateCommandContext(ctx context.Context, command string, wo
 // cases where a script file contains blocked commands that would otherwise
 // only fail once reached at runtime, rejecting the command up front instead.
 // Errors reading files are silently ignored (fail-open) since the file may
-// not exist yet at validation time.
-func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+// not exist yet at validation time. ctx carries the audit scope and the
+// user's approval, as for the command line itself.
+func (s *Sandbox) validateScriptContents(ctx context.Context, f *syntax.File, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	if depth >= maxBashDepth {
 		return fmt.Errorf("script nesting depth exceeded (max %d)", maxBashDepth)
 	}
@@ -1123,9 +1124,9 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 		}
 		switch {
 		case inline:
-			validationErr = s.validateScriptText(cmdName, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
+			validationErr = s.validateScriptText(ctx, cmdName, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
 		case script != "":
-			validationErr = s.validateScriptFile(script, workDir, readAllowedPaths, writeAllowedPaths, depth)
+			validationErr = s.validateScriptFile(ctx, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
 		}
 
 		return validationErr == nil
@@ -1134,14 +1135,15 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 }
 
 // validateScriptFile reads a script file path, parses and validates its contents.
-func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	path := absPath(scriptPath, workDir)
 	// Bare extra_commands script entries are an explicit trust opt-in; skip
 	// body validation regardless of how the script is reached (directly,
 	// `bash <script>`, or `source <script>`). This mirrors the runtime
 	// ExecHandler bypass so static preflight does not reject a script the user
-	// deliberately opted out of validation for.
-	if s.bareAllowsScript(scriptPath, workDir) {
+	// deliberately opted out of validation for; like executeBash, it matches
+	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
+	if s.bareAllowsScript(scriptPath, workDir) || s.getBareExtraScriptPaths()[path] {
 		return nil
 	}
 	if isBinaryExecutable(path) {
@@ -1161,25 +1163,25 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	if err != nil {
 		return nil // fail-open: unparseable scripts handled at runtime
 	}
-	if err := s.validateFile(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	if err := s.validateFileCtx(ctx, sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return fmt.Errorf("script %s: %w", scriptPath, err)
 	}
-	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
+	return s.validateScriptContents(ctx, sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
 }
 
 // validateScriptText parses and validates a script given on the command line
 // (bash -c's command string), as validateScriptFile does a file's. executeBash
 // validates it again when it runs; this pass is what the PreToolUse hook's
 // --bash-ast-hook-mode, which hands the command to the real bash, relies on.
-func (s *Sandbox) validateScriptText(cmdName, script, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+func (s *Sandbox) validateScriptText(ctx context.Context, cmdName, script, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	sf, err := ParseBash(script)
 	if err != nil {
 		return fmt.Errorf("%s -c: %w", cmdName, err)
 	}
-	if err := s.validateFile(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+	if err := s.validateFileCtx(ctx, sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 		return fmt.Errorf("%s -c: %w", cmdName, err)
 	}
-	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
+	return s.validateScriptContents(ctx, sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
 }
 
 // scriptOperand returns the shell script a command line runs as one of its
@@ -1614,6 +1616,13 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 	// interpreter, into every runtime handler and nested interpreter.
 	ctx = withAuditScope(ctx, command, workDir, "bash")
 	if err := s.validateFileCtx(ctx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		return "", fmt.Errorf("validation failed: %w", err)
+	}
+	// Check the scripts the command runs (bash -c's string, bash x.sh) before
+	// any of it runs, as the hook does, so a refused command in one stops the
+	// whole line rather than after the commands ahead of it ran. executeBash
+	// checks them again when they run.
+	if err := s.validateScriptContents(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
 		return "", fmt.Errorf("validation failed: %w", err)
 	}
 

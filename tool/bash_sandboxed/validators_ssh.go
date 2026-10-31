@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -18,14 +19,20 @@ import (
 // validators_ssh_remote.go).
 //
 // The options that make ssh reach anything but the destination, or run
-// something on this machine, are refused: port and socket forwarding (-L, -R,
-// -D, -W, -w), agent and X11 forwarding (-A, -X, -Y), GSSAPI delegation (-K),
-// a PKCS#11 library (-I, which ssh loads into itself), an alternative config
-// file (-F, whose ProxyCommand or LocalCommand would run here), connection
-// sharing (-M, -S, -O), going to the background (-f), and a log file (-E).
-// -o takes only the keys in sshOptionPolicy; the others (ProxyCommand,
-// LocalCommand, KnownHostsCommand, Hostname, IdentityAgent, SendEnv, ...) are
-// refused.
+// something on this machine, are refused: stdio and tunnel forwarding (-W,
+// -w), agent and X11 forwarding (-A, -X, -Y), GSSAPI delegation (-K), a
+// PKCS#11 library (-I, which ssh loads into itself), an alternative config
+// file (-F, whose ProxyCommand or LocalCommand would run here), going to the
+// background (-f), and a log file (-E). -o takes only the keys in
+// sshOptionPolicy; the others (ProxyCommand, LocalCommand, KnownHostsCommand,
+// Hostname, IdentityAgent, SendEnv, ...) are refused.
+//
+// Port forwarding (-L, -R, -D and their -o forms) and connection sharing (-M,
+// -S, -O, ControlMaster, ControlPath, ControlPersist) are allowed to a host
+// that allows writes only (checkSSHSharing), and are checked here as far as
+// they touch this machine: a local listener binds to loopback, no forward
+// names a local Unix socket, and a control socket's path holds %C, so a
+// client can only reach a master to the host it names (see controlPath).
 //
 // The parse follows ssh's own: options up to the destination, options again
 // after it up to the command, and "--" ending them.
@@ -44,12 +51,7 @@ var sshRefusedFlags = map[byte]string{
 	'Y': "forwards the X11 display",
 	'K': "delegates GSSAPI credentials to the remote host",
 	'g': "lets remote hosts connect to forwarded ports",
-	'f': "keeps ssh running in the background after the command returns",
-	'M': "starts a connection-sharing master",
-	'O': "controls a connection-sharing master",
-	'D': "forwards ports (a SOCKS proxy to anywhere the remote host reaches)",
-	'L': "forwards a local port to anywhere the remote host reaches",
-	'R': "forwards a remote port to this machine",
+	'f': "keeps ssh running in the background after the command returns; use run_in_background, or ControlPersist for a connection-sharing master",
 	'W': "forwards stdin and stdout to another host",
 	'w': "forwards a tunnel device",
 	'E': "writes a log file; use -v, which logs to stderr",
@@ -109,9 +111,17 @@ var sshOptionPolicy = map[string][]string{
 	"verifyhostkeydns":                nil,
 	"visualhostkey":                   nil,
 	"proxyjump":                       nil,
+	// Forwarding and connection sharing, checked further in configOption and
+	// allowed to a host that allows writes only (checkSSHSharing). ask and
+	// autoask would run ssh-askpass here.
+	"localforward":   nil,
+	"remoteforward":  nil,
+	"dynamicforward": nil,
+	"controlpath":    nil,
+	"controlpersist": nil,
+	"controlmaster":  {"yes", "no", "auto"},
 	// Off switches only.
 	"addkeystoagent":            {"no"},
-	"controlmaster":             {"no"},
 	"forkafterauthentication":   {"no"},
 	"forwardagent":              {"no"},
 	"forwardx11":                {"no"},
@@ -119,7 +129,6 @@ var sshOptionPolicy = map[string][]string{
 	"gssapidelegatecredentials": {"no"},
 	"permitlocalcommand":        {"no"},
 	"tunnel":                    {"no"},
-	"controlpath":               {"none"},
 	"proxycommand":              {"none"},
 	"identityagent":             {"none"},
 	"userknownhostsfile":        {"/dev/null", "none"},
@@ -142,6 +151,26 @@ type sshArgs struct {
 	tty           bool     // -t or RequestTTY=yes/force: the remote side gets a terminal
 	remoteCommand bool     // -o RemoteCommand
 	setEnv        []string // -o SetEnv values
+
+	// Forwarding and connection sharing (checkSSHSharing).
+	forwards    []string // -L, -R, -D and their -o forms, as "-L spec"
+	controlPath string   // -S or -o ControlPath, unless none
+	masters     int      // -M count; ControlMaster yes or auto counts one
+	persist     bool     // -o ControlPersist
+	controlCmd  string   // -O's command
+}
+
+// sharing describes the forwarding and connection sharing the command line
+// asks for, or "" when it asks for none.
+func (p sshArgs) sharing() string {
+	var what []string
+	if len(p.forwards) > 0 {
+		what = append(what, "port forwarding ("+strings.Join(p.forwards, ", ")+")")
+	}
+	if p.controlPath != "" || p.masters > 0 || p.persist || p.controlCmd != "" {
+		what = append(what, "connection sharing (-M, -S, -O, ControlMaster, ControlPath, ControlPersist)")
+	}
+	return strings.Join(what, " and ")
 }
 
 // parseSSHArgs parses args (command name at index 0) and returns the
@@ -202,6 +231,11 @@ func (p *sshArgs) parseBundle(args []string, i int) (int, error) {
 				p.stdinNull = true
 			case 't':
 				p.tty = true
+			case 'M':
+				p.masters++
+				if p.masters > 1 {
+					return 0, fmt.Errorf("ssh option -M given twice is not allowed: it asks for confirmation with ssh-askpass, a program run on this machine; give -M once")
+				}
 			}
 			continue
 		}
@@ -236,9 +270,16 @@ func (p *sshArgs) optionValue(c byte, val string, idx int) error {
 			return fmt.Errorf("ssh option -F %s is not allowed: a config file can name programs for ssh to run here (ProxyCommand, LocalCommand); only -F none is", val)
 		}
 	case 'S':
-		if val != "none" {
-			return fmt.Errorf("ssh option -S %s is not allowed: connection sharing; only -S none is", val)
+		return p.setControlPath(val, "-S")
+	case 'L', 'R', 'D':
+		return p.addForward(c, val)
+	case 'O':
+		if !slices.Contains(sshControlCommands, val) {
+			return fmt.Errorf("ssh option -O %s is not allowed: only -O %s", val, strings.Join(sshControlCommands, ", "))
 		}
+		p.controlCmd = val
+		// The master runs the command; this ssh runs no session.
+		p.noSession = true
 	case 'J':
 		if val != "none" {
 			p.jumps = append(p.jumps, val)
@@ -259,7 +300,8 @@ func (p *sshArgs) configOption(opt string) error {
 		return fmt.Errorf("ssh option -o %q has no value", opt)
 	}
 	key := strings.ToLower(opt[:end])
-	val := strings.Trim(strings.TrimLeft(opt[end:], " \t="), `"`)
+	rawVal := strings.TrimLeft(opt[end:], " \t=")
+	val := strings.Trim(rawVal, `"`)
 	allowed, ok := sshOptionPolicy[key]
 	if !ok {
 		hint := ""
@@ -272,9 +314,32 @@ func (p *sshArgs) configOption(opt string) error {
 		return fmt.Errorf("ssh option -o %s is not allowed: only the options that keep ssh connecting to the destination, and running nothing on this machine, are%s", opt[:end], hint)
 	}
 	if allowed != nil && !slices.ContainsFunc(allowed, func(v string) bool { return strings.EqualFold(v, val) }) {
-		return fmt.Errorf("ssh option -o %s=%s is not allowed: only %s", opt[:end], val, strings.Join(allowed, " or "))
+		return fmt.Errorf("ssh option -o %s=%s is not allowed: %s may only be %s", opt[:end], strconv.Quote(rawVal), opt[:end], strings.Join(allowed, " or "))
 	}
 	switch key {
+	case "localforward", "remoteforward":
+		// LocalForward takes the listener and the target as two words, which
+		// ssh joins with a colon.
+		// RemoteForward may give the listener alone (a SOCKS proxy).
+		kind := map[string]byte{"localforward": 'L', "remoteforward": 'R'}[key]
+		f := strings.Fields(val)
+		switch {
+		case len(f) == 1 && kind == 'R':
+			return p.addForward(kind, f[0])
+		case len(f) != 2:
+			return fmt.Errorf("ssh option -o %s=%s is not allowed: give the listener and the target (%s=\"8080 localhost:80\")", opt[:end], strconv.Quote(rawVal), opt[:end])
+		}
+		return p.addForward(kind, f[0]+":"+f[1])
+	case "dynamicforward":
+		return p.addForward('D', val)
+	case "controlpath":
+		return p.setControlPath(val, "-o ControlPath")
+	case "controlmaster":
+		if !strings.EqualFold(val, "no") {
+			p.masters = max(p.masters, 1)
+		}
+	case "controlpersist":
+		p.persist = !strings.EqualFold(val, "no")
 	case "proxyjump":
 		if !strings.EqualFold(val, "none") {
 			p.jumps = append(p.jumps, val)
@@ -292,6 +357,206 @@ func (p *sshArgs) configOption(opt string) error {
 		p.setEnv = append(p.setEnv, val)
 	}
 	return nil
+}
+
+// sshControlCommands are the -O commands allowed. proxy is left out: it hands
+// this ssh's stdio to the master as a raw connection.
+var sshControlCommands = []string{"check", "conninfo", "channels", "forward", "cancel", "exit", "stop"}
+
+// setControlPath records a control socket path (-S or -o ControlPath). ssh
+// expands ~, ${VAR}, and %-tokens in it; only %C (a hash of the local host,
+// remote host, port, user, and jump hosts) and %% are allowed, and %C is
+// required. A client given a path reaches whatever master listens there,
+// whichever host it names, so a fixed path would let `ssh -S sock other-host
+// cmd` be checked as other-host's command while it runs on the master's host;
+// with %C the client's path is computed from the host it names, so it only
+// finds a master to that host. The path is a file ssh creates, so it is also
+// checked against the write set (sshControlPathWrites).
+func (p *sshArgs) setControlPath(val, what string) error {
+	if strings.EqualFold(val, "none") {
+		p.controlPath = ""
+		return nil
+	}
+	refuse := func(why string) error {
+		return fmt.Errorf("ssh option %s %s is not allowed: %s; use a path in the working directory with %%C in its name (%s cm-%%C)", what, val, why, what)
+	}
+	switch {
+	case strings.HasPrefix(val, "~"):
+		return refuse("ssh expands ~ itself")
+	case strings.Contains(val, "$"):
+		return refuse("ssh expands environment variables in it")
+	}
+	hasC := false
+	for i := 0; i < len(val); i++ {
+		if val[i] != '%' {
+			continue
+		}
+		if i+1 >= len(val) {
+			return refuse("it ends in a lone %")
+		}
+		switch val[i+1] {
+		case 'C':
+			hasC = true
+		case '%':
+		default:
+			return refuse(fmt.Sprintf("ssh expands %%%c in it; only %%C and %%%% are allowed", val[i+1]))
+		}
+		i++
+	}
+	if !hasC {
+		return refuse("without %C a client could reach a master to a different host than the one it names")
+	}
+	p.controlPath = val
+	return nil
+}
+
+// addForward records a -L, -R, or -D spec (or its -o form) after checking the
+// part of it on this machine: a local listener (-L, -D) binds to loopback, and
+// nothing listens on or connects to a local Unix socket. The remote side (-R's
+// listener, -L's target) is the remote host's business.
+func (p *sshArgs) addForward(kind byte, spec string) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("ssh option -%c %s is not allowed: %s", kind, spec, why)
+	}
+	f, err := sshForwardFields(spec)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	// What ssh's parse_forward makes of the fields: the local listener's
+	// address and whether it is a socket (-L, -D), and whether the local
+	// target is a socket (-R).
+	var listenAddr *string
+	listenPath, localTargetPath := false, false
+	switch kind {
+	case 'D':
+		switch len(f) {
+		case 1:
+			listenPath = f[0].path
+		case 2:
+			listenAddr = &f[0].arg
+		default:
+			return refuse("give [bind_address:]port")
+		}
+	case 'L':
+		switch len(f) {
+		case 2: // port:remote_socket, or local_socket:remote_socket
+			listenPath = f[0].path
+		case 3: // local_socket:host:port, bind:port:remote_socket, port:host:port
+			switch {
+			case f[0].path:
+				listenPath = true
+			case f[2].path:
+				listenAddr = &f[0].arg
+			}
+		case 4:
+			listenAddr = &f[0].arg
+		default:
+			return refuse("give [bind_address:]port:host:hostport")
+		}
+	case 'R':
+		switch len(f) {
+		case 1, 2: // [bind:]port: a SOCKS proxy from the remote host, or port:local_socket
+			localTargetPath = len(f) == 2 && f[1].path
+		case 3, 4: // ...:host:port or ...:local_socket
+			localTargetPath = f[len(f)-1].path
+		default:
+			return refuse("give [bind_address:]port:host:hostport")
+		}
+	}
+	switch {
+	case listenPath:
+		return refuse("a local Unix socket listener is not supported; forward a loopback port")
+	case localTargetPath:
+		return refuse("forwarding to a local Unix socket is not allowed: it could reach any socket on this machine (docker's, an agent's)")
+	case listenAddr != nil && !isLoopbackBind(*listenAddr):
+		return refuse(fmt.Sprintf("binding %q would open the port to other machines; bind localhost, 127.0.0.1, or ::1, or leave the address out", *listenAddr))
+	}
+	p.forwards = append(p.forwards, fmt.Sprintf("-%c %s", kind, spec))
+	return nil
+}
+
+// sshForwardField is one colon-separated field of a forwarding spec.
+type sshForwardField struct {
+	arg  string
+	path bool // a Unix socket path: it has a slash
+}
+
+// sshForwardFields splits a forwarding spec as ssh's parse_fwd_field does: on
+// colons, a field in square brackets taken whole, and a field with a slash
+// read as a Unix socket path. Backslash escapes are refused rather than
+// followed.
+func sshForwardFields(spec string) ([]sshForwardField, error) {
+	if strings.Contains(spec, `\`) {
+		return nil, fmt.Errorf("backslashes are not supported in it")
+	}
+	var out []sshForwardField
+	rest := strings.TrimLeft(spec, " \t")
+	for rest != "" {
+		if len(out) == 4 {
+			return nil, fmt.Errorf("it has more than four fields")
+		}
+		if rest[0] == '[' {
+			end := strings.IndexByte(rest, ']')
+			if end < 0 || (end+1 < len(rest) && rest[end+1] != ':') {
+				return nil, fmt.Errorf("a bracketed field is not closed")
+			}
+			arg := rest[1:end]
+			out = append(out, sshForwardField{arg: arg, path: strings.Contains(arg, "/")})
+			rest = rest[min(end+2, len(rest)):]
+			continue
+		}
+		arg, after, found := strings.Cut(rest, ":")
+		out = append(out, sshForwardField{arg: arg, path: strings.Contains(arg, "/")})
+		rest = after
+		if found && rest == "" {
+			// A trailing colon: ssh reads it as the end of the spec.
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("it is empty")
+	}
+	return out, nil
+}
+
+// isLoopbackBind reports whether a local forward's bind address keeps the
+// listener on this machine. An empty address and * mean every interface.
+func isLoopbackBind(addr string) bool {
+	switch strings.ToLower(addr) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+// checkSSHSharing refuses forwarding and connection sharing to a host that
+// does not allow writes: a forward reaches past the remote command check
+// (anything the remote host reaches, or this machine from there), and a
+// connection-sharing master is a connection the check no longer sees.
+// Starting a master (-M, ControlMaster) needs a control path given here, so
+// it is never a socket the user's ssh config places outside the sandbox.
+func checkSSHSharing(p sshArgs, host *config.SSHHost) error {
+	what := p.sharing()
+	if what == "" {
+		return nil
+	}
+	if !host.Writes() {
+		return fmt.Errorf("ssh with %s to %s is not allowed: only to a host that allows writes; the user can allow it with `lite-sandbox config ssh hosts add %s --write`", what, host.Host, host.Host)
+	}
+	if (p.masters > 0 || p.persist) && p.controlPath == "" {
+		return fmt.Errorf("ssh starting a connection-sharing master is not allowed without a control path: give one in the working directory with %%C in its name (-S cm-%%C)")
+	}
+	return nil
+}
+
+// sshControlPathWrites returns the control socket an ssh argv creates or
+// connects to, for the write-set check.
+func sshControlPathWrites(args []string) []string {
+	p, err := parseSSHArgs(args)
+	if err != nil || p.controlPath == "" {
+		return nil
+	}
+	return []string{p.controlPath}
 }
 
 // sshDestinationHost returns the host of an ssh destination:
@@ -367,7 +632,11 @@ func checkSSHArgv(argv []string, cfg *config.SSHConfig) error {
 	if p.noDest {
 		return nil
 	}
-	if err := checkSSHRemote(p, argv, cfg.Host(sshDestinationHost(p.dest))); err != nil {
+	host := cfg.Host(sshDestinationHost(p.dest))
+	if err := checkSSHSharing(p, host); err != nil {
+		return tagRule(ruleArgValidator, "ssh", err)
+	}
+	if err := checkSSHRemote(p, argv, host); err != nil {
 		return tagRule(ruleArgValidator, "ssh", err)
 	}
 	return nil

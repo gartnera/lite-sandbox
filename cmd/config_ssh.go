@@ -90,8 +90,9 @@ var sshHostsAddCmd = &cobra.Command{
 	Long: `Allow ssh and sshpass to connect to hosts, as typed: an alias of
 ~/.ssh/config or a host name. The command ssh runs there is held to read-only
 commands; --command allows a command beyond those (with any arguments, or
-limited to the leading arguments given), and --write lifts the check and lets
-scp and rsync copy files to and from the host.
+limited to the leading arguments given), and --write lifts the check, lets
+scp and rsync copy files to and from the host, and lets ssh forward ports
+(-L, -R, -D) and share connections (-M, -S, -O) with it.
 
   lite-sandbox config ssh hosts add build-box
   lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
@@ -225,7 +226,7 @@ var sshDisableCmd = &cobra.Command{
 }
 
 func init() {
-	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands), and scp and rsync copy to and from the host")
+	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands), scp and rsync copy to and from the host, and ssh forward ports and share connections")
 	sshHostsAddCmd.Flags().StringArrayVar(&sshHostsAddCommands, "command", nil, "allow a remote command beyond the read-only ones: a name, or a name and its leading arguments ('systemctl restart'); repeatable")
 	sshHostsCmd.AddCommand(sshHostsAddCmd, sshHostsRemoveCmd)
 	sshAgentCmd.AddCommand(sshAgentEnableCmd, sshAgentDisableCmd, sshAgentRestrictCmd, sshAgentUnrestrictCmd)

@@ -306,6 +306,38 @@ func TestExecuteBash_ShellFlagsApplied(t *testing.T) {
 	}
 }
 
+// An -o bash does not know stops the shell before the command string runs,
+// as bash refuses to start.
+func TestExecuteBash_InvalidOptionStops(t *testing.T) {
+	dir := t.TempDir()
+	out, err := executeInDir(t, dir, `bash -o 'pipefail; echo INJECTED' -c 'echo ran'`)
+	if err == nil {
+		t.Fatalf("expected an error, got output %q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "ran" || line == "INJECTED" {
+			t.Fatalf("the command string ran: %q", out)
+		}
+	}
+}
+
+// A refused command in a bash -c string stops the whole line before any of
+// it runs, not once the nested shell reaches it.
+func TestExecute_InlineScriptCheckedUpFront(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	out, err := executeInDir(t, dir, "touch "+marker+"; bash -c 'echo partial; curl http://example.com'")
+	if err == nil || !strings.HasPrefix(err.Error(), "validation failed: ") {
+		t.Fatalf("expected a validation error, got %v (output %q)", err, out)
+	}
+	if strings.Contains(out, "partial") {
+		t.Fatalf("part of the -c string ran: %q", out)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("the command ahead of bash -c ran")
+	}
+}
+
 func TestExecuteBash_WriteRedirectInNested(t *testing.T) {
 	dir := t.TempDir()
 
