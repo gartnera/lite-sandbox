@@ -1,6 +1,6 @@
-# lite-sandbox-mcp
+# lite-sandbox
 
-An MCP (Model Context Protocol) server that gives AI coding agents a `bash` tool to use instead of their built-in shell. Agents can run commands without a permission prompt for each one. Every command is parsed into an AST, checked against a whitelist, and then run by a shell interpreter that re-checks paths after variable expansion.
+`lite-sandbox` gives AI coding agents an alternative `bash` tool to use instead of their built-in shell. Agents can run commands without a permission prompt for each one. Instead of "dumb" regexp parsers or LLM inspection, every command is parsed into an AST so more intelligent decisions can be made.
 
 ## Quick start
 
