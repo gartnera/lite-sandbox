@@ -79,6 +79,27 @@ var sortSpec = optSpec{
 	long:  []string{"key", "field-separator", "buffer-size", "temporary-directory", "output", "batch-size", "compress-program", "files0-from", "parallel", "random-source", "sort"},
 }
 
+// sortLayout is sort's layout: -o/--output and -T/--temporary-directory are
+// written, --files0-from and --random-source read. The command has
+// noFlagPaths (-t/ is a separator, not a path), so the attached forms of
+// these options are checked from the layout instead of by the generic pass.
+var sortLayout = &argLayout{opts: sortSpec, values: map[string]argRole{
+	"o": roleWrite, "output": roleWrite,
+	"T": roleWrite, "temporary-directory": roleWrite,
+	"files0-from": roleRead, "random-source": roleRead,
+}}
+
+// checkSortReads holds the files sort reads through an option value to the
+// read set.
+func checkSortReads(args []string, workDir string, sets resolvedPathSets) error {
+	for _, f := range sortLayout.readTargets(args) {
+		if err := checkBoundary(f, f, workDir, false, sets.read); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // sortLongOpts are all of sort's long options (GNU and BSD).
 var sortLongOpts = append(append([]string(nil), sortSpec.long...),
 	"check", "debug", "dictionary-order", "general-numeric-sort", "help",
