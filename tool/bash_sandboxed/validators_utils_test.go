@@ -48,6 +48,7 @@ func TestUtilCommands_Allowed(t *testing.T) {
 		"bzgrep foo a.bz2", "xzgrep foo a.xz", "xzless a.xz", "zless -R a.gz",
 		"less -R a.txt", "less -N -S a.txt", "less -p pattern a.txt", "less -pko a.txt",
 		"less --long-prompt a.txt", "less -- -o", "PAGER=cat git log",
+		"sort -k2 -t, a.txt", "sort -u --output=out.txt a.txt", "sort -S 64K a.txt",
 		"shuf -n 1 a.txt", "shuf -o out.txt a.txt", "shuf -i 1-10",
 
 		// Writes inside the write set
@@ -96,6 +97,10 @@ func TestUtilCommands_Blocked(t *testing.T) {
 		{"sdiff --out=out a b", "runs another program"},
 		{"split --filter='sh -c x' a.txt", "runs a shell command"},
 		{"split --f=sh a.txt", "runs a shell command"},
+		{"sort --compress-program=sh a.txt", "runs a program"},
+		{"sort --compress-program sh a.txt", "runs a program"},
+		{"sort --compress-prog=sh a.txt", "runs a program"},
+		{"sort -S 64K --compress-program=/nonexistent/prog a.txt", "runs a program"},
 		{"install -s a b", "runs a strip program"},
 		{"install -sm 755 a b", "runs a strip program"},
 		{"install --strip a b", "runs a strip program"},
