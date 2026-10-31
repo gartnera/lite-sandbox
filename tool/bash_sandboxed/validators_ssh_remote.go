@@ -326,10 +326,10 @@ var remoteWrapperIndex = map[string]func(argv []string) int{
 		idx, _ := remoteSudoIndex(argv)
 		return idx
 	},
-	"env":     func(argv []string) int { return envCommandIndex(argv, argv) },
-	"timeout": timeoutCommandIndex,
-	"nice":    func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["nice"]) },
-	"stdbuf":  func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["stdbuf"]) },
+	"env":     wrapperCommandIndex,
+	"timeout": wrapperCommandIndex,
+	"nice":    wrapperCommandIndex,
+	"stdbuf":  wrapperCommandIndex,
 	"command": remoteCommandBuiltinIndex,
 }
 
@@ -396,11 +396,11 @@ var (
 )
 
 // remoteSudoIndex returns the command sudo runs, or -1. Its options stop at
-// the first operand ("+" getopt, as optionWrapperCommandIndex walks); only
+// the first operand ("+" getopt, as wrapperSpec.commandIndex walks); only
 // the ones above are allowed, so -e (sudoedit), -i, and -s (a shell) are
 // refused, as are VAR=value operands.
 func remoteSudoIndex(argv []string) (int, error) {
-	idx := optionWrapperCommandIndex(argv, sudoSpec)
+	idx := wrapperSpec{opts: sudoSpec, long: append(slices.Clone(sudoSpec.long), sudoLongFlags...)}.commandIndex(argv, argv)
 	end := idx
 	if idx < 0 {
 		end = len(argv)
@@ -515,10 +515,10 @@ func init() {
 		return func(_ *Sandbox, args []*syntax.Word) error { return check(wordLits(args)) }
 	}
 	remoteArgValidators = map[string]func(*Sandbox, []*syntax.Word) error{
-		"env":     validateEnvArgs,
-		"timeout": validateTimeoutArgs,
-		"nice":    validateOptionWrapperArgs,
-		"stdbuf":  validateOptionWrapperArgs,
+		"env":     validateWrapperArgs,
+		"timeout": validateWrapperArgs,
+		"nice":    validateWrapperArgs,
+		"stdbuf":  validateWrapperArgs,
 		"sudo":    validateRemoteSudo,
 		"command": validateRemoteCommandBuiltin,
 		"sh":      validateRemoteShell,

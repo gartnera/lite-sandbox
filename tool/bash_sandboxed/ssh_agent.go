@@ -261,7 +261,7 @@ func stripSSHPass(args []string, env map[string]string) {
 // runs by: popt, which parses rsync's options, reads aliases from
 // $HOME/.popt, and an alias can add any option or operand, -e with any
 // program or a host included, past the rsync validator. env HOME=... rsync,
-// which would set it again, is refused (validateEnvArgs). The ssh that rsync
+// which would set it again, is refused (validateEnvAssignments). The ssh that rsync
 // starts finds ~/.ssh by the user's passwd entry, not $HOME; rsync -C loses
 // ~/.cvsignore.
 func stripRsyncHome(args []string, env map[string]string) {

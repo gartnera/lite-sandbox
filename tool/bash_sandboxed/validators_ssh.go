@@ -687,7 +687,7 @@ func xargsReplaceStrings(opts []string) []string {
 				// GNU optional values: the rest of the word.
 				break bundle
 			default:
-				if xargsArgConsumingFlags["-"+string(c)] {
+				if strings.IndexByte(wrapperSpecs["xargs"].opts.short, c) >= 0 {
 					if rest == "" {
 						i++
 					}
