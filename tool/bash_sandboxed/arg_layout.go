@@ -18,8 +18,8 @@ const (
 	// pattern, a script, a number, a process name).
 	roleNonPath
 	// roleWrite: the word names a file the command creates, modifies, or
-	// removes; it is checked against the write set and .claude even when it
-	// does not look like a path.
+	// removes; it is checked against the write set and agent configuration
+	// even when it does not look like a path.
 	roleWrite
 )
 

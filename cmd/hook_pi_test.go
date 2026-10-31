@@ -78,6 +78,10 @@ func TestPiHookFileTools(t *testing.T) {
 		{"write project .pi extension", hook.PiToolWrite, map[string]any{"path": ".pi/extensions/x.ts", "content": "x"}, true},
 		{"write project .claude settings", hook.PiToolWrite, map[string]any{"path": ".claude/settings.json", "content": "{}"}, true},
 		{"edit project .pi settings", hook.PiToolEdit, map[string]any{"path": "./.pi/settings.json", "edits": []any{}}, true},
+		{"write project opencode.json", hook.PiToolWrite, map[string]any{"path": "opencode.json", "content": "{}"}, true},
+		{"write project .opencode plugin", hook.PiToolWrite, map[string]any{"path": ".opencode/plugin/x.ts", "content": "x"}, true},
+		{"write project crushrc", hook.PiToolWrite, map[string]any{"path": "sub/crushrc", "content": "x"}, true},
+		{"write project AGENTS.md", hook.PiToolWrite, map[string]any{"path": "AGENTS.md", "content": "x"}, false},
 		// The same lowercase names mean other tools to Grok; an exact key
 		// match keeps a differently cased duplicate from hiding the path.
 		{"case-folded duplicate key", hook.PiToolRead, map[string]any{"path": filepath.Join(outside, "secret"), "PATH": "a.go"}, true},

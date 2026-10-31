@@ -202,28 +202,6 @@ func TestOSSandboxGitCheckoutTrackedClaudeDir(t *testing.T) {
 	}
 }
 
-func TestIsPiConfigPath(t *testing.T) {
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{"/repo/.pi", true},
-		{"/repo/.pi/settings.json", true},
-		{"/repo/.pi/extensions/x.ts", true},
-		{"/home/u/.pi/agent/settings.json", true},
-		{"/repo/.PI/mcp.json", true},
-		{"/repo/pi/settings.json", false},
-		{"/repo/.pip/x", false},
-		{"/repo/.pi.json", false},
-		{"/repo/src/main.go", false},
-	}
-	for _, tt := range tests {
-		if got := IsPiConfigPath(tt.path); got != tt.want {
-			t.Errorf("IsPiConfigPath(%q) = %v, want %v", tt.path, got, tt.want)
-		}
-	}
-}
-
 // TestBashSandboxed_PiDirReadOnly checks that a project's .pi directory, which
 // pi loads extensions, settings and MCP servers from, can be read but not
 // written, like .claude.

@@ -528,10 +528,11 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 
 // evaluatePiPaths enforces the sandbox boundary on one of pi's file tools.
 // pi never asks before a tool call, so unlike Claude Code's file tools a pi
-// write into a .claude or .pi directory is denied outright, as it is for
-// sandboxed commands: the project's .claude holds Claude Code's hooks and the
-// project's .pi the extensions, settings and MCP servers pi loads, both run
-// outside the sandbox.
+// write into any agent's configuration (bash_sandboxed.IsAgentConfigPath) is
+// denied outright, as it is for sandboxed commands: the project's .pi holds
+// the extensions, settings and MCP servers pi loads, .claude Claude Code's
+// hooks, opencode.json and .opencode opencode's permissions and plugins, all
+// run or obeyed outside the sandbox.
 func evaluatePiPaths(event *hook.Event, pt *hook.PiPathInput) *hook.Decision {
 	paths := pt.Paths()
 	if pt.Write() {
@@ -541,18 +542,22 @@ func evaluatePiPaths(event *hook.Event, pt *hook.PiPathInput) *hook.Decision {
 				continue
 			}
 			resolved := bash_sandboxed.ResolvePath(p, cwd)
-			dir := bash_sandboxed.AgentConfigDir(filepath.Clean(p))
-			if dir == "" {
-				dir = bash_sandboxed.AgentConfigDir(resolved)
+			abs := p
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(cwd, abs)
 			}
-			if dir == "" {
+			what := bash_sandboxed.AgentConfigMatch(filepath.Clean(abs))
+			if what == "" {
+				what = bash_sandboxed.AgentConfigMatch(resolved)
+			}
+			if what == "" {
 				continue
 			}
 			reason := fmt.Sprintf(
 				"Blocked by lite-sandbox: %s\n"+
-					"%q resolves to %q, which is inside a %s directory: agent configuration, "+
+					"%q resolves to %q, which is %s: agent configuration, "+
 					"which is read-only in the sandbox. Ask the user to make this change.",
-				pt.Describe(), p, resolved, dir,
+				pt.Describe(), p, resolved, what,
 			)
 			if !auditHookFinding(cwd, pt.Describe(), resolved, reason) {
 				return nil
