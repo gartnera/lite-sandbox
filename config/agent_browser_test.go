@@ -40,7 +40,7 @@ func TestAgentBrowserPaths(t *testing.T) {
 			t.Errorf("%s not created", d)
 		}
 	}
-	if !underDir(AgentBrowserSocketDir(), root) {
+	if filepath.Dir(AgentBrowserSocketDir()) != root {
 		t.Errorf("socket dir %s is not under %s, which other workers hide", AgentBrowserSocketDir(), root)
 	}
 }
@@ -68,9 +68,4 @@ func TestAgentBrowserProfile_Scope(t *testing.T) {
 	if !hidden {
 		t.Errorf("~/.agent-browser is not hidden from other workers: %+v", eff.ScopedDeniedReadEntries())
 	}
-}
-
-func underDir(p, dir string) bool {
-	rel, err := filepath.Rel(dir, p)
-	return err == nil && rel != ".." && !filepath.IsAbs(rel) && (len(rel) < 3 || rel[:3] != "../")
 }

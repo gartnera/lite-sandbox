@@ -1439,6 +1439,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	}
 	stripSSHPass(args, envMap)
 	stripRsyncHome(args, envMap)
+	agentBrowserSocketEnv(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
@@ -1796,6 +1797,7 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	}
 	stripSSHPass(args, envMap)
 	stripRsyncHome(args, envMap)
+	agentBrowserSocketEnv(args, envMap)
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

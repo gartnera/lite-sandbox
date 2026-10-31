@@ -854,6 +854,16 @@ func generateSBPLProfile(workDir string, extraBinds []string, maskPaths []string
 			sb.WriteString(fmt.Sprintf("(deny network-outbound (subpath \"%s\"))\n", rd))
 		}
 	}
+	// A read-denied path's sockets too: Seatbelt checks a connection to a
+	// unix socket as network-outbound, which the file-read deny above does
+	// not cover, so a socket inside a hidden path (the agent-browser
+	// daemons' in a grant scoped to agent-browser, gpg-agent's in ~/.gnupg)
+	// would otherwise stay reachable. (On Linux the path's mask hides it.)
+	for _, p := range dl.deniedReadPaths {
+		for _, rp := range withResolved(p) {
+			sb.WriteString(fmt.Sprintf("(deny network-outbound (%s \"%s\"))\n", sbplScope(rp), rp))
+		}
+	}
 
 	// Allow mach lookups (required for macOS services)
 	sb.WriteString("(allow mach-lookup)\n")

@@ -3,7 +3,6 @@ package bash_sandboxed
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/gartnera/lite-sandbox/os_sandbox"
@@ -25,18 +24,6 @@ func guardHost(cfg *config.Config, opts *os_sandbox.WorkerOptions) {
 	opts.DeniedWritePaths = append(opts.DeniedWritePaths, hostProgramDenies(cfg, *opts)...)
 
 	opts.MaskDirs = config.AgentSocketDirs()
-	// On macOS a hidden directory is denied reads only, which does not stop a
-	// connection to a socket in it: mask the socket directory of the daemons
-	// agent-browser's own worker starts in every other worker, which drive
-	// a browser holding agent-browser's sessions. (On Linux the scoped
-	// grant's mask over ~/.agent-browser already makes it unreachable.)
-	if runtime.GOOS == "darwin" && cfg.ProfileEnabled(config.AgentBrowserProfile) {
-		if _, shared := cfg.ScopeForCommand("agent-browser"); shared {
-			if dir := config.AgentBrowserSocketDir(); dir != "" {
-				opts.MaskDirs = append(opts.MaskDirs, dir)
-			}
-		}
-	}
 	for _, sock := range config.AgentSocketPaths() {
 		inDir := false
 		for _, d := range opts.MaskDirs {
