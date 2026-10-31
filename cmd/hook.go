@@ -48,6 +48,29 @@ const (
 // name.
 const grokMCPToolPrefix = grokServerName + "__"
 
+// piMCPToolPrefix is how pi names the sandbox's MCP tools:
+// `mcp__<server>__<tool>` with every character other than letters, digits and
+// _ replaced by _, so lite-sandbox's tools are mcp__lite_sandbox__bash, ...
+const piMCPToolPrefix = "mcp__lite_sandbox__"
+
+// isSandboxBashTool reports whether the event is a call to the sandbox's own
+// bash MCP tool, under the name the sending agent gives it.
+func isSandboxBashTool(event *hook.Event) bool {
+	if event.FromPi() {
+		return event.ToolName == piMCPToolPrefix+"bash"
+	}
+	return event.ToolName == mcpToolPrefix+"bash"
+}
+
+// isSandboxMCPTool reports whether the event is a call to any of the
+// sandbox's MCP tools (bash, kill_shell, list_shells).
+func isSandboxMCPTool(event *hook.Event) bool {
+	if event.FromPi() {
+		return strings.HasPrefix(event.ToolName, piMCPToolPrefix)
+	}
+	return strings.HasPrefix(event.ToolName, mcpToolPrefix) || strings.HasPrefix(event.ToolName, grokMCPToolPrefix)
+}
+
 // hookOptions are the hook's flags, fixed by the installer when it registers
 // the hook.
 type hookOptions struct {
@@ -68,9 +91,9 @@ var hookFlags hookOptions
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Evaluate a Claude Code, Codex, or Grok Build PreToolUse event from stdin",
+	Short: "Evaluate a Claude Code, Codex, Grok Build, or pi PreToolUse event from stdin",
 	Long: "Reads a PreToolUse hook event as JSON on stdin (Claude Code's protocol, which " +
-		"Codex and Grok Build also speak) and enforces " +
+		"Codex and Grok Build also speak, and lite-sandbox's pi extension sends) and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
 		"writes outside the writable paths are denied. The sandbox's own MCP tools " +
 		"(mcp__lite-sandbox__*) are allowed outright, so they stay prompt-free in " +
@@ -141,7 +164,7 @@ func evaluate(event *hook.Event, opts hookOptions) *hook.Decision {
 	// sandbox bash command it is never pre-approved: the user confirms it.
 	// Its decisions are about running `lite-sandbox config`, so they get no
 	// hint suggesting it.
-	if event.ToolName == mcpToolPrefix+"bash" {
+	if isSandboxBashTool(event) {
 		if d := evaluateConfigRequest(event, opts); d != nil {
 			return d
 		}
@@ -167,7 +190,7 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 	// (anthropics/claude-code#18950) but PreToolUse hooks still fire there.
 	// This grants nothing the installer's allow rules don't already: the tools
 	// validate and sandbox every command themselves.
-	if strings.HasPrefix(event.ToolName, mcpToolPrefix) || strings.HasPrefix(event.ToolName, grokMCPToolPrefix) {
+	if isSandboxMCPTool(event) {
 		return hook.NewDecision(hook.DecisionAllow,
 			"Pre-approved by lite-sandbox: its MCP tools validate and sandbox every command themselves.")
 	}
@@ -176,16 +199,17 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 	if in, ok := event.ToolInput.(*hook.MonitorInput); ok && in.IsWebSocket() {
 		return nil
 	}
-	// Claude Code's and Codex's Bash, Claude Code's Monitor, or one of Grok
-	// Build's shell tools (run_terminal_command, monitor, ...). The redirect
-	// needs only the name.
-	if hook.IsShellTool(event.ToolName) && !validateBash {
+	// Claude Code's and Codex's Bash, Claude Code's Monitor, one of Grok
+	// Build's shell tools (run_terminal_command, monitor, ...), or pi's bash.
+	// The redirect needs only the name. pi's powershell tool runs PowerShell,
+	// which the bash validator cannot check, so it is always redirected.
+	if event.IsShellTool() && (!validateBash || (event.FromPi() && event.ToolName == hook.PiToolPowerShell)) {
 		return denyBuiltinBash(event)
 	}
 	if d := denyUninspectableGrokInput(event); d != nil {
 		return d
 	}
-	if hook.IsShellTool(event.ToolName) {
+	if event.IsShellTool() {
 		return validateBuiltinBash(event)
 	}
 	return evaluatePathPolicy(event)
@@ -340,7 +364,7 @@ func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
 // sandboxed MCP tool, which runs the same command through lite-sandbox's
 // validation and path boundaries. The built-in shell tools have no sandbox.
 func denyBuiltinBash(event *hook.Event) *hook.Decision {
-	if !hook.IsShellTool(event.ToolName) {
+	if !event.IsShellTool() {
 		return nil
 	}
 	what := event.ToolName
@@ -356,6 +380,12 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 		))
 	}
 	instead := "run this command with the mcp__lite-sandbox__bash tool"
+	if event.FromPi() {
+		instead = "run this command with the " + piMCPToolPrefix + "bash tool"
+		if event.ToolName == hook.PiToolPowerShell {
+			instead += " (it runs bash, not PowerShell)"
+		}
+	}
 	if event.ToolName == hook.ToolMonitor {
 		instead += " and run_in_background set to true, then read the output file it names"
 	}
@@ -430,10 +460,17 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 	// command runs — and the built-in Bash tool has no runtime layer and no OS
 	// sandbox worker behind it. Defer to Claude Code's normal permission flow
 	// instead: the static checks that did apply were still enforced above.
+	// pi has no permission flow of its own — deferring there runs the command
+	// unasked — so its extension is told to ask the user instead.
 	if len(prompted) > 0 {
 		return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
 	}
 	if cfg, _ := config.LoadSettingsForDirectory(cwd); cfg.EffectiveMode() != config.ModeAllowlist {
+		if event.FromPi() {
+			return hook.NewDecision(hook.DecisionAsk, fmt.Sprintf(
+				"lite-sandbox: in %s mode the command whitelist is advisory, and pi's bash runs this command "+
+					"outside the sandbox: %s", cfg.EffectiveMode(), in.Describe()))
+		}
 		return nil
 	}
 	return hook.NewDecision(hook.DecisionAllow, "Validated by lite-sandbox: command passed the sandbox AST whitelist and path boundaries.")
@@ -459,6 +496,10 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if mi, ok := event.ToolInput.(*hook.MediaInput); ok {
 		return evaluatePaths(event, mi.Describe(), mi.Paths(), false)
 	}
+	// pi's file tools.
+	if pt, ok := event.ToolInput.(*hook.PiPathInput); ok {
+		return evaluatePiPaths(event, pt)
+	}
 
 	path, write, governed := fsTarget(event)
 	if !governed || path == "" {
@@ -483,6 +524,43 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		what = event.ToolInput.Describe()
 	}
 	return boundaryDenial(sb, cwd, what, path, write, event.FromGrok())
+}
+
+// evaluatePiPaths enforces the sandbox boundary on one of pi's file tools.
+// pi never asks before a tool call, so unlike Claude Code's file tools a pi
+// write into a .claude or .pi directory is denied outright, as it is for
+// sandboxed commands: the project's .claude holds Claude Code's hooks and the
+// project's .pi the extensions, settings and MCP servers pi loads, both run
+// outside the sandbox.
+func evaluatePiPaths(event *hook.Event, pt *hook.PiPathInput) *hook.Decision {
+	paths := pt.Paths()
+	if pt.Write() {
+		cwd := eventCWD(event)
+		for _, p := range paths {
+			if cwd == "" && !filepath.IsAbs(p) {
+				continue
+			}
+			resolved := bash_sandboxed.ResolvePath(p, cwd)
+			dir := bash_sandboxed.AgentConfigDir(filepath.Clean(p))
+			if dir == "" {
+				dir = bash_sandboxed.AgentConfigDir(resolved)
+			}
+			if dir == "" {
+				continue
+			}
+			reason := fmt.Sprintf(
+				"Blocked by lite-sandbox: %s\n"+
+					"%q resolves to %q, which is inside a %s directory: agent configuration, "+
+					"which is read-only in the sandbox. Ask the user to make this change.",
+				pt.Describe(), p, resolved, dir,
+			)
+			if !auditHookFinding(cwd, pt.Describe(), resolved, reason) {
+				return nil
+			}
+			return hook.NewDecision(hook.DecisionDeny, reason)
+		}
+	}
+	return evaluatePaths(event, pt.Describe(), paths, pt.Write())
 }
 
 // isClaudeConfigTarget reports whether a Claude Code file tool's target

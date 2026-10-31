@@ -412,7 +412,7 @@ func TestCheckLaunchFlags(t *testing.T) {
 		return fs
 	}
 
-	for _, name := range []string{"claude", "codex", "opencode", "crush"} {
+	for _, name := range []string{"claude", "codex", "opencode", "crush", "pi"} {
 		if err := checkLaunchFlags(target(name), flags()); err != nil {
 			t.Errorf("%s with default flags: %v", name, err)
 		}
@@ -432,6 +432,20 @@ func TestCheckLaunchFlags(t *testing.T) {
 	}
 	if err := checkLaunchFlags(target("codex"), flags("bash-ast-hook-mode=true")); err != nil {
 		t.Errorf("--bash-ast-hook-mode refused for codex: %v", err)
+	}
+
+	// pi's file tools are always confined.
+	if err := checkLaunchFlags(target("pi"), flags()); err != nil {
+		t.Errorf("pi with default flags: %v", err)
+	}
+	if err := checkLaunchFlags(target("pi"), flags("with-tool-hook=false")); err == nil {
+		t.Error("--with-tool-hook=false accepted for pi")
+	}
+	if err := checkLaunchFlags(target("pi"), flags("bash-ast-hook-mode=true")); err != nil {
+		t.Errorf("--bash-ast-hook-mode refused for pi: %v", err)
+	}
+	if err := checkLaunchFlags(target("pi"), flags("permission-mode=plan")); err == nil {
+		t.Error("--permission-mode accepted for pi")
 	}
 }
 

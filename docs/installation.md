@@ -57,23 +57,23 @@ It downloads the archive for this OS/arch, verifies it against the release's `ch
 lite-sandbox install
 ```
 
-With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), [Crush](#crush), and [Grok Build](#grok-build)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`, `grok`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`/`$OPENCODE_CONFIG_DIR`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`, `~/.grok`/`$GROK_HOME`). Name agents to configure only those:
+With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), [Crush](#crush), [Grok Build](#grok-build), and [pi](#pi)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`, `grok`, `pi`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`/`$OPENCODE_CONFIG_DIR`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`, `~/.grok`/`$GROK_HOME`, `~/.pi/agent`/`$PI_CODING_AGENT_DIR`). Name agents to configure only those:
 
 ```bash
-lite-sandbox install                  # autodetect claude / codex / opencode / crush / grok
+lite-sandbox install                  # autodetect claude / codex / opencode / crush / grok / pi
 lite-sandbox install codex            # configure only Codex
 lite-sandbox install claude opencode  # configure exactly these
 ```
 
 `install` also sets up lite-sandbox's own config (`lite-sandbox config path`). A **first-time** config is created with only `audit: true`, so the mode is the `allowlist` default and validation findings are logged for `lite-sandbox audit report`. An **existing** config is left alone. To start in a looser mode, pass `--mode denylist` (or `open`). `denylist` also enables the OS sandbox if `os_sandbox` was never set and bubblewrap (Linux) or sandbox-exec (macOS) passes a preflight check. See [Incremental adoption](adoption.md).
 
-The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude`, `codex`, and `grok`, which share lite-sandbox's PreToolUse hook protocol (for `grok`, `--with-tool-hook` is always on). opencode has no compatible hook protocol, and lite-sandbox's hook doesn't govern Crush's built-in tools, so `--with-tool-hook` does nothing for those two and `--bash-ast-hook-mode` skips them.
+The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to `claude`, `codex`, and `grok`, which share lite-sandbox's PreToolUse hook protocol, and to `pi`, whose lite-sandbox extension runs the same hook (for `grok` and `pi`, `--with-tool-hook` is always on). opencode has no compatible hook protocol, and lite-sandbox's hook doesn't govern Crush's built-in tools, so `--with-tool-hook` does nothing for those two and `--bash-ast-hook-mode` skips them.
 
 ## Temporary setup: `lite-sandbox launch`
 
 `launch` starts an agent CLI with the sandbox wired up, without writing to the agent's configuration. Everything `install` would write to the agent's config files is passed on the agent's command line or in its environment instead, so the sandbox applies to that session only.
 
-It supports Claude Code, Codex, opencode, and Crush:
+It supports Claude Code, Codex, opencode, Crush, and pi:
 
 ```bash
 lite-sandbox launch claude                     # interactive session, sandboxed
@@ -81,6 +81,7 @@ lite-sandbox launch claude -p "run the tests"  # arguments after the agent are p
 lite-sandbox launch codex exec "run the tests"
 lite-sandbox launch opencode
 lite-sandbox launch crush
+lite-sandbox launch pi
 lite-sandbox launch --dry-run codex            # print the command instead of running it
 ```
 
@@ -106,6 +107,8 @@ Grok Build isn't supported. Its `GROK_CONFIG` overlay only accepts soft settings
 | | Usage directive in `AGENTS.md` | `instructions` naming a file in lite-sandbox's cache directory |
 | Crush | MCP server and permissions in `crushrc` (or `crush.json`) | `CRUSH_GLOBAL_CONFIG` pointing at a stand-in config directory ([below](#crush-stand-in-config)) |
 | | Usage directive in `CRUSH.md` | A global context path in the stand-in `crushrc` |
+| pi | Extension in `~/.pi/agent/extensions/lite-sandbox.ts` (MCP server, hook, usage directive) | `-e`, with the same extension kept in lite-sandbox's cache directory (`<cache>/lite-sandbox/launch/pi`, named by its content) |
+| | `"-bash"` in `defaultTools` in `~/.pi/agent/settings.json` | `--exclude-tools bash` |
 
 <a id="opencode-v2-standalone"></a>
 #### opencode v2: `--standalone`
@@ -125,17 +128,19 @@ Crush has no flag or variable that adds configuration, only `CRUSH_GLOBAL_CONFIG
 
 Crush's data directory, skills, and commands don't depend on `CRUSH_GLOBAL_CONFIG`, and project configs still load. `launch crush` needs crush v0.88.0 or newer, since older versions don't read `crushrc`.
 
+`launch pi` refuses to run when the extension is already installed in `~/.pi/agent/extensions`: plain `pi` is then sandboxed already, and pi would refuse to load a second copy.
+
 ### Defaults
 
 Because it configures one session rather than every project, `launch` is stricter than `install` by default:
 
-- **The built-in shell is blocked outright.** Claude Code's `Bash` is denied as in the default install, so the model isn't offered it. Codex's is removed with `--disable shell_tool`. opencode's `bash` (v2: `shell`) is denied and Crush's is disabled, as `install` does.
-- **`--with-tool-hook` is on** for Claude Code and Codex. The `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` (and Codex's `apply_patch`) to its writable paths. For Claude Code this is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior. opencode and Crush have no compatible hook, so their file tools aren't confined, as with `install`.
+- **The built-in shell is blocked outright.** Claude Code's `Bash` is denied as in the default install, so the model isn't offered it. Codex's is removed with `--disable shell_tool`. opencode's `bash` (v2: `shell`) is denied and Crush's is disabled, as `install` does, and pi's is left out with `--exclude-tools`.
+- **`--with-tool-hook` is on** for Claude Code and Codex. The `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` (and Codex's `apply_patch`) to its writable paths. For Claude Code this is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior. opencode and Crush have no compatible hook, so their file tools aren't confined, as with `install`. pi's are always confined, as with `install pi`, so `--with-tool-hook=false` is refused for it.
 - **`--permission-mode acceptEdits`** (Claude Code only), written as `permissions.defaultMode`, so edits apply without a prompt. The hook keeps them inside the boundary, and a write outside it is still denied. Pass `--permission-mode ""` to keep Claude Code's own default, or pass your own `--permission-mode` *after* the agent name, which overrides the setting.
 
-`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below), for Claude Code and Codex. A flag that has no effect on the chosen agent (`--permission-mode` for anything but Claude Code, `--bash-ast-hook-mode` or an explicit `--with-tool-hook` for opencode or Crush) is refused rather than ignored.
+`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below), for Claude Code and Codex, and `--bash-ast-hook-mode` for pi too. A flag that has no effect on the chosen agent (`--permission-mode` for anything but Claude Code, `--bash-ast-hook-mode` or an explicit `--with-tool-hook` for opencode or Crush) is refused rather than ignored.
 
-`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup. The only files `launch` writes are opencode's directive and Crush's stand-in config, under lite-sandbox's cache directory. That directory is as protected as lite-sandbox's config file: outside the path boundary, and read-only under the OS sandbox in `denylist` mode. This matters for Crush, which runs the stand-in `crushrc` as a script.
+`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup. The only files `launch` writes are opencode's directive, Crush's stand-in config, and pi's extension, under lite-sandbox's cache directory. That directory is as protected as lite-sandbox's config file: outside the path boundary, and read-only under the OS sandbox in `denylist` mode. This matters for Crush, which runs the stand-in `crushrc` as a script.
 
 ## Claude Code
 
@@ -479,6 +484,44 @@ For every shell command, run it with the `lite-sandbox__bash` MCP tool: call `us
 
 Restart Grok after making these changes; `/hooks` lists the loaded hook.
 
+## pi
+
+To configure [pi](https://pi.dev) (`@earendil-works/pi-coding-agent`, 1.0 or later), run the install (autodetected, or named explicitly):
+
+```bash
+lite-sandbox install pi
+```
+
+pi has no hook protocol or permission prompts of its own; it is extended with TypeScript [extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md) that run inside the pi process. So the installer writes one, in pi's **agent directory** (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`):
+
+1. `extensions/lite-sandbox.ts`, which pi loads in every session. It:
+   - registers the MCP server (`lite-sandbox serve-mcp --config-requests`) with `exposure: "direct"`, so its tools are declared to the model like built-in ones (pi's default for MCP servers, `codemode`, would hide them behind scripts). pi names MCP tools `mcp__<server>__<tool>` with `-` replaced by `_`, so the sandbox shell is `mcp__lite_sandbox__bash`. The server runs for the whole session, like with the other agents.
+   - forwards each call of pi's built-in `bash`, `powershell`, `read`, `write`, `edit`, `grep`, `find`, and `ls` tools, and of `mcp__lite_sandbox__bash`, to `lite-sandbox hook --config-requests` from pi's `tool_call` event. The hook redirects `bash` and `powershell` to the sandbox tool, confines `read`/`grep`/`find`/`ls` to the readable paths and `write`/`edit` to the writable paths (and denies writes into `.git`, `.pi`, and `.claude` directories), and answers `ask` for a [config request](configuration.md#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval) or a [command that asks first](configuration.md#commands-that-ask-first). A denial blocks the call with the hook's reason. An `ask` opens a confirmation dialog, and the call runs only if you approve; in print (`-p`) and JSON mode, which have no UI, it is blocked. Unlike the other agents' hooks, **the extension fails closed**: if the hook can't be run, exits with an error, prints an unreadable answer, or takes more than 30 seconds, the call is blocked.
+   - adds a usage directive to the system prompt as a section of its own.
+2. `"-bash"` in `defaultTools` in `settings.json`, so the model isn't offered pi's built-in shell. Any other `bash` entry is removed first; an empty `defaultTools` (all built-in tools off) is left alone. If the extension fails to load, pi then has no shell at all rather than an unsandboxed one. Its file tools, though, run unconfined in such a session, so treat an extension load error that pi reports at startup as the sandbox being off.
+
+Like for Grok Build, the file tools are **always** confined (`--with-tool-hook` is implied): pi never asks before a tool call, so the hook is the only thing keeping `read` and `write` inside the project. `--bash-ast-hook-mode` works too: the extension registers no MCP server and adds no directive, the built-in `bash` stays enabled (a `"-bash"` an earlier install added is removed), and the hook AST-checks each command (`lite-sandbox hook --validate-bash`). `powershell` is always redirected, since the check parses bash. Outside `allowlist` mode a command that passes the check isn't on a full whitelist, and pi's `bash` runs it unsandboxed, so the extension asks you before running it (where Claude Code would show its own permission prompt). The installer refuses a pi on `PATH` older than 1.0, the first release with built-in MCP support, and warns when `settings.json` disables it (`"-builtin:mcp"` in `extensions`).
+
+Re-running the install (including to switch modes) is idempotent: the extension file is owned outright and rewritten, and only the `bash` entries of `defaultTools` are touched. Restart pi, or run `/reload`, for the changes to take effect; `/mcp` lists the lite-sandbox server.
+
+Things to know:
+
+- **Extensions are trusted code.** The hook's checks hold only while the lite-sandbox extension runs. pi runs `tool_call` handlers in load order, and a later extension's handler can still change a call's arguments after lite-sandbox approved them. The `--no-extensions`, `--no-mcp`, `--tools`, and `-e` flags change what loads for one run.
+- **Project `.pi` directories are read-only to the sandbox.** pi loads a project's `.pi/settings.json`, `.pi/extensions`, and `.pi/mcp.json` into its own process once you trust the project, so neither sandboxed commands nor pi's `write`/`edit` tools may write there (see [Security](security.md)). Make such changes yourself.
+- **`!` commands you type run unsandboxed.** pi's `user_bash` event (`!cmd` and `!!cmd`) is left alone: the commands are yours, not the model's.
+
+### Manual pi setup
+
+The extension is generated from [`cmd/pi_extension.ts`](../cmd/pi_extension.ts) with the binary path and mode filled in, so the simplest manual setup is to run the installer with `PI_CODING_AGENT_DIR` pointing at a scratch directory and copy `extensions/lite-sandbox.ts` from there. Then add `"-bash"` to `defaultTools` in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "defaultTools": ["-bash"]
+}
+```
+
+Restart pi after making these changes.
+
 ## Manual Claude Code setup
 
 ### 1. Add the MCP server
@@ -551,7 +594,7 @@ ALWAYS use the mcp__lite-sandbox__bash tool for running shell commands. The buil
 
 ## Built-in tool boundaries
 
-The bash tool confines shell commands to the sandbox's readable and writable paths, but Claude Code's **built-in tools** bypass the sandbox. (This section is about Claude Code. Codex and Grok Build get the same hook; see [OpenAI Codex CLI](#openai-codex-cli) and [Grok Build](#grok-build) for their tool names.) The built-in `Bash` tool runs unvalidated shell, and `Read`/`Write`/`Edit`/`NotebookEdit` (plus the `Grep`/`Glob` path argument) can read and write anywhere, so an agent could read `~/.ssh/id_rsa` or write outside the project through them. The optional tool hook closes that gap.
+The bash tool confines shell commands to the sandbox's readable and writable paths, but Claude Code's **built-in tools** bypass the sandbox. (This section is about Claude Code. Codex, Grok Build, and pi get the same hook; see [OpenAI Codex CLI](#openai-codex-cli), [Grok Build](#grok-build), and [pi](#pi) for their tool names.) The built-in `Bash` tool runs unvalidated shell, and `Read`/`Write`/`Edit`/`NotebookEdit` (plus the `Grep`/`Glob` path argument) can read and write anywhere, so an agent could read `~/.ssh/id_rsa` or write outside the project through them. The optional tool hook closes that gap.
 
 Enable it at install time:
 

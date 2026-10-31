@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -233,5 +236,84 @@ func TestShellQuote(t *testing.T) {
 	want := `claude --settings '{"a":"b"}' -p 'it'\''s here'`
 	if got != want {
 		t.Errorf("shellQuote = %s, want %s", got, want)
+	}
+}
+
+// isolatePiLaunch points pi's agent directory and lite-sandbox's cache at
+// temp directories, with no pi on PATH (so no version check).
+func isolatePiLaunch(t *testing.T) (agentDir, cacheDir string) {
+	t.Helper()
+	agentDir = filepath.Join(t.TempDir(), "agent")
+	cacheDir = t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	return agentDir, cacheDir
+}
+
+func TestPiLaunchArgs(t *testing.T) {
+	setLaunchFlags(t)
+	_, cacheDir := isolatePiLaunch(t)
+
+	argv, err := piLaunchArgs(testBin, []string{"-p", "hi"})
+	if err != nil {
+		t.Fatalf("piLaunchArgs: %v", err)
+	}
+	ext := flagValue(t, argv, "-e")
+	if runtime.GOOS == "linux" && !strings.HasPrefix(ext, cacheDir) {
+		t.Errorf("extension %s is not in the cache directory %s", ext, cacheDir)
+	}
+	src, err := os.ReadFile(ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), `"bin": "`+testBin+`"`) || !strings.Contains(string(src), `"mcp": true`) {
+		t.Errorf("extension does not carry the launch configuration:\n%s", src)
+	}
+	if got := flagValue(t, argv, "--exclude-tools"); got != "bash" {
+		t.Errorf("--exclude-tools %s, want bash", got)
+	}
+	if !slices.Equal(argv[len(argv)-2:], []string{"-p", "hi"}) {
+		t.Errorf("agent arguments not passed last: %v", argv)
+	}
+
+	// The same configuration reuses the same file.
+	argv2, err := piLaunchArgs(testBin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flagValue(t, argv2, "-e") != ext {
+		t.Error("an identical launch wrote a second extension file")
+	}
+}
+
+func TestPiLaunchArgsBashASTHookMode(t *testing.T) {
+	setLaunchFlags(t, bashASTHookMode)
+	isolatePiLaunch(t)
+	argv, err := piLaunchArgs(testBin, nil)
+	if err != nil {
+		t.Fatalf("piLaunchArgs: %v", err)
+	}
+	if slices.Contains(argv, "--exclude-tools") {
+		t.Errorf("built-in bash excluded in --bash-ast-hook-mode: %v", argv)
+	}
+	src, err := os.ReadFile(flagValue(t, argv, "-e"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "--validate-bash") {
+		t.Errorf("extension does not validate bash:\n%s", src)
+	}
+}
+
+func TestPiLaunchArgsRefusesWhenInstalled(t *testing.T) {
+	setLaunchFlags(t)
+	agentDir, _ := isolatePiLaunch(t)
+	if err := writeFileMkdir(filepath.Join(agentDir, "extensions", piExtensionFile), []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := piLaunchArgs(testBin, nil); err == nil || !strings.Contains(err.Error(), "already installed") {
+		t.Fatalf("err = %v, want already installed", err)
 	}
 }

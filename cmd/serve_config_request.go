@@ -106,7 +106,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 // fix when this agent can make config requests, so the agent runs the change
 // itself (with the user's approval) instead of only relaying it.
 const configRequestHint = "\n\nYou can make this config change yourself: run the `lite-sandbox config ...` command " +
-	"with the mcp__lite-sandbox__bash tool, as a command of its own. The user is asked to approve it, " +
+	"with the lite-sandbox MCP server's `bash` tool, as a command of its own. The user is asked to approve it, " +
 	"and it applies to the next command."
 
 // configRequestAloneHint replaces configRequestHint when the error is the deny
