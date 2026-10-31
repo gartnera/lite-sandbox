@@ -91,6 +91,12 @@ func TestGrokHookFileTools(t *testing.T) {
 		{"second spelling outside", hook.GrokToolRead, map[string]any{"target_file": "src/ok.go", "filePath": filepath.Join(outside, "secret")}, true},
 		{"write second spelling outside", hook.GrokToolWrite, map[string]any{"filePath": "ok.txt", "file_path": filepath.Join(outside, "x"), "content": "x"}, true},
 		{"case-variant key does not hide the real one", hook.GrokToolSearchReplace, map[string]any{"file_path": filepath.Join(outside, "x"), "FILE_PATH": "a.go", "old_string": "a", "new_string": "b"}, true},
+		{"write project .opencode plugin", hook.GrokToolWrite, map[string]any{"file_path": ".opencode/plugin/x.ts", "content": "x"}, true},
+		{"write project .grok hook", hook.GrokToolWrite, map[string]any{"file_path": ".grok/hooks/h.json", "content": "{}"}, true},
+		{"search_replace project opencode.json", hook.GrokToolSearchReplace, map[string]any{"file_path": "opencode.json", "old_string": "a", "new_string": "b"}, true},
+		{"write project .claude settings", hook.GrokToolWrite, map[string]any{"file_path": ".claude/settings.json", "content": "{}"}, true},
+		{"read project opencode.json", hook.GrokToolReadFile, map[string]any{"target_file": "opencode.json"}, false},
+		{"write project AGENTS.md", hook.GrokToolWrite, map[string]any{"file_path": "AGENTS.md", "content": "x"}, false},
 		{"apply_patch outside", hook.ToolApplyPatch, map[string]any{"patch": "*** Begin Patch\n*** Add File: " + filepath.Join(outside, "x") + "\n+x\n*** End Patch\n"}, true},
 	}
 	for _, tt := range tests {

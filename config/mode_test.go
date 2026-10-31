@@ -199,6 +199,16 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 			t.Errorf("write-denied missing %s: %v", want, write)
 		}
 	}
+	// opencode's home config directory, which it loads like the XDG one.
+	if err := os.MkdirAll(filepath.Join(home, ".opencode"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write = deniedPathStrings(DefaultDeniedWritePaths())
+	for _, want := range []string{filepath.Join(home, ".opencode", "opencode.json"), filepath.Join(home, ".opencode", "plugin"), filepath.Join(home, ".opencode", "tools")} {
+		if !slices.Contains(write, want) {
+			t.Errorf("write-denied missing %s: %v", want, write)
+		}
+	}
 }
 
 func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
@@ -222,7 +232,7 @@ func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 		}
 	}
 	write := deniedPathStrings(DefaultDeniedWritePaths())
-	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/opencode/plugins", xdg + "/opencode/agents", oc + "/opencode.json", oc + "/AGENTS.md", oc + "/plugins", pi, xdg + "/crush/crushrc", xdg + "/git/config"} {
+	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", cx + "/hooks.json", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/opencode/plugins", xdg + "/opencode/agents", xdg + "/opencode/tools", oc + "/opencode.json", oc + "/AGENTS.md", oc + "/plugins", pi, xdg + "/crush/crushrc", xdg + "/git/config"} {
 		if !slices.Contains(write, want) {
 			t.Errorf("write-denied defaults missing %s: %v", want, write)
 		}

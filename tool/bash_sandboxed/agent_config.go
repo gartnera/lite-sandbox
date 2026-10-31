@@ -96,22 +96,31 @@ func IsAgentConfigPath(path string) bool {
 	return AgentConfigMatch(path) != ""
 }
 
-// checkAgentConfigWrite rejects a write to agent configuration (see
-// IsAgentConfigPath). Both the path as written and its symlink resolution are
-// checked: a .claude that is itself a symlink resolves to a target without
-// the name, and a link to .claude (or to opencode.json) resolves into it.
-func checkAgentConfigWrite(orig, path, workDir string) error {
+// AgentConfigWrite reports whether a write to path, relative to workDir,
+// lands in agent configuration: what is AgentConfigMatch's description, or ""
+// when it does not, and resolved is the path with symlinks followed. Both the
+// path as written and its symlink resolution are checked: a .claude that is
+// itself a symlink resolves to a target without the name, and a link to
+// .claude (or to opencode.json) resolves into it. The sandbox's path checks
+// and the PreToolUse hook's file-tool checks share it.
+func AgentConfigWrite(path, workDir string) (what, resolved string) {
 	abs := path
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(workDir, abs)
 	}
 	abs = filepath.Clean(abs)
-	resolved := ResolvePath(abs, workDir)
-	what := AgentConfigMatch(abs)
+	resolved = ResolvePath(abs, workDir)
+	what = AgentConfigMatch(abs)
 	if what == "" {
 		what = AgentConfigMatch(resolved)
 	}
-	if what != "" {
+	return what, resolved
+}
+
+// checkAgentConfigWrite rejects a write to agent configuration (see
+// AgentConfigWrite).
+func checkAgentConfigWrite(orig, path, workDir string) error {
+	if what, resolved := AgentConfigWrite(path, workDir); what != "" {
 		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q is %s, a coding agent's configuration, which is read-only in the sandbox; ask the user to make this change", orig, what))
 	}
 	return nil

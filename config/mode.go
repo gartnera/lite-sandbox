@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -252,16 +253,19 @@ func DefaultDeniedWritePaths() []DeniedPath {
 	if dirExists(codex) {
 		out = append(out,
 			file(filepath.Join(codex, "config.toml")),
+			// Hooks Codex runs, outside the sandbox, from its config folder.
+			file(filepath.Join(codex, "hooks.json")),
 			file(filepath.Join(codex, "AGENTS.md")),
 			dir(filepath.Join(codex, "prompts")),
 		)
 	}
 	// opencode: its config (MCP server, permission rules) and usage directive,
 	// plus the agent definitions (which carry permission rules of their own)
-	// and the plugins it runs as unsandboxed JavaScript. v2 reads
-	// OPENCODE_CONFIG_DIR in place of the XDG directory when it is set.
-	ocDirs := []string{filepath.Join(xdg, "opencode")}
-	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" && d != ocDirs[0] {
+	// and the plugins and custom tools it runs as unsandboxed JavaScript. v2
+	// reads OPENCODE_CONFIG_DIR in place of the XDG directory when it is set,
+	// and both majors also load ~/.opencode as a config directory.
+	ocDirs := []string{filepath.Join(xdg, "opencode"), filepath.Join(home, ".opencode")}
+	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" && !slices.Contains(ocDirs, d) {
 		ocDirs = append(ocDirs, d)
 	}
 	for _, oc := range ocDirs {
@@ -273,7 +277,7 @@ func DefaultDeniedWritePaths() []DeniedPath {
 			file(filepath.Join(oc, "opencode.jsonc")),
 			file(filepath.Join(oc, "AGENTS.md")),
 		)
-		for _, sub := range []string{"agent", "agents", "mode", "modes", "plugin", "plugins"} {
+		for _, sub := range []string{"agent", "agents", "mode", "modes", "plugin", "plugins", "tool", "tools"} {
 			out = append(out, dir(filepath.Join(oc, sub)))
 		}
 	}
