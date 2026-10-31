@@ -1786,6 +1786,7 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 		return err
 	}
 	restrictCommandEnv(args, envMap)
+	agentBrowserWorkerEnv(args, envMap)
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {
