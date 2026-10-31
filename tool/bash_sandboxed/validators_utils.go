@@ -79,6 +79,27 @@ var sortSpec = optSpec{
 	long:  []string{"key", "field-separator", "buffer-size", "temporary-directory", "output", "batch-size", "compress-program", "files0-from", "parallel", "random-source", "sort"},
 }
 
+// sortLayout is sort's layout: -o/--output and -T/--temporary-directory are
+// written, --random-source read (--files0-from is refused). The command has
+// noFlagPaths (-t/ is a separator, not a path), so the attached forms of
+// these options are checked from the layout instead of by the generic pass.
+var sortLayout = &argLayout{opts: sortSpec, values: map[string]argRole{
+	"o": roleWrite, "output": roleWrite,
+	"T": roleWrite, "temporary-directory": roleWrite,
+	"random-source": roleRead,
+}}
+
+// checkSortReads holds the files sort reads through an option value to the
+// read set.
+func checkSortReads(args []string, workDir string, sets resolvedPathSets) error {
+	for _, f := range sortLayout.readTargets(args) {
+		if err := checkBoundary(f, f, workDir, false, sets.read); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // sortLongOpts are all of sort's long options (GNU and BSD).
 var sortLongOpts = append(append([]string(nil), sortSpec.long...),
 	"check", "debug", "dictionary-order", "general-numeric-sort", "help",
@@ -89,7 +110,12 @@ var sortLongOpts = append(append([]string(nil), sortSpec.long...),
 
 // validateSortArgs refuses --compress-program (and any abbreviation of it):
 // sort runs the program, through sh on macOS, whenever it spills temp files.
+// It also refuses --files0-from, which reads the names it sorts from a file
+// the path check can't see into (as for xz --files).
 func validateSortArgs(_ *Sandbox, args []*syntax.Word) error {
+	if opt := refusedOption(wordTexts(args), sortSpec, sortLongOpts, "--files0-from"); opt != "" {
+		return fmt.Errorf("sort option %q is not allowed: it reads file names from a file", opt)
+	}
 	if opt := refusedOption(wordTexts(args), sortSpec, sortLongOpts, "--compress-program"); opt != "" {
 		return fmt.Errorf("sort option %q is not allowed: it runs a program", opt)
 	}

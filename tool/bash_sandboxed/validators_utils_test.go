@@ -49,6 +49,8 @@ func TestUtilCommands_Allowed(t *testing.T) {
 		"less -R a.txt", "less -N -S a.txt", "less -p pattern a.txt", "less -pko a.txt",
 		"less --long-prompt a.txt", "less -- -o", "PAGER=cat git log",
 		"sort -k2 -t, a.txt", "sort -u --output=out.txt a.txt", "sort -S 64K a.txt",
+		"sort --random-source=" + ro + "/r a",
+		"sort --random-source " + ro + "/r a", "sort -T. a", "sort -T out a", "sort --temporary-directory=out a",
 		"shuf -n 1 a.txt", "shuf -o out.txt a.txt", "shuf -i 1-10",
 
 		// Writes inside the write set
@@ -83,6 +85,11 @@ func TestUtilCommands_Blocked(t *testing.T) {
 	workDir, roDir := utilDirs(t)
 	ro := filepath.Join(roDir, "data.txt")
 	outside := filepath.Join(filepath.Dir(workDir), "outside-"+filepath.Base(workDir))
+	// A read of a path that doesn't exist is allowed, so the read cases need a file.
+	if err := os.WriteFile(outside, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
 	s := newTestSandbox()
 	for _, tt := range []struct {
 		command string
@@ -97,6 +104,9 @@ func TestUtilCommands_Blocked(t *testing.T) {
 		{"sdiff --out=out a b", "runs another program"},
 		{"split --filter='sh -c x' a.txt", "runs a shell command"},
 		{"split --f=sh a.txt", "runs a shell command"},
+		{"sort --files0-from=a.txt", "reads file names"},
+		{"sort --files0-from -", "reads file names"},
+		{"sort --files0-f=a.txt", "reads file names"},
 		{"sort --compress-program=sh a.txt", "runs a program"},
 		{"sort --compress-program sh a.txt", "runs a program"},
 		{"sort --compress-prog=sh a.txt", "runs a program"},
@@ -141,6 +151,14 @@ func TestUtilCommands_Blocked(t *testing.T) {
 
 		// Writes outside the write set
 		{"sort -o " + outside + " a.txt", "outside allowed directories"},
+		{"sort --random-source=" + outside + " a", "outside allowed directories"},
+		{"sort --random-source " + outside + " a", "outside allowed directories"},
+		{"sort -T" + outside + " a", "outside allowed directories"},
+		{"sort -T " + outside + " a", "outside allowed directories"},
+		{"sort -T" + ro + " a", "outside allowed directories"},
+		{"sort --temporary-directory=" + outside + " a", "outside allowed directories"},
+		{"sort --temporary-directory " + outside + " a", "outside allowed directories"},
+		{"sort --temp=" + outside + " a", "outside allowed directories"},
 		{"uniq a.txt " + outside, "outside allowed directories"},
 		{"shuf -o " + ro + " a.txt", "outside allowed directories"},
 		{"dd if=a.txt of=" + outside, "outside allowed directories"},

@@ -124,7 +124,7 @@ func commandTable() map[string]commandSpec {
 		"split":   {validate: validateSplitArgs, args: splitLayout},
 		"csplit":  {args: csplitLayout},
 		"shuf":    {args: outputOptionLayout(optSpec{short: "ino", long: []string{"input-range", "head-count", "output", "random-source"}})},
-		"sort":    {noFlagPaths: true, validate: validateSortArgs, args: outputOptionLayout(sortSpec)}, // sort -t<sep>
+		"sort":    {noFlagPaths: true, validate: validateSortArgs, args: sortLayout, checkPaths: checkSortReads}, // sort -t<sep>
 		"iconv":   {args: outputOptionLayout(optSpec{short: "fto", long: []string{"from-code", "to-code", "output"}})},
 		"uniq":    {args: secondOperandLayout(optSpec{short: "fsw", long: []string{"skip-fields", "skip-chars", "check-chars"}})},
 		"xxd":     {args: secondOperandLayout(optSpec{short: "cglosnR"})},

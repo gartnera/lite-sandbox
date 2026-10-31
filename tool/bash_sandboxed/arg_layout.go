@@ -21,6 +21,11 @@ const (
 	// removes; it is checked against the write set and agent configuration
 	// even when it does not look like a path.
 	roleWrite
+	// roleRead: the word names a file the command reads. It is checked
+	// against the read set (see argLayout.readTargets) even when attached to
+	// its option (--files0-from=FILE), where the generic pass would skip it
+	// for a command with noFlagPaths.
+	roleRead
 )
 
 // argLayout declares what a command's option values and operands are, over
@@ -64,6 +69,7 @@ type argLayout struct {
 type argRoles struct {
 	index map[int]argRole
 	extra []string
+	reads []string
 }
 
 // set gives the word at index i role r.
@@ -108,6 +114,9 @@ func (l *argLayout) roles(sp optSpec, args []string) argRoles {
 			r.set(o.valueIndex, role)
 		case role == roleWrite:
 			r.write(o.value)
+		}
+		if role == roleRead && o.hasValue {
+			r.reads = append(r.reads, o.value)
 		}
 	}
 	lead := l.lead
@@ -158,6 +167,20 @@ func (l *argLayout) writeTargets(args []string, _ map[int]bool) []string {
 		for _, e := range r.extra {
 			if !slices.Contains(out, e) {
 				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
+// readTargets returns the files read through an option's value (roleRead) in
+// any reading, for the read-set check.
+func (l *argLayout) readTargets(args []string) []string {
+	var out []string
+	for _, sp := range l.readings() {
+		for _, f := range l.roles(sp, args).reads {
+			if !slices.Contains(out, f) {
+				out = append(out, f)
 			}
 		}
 	}
