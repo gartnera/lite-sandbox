@@ -1,6 +1,6 @@
 ---
 name: autodev
-description: Headless end-to-end development. Takes a requested feature or fix all the way to a merged PR without check-ins - implement, test the affected Go packages, commit, rebase, code review, triage and fix findings, open a labeled PR with auto-merge, then watch CI and merge conflicts until it merges. Use whenever the prompt contains the word "autodev" or asks for hands-off develop-to-merge work.
+description: Headless end-to-end development. Takes a requested feature or fix all the way to a merged PR without check-ins - implement, test the affected Go packages, commit, rebase, code review, then a security review when the change touches the sandbox boundary, triage and fix findings, open a labeled PR with auto-merge, then watch CI and merge conflicts until it merges. Use whenever the prompt contains the word "autodev" or asks for hands-off develop-to-merge work.
 argument-hint: <feature or fix to make>
 allowed-tools: Bash(go *) Bash(gofmt *) Bash(git *) Bash(gh *)
 ---
@@ -120,18 +120,12 @@ git fetch origin main && git rebase origin/main
 Resolve conflicts by keeping both sides' intent. After a non-trivial
 conflict, rerun step 3.
 
-## 6. Review
+## 6. Code review
 
 Review the branch diff against `origin/main` with a reviewer that hasn't seen
-your reasoning:
-
-- Run the `code-review` skill at `high` on the branch diff. If it isn't
-  available, start a fresh `Agent` to review it. Give the agent the diff and
-  the request, not your conclusions.
-- If the diff touches the security boundary, also run the `security-review`
-  skill. That covers `tool/bash_sandboxed`, `os_sandbox`, `config`,
-  `internal/hook`, `cmd/hook*`, `cmd/install*`, `cmd/launch*`, or anything
-  `docs/security.md` describes.
+your reasoning. Run the `code-review` skill at `high` on the branch diff. If
+it isn't available, start a fresh `Agent` to review it. Give the agent the
+diff and the request, not your conclusions.
 
 ## 7. Triage
 
@@ -149,10 +143,25 @@ Check a finding against the code before you act on it. Reviewers can be wrong.
 
 Apply the **Fix** findings. Rerun step 3 and commit, either amending the
 change or adding a follow-up commit. Rebase again as in step 5. If the fixes
-were substantial, run step 6 once more on the new diff. Do at most two review
-rounds, then proceed.
+were substantial, run step 6 once more on the new diff. Do at most two code
+review rounds, then proceed.
 
-## 9. Push and open the PR
+## 9. Security review (only when the change touches the security boundary)
+
+Run this step only if the diff changes the security boundary: decide from
+what the diff does, not just from file names. `tool/bash_sandboxed`,
+`os_sandbox`, `config`, `internal/hook`, `cmd/hook*`, `cmd/install*`,
+`cmd/launch*`, and anything `docs/security.md` describes usually qualify.
+Otherwise skip it and write "Security review: skipped, no security-boundary
+change" in the PR's **Review** section.
+
+When it applies, run the `security-review` skill as a separate pass on the
+diff you have after step 8, so it sees the code-review fixes. Triage its
+findings as in step 7. Fix them as in step 8, and rerun this step after a
+substantial fix. Do at most two security review rounds. Also check that
+`docs/security.md` still matches the behavior.
+
+## 10. Push and open the PR
 
 ```bash
 git push --force-with-lease -u origin <branch>
@@ -166,15 +175,16 @@ headings. Otherwise use:
 - **Summary:** what the PR changes and why.
 - **Testing:** the commands you ran locally, and what you left to CI (full
   `go test ./...`, macOS, E2E).
-- **Review:** what review found: findings fixed, findings rejected with
-  reasons, and links to the issues you filed.
+- **Review:** what the code review and the security review found, each
+  separately: findings fixed, findings rejected with reasons, and links to the
+  issues you filed. If you skipped the security review, say so.
 - **Assumptions:** how you read anything ambiguous in the request.
 
 Add **exactly one** `release:*` label: `release:minor` for a feature,
 `release:patch` for a fix or refactor, `release:skip` for a docs-only,
 CI-only or tests-only change, `release:major` for a breaking change.
 
-## 10. Auto-merge and watch
+## 11. Auto-merge and watch
 
 Nothing gates a merge on CI here: there is no merge queue, and `main` may not
 require status checks. Enabling auto-merge right away could therefore merge
@@ -197,8 +207,9 @@ before CI runs.
 3. **CI failure:** read the failing job's log (`gh run view <run>
    --log-failed`, or `get_job_logs`). Reproduce the failure locally with the
    job's exact command and environment (`OS_SANDBOX_TESTS=1` and so on).
-   Fix it and show the same command passing. Then commit, rebase and push as
-   in steps 4, 5 and 9, and wait for green again before re-enabling auto-merge
+   Fix it and show the same command passing. If the fix touches the security
+   boundary, run step 9 on it. Then commit, rebase and push as
+   in steps 4, 5 and 10, and wait for green again before re-enabling auto-merge
    if GitHub dropped it. If the failure only happens on macOS, reason from the
    log and say so in the PR. If a failure is unrelated to the diff and passes
    when rerun locally, rerun only the failed jobs once (`gh run rerun <run>
