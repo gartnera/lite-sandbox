@@ -45,6 +45,16 @@ type optSpec struct {
 	// stopAtOperand ends the options at the first operand, as getopt does
 	// with a "+" optstring, POSIXLY_CORRECT, or a BSD libc.
 	stopAtOperand bool
+	// cfg, when set, is config()'s result (see compiled).
+	cfg *getopt.Config
+}
+
+// compiled returns sp with its getopt.Config built, so scanning with it does
+// not build one per call.
+func (sp optSpec) compiled() optSpec {
+	c := sp.config()
+	sp.cfg = &c
+	return sp
 }
 
 // parsedOpt is one option of a parsed command line.
@@ -81,7 +91,11 @@ func (sp optSpec) scan(args []string) parsedArgs {
 // scanFrom parses args from index start into p.
 func (sp optSpec) scanFrom(p *parsedArgs, start int) {
 	args := p.args
-	cfg := sp.config()
+	cfg := sp.cfg
+	if cfg == nil {
+		c := sp.config()
+		cfg = &c
+	}
 	for start < len(args) {
 		// The state's argv is args[start:] behind the command name, so its
 		// index i is args' index start+i-1.
@@ -94,7 +108,7 @@ func (sp optSpec) scanFrom(p *parsedArgs, start int) {
 				return // every word parsed
 			}
 			word := args[at(before)]
-			res, err := st.GetOpt(cfg)
+			res, err := st.GetOpt(*cfg)
 			if err == getopt.ErrDone {
 				if word == "--" {
 					p.dashdash = true

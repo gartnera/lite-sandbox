@@ -2,11 +2,14 @@ package bash_sandboxed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+
+	"mvdan.cc/sh/v3/shell"
 )
 
 // TestArgLayoutPathBypasses: every spelling getopt_long accepts reaches the
@@ -42,6 +45,8 @@ func TestArgLayoutPathBypasses(t *testing.T) {
 		"grep -rn /api/v1 .",
 		"grep -A 3 -m 1 /usr/ .",
 		"sed -n s/a/b/p ./f",
+		"sed -i /^#/d ./f", // GNU script that BSD would read as -i's suffix
+		"sed -i -e /^#/d ./f",
 		"sed -e s/a/b/ -e s/c/d/ ./f",
 		"pgrep -f /usr/bin/node",
 		"pgrep -lf /usr/bin/node",
@@ -119,7 +124,8 @@ var getoptVectors = []struct {
 // which parses with glibc's getopt_long, and requires scan to read the
 // options, values, and operands as it does.
 func TestGetoptMatchesGlibc(t *testing.T) {
-	if err := exec.Command("getopt", "-T").Run(); err == nil || err.(*exec.ExitError).ExitCode() != 4 {
+	var exit *exec.ExitError
+	if err := exec.Command("getopt", "-T").Run(); !errors.As(err, &exit) || exit.ExitCode() != 4 {
 		t.Skip("needs util-linux getopt(1)")
 	}
 	for _, v := range getoptVectors {
@@ -194,7 +200,10 @@ func glibcGetopt(sp optSpec, argv []string) (string, error) {
 		}
 		return letters[rune(word[1])]
 	}
-	words := shellSplit(strings.TrimSpace(string(out)))
+	words, err := shell.Fields(string(out), nil)
+	if err != nil {
+		return "", fmt.Errorf("getopt output %q: %v", out, err)
+	}
 	var b strings.Builder
 	i := 0
 	for ; i < len(words) && words[i] != "--"; i++ {
@@ -236,40 +245,4 @@ func canonicalParse(sp optSpec, argv []string) string {
 		fmt.Fprintf(&b, " %q", w)
 	}
 	return b.String()
-}
-
-// shellSplit splits getopt(1)'s output, whose words are single-quoted with
-// ' written '\”.
-func shellSplit(s string) []string {
-	var out []string
-	var cur strings.Builder
-	in, started := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case in && c == '\'':
-			in = false
-		case in:
-			cur.WriteByte(c)
-		case c == '\'':
-			in, started = true, true
-		case c == '\\' && i+1 < len(s):
-			i++
-			cur.WriteByte(s[i])
-			started = true
-		case c == ' ':
-			if started {
-				out = append(out, cur.String())
-				cur.Reset()
-				started = false
-			}
-		default:
-			cur.WriteByte(c)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, cur.String())
-	}
-	return out
 }

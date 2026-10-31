@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"maps"
 	"slices"
+	"sync"
 )
 
 // argRole is what a word of a command line is to the path checks.
@@ -50,6 +51,11 @@ type argLayout struct {
 	// adjust changes the roles where the shape above does not fit: cp
 	// writes only its last operand, ln TARGET creates "." as well.
 	adjust func(p parsedArgs, r *argRoles)
+
+	// compiled caches readings: a command line is read several times per
+	// command, on the interpreter's per-command path.
+	once     sync.Once
+	compiled []optSpec
 }
 
 // argRoles is the role of each word of one reading of a command line, and
@@ -66,18 +72,25 @@ func (r *argRoles) set(i int, role argRole) { r.index[i] = role }
 // write records a written file that is not a word of its own.
 func (r *argRoles) write(name string) { r.extra = append(r.extra, name) }
 
-// readings returns the option tables the command line is read with.
+// readings returns the option tables the command line is read with: each
+// table (GNU, and BSD's where it differs) as it permutes, and stopping at the
+// first operand.
 func (l *argLayout) readings() []optSpec {
-	out := []optSpec{l.opts}
-	if !l.opts.stopAtOperand {
-		posix := l.opts
-		posix.stopAtOperand = true
-		out = append(out, posix)
-	}
-	if l.bsd != nil {
-		out = append(out, *l.bsd)
-	}
-	return out
+	l.once.Do(func() {
+		tables := []optSpec{l.opts}
+		if l.bsd != nil {
+			tables = append(tables, *l.bsd)
+		}
+		for _, t := range tables {
+			t = t.compiled()
+			l.compiled = append(l.compiled, t)
+			if !t.stopAtOperand {
+				t.stopAtOperand = true
+				l.compiled = append(l.compiled, t)
+			}
+		}
+	})
+	return l.compiled
 }
 
 // roles reads args with sp and assigns each word its role.

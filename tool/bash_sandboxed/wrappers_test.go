@@ -100,6 +100,19 @@ func TestWrapperDenyList(t *testing.T) {
 	}
 }
 
+// TestEnvAssignmentsAreOperands: only env's NAME=VALUE operands are held
+// to the blocked variables, not an option's value that contains "=".
+func TestEnvAssignmentsAreOperands(t *testing.T) {
+	s := NewSandbox()
+	wd := t.TempDir()
+	if err := s.ValidateCommand("env -u LD_PRELOAD=x ls", wd, []string{wd}, []string{wd}); err != nil {
+		t.Errorf("env -u NAME=x unsets a variable, sets none: %v", err)
+	}
+	if err := s.ValidateCommand("env LD_PRELOAD=x ls", wd, []string{wd}, []string{wd}); err == nil {
+		t.Error("env LD_PRELOAD=x ls should be refused")
+	}
+}
+
 // TestWrapperUnwrapAgreesWithValidation: path checks and routing see the
 // same wrapped command the validator does.
 func TestWrapperUnwrapAgreesWithValidation(t *testing.T) {

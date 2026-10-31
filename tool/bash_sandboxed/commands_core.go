@@ -61,9 +61,11 @@ var (
 	// sedLayout: the script (-e, or the first operand when neither -e nor
 	// -f gives it) is not a path; with -i every file is written.
 	sedLayout = &argLayout{
-		opts:       sedSpec,
-		bsd:        &bsdSedOpts,
-		values:     map[string]argRole{"e": roleNonPath},
+		opts: sedSpec,
+		bsd:  &bsdSedOpts,
+		// BSD's -i and -I take the backup suffix, which is not a path; GNU's
+		// script (sed -i '/^#/d' f) is that suffix in the BSD reading.
+		values:     map[string]argRole{"e": roleNonPath, "i": roleNonPath, "I": roleNonPath},
 		lead:       1,
 		leadRole:   roleNonPath,
 		leadUnless: []string{"e", "f"},

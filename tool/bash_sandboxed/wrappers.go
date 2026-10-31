@@ -66,6 +66,13 @@ type wrapperSpec struct {
 // FOO=$BAR still reads as one) where every option test keeps to the strict
 // literal; callers with already-expanded strings pass lits for both.
 func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
+	idx, _ := sp.layout(lits, assignLits)
+	return idx
+}
+
+// layout is commandIndex, also returning the index of the first operand
+// (env's first NAME=VALUE assignment).
+func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
 	opts := sp.opts
 	opts.stopAtOperand = true
 	p := parsedArgs{args: lits}
@@ -79,12 +86,13 @@ func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
 		p.operands = p.operands[:n]
 	}
 	if p.has(sp.rejected...) {
-		return wrapperRejected
+		return wrapperRejected, 0
 	}
 	i := len(lits)
 	if len(p.operands) > 0 {
 		i = p.operands[0]
 	}
+	operands = i
 	if sp.assignments {
 		for i < len(lits) && strings.Contains(assignLits[i], "=") {
 			i++
@@ -92,9 +100,9 @@ func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
 	}
 	i += sp.operands
 	if i >= len(lits) {
-		return wrapperNoCommand
+		return wrapperNoCommand, operands
 	}
-	return i
+	return i, operands
 }
 
 // wrapperSpecs describes each wrapper's options (see wrapperSpec).
@@ -171,7 +179,7 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	// wordLeadingLits handles env assignment values that are non-literal
 	// expansions (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
 	assignLits := wordLeadingLits(args)
-	idx := wrapperSpecs[lits[0]].commandIndex(lits, assignLits)
+	idx, operands := wrapperSpecs[lits[0]].layout(lits, assignLits)
 	if idx == wrapperRejected {
 		return errEnvSplitString()
 	}
@@ -180,7 +188,7 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	}
 	switch lits[0] {
 	case "env":
-		if err := validateEnvAssignments(s, args, assignLits, idx); err != nil {
+		if err := validateEnvAssignments(s, args, assignLits[operands:idx], idx); err != nil {
 			return err
 		}
 	case "xargs":
@@ -192,12 +200,12 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[idx:])
 }
 
-// validateEnvAssignments holds env's NAME=VALUE operands (those before the
-// command at idx) to the same blocked variables as a shell assignment (FOO=bar
-// cmd), which they are equivalent to.
-func validateEnvAssignments(s *Sandbox, args []*syntax.Word, assignLits []string, idx int) error {
-	for i := idx - 1; i > 0 && strings.Contains(assignLits[i], "="); i-- {
-		name, val, _ := strings.Cut(assignLits[i], "=")
+// validateEnvAssignments holds env's NAME=VALUE operands (assigns, the words
+// between its options and the command at idx) to the same blocked variables
+// as a shell assignment (FOO=bar cmd), which they are equivalent to.
+func validateEnvAssignments(s *Sandbox, args []*syntax.Word, assigns []string, idx int) error {
+	for _, a := range assigns {
+		name, val, _ := strings.Cut(a, "=")
 		if err := s.checkEnvAssign(name, val); err != nil {
 			return err
 		}

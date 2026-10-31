@@ -23,6 +23,8 @@ var (
 		alias: map[string]string{"pidfile": "F"},
 	}
 	bsdPgrepOpts = optSpec{short: "FGMNPUdgstu", stopAtOperand: true}
+	// pgrepReadings holds the tables pgrep's command line is read with.
+	pgrepReadings = &argLayout{opts: pgrepOpts, bsd: &bsdPgrepOpts}
 )
 
 // pgrepPidfiles returns, over every reading of a pgrep command line, the
@@ -32,7 +34,7 @@ var (
 // an option value.
 func pgrepPidfiles(args []string) (pidfiles, attached map[int]bool) {
 	pidfiles, attached = map[int]bool{}, map[int]bool{}
-	for _, sp := range []optSpec{pgrepOpts, bsdPgrepOpts, {short: pgrepOpts.short, long: pgrepOpts.long, flags: pgrepOpts.flags, alias: pgrepOpts.alias, stopAtOperand: true}} {
+	for _, sp := range pgrepReadings.readings() {
 		for _, o := range sp.scan(args).opts {
 			switch {
 			case o.name != "F" || !o.hasValue:
