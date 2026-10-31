@@ -171,12 +171,13 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GROK_HOME", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 
 	// No agent installed: none of their paths are listed (so none get created).
 	for _, p := range deniedPathStrings(append(DefaultDeniedReadPaths(), DefaultDeniedWritePaths()...)) {
-		if strings.Contains(p, ".claude") || strings.Contains(p, ".codex") || strings.Contains(p, "opencode") || strings.Contains(p, "crush") || strings.Contains(p, ".grok") {
+		if strings.Contains(p, ".claude") || strings.Contains(p, ".codex") || strings.Contains(p, "opencode") || strings.Contains(p, "crush") || strings.Contains(p, ".grok") || strings.Contains(p, ".pi") {
 			t.Errorf("agent path %s listed without the agent installed", p)
 		}
 	}
@@ -201,8 +202,8 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 
 func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 	root := t.TempDir()
-	cc, cx, gk, xdg := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "gk"), filepath.Join(root, "xdg")
-	for _, d := range []string{cc, cx, gk, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
+	cc, cx, gk, xdg, pi := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "gk"), filepath.Join(root, "xdg"), filepath.Join(root, "pi")
+	for _, d := range []string{cc, cx, gk, pi, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -210,15 +211,16 @@ func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", cc)
 	t.Setenv("CODEX_HOME", cx)
 	t.Setenv("GROK_HOME", gk)
+	t.Setenv("PI_CODING_AGENT_DIR", pi)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	read := deniedPathStrings(DefaultDeniedReadPaths())
-	for _, want := range []string{cc + "/.claude.json", cc + "/.credentials.json", cx + "/auth.json", gk + "/auth.json", gk + "/mcp_credentials.json", xdg + "/gh"} {
+	for _, want := range []string{cc + "/.claude.json", cc + "/.credentials.json", cx + "/auth.json", gk + "/auth.json", gk + "/mcp_credentials.json", pi + "/auth.json", pi + "/mcp-auth.json", xdg + "/gh"} {
 		if !slices.Contains(read, want) {
 			t.Errorf("read-denied defaults missing %s: %v", want, read)
 		}
 	}
 	write := deniedPathStrings(DefaultDeniedWritePaths())
-	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/crush/crushrc", xdg + "/git/config"} {
+	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", pi, xdg + "/opencode/opencode.json", xdg + "/crush/crushrc", xdg + "/git/config"} {
 		if !slices.Contains(write, want) {
 			t.Errorf("write-denied defaults missing %s: %v", want, write)
 		}
@@ -288,5 +290,20 @@ func TestEffectiveDeniedReadPaths_RawAWSCredentials(t *testing.T) {
 	}
 	if read, _ := cfg.LiftedDeniedEntries(); len(read) != 1 || read[0].Path != aws || read[0].LiftedBy != "~/.aws" || !read[0].AllModes {
 		t.Errorf("lifted entries = %+v", read)
+	}
+}
+
+func TestPiAgentDir(t *testing.T) {
+	home := "/home/u"
+	for _, tt := range []struct{ env, want string }{
+		{"", "/home/u/.pi/agent"},
+		{"/opt/pi", "/opt/pi"},
+		{"~/pi-agent", "/home/u/pi-agent"},
+		{"~", "/home/u"},
+	} {
+		t.Setenv("PI_CODING_AGENT_DIR", tt.env)
+		if got := PiAgentDir(home); got != tt.want {
+			t.Errorf("PiAgentDir with PI_CODING_AGENT_DIR=%q = %q, want %q", tt.env, got, tt.want)
+		}
 	}
 }

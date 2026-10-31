@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,7 +24,7 @@ var launchPermissionMode string
 var launchDryRun bool
 
 var launchCmd = &cobra.Command{
-	Use:   "launch <claude|codex|opencode|crush> [agent args...]",
+	Use:   "launch <claude|codex|opencode|crush|pi> [agent args...]",
 	Short: "Run an agent CLI through lite-sandbox without changing its config",
 	Long: `Starts an agent CLI configured to route shell commands through lite-sandbox,
 without writing anything to the agent's configuration.
@@ -40,6 +42,7 @@ are still loaded and the sandbox settings are layered on top.
   lite-sandbox launch opencode
   lite-sandbox launch crush
   lite-sandbox launch --with-tool-hook=false claude  # lite-sandbox's own flags come first
+  lite-sandbox launch pi
 
 Everything after the agent name is handed to the agent untouched, so
 lite-sandbox's flags must precede it (or be separated with --).
@@ -59,8 +62,14 @@ Per agent:
   crush     CRUSH_GLOBAL_CONFIG pointing at a generated directory whose
             crushrc sources your own global crushrc (and links your
             crush.json), then adds the MCP server and denies bash.
+  pi        -e with the extension "install pi" writes to
+            ~/.pi/agent/extensions (MCP server, hook, directive), kept in
+            lite-sandbox's cache instead, and --exclude-tools bash. pi's file
+            tools are always confined, so --with-tool-hook=false is refused.
+            Refused when the extension is already installed: plain pi is then
+            sandboxed already.
 
-opencode's directive and Crush's generated config are kept in lite-sandbox's
+opencode's directive, Crush's generated config and pi's extension are kept in lite-sandbox's
 cache directory (rewritten on each launch), not in the agent's config. Grok
 Build is not supported: its CLI has no way to add an MCP server or hook for a
 single session. Use "lite-sandbox install grok".
@@ -143,6 +152,7 @@ func launchTargets() []launchTarget {
 		{"codex", "Codex", "codex", true, false, codexLaunchSpec},
 		{"opencode", "opencode", "opencode", false, false, opencodeLaunchSpec},
 		{"crush", "Crush", "crush", false, false, crushLaunchSpec},
+		{"pi", "pi", "pi", true, false, piLaunchSpec},
 	}
 }
 
@@ -219,6 +229,11 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 func checkLaunchFlags(target launchTarget, flags *pflag.FlagSet) error {
 	if !target.permissionMode && flags.Changed("permission-mode") {
 		return fmt.Errorf("--permission-mode applies only to Claude Code; pass %s's own permission flags after the agent name instead", target.displayName)
+	}
+	if target.name == "pi" && flags.Changed("with-tool-hook") {
+		if on, _ := flags.GetBool("with-tool-hook"); !on {
+			return fmt.Errorf("pi's file tools are always confined to the sandbox's paths: pi never asks before a tool call, so --with-tool-hook=false is not supported")
+		}
 	}
 	if !target.hooks {
 		if on, _ := flags.GetBool("bash-ast-hook-mode"); on {
@@ -372,4 +387,48 @@ func shellQuote(argv []string) string {
 		quoted[i] = a
 	}
 	return strings.Join(quoted, " ")
+}
+
+// piLaunchSpec builds pi's arguments for a sandboxed run: the extension
+// `install pi` writes to pi's extensions directory, loaded with -e from
+// lite-sandbox's cache directory instead, and --exclude-tools in place of the
+// defaultTools entry install writes to settings.json.
+//
+// The extension file is named by its content, so repeated launches reuse it
+// and a concurrent launch with other flags never replaces the file a running
+// pi reloads (/reload) from.
+func piLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
+	argv, err := piLaunchArgs(binPath, agentArgs)
+	return launchSpec{args: argv}, err
+}
+
+func piLaunchArgs(binPath string, agentArgs []string) ([]string, error) {
+	if err := checkPiVersion(); err != nil {
+		return nil, err
+	}
+	if agentDir, err := piAgentDir(); err == nil {
+		installed := filepath.Join(agentDir, "extensions", piExtensionFile)
+		if _, err := os.Stat(installed); err == nil {
+			return nil, fmt.Errorf("lite-sandbox is already installed for pi (%s), so plain `pi` runs sandboxed; a second copy of the extension would fail to load", installed)
+		}
+	}
+	plan := newPiPlan(launchBashASTHookMode)
+	src, err := renderPiExtension(binPath, plan)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := launchCacheDir("pi")
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(src))
+	path := filepath.Join(dir, "lite-sandbox-"+hex.EncodeToString(sum[:8])+".ts")
+	if err := writeFileAtomic(path, []byte(src)); err != nil {
+		return nil, fmt.Errorf("writing the pi extension: %w", err)
+	}
+	argv := []string{"-e", path}
+	if plan.configMCP {
+		argv = append(argv, "--exclude-tools", piBuiltinBash)
+	}
+	return append(argv, agentArgs...), nil
 }

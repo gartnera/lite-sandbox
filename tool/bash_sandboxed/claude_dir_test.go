@@ -201,3 +201,75 @@ func TestOSSandboxGitCheckoutTrackedClaudeDir(t *testing.T) {
 		t.Fatalf("SKILL.md not checked out: %q, %v", got, err)
 	}
 }
+
+func TestIsPiConfigPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/repo/.pi", true},
+		{"/repo/.pi/settings.json", true},
+		{"/repo/.pi/extensions/x.ts", true},
+		{"/home/u/.pi/agent/settings.json", true},
+		{"/repo/.PI/mcp.json", true},
+		{"/repo/pi/settings.json", false},
+		{"/repo/.pip/x", false},
+		{"/repo/.pi.json", false},
+		{"/repo/src/main.go", false},
+	}
+	for _, tt := range tests {
+		if got := IsPiConfigPath(tt.path); got != tt.want {
+			t.Errorf("IsPiConfigPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestBashSandboxed_PiDirReadOnly checks that a project's .pi directory, which
+// pi loads extensions, settings and MCP servers from, can be read but not
+// written, like .claude.
+func TestBashSandboxed_PiDirReadOnly(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, ".pi", "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".pi", "settings.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".pi", filepath.Join(workDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, command := range []string{
+		"cat .pi/settings.json",
+		"ls .pi/extensions",
+		"cp .pi/settings.json backup.json",
+	} {
+		t.Run("allowed/"+command, func(t *testing.T) {
+			if _, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	for _, command := range []string{
+		"touch .pi/extensions/evil.ts",
+		"echo '{}' > .pi/settings.json",
+		"echo x | tee .pi/mcp.json",
+		"mkdir .pi/skills",
+		"rm -rf .pi",
+		"cd .pi && touch APPEND_SYSTEM.md",
+		"touch link/x",
+		"touch .PI/x",
+		"cp backup.json .pi/settings.json",
+	} {
+		t.Run("blocked/"+command, func(t *testing.T) {
+			_, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir})
+			if err == nil {
+				t.Fatal("expected .pi write to be blocked")
+			}
+			if !strings.Contains(err.Error(), ".pi directory") {
+				t.Fatalf("expected .pi error, got %q", err.Error())
+			}
+		})
+	}
+}

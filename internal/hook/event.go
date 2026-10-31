@@ -58,6 +58,12 @@ type Event struct {
 	TurnID string `json:"turn_id,omitempty"`
 	Model  string `json:"model,omitempty"`
 
+	// PiEvent marks an event lite-sandbox's pi extension forwarded from one of
+	// pi's tool_call events ("tool_call"; see FromPi). pi's tool names are
+	// lowercase and overlap Grok Build's, so its tool_input is decoded with
+	// pi's own vocabulary.
+	PiEvent string `json:"pi_event,omitempty"`
+
 	// ToolInputTruncated is Grok's flag for a tool input over its 128 KiB hook
 	// payload limit. Grok then sends a clipped JSON string in place of the
 	// input object, so the arguments cannot be decoded.
@@ -84,8 +90,10 @@ func (e *Event) FromCodex() bool { return e.TurnID != "" || e.Model != "" }
 // decision to the user. Claude Code does. Codex parses "ask" but does not
 // support it: it reports the hook as failed and runs the tool call, so an
 // "ask" there would let the call through unchecked. Grok Build does not
-// support it either. Misreading a Claude Code event as Codex's only turns an
-// ask into a denial, the safe direction.
+// support it either. lite-sandbox's pi extension does: it puts the ask to the
+// user in a confirmation dialog, and blocks the call when pi has no UI to
+// show one. Misreading a Claude Code event as Codex's only turns an ask into
+// a denial, the safe direction.
 func (e *Event) CanAsk() bool { return !e.FromGrok() && !e.FromCodex() }
 
 // ToolInput is implemented by every typed tool argument struct. Tool reports
@@ -115,7 +123,11 @@ func ParseEvent(r io.Reader) (*Event, error) {
 
 // parseToolInput decodes RawToolInput into the concrete type for ToolName.
 func (e *Event) parseToolInput() error {
-	factory, ok := toolInputFactories[e.ToolName]
+	factories := toolInputFactories
+	if e.FromPi() {
+		factories = piToolInputFactories
+	}
+	factory, ok := factories[e.ToolName]
 	if !ok {
 		// Unmodeled tool (e.g. an MCP tool). Leave ToolInput nil; callers fall
 		// back to RawToolInput.

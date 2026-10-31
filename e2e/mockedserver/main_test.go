@@ -1,6 +1,7 @@
 package mockedserver
 
 import (
+	"archive/tar"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sync/errgroup"
@@ -30,8 +32,8 @@ const e2eEnv = "LITE_SANDBOX_E2E"
 // for every subprocess so `lite-sandbox install` autodetection and the agents'
 // own PATH lookups (e.g. `crush --version`) find them.
 var bins struct {
-	sandbox, crush, codex, claude, opencode, grok string
-	pathDirs                                      []string
+	sandbox, crush, codex, claude, opencode, grok, pi string
+	pathDirs                                          []string
 }
 
 func TestMain(m *testing.M) {
@@ -65,7 +67,7 @@ func requireE2E(t *testing.T) {
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
 // setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION /
-// E2E_OPENCODE_VERSION / E2E_GROK_VERSION for one run — never re-downloads a
+// E2E_OPENCODE_VERSION / E2E_GROK_VERSION / E2E_PI_VERSION for one run — never re-downloads a
 // version that is already there.
 func provision() error {
 	binDir := os.Getenv("E2E_BIN_DIR")
@@ -92,17 +94,20 @@ func provision() error {
 	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
 	opencodeVersion := versionFromEnv("E2E_OPENCODE_VERSION", OpencodeVersion)
 	grokVersion := versionFromEnv("E2E_GROK_VERSION", GrokVersion)
+	piVersion := versionFromEnv("E2E_PI_VERSION", PiVersion)
 	crushDir := filepath.Join(agentsDir, "crush", crushVersion)
 	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
 	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
 	opencodeDir := filepath.Join(agentsDir, "opencode", opencodeVersion)
 	grokDir := filepath.Join(agentsDir, "grok", grokVersion)
+	piDir := filepath.Join(agentsDir, "pi", piVersion)
 	var g errgroup.Group
 	bins.crush = filepath.Join(crushDir, "crush")
 	bins.codex = filepath.Join(codexDir, "codex")
 	bins.claude = filepath.Join(claudeDir, "claude")
 	bins.opencode = filepath.Join(opencodeDir, "opencode")
 	bins.grok = filepath.Join(grokDir, "grok")
+	bins.pi = filepath.Join(piDir, "pi")
 	g.Go(func() error {
 		return ensureInstalled(bins.crush, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
 	})
@@ -118,17 +123,20 @@ func provision() error {
 	g.Go(func() error {
 		return ensureInstalled(bins.grok, "grok "+grokVersion, func() error { return installGrok(grokDir, grokVersion) })
 	})
+	g.Go(func() error {
+		return ensureInstalled(bins.pi, "pi "+piVersion, func() error { return installPi(piDir, piVersion) })
+	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
-	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode), filepath.Dir(bins.grok)}
-	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode, bins.grok} {
+	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode), filepath.Dir(bins.grok), filepath.Dir(bins.pi)}
+	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode, bins.grok, bins.pi} {
 		if _, err := os.Stat(b); err != nil {
 			return fmt.Errorf("provisioned binary missing: %w", err)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s, grok %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion, grokVersion)
+	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s, grok %s, pi %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion, grokVersion, piVersion)
 	return nil
 }
 
@@ -347,6 +355,60 @@ func installGrokFrom(url, dest, want string) error {
 		return fmt.Errorf("%s: checksum mismatch: got %s, pinned %s", url, got, want)
 	}
 	return nil
+}
+
+// installPi installs the pi release for version and this OS/arch into dir.
+// pi is a Bun-compiled binary that reads files shipped beside it (its
+// package.json, themes, wasm, native helpers), so the whole archive is
+// extracted, minus its top-level pi/ directory.
+func installPi(dir, version string) error {
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	if arch == "" || (runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		return fmt.Errorf("no pi release for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	asset := fmt.Sprintf("pi-%s-%s.tar.gz", runtime.GOOS, arch)
+	body, err := releases.Open(context.Background(), "earendil-works/pi", "v"+version, asset)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	gz, err := gzip.NewReader(body)
+	if err != nil {
+		return fmt.Errorf("%s: %w", asset, err)
+	}
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", asset, err)
+		}
+		_, rel, ok := strings.Cut(filepath.Clean(hdr.Name), string(filepath.Separator))
+		if !ok || rel == "" || !filepath.IsLocal(rel) {
+			continue
+		}
+		dest := filepath.Join(dir, rel)
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dest, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode)&0755|0644)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(f, tr)
+			if err := errors.Join(err, f.Close()); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // isMusl reports whether this Linux host uses musl rather than glibc, the way

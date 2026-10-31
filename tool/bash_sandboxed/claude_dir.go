@@ -25,24 +25,57 @@ func IsClaudeConfigPath(path string) bool {
 	return false
 }
 
-// checkClaudeDirWrite rejects a write to a path inside a .claude directory
-// (see IsClaudeConfigPath). Both the path as written and its symlink
+// IsPiConfigPath reports whether the absolute path is inside (or is) a .pi
+// directory: pi's project configuration — settings, extensions, MCP servers,
+// skills, prompts and system-prompt files — which pi loads into its own
+// process, outside the sandbox, once the user has trusted the project. Like
+// .claude, sandboxed commands may read it but not write it, so a command
+// cannot plant an extension that runs the next time pi starts there. The
+// name is matched case-insensitively, as for .claude.
+func IsPiConfigPath(path string) bool {
+	for _, p := range strings.Split(path, string(filepath.Separator)) {
+		if strings.EqualFold(p, ".pi") {
+			return true
+		}
+	}
+	return false
+}
+
+// AgentConfigDir names the read-only agent configuration directory the path
+// is inside (".claude" or ".pi"; see IsClaudeConfigPath and IsPiConfigPath),
+// or "" when it is in neither.
+func AgentConfigDir(path string) string {
+	switch {
+	case IsClaudeConfigPath(path):
+		return ".claude"
+	case IsPiConfigPath(path):
+		return ".pi"
+	}
+	return ""
+}
+
+// checkAgentConfigDirWrite rejects a write to a path inside a .claude or .pi
+// directory (see AgentConfigDir). Both the path as written and its symlink
 // resolution are checked: a .claude that is itself a symlink resolves to a
 // target without the name, and a link to .claude resolves into it.
-func checkClaudeDirWrite(orig, path, workDir string) error {
+func checkAgentConfigDirWrite(orig, path, workDir string) error {
 	abs := path
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(workDir, abs)
 	}
 	abs = filepath.Clean(abs)
 	resolved := ResolvePath(abs, workDir)
-	if IsClaudeConfigPath(abs) || IsClaudeConfigPath(resolved) {
-		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q is inside a .claude directory, which is read-only in the sandbox; ask the user to make this change", orig))
+	dir := AgentConfigDir(abs)
+	if dir == "" {
+		dir = AgentConfigDir(resolved)
+	}
+	if dir != "" {
+		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q is inside a %s directory, which is read-only in the sandbox; ask the user to make this change", orig, dir))
 	}
 	return nil
 }
 
-// validateClaudeDirWrites rejects a command that writes inside a .claude
+// validateAgentConfigDirWrites rejects a command that writes inside a .claude
 // directory. Only the arguments the command writes are checked (see
 // writeTargets), so reading .claude stays possible — `sed -n 1p
 // .claude/settings.json`, `cp .claude/settings.json backup.json` — while
@@ -52,12 +85,12 @@ func checkClaudeDirWrite(orig, path, workDir string) error {
 // bare name written from inside .claude (cd .claude && touch x) is caught.
 // Empty targets are non-literal words in the static pass, re-checked after
 // expansion.
-func validateClaudeDirWrites(cmdName string, args []string, workDir string, skip map[int]bool) error {
+func validateAgentConfigDirWrites(cmdName string, args []string, workDir string, skip map[int]bool) error {
 	for _, t := range writeTargets(cmdName, args, skip) {
 		if t == "" || t == "-" {
 			continue
 		}
-		if err := checkClaudeDirWrite(t, t, workDir); err != nil {
+		if err := checkAgentConfigDirWrite(t, t, workDir); err != nil {
 			return err
 		}
 	}

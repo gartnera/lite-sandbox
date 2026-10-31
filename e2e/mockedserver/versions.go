@@ -1,5 +1,5 @@
 // Package mockedserver drives real agent binaries (Crush, Codex, Claude Code,
-// opencode, Grok Build) through
+// opencode, Grok Build, pi) through
 // `lite-sandbox install` and a non-interactive run against a mocked model
 // server (the mockmodel package), so it needs no API key. The sibling
 // e2e/claude suite uses a real model instead. See the *_test.go files; this file pins the agent
@@ -22,6 +22,8 @@ const (
 	// GrokVersion is a Grok Build release, fetched from the distribution that
 	// https://x.ai/cli/install.sh uses.
 	GrokVersion = "1.0.41"
+	// PiVersion is an earendil-works/pi GitHub release (without the "v").
+	PiVersion = "1.4.0"
 )
 
 // grokSHA256 pins the SHA-256 of the (decompressed) GrokVersion binary per

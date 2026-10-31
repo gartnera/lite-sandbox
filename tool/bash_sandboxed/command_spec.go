@@ -34,7 +34,7 @@ type commandSpec struct {
 	// writeTargets returns the arguments that name a file the command
 	// creates, modifies, or removes; each is checked against the write set
 	// (validateWriteTargets) and the read-only .claude directories
-	// (validateClaudeDirWrites). skip holds the arguments nonPathArgs
+	// (validateAgentConfigDirWrites). skip holds the arguments nonPathArgs
 	// reported. It errs toward listing an argument.
 	writeTargets func(args []string, skip map[int]bool) []string
 	// targetsConfinedElsewhere leaves writeTargets to the .claude check
