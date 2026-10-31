@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 
 	"github.com/gartnera/lite-sandbox/config"
 )
@@ -68,5 +69,31 @@ func agentBrowserSocketEnv(args []string, env map[string]string) {
 	}
 	if dir := config.AgentBrowserSocketDir(); dir != "" {
 		env["AGENT_BROWSER_SOCKET_DIR"] = dir
+	}
+}
+
+// agentBrowserWorkerEnv has an agent-browser run in an OS sandbox worker (the
+// shared one or a scoped one) launch Chrome without Chrome's own sandbox, on
+// macOS: a process inside a Seatbelt sandbox can't apply another
+// (sandbox_apply fails with EPERM), so Chrome's helpers die starting theirs
+// and agent-browser reports "CDP response channel closed". Chrome then runs
+// confined by the worker's sandbox alone. agent-browser adds --no-sandbox
+// itself when $CI is set; that keeps the user's own launch args (config.json,
+// AGENT_BROWSER_ARGS, --args), which AGENT_BROWSER_ARGS would replace. On the
+// host, outside the OS sandbox, Chrome keeps its sandbox.
+//
+// $CI is a stopgap: it relies on agent-browser's should_disable_sandbox
+// heuristic, not a documented setting. Drop it once agent-browser detects
+// that it already runs in a Seatbelt sandbox (sandbox_check) itself.
+func agentBrowserWorkerEnv(args []string, env map[string]string) {
+	agentBrowserWorkerEnvFor(runtime.GOOS, args, env)
+}
+
+func agentBrowserWorkerEnvFor(goos string, args []string, env map[string]string) {
+	if goos != "darwin" || len(args) == 0 || filepath.Base(args[0]) != "agent-browser" {
+		return
+	}
+	if _, ok := env["CI"]; !ok {
+		env["CI"] = "1"
 	}
 }

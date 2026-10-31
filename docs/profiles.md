@@ -577,6 +577,19 @@ They run outside the sandbox, possibly with your Chrome profile. So
 lite-sandbox points its agent-browser at `~/.agent-browser/lite-sandbox`
 instead (`AGENT_BROWSER_SOCKET_DIR`), and it never drives one of yours.
 
+### Chrome's own sandbox (macOS)
+
+macOS doesn't let a process inside a Seatbelt sandbox apply another one.
+Chrome's helper processes sandbox themselves with Seatbelt, so inside the OS
+sandbox worker they fail to start, and agent-browser reports `CDP response
+channel closed`. On macOS lite-sandbox sets `CI=1` for an agent-browser run in a
+worker, and agent-browser then launches Chrome with `--no-sandbox`. Your own
+launch args (`config.json`, `AGENT_BROWSER_ARGS`, `--args`) still apply. Chrome
+is then confined by agent-browser's worker alone. A page that exploits the
+renderer gets that worker's access, including `~/.agent-browser` with your
+saved sessions and the auth vault, but nothing outside it. Without the OS
+sandbox, Chrome keeps its own sandbox.
+
 On Linux the daemon and the browser stop with agent-browser's worker, which
 closes after five idle minutes or when the server exits. The next command
 starts a fresh browser. Use `--session-name` or `state save` to keep logins

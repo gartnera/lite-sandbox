@@ -220,6 +220,7 @@ func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.
 		}
 	}
 	restrictCommandEnv(args, env)
+	agentBrowserWorkerEnv(args, env)
 	if !s.isSSHAgentScope(scope) {
 		return
 	}
