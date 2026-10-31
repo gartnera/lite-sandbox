@@ -243,18 +243,11 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			processEntry(e.Command, e.NoSandbox)
 		}
 	}
-	// The ssh section's hosts whitelist ssh and sshpass, and a host that
-	// allows writes scp and rsync, whose validators then hold them to those
-	// hosts.
-	if cfg.SSH.HostsConfigured() {
-		for _, name := range config.SSHCommands {
-			whitelisted[name] = true
-		}
-	}
-	if cfg.SSH.WriteHostsConfigured() {
-		for _, name := range config.SSHCopyCommands {
-			whitelisted[name] = true
-		}
+	// A config section whitelists its commands once it is set up (the ssh
+	// section's hosts: ssh and sshpass, and scp and rsync with a host that
+	// allows writes), and its validators then hold them to it.
+	for _, name := range cfg.SectionCommands() {
+		whitelisted[name] = true
 	}
 	s.mu.Lock()
 	// The OS sandbox toggle and the AWS credential mask are read straight off

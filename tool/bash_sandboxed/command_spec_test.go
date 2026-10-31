@@ -1,7 +1,6 @@
 package bash_sandboxed
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/config"
@@ -15,11 +14,10 @@ func TestCommandSpecsReachable(t *testing.T) {
 		switch {
 		case allowedCommands[name],
 			len(config.ProfilesForCommand(name)) > 0,
-			slices.Contains(config.SSHCommands, name),
-			slices.Contains(config.SSHCopyCommands, name),
+			sectionCommand(name),
 			name == "time": // a shell keyword; registered only to refuse it under a wrapper
 		default:
-			t.Errorf("command %q is registered but no whitelist, profile, or ssh host can allow it", name)
+			t.Errorf("command %q is registered but no whitelist, profile, or config section can allow it", name)
 		}
 	}
 }
@@ -33,4 +31,9 @@ func TestCommandSpecLookup(t *testing.T) {
 	if !lookupCommand("cp").writes || lookupCommand("cat").writes {
 		t.Error("cp should be a writer, cat a reader")
 	}
+}
+
+func sectionCommand(name string) bool {
+	_, ok := config.SectionCommandFor(name)
+	return ok
 }

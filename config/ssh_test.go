@@ -225,3 +225,25 @@ func TestWithSSHAgentScopesTheSocket(t *testing.T) {
 		t.Error("no ssh section still granted something")
 	}
 }
+
+func TestSectionCommands(t *testing.T) {
+	none := &Config{}
+	if got := none.SectionCommands(); len(got) != 0 {
+		t.Errorf("no ssh hosts: SectionCommands = %v", got)
+	}
+	read := &Config{SSH: &SSHConfig{Hosts: []SSHHost{{Host: "box"}}}}
+	if got := read.SectionCommands(); !slices.Equal(got, []string{"ssh", "sshpass"}) {
+		t.Errorf("read-only host: SectionCommands = %v", got)
+	}
+	yes := true
+	write := &Config{SSH: &SSHConfig{Hosts: []SSHHost{{Host: "box", Write: &yes}}}}
+	if got := write.SectionCommands(); !slices.Equal(got, []string{"ssh", "sshpass", "scp", "rsync"}) {
+		t.Errorf("write host: SectionCommands = %v", got)
+	}
+	if sc, ok := SectionCommandFor("rsync"); !ok || !strings.Contains(sc.Fix, "--write") {
+		t.Errorf("SectionCommandFor(rsync) = %+v, %v", sc, ok)
+	}
+	if _, ok := SectionCommandFor("cat"); ok {
+		t.Error("cat is not a section command")
+	}
+}
