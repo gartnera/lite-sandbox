@@ -84,9 +84,15 @@ func wordText(w *syntax.Word) string {
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			// An unquoted literal keeps its backslashes (--comp\ress is
-			// --compress to the program); drop them as the shell does.
-			sb.WriteString(unescapeLit(p.Value))
+			// A parsed unquoted literal keeps its backslashes (--comp\ress
+			// is --compress to the program); drop them as the shell does.
+			// A word with no position is an argument the runtime layer has
+			// already expanded (literalWords): its backslashes are real.
+			if w.Pos().IsValid() {
+				sb.WriteString(unescapeLit(p.Value))
+			} else {
+				sb.WriteString(p.Value)
+			}
 		case *syntax.SglQuoted:
 			sb.WriteString(p.Value)
 		case *syntax.DblQuoted:
