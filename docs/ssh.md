@@ -1,8 +1,9 @@
 # SSH Access
 
-The `ssh` section lets the agent run `ssh` and `sshpass` to hosts you list, and
-gives your ssh agent to them and to git's remote commands (`git fetch`, `pull`,
-`push`, `clone`, ...), so a push to an ssh remote authenticates with your keys.
+The `ssh` section lets the agent run `ssh` and `sshpass` to hosts you list
+(and `scp` and `rsync` to the ones that allow writes), and gives your ssh
+agent to them and to git's remote commands (`git fetch`, `pull`, `push`,
+`clone`, ...), so a push to an ssh remote authenticates with your keys.
 The agent goes through a filter by default, and nothing else the agent runs can
 reach it. With no `ssh` section, nothing changes: `ssh` isn't on the
 whitelist, and the agent is left as it was.
@@ -17,8 +18,8 @@ ssh:
         - systemctl restart
         - docker compose up
     - host: scratch-vm
-      write: true            # the remote command is not checked
-  agent: true                # give the agent to ssh, sshpass, and git's remote commands (default: true)
+      write: true            # the remote command is not checked; scp and rsync may copy to and from it
+  agent: true                # give the agent to ssh, sshpass, scp, rsync, and git's remote commands (default: true)
   unrestricted_agent: false  # hand them the real agent socket instead of the filter (default: false)
   git_signing: false         # sign git commits and tags with the agent (default: false)
 ```
@@ -108,7 +109,8 @@ disk, a repository's history) without changing it. A host's entry widens that:
   does: a name (`make`, any arguments) or a name and the leading arguments it
   is limited to (`systemctl restart`, `docker compose up`). Their arguments
   aren't checked.
-- `write: true` lifts the check: the remote command runs as written.
+- `write: true` lifts the check: the remote command runs as written. It also
+  lets [`scp` and `rsync`](#scp-and-rsync) copy files to and from the host.
 
 ssh joins the words after the destination with spaces and hands the result to
 the remote user's shell, so the check parses that string as a shell script
@@ -177,6 +179,88 @@ Without hosts listed, `ssh` and `sshpass` aren't on the whitelist, so
 `allowlist` mode refuses them. `denylist` mode, which doesn't whitelist
 commands, still runs them unchecked until you list a host.
 
+### scp and rsync
+
+Once a host's entry has `write: true`, `scp` and `rsync` are on the whitelist
+too, and copy to and from such hosts only:
+
+```bash
+rsync -avz --delete ./dist/ scratch-vm:/srv/app/   # allowed
+rsync -av scratch-vm:/var/log/app/ ./logs/          # allowed
+scp ./build.tar.gz scratch-vm:/tmp/                  # allowed
+scp scratch-vm:/etc/nginx/nginx.conf ./              # allowed
+rsync -av ./dist/ build-box:/srv/                   # refused: build-box is held to read-only commands
+scp notes.txt other-box:                             # refused: not listed
+```
+
+Both start their own program on the host through ssh (rsync's server, scp's
+sftp-server or `scp -t`/`-f`), a remote command the read-only check can't
+hold, so a host held to read-only commands (with or without extra `commands`)
+takes neither direction of copy. Every remote operand must name a
+`write: true` host, matched as ssh's destination is, and so must
+`rsync --files-from=host:list`; every jump host (`-J`, `-o ProxyJump`,
+`rsync -e 'ssh -J ...'`) must be listed. A copy with no remote operand is a
+local copy, held to the path checks like `cp`.
+
+Local paths are held to the path boundary: what the copy reads (the local
+sources, `-i`, `--exclude-from`, `--include-from`, a local `--files-from`
+list, and `--compare-dest` and `--copy-dest`) must be readable, and what it
+writes (a local destination, `--log-file`, the local sources with
+`--remove-source-files`, and `--backup-dir`, `--temp-dir`, `--link-dest`, and
+an absolute `--partial-dir`) must be writable. The receiver's directories
+(`--backup-dir`, ...) are checked only when the destination is local, a
+relative one from the destination and from its parent. Remote paths are not
+checked.
+
+Refused:
+
+- what would run a program here: scp's `-S` and `-D`, and an rsync `-e`/`--rsh`
+  other than `ssh` followed by options ssh's own check allows
+  (`-e 'ssh -p 2222 -i ./deploy_key'`, without quotes or backslashes inside);
+  `RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_SHELL`, and `RSYNC_PARTIAL_DIR`
+  can't be set. The option parser rsync uses reads aliases from
+  `$HOME/.popt`, and an alias can add any option, so rsync runs without
+  `$HOME`, under a wrapper (`timeout`, `nice`, ...) too, and
+  `env HOME=... rsync` is refused (`rsync -C` then skips `~/.cvsignore`; ssh
+  finds `~/.ssh` without it), and `~/.popt` is
+  [write-denied](configuration.md#denials-read-false-write-false-denylist-mode)
+  like `~/.ssh`, for the rsync you run yourself;
+- scp's `-A` (agent forwarding), `-F` other than `-F none`, the `-o` keys ssh
+  refuses, and its server modes (`-t`, `-f`, `-d`);
+- an rsync daemon: `host::module`, `rsync://`, the daemon's options (`--port`,
+  `--password-file`, `--address`, `--sockopts`, `--early-input`,
+  `--contimeout`), and `--daemon`, `--server`, `--sender`, `--config`,
+  `--dparam`;
+- following symlinks out of the files given: `scp -r` from a local directory
+  (scp always follows them; copy directories with `rsync -r`, which keeps
+  symlinks as symlinks), and `rsync -L`, `-k`, and `--copy-unsafe-links` from a
+  local source; and, into a local destination, `rsync -K`, which writes
+  through symlinked directories there, and `--trust-sender`, which drops
+  rsync's checks of what a remote sender sends;
+- `--files-from` with a local source: the names in the list aren't checked,
+  and rsync follows a symlinked directory in their paths (`link/secret`) out
+  of the source; name the files as operands. A list of remote files, pulled
+  from a host, is fine;
+- rules read from files the path checks don't see: rsync's merge and dir-merge
+  filter rules (`-f '. rules'`, `-f ': .rsync-filter'`, `-F`); use
+  `--exclude-from` and `--include-from`;
+- a relative `--partial-dir` that leaves the destination (`../partial`), and
+  the batch modes (`--write-batch`, `--only-write-batch`, `--read-batch`).
+
+As with ssh, the words must be written out (no variables or substitutions),
+and an unquoted glob or brace must come after a `/` (`./*.log`,
+`scratch-vm:/var/log/*.log`): before one, this machine's shell could expand
+it into an option or a `host:` operand. `xargs` and `find -exec` may not run
+scp or rsync, since the words they add could name a host or, for rsync, which
+reads options anywhere, an option; give rsync a list of remote files with
+`--files-from`.
+`sshpass -e scp ...` and `sshpass -e rsync ...` are checked the same way.
+
+Without a `write: true` host, `allowlist` mode refuses scp and rsync and names
+the remedy (`lite-sandbox config ssh hosts add <host> --write`). `denylist`
+mode runs them unchecked until hosts are listed, and once they are, holds
+them to the `write: true` ones.
+
 ### sshpass
 
 sshpass takes the password from the environment only (`-e`, which reads
@@ -215,14 +299,15 @@ from every command in every mode, so key authentication inside the sandbox
 goes through your ssh agent (`SSH_AUTH_SOCK`). With the `ssh` section present,
 and the [OS sandbox](security.md#os-level-sandboxing-optional) on:
 
-- **Only ssh, sshpass, and git's remote commands get it.** They run in an OS
+- **Only ssh, sshpass, scp, rsync, and git's remote commands get it.** They run in an OS
   sandbox worker of their own (like the [gh profile](profiles.md#github-cli-gh)'s
   credentials), started with `SSH_AUTH_SOCK` pointing at the agent's socket.
   Every other worker masks the agent socket, so a dependency's install script,
   a test, or a program the agent writes can't use your keys, and neither can an
   `ssh` it launches itself. Only a direct invocation by name is routed there:
   `ssh box`, `git push`, not `timeout 60 ssh box` or `bash -c 'git push'`.
-  ssh and sshpass get the agent only while hosts are listed.
+  ssh and sshpass get the agent only while hosts are listed, and scp and rsync
+  only while one of them allows writes.
 - **git gets it only to reach a remote.** `fetch`, `pull`, `push`, `clone`,
   `ls-remote`, `remote show`, `archive --remote`, and `submodule` run in the
   agent's worker; every other git command runs in the shared one, as before.

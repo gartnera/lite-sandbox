@@ -133,6 +133,13 @@ func writeTargets(cmdName string, args []string, skip map[int]bool) []string {
 			return pos[len(pos)-1:]
 		}
 		return nil
+	case "scp", "rsync":
+		return copyWrites(args)
+	case "sshpass":
+		if inner := sshpassCopyArgs(args); inner != nil {
+			return copyWrites(inner)
+		}
+		return nil
 	case "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz":
 		// Each operand is replaced by its (de)compressed file beside it,
 		// unless the output goes to stdout or nothing is written.

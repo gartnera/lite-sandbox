@@ -88,7 +88,8 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 // path-like arguments (against the read or write set, per writeCommands), the
 // arguments it writes (against the write set, see validateWriteTargets), for
 // tar, unzip, and zip, what they write (see validateArchiveWrites) and what a
-// creating tar reads (see validateTarCreateReads), and, for
+// creating tar reads (see validateTarCreateReads), what scp and rsync read
+// (see validateCopyReads), and, for
 // a wrapper (timeout, env, nice, ...), the paths of the command it runs, which
 // never passes back through the interpreter.
 func validateCommandPaths(cmdName string, args []string, workDir string, sets resolvedPathSets) error {
@@ -107,6 +108,12 @@ func validateCommandPaths(cmdName string, args []string, workDir string, sets re
 	}
 	if cmdName == "tar" {
 		if err := validateTarCreateReads(args, workDir, sets.read); err != nil {
+			return err
+		}
+	}
+	switch cmdName {
+	case "scp", "rsync", "sshpass":
+		if err := validateCopyReads(cmdName, args, workDir, sets.read); err != nil {
 			return err
 		}
 	}
@@ -204,6 +211,8 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 		return sshNonPathArgIndices(args)
 	case "sshpass":
 		return sshpassNonPathArgIndices(args)
+	case "scp", "rsync":
+		return copyNonPathArgIndices(args)
 	case "sed":
 		return sedNonPathArgIndices(args)
 	case "grep", "egrep", "fgrep", "rgrep", "zgrep", "zegrep", "zfgrep",

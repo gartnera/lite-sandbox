@@ -10,7 +10,7 @@ import (
 
 func TestSSHConfigAccessors(t *testing.T) {
 	var none *SSHConfig
-	if none.HostsConfigured() || none.AgentEnabled() || none.AgentUnrestricted() || none.AllowsHost("a") {
+	if none.HostsConfigured() || none.WriteHostsConfigured() || none.AgentEnabled() || none.AgentUnrestricted() || none.AllowsHost("a") {
 		t.Fatal("a missing ssh section must allow nothing")
 	}
 	no := false
@@ -116,7 +116,7 @@ func TestSSHHostEntryForms(t *testing.T) {
 	if hosts[1].Host != "deploy-box" || !slices.Equal(hosts[1].Commands, []string{"systemctl restart", "docker ps"}) {
 		t.Errorf("commands entry: %+v", hosts[1])
 	}
-	if !hosts[2].Writes() || !cfg.SSH.AllowsHost("Scratch-VM") {
+	if !hosts[2].Writes() || !cfg.SSH.AllowsHost("Scratch-VM") || !cfg.SSH.WriteHostsConfigured() {
 		t.Errorf("write entry: %+v", hosts[2])
 	}
 	out, err := yaml.Marshal(cfg.SSH)
@@ -193,6 +193,16 @@ func TestWithSSHAgentScopesTheSocket(t *testing.T) {
 	}
 	if paths := got.ForScope(scope).ExpandedInternalReadablePaths(); !slices.Contains(paths, "/run/agent.sock") {
 		t.Errorf("the scope's worker would not get the socket: %v", paths)
+	}
+
+	if _, ok := got.ScopeForCommand("rsync"); ok {
+		t.Error("rsync got the agent with no host allowing writes")
+	}
+	write := true
+	copies := (&Config{SSH: &SSHConfig{Hosts: []SSHHost{{Host: "ro"}, {Host: "box", Write: &write}}}}).Effective().WithSSHAgent("/run/agent.sock")
+	scope, ok = copies.ScopeForCommand("scp")
+	if !ok || !slices.Equal(scope.Commands, []string{"git", "rsync", "scp", "ssh", "sshpass"}) {
+		t.Fatalf("with a write host, scope = %+v, %v", scope, ok)
 	}
 
 	gitOnly := (&Config{SSH: &SSHConfig{}}).WithSSHAgent("/run/agent.sock")

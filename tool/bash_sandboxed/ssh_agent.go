@@ -208,9 +208,10 @@ var gitIdentityEnv = []string{
 
 // sshScopedEnv adjusts a scoped worker's environment (the server's) for args:
 // $SSHPASS reaches sshpass alone (stripSSHPass), from the agent's environment
-// when it set one; the agent's worker gets SSH_AUTH_SOCK at the granted
-// socket, the agent's commit identity for git, and, when git signs there, the
-// signing configuration (gitSigningConfig).
+// when it set one; rsync runs without $HOME (stripRsyncHome); the agent's
+// worker gets SSH_AUTH_SOCK at the granted socket, the agent's commit
+// identity for git, and, when git signs there, the signing configuration
+// (gitSigningConfig).
 func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.CommandScope, cfg *config.Config, env map[string]string) {
 	hc := interp.HandlerCtx(ctx)
 	if args[0] == "sshpass" {
@@ -220,6 +221,7 @@ func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.
 	} else {
 		stripSSHPass(args, env)
 	}
+	stripRsyncHome(args, env)
 	if !s.isSSHAgentScope(scope) {
 		return
 	}
@@ -251,6 +253,20 @@ func (s *Sandbox) signsInScope(scope config.CommandScope, cfg *config.Config) bo
 func stripSSHPass(args []string, env map[string]string) {
 	if len(args) == 0 || args[0] != "sshpass" {
 		delete(env, "SSHPASS")
+	}
+}
+
+// stripRsyncHome drops $HOME from the environment of rsync (run directly, by
+// sshpass, or under a wrapper; see rsyncInvocation), on every path a command
+// runs by: popt, which parses rsync's options, reads aliases from
+// $HOME/.popt, and an alias can add any option or operand, -e with any
+// program or a host included, past the rsync validator. env HOME=... rsync,
+// which would set it again, is refused (validateEnvArgs). The ssh that rsync
+// starts finds ~/.ssh by the user's passwd entry, not $HOME; rsync -C loses
+// ~/.cvsignore.
+func stripRsyncHome(args []string, env map[string]string) {
+	if rsyncInvocation(args) != nil {
+		delete(env, "HOME")
 	}
 }
 

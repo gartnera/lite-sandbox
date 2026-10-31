@@ -70,7 +70,7 @@ func TestSSHConfigCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "deploy-box: read-only remote commands, and systemctl restart") || !strings.Contains(out, "scratch-vm: any remote command") {
+	if !strings.Contains(out, "deploy-box: read-only remote commands, and systemctl restart") || !strings.Contains(out, "scratch-vm: any remote command; scp and rsync") || !strings.Contains(out, "for ssh, sshpass, scp, rsync, and git's remote commands") {
 		t.Errorf("show: %s", out)
 	}
 
