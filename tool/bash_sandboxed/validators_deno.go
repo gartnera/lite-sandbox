@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -243,4 +244,21 @@ func applyDenoSandbox(args []string, readPaths, writePaths []string, autoSandbox
 	out = append(out, inject...)
 	out = append(out, args[subIdx+1:]...)
 	return out
+}
+
+// denoPrepareExec configures deno's permission flags to mirror the sandbox
+// policy, from the deno profile's options. The whitelist (deno profile
+// enabled) is enforced earlier in allowlist mode; in denylist mode deno may
+// run with the profile off, in which case the options' defaults apply
+// (auto-sandbox on, network denied). Network and import denials are applied
+// independent of auto_sandbox so the policy holds even when filesystem
+// auto-scoping is off.
+func denoPrepareExec(_ context.Context, s *Sandbox, args []string, x execEnv) []string {
+	cfg := s.getConfig()
+	// Deno needs real directories for --allow-read/-write, so strip any
+	// descendants-only "/*" markers down to their base subtree.
+	return applyDenoSandbox(args, stripNestedOnlyMarkers(x.readAllowedPaths), stripNestedOnlyMarkers(x.writeAllowedPaths),
+		cfg.ProfileOption("deno", "auto_sandbox"),
+		cfg.ProfileOption("deno", "allow_network"),
+		cfg.ProfileOption("deno", "allow_import"))
 }

@@ -2,104 +2,62 @@ package bash_sandboxed
 
 import (
 	"fmt"
-	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// pgrepShortValueOpts are the pgrep short options that take a value
-// (procps-ng; macOS's BSD pgrep takes a subset of them).
-const pgrepShortValueOpts = "dgGPstuUFrO"
+// pgrepOpts is procps-ng pgrep's option table; macOS's BSD pgrep takes a
+// subset of its value options with getopt, which stops at the first
+// operand (bsdPgrepOpts).
+var (
+	pgrepOpts = optSpec{
+		short: "dgGPstuUFrO",
+		long: []string{
+			"delimiter", "pgroup", "group", "parent", "session", "signal", "terminal",
+			"euid", "uid", "pidfile", "runstates", "older", "cgroup", "ns", "nslist",
+		},
+		flags: []string{
+			"count", "full", "ignore-case", "list-name", "list-full", "newest", "oldest",
+			"inverse", "lightweight", "exact", "logpidfile", "require-handler", "env", "help", "version",
+		},
+		alias: map[string]string{"pidfile": "F"},
+	}
+	bsdPgrepOpts = optSpec{short: "FGMNPUdgstu", stopAtOperand: true}
+	// pgrepReadings holds the tables pgrep's command line is read with.
+	pgrepReadings = &argLayout{opts: pgrepOpts, bsd: &bsdPgrepOpts}
+)
 
-// pgrepLongValueOpts are the procps-ng pgrep long options that take a value.
-var pgrepLongValueOpts = []string{
-	"delimiter", "pgroup", "group", "parent", "session", "signal", "terminal",
-	"euid", "uid", "pidfile", "runstates", "older", "cgroup", "ns", "nslist",
-}
-
-// isPgrepPidfileLong reports whether name (a long option without its "--")
-// selects --pidfile, which getopt_long also accepts abbreviated.
-func isPgrepPidfileLong(name string) bool {
-	return len(name) >= 2 && strings.HasPrefix("pidfile", name)
-}
-
-// pgrepLongTakesValue reports whether name, possibly abbreviated, is a long
-// option that takes a value.
-func pgrepLongTakesValue(name string) bool {
-	for _, opt := range pgrepLongValueOpts {
-		if name != "" && strings.HasPrefix(opt, name) {
-			return true
+// pgrepPidfiles returns, over every reading of a pgrep command line, the
+// indices of the words that name a pid file (-F FILE, --pidfile FILE) and of
+// the options carrying one attached (-FFILE, -lFFILE, --pidfile=FILE). The
+// pid file is the only file pgrep reads; every other argument is a pattern or
+// an option value.
+func pgrepPidfiles(args []string) (pidfiles, attached map[int]bool) {
+	pidfiles, attached = map[int]bool{}, map[int]bool{}
+	for _, sp := range pgrepReadings.readings() {
+		for _, o := range sp.scan(args).opts {
+			switch {
+			case o.name != "F" || !o.hasValue:
+			case o.valueIndex >= 0:
+				pidfiles[o.valueIndex] = true
+			default:
+				attached[o.index] = true
+			}
 		}
 	}
-	return false
-}
-
-// scanPgrepArgs walks pgrep's arguments the way getopt does (options may
-// follow the pattern) and returns the indices of the arguments that name a
-// pid file (-F FILE, --pidfile FILE) and of the ones carrying a pid file
-// embedded in the option itself (-FFILE, -lFFILE, --pidfile=FILE). The pid
-// file is the only file pgrep reads; every other argument is a pattern or an
-// option value.
-func scanPgrepArgs(args []string) (pidfiles, embedded map[int]bool) {
-	pidfiles = make(map[int]bool)
-	embedded = make(map[int]bool)
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			continue // pattern
-		}
-		if strings.HasPrefix(arg, "--") {
-			name, _, hasValue := strings.Cut(arg[2:], "=")
-			if hasValue {
-				if isPgrepPidfileLong(name) {
-					embedded[i] = true
-				}
-				continue
-			}
-			if pgrepLongTakesValue(name) && i+1 < len(args) {
-				i++
-				if isPgrepPidfileLong(name) {
-					pidfiles[i] = true
-				}
-			}
-			continue
-		}
-		for j := 1; j < len(arg); j++ {
-			c := arg[j]
-			if !strings.ContainsRune(pgrepShortValueOpts, rune(c)) {
-				continue
-			}
-			// The rest of the cluster is the value; without one, the next
-			// argument is, whatever it starts with.
-			if j+1 < len(arg) {
-				if c == 'F' {
-					embedded[i] = true
-				}
-			} else if i+1 < len(args) {
-				i++
-				if c == 'F' {
-					pidfiles[i] = true
-				}
-			}
-			break
-		}
-	}
-	return pidfiles, embedded
+	return pidfiles, attached
 }
 
 // pgrepNonPathArgIndices returns every argument index except the pid files
-// scanPgrepArgs finds: pgrep's patterns (`pgrep -f /usr/bin/node`) and option
+// pgrepPidfiles finds: pgrep's patterns (`pgrep -f /usr/bin/node`) and option
 // values are not paths, so only the pid file is held to the path boundary.
-// Embedded pid files are left to the generic flag check as well, though
+// Attached pid files are left to the generic flag check as well, though
 // validatePgrepArgs refuses them outright.
 func pgrepNonPathArgIndices(args []string) map[int]bool {
-	pidfiles, embedded := scanPgrepArgs(args)
+	pidfiles, attached := pgrepPidfiles(args)
 	skip := make(map[int]bool)
 	for i := 1; i < len(args); i++ {
-		if !pidfiles[i] && !embedded[i] {
+		if !pidfiles[i] && !attached[i] {
 			skip[i] = true
 		}
 	}
@@ -115,9 +73,9 @@ func validatePgrepArgs(_ *Sandbox, args []*syntax.Word) error {
 	for i, w := range args {
 		texts[i] = wordText(w)
 	}
-	_, embedded := scanPgrepArgs(texts)
+	_, attached := pgrepPidfiles(texts)
 	for i := range texts {
-		if embedded[i] {
+		if attached[i] {
 			return fmt.Errorf("pgrep %s: pass the pid file as its own argument (-F FILE)", texts[i])
 		}
 	}

@@ -39,7 +39,7 @@ import (
 func validateGhArgs(args []*syntax.Word, o ghOptions) error {
 	argv := make([]string, len(args))
 	for i, w := range args {
-		v, ok := ghLiteral(w)
+		v, ok := wordLiteral(w)
 		if !ok {
 			// A word known only after expansion (--body "$(cat notes.md)"):
 			// the runtime layer re-runs this validator on the expanded argv.
@@ -62,13 +62,6 @@ type ghGitError struct{ what string }
 
 func (e *ghGitError) Error() string {
 	return fmt.Sprintf("%s is not allowed: it makes gh run git in the working directory, where the hooks and config sandboxed commands can write would run with gh's token; the user can allow it with `lite-sandbox config profiles set gh allow_git true`, which gives up that protection", e.what)
-}
-
-// ghLiteral returns the value of a word made only of literal text, quoted or
-// not, and false for a word with an expansion in it.
-func ghLiteral(w *syntax.Word) (string, bool) {
-	v, bad := literalWord(w)
-	return v.val, bad == nil
 }
 
 // ghCommandAliases and ghSubcommandAliases map the built-in aliases of gh's
@@ -535,6 +528,24 @@ func validateGhReads(args []string, workDir string, read []resolvedAllowedPath) 
 		if err := checkBoundary(f, f, workDir, false, read); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateGhCommand is gh's validator, with the gh profile's options.
+func validateGhCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	return validateGhArgs(args, ghOptions{
+		allowToken: cfg.ProfileOption("gh", "allow_token"),
+		allowGit:   cfg.ProfileOption("gh", "allow_git"),
+	})
+}
+
+// ghNonPathArgIndices: gh api's endpoint (gh api /user) is a URL path, not a
+// file.
+func ghNonPathArgIndices(args []string) map[int]bool {
+	if i, _ := ghAPIPaths(args); i > 0 {
+		return map[int]bool{i: true}
 	}
 	return nil
 }

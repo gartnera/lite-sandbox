@@ -30,26 +30,15 @@ func isStdStreamRedirect(path string, isWrite bool) bool {
 	return ok && (fd != 0) == isWrite
 }
 
-// inProcessPathCommands are commands that run inside the lite-sandbox process
-// and open their file operands with the host's own descriptors, so a
-// standard-stream name there would reach the host's streams rather than the
-// command's.
-var inProcessPathCommands = map[string]bool{
-	"awk":     true,
-	"bash":    true,
-	"sh":      true,
-	"python":  true,
-	"python3": true,
-}
-
 // isStdStreamArg reports whether arg is a standard-stream name passed to a
 // command that opens it as its own descriptor (`tee /dev/stdout`,
 // `cat /dev/stdin`, `dd of=/dev/stderr`). That is a separate process, so the
 // name reaches only the streams the sandbox already gave it. In-process
-// commands are left to the boundary check.
+// commands (commandSpec.inProcess), which open it with the host's own
+// descriptors, are left to the boundary check.
 func isStdStreamArg(cmdName, arg string) bool {
 	_, ok := stdStreamFDs[arg]
-	return ok && !inProcessPathCommands[cmdName]
+	return ok && !lookupCommand(cmdName).inProcess
 }
 
 // openStdStream serves a redirect to a standard-stream name from the

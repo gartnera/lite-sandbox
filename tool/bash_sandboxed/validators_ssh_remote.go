@@ -258,7 +258,7 @@ func (r *remotePolicy) command(s *Sandbox, args []*syntax.Word) error {
 	if r.allows(vals) || remotePlainReaders[name] {
 		return nil
 	}
-	validator, ok := s.argValidators[name]
+	validator, ok := s.validator(name)
 	if !ok {
 		return fmt.Errorf("%s is not one of the read-only commands", name)
 	}
@@ -326,10 +326,10 @@ var remoteWrapperIndex = map[string]func(argv []string) int{
 		idx, _ := remoteSudoIndex(argv)
 		return idx
 	},
-	"env":     func(argv []string) int { return envCommandIndex(argv, argv) },
-	"timeout": timeoutCommandIndex,
-	"nice":    func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["nice"]) },
-	"stdbuf":  func(argv []string) int { return optionWrapperCommandIndex(argv, optionWrapperSpecs["stdbuf"]) },
+	"env":     wrapperCommandIndex,
+	"timeout": wrapperCommandIndex,
+	"nice":    wrapperCommandIndex,
+	"stdbuf":  wrapperCommandIndex,
 	"command": remoteCommandBuiltinIndex,
 }
 
@@ -396,11 +396,11 @@ var (
 )
 
 // remoteSudoIndex returns the command sudo runs, or -1. Its options stop at
-// the first operand ("+" getopt, as optionWrapperCommandIndex walks); only
+// the first operand ("+" getopt, as wrapperSpec.commandIndex walks); only
 // the ones above are allowed, so -e (sudoedit), -i, and -s (a shell) are
 // refused, as are VAR=value operands.
 func remoteSudoIndex(argv []string) (int, error) {
-	idx := optionWrapperCommandIndex(argv, sudoSpec)
+	idx := wrapperSpec{opts: optSpec{short: sudoSpec.short, long: sudoSpec.long, flags: sudoLongFlags}}.commandIndex(argv, argv)
 	end := idx
 	if idx < 0 {
 		end = len(argv)
@@ -494,7 +494,7 @@ var remotePlainReaders = map[string]bool{}
 // remoteArgValidators are the validators of the other commands a remote
 // command may run: the wrappers, and the commands with options or verbs
 // that write. Their keys and remotePlainReaders are the read-only commands.
-var remoteArgValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+var remoteArgValidators map[string]argValidator
 
 func init() {
 	for _, c := range []string{
@@ -514,11 +514,11 @@ func init() {
 	argv := func(check func([]string) error) func(*Sandbox, []*syntax.Word) error {
 		return func(_ *Sandbox, args []*syntax.Word) error { return check(wordLits(args)) }
 	}
-	remoteArgValidators = map[string]func(*Sandbox, []*syntax.Word) error{
-		"env":     validateEnvArgs,
-		"timeout": validateTimeoutArgs,
-		"nice":    validateOptionWrapperArgs,
-		"stdbuf":  validateOptionWrapperArgs,
+	remoteArgValidators = map[string]argValidator{
+		"env":     validateWrapperArgs,
+		"timeout": validateWrapperArgs,
+		"nice":    validateWrapperArgs,
+		"stdbuf":  validateWrapperArgs,
 		"sudo":    validateRemoteSudo,
 		"command": validateRemoteCommandBuiltin,
 		"sh":      validateRemoteShell,

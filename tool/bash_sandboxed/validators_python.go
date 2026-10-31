@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -25,7 +26,7 @@ import (
 //
 // This is a static pass. executePython re-derives everything it needs from the
 // expanded argv, and the runtime layer re-runs this validator (python is not in
-// runtimeValidatorSkip), so nothing here is load-bearing for security; it is
+// commandSpec.revalidatesItself), so nothing here is load-bearing for security; it is
 // here to fail fast with a good message.
 func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
 	if name := wordOrDefault(args, 0, "python"); !s.commandWhitelisted(name) {
@@ -117,4 +118,19 @@ func pythonNonPathArgIndices(args []string) map[int]bool {
 		}
 	}
 	return skip
+}
+
+// runPythonHook is python's and python3's run hook: it dispatches them to the
+// embedded monty runtime (python.go); sets is the authorization input for
+// its OS-call handler, which keeps Python file I/O inside the same boundary
+// as bash. An explicit extra_commands / unsandboxed_commands entry is the
+// exception: naming python there is a deliberate request for the real
+// interpreter (monty is a subset and cannot import third-party packages),
+// so it runs the ordinary way. Those entries already bypass validation by
+// design — this only decides which interpreter runs.
+func runPythonHook(ctx context.Context, s *Sandbox, args []string, x execEnv) (bool, error) {
+	if s.pythonExplicitlyRequested(args) {
+		return false, nil
+	}
+	return true, s.executePython(ctx, args, x.sets)
 }

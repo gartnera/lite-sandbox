@@ -22,6 +22,38 @@ The `Docs` workflow runs [lychee](https://github.com/lycheeverse/lychee) on ever
 lychee './**/*.md'
 ```
 
+### Adding or changing a command
+
+Everything the sandbox knows about how a command treats its arguments is one
+`commandSpec` entry in `commandTable` (`tool/bash_sandboxed/commands_table.go`),
+a single statically declared table: its argument validator, whether its paths
+are checked against the write set, what its option values and operands are,
+any paths its own syntax hides from the generic check, and, for a wrapper, the
+command it runs. The static walk, the runtime handlers, the path checks,
+wrapper recursion, and routing all look the command up there, so none of them
+change when a command is added. A command with no entry is a plain reader. To
+add one:
+
+1. Put it on the whitelist: `allowedCommands` (`commands.go`) for a built-in,
+   or a profile in `config/profiles.go`; a command a config section allows
+   goes in `config/section_commands.go`.
+2. Add its `commandTable` entry. Never walk an argv by hand: declare the
+   command's options as an `optSpec` (`opts.go`), from its `--help` or man
+   page (every option that takes a value, plus the long flags so
+   abbreviations expand as the tool expands them), and what its option values
+   and operands are as an `argLayout` (`arg_layout.go`; `commands_core.go` has
+   the coreutils-style ones). The command line is parsed by
+   [`jonathonwebb/getopt`](https://github.com/jonathonwebb/getopt), a port of
+   glibc's `getopt_long`, under both GNU permutation and a stop at the first
+   operand (`POSIXLY_CORRECT`, BSD tools). A new wrapper is an entry in
+   `wrapperSpecs` (`wrappers.go`).
+3. Add the new command lines to `getoptVectors` (`opts_test.go`).
+   `TestGetoptMatchesGlibc` checks the parser's reading of each against
+   util-linux `getopt(1)`, which parses with glibc itself (skipped where it
+   isn't installed, as on macOS).
+4. If the command must not see part of the environment, add that to
+   `restrictCommandEnv` (`ssh_agent.go`), which every exec path applies.
+
 ## Releasing
 
 **Every push to `main` is tagged and released** by `.github/workflows/release.yaml`. It builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). Every asset gets a signed build-provenance attestation, and releases are published as immutable. No manual steps are needed.

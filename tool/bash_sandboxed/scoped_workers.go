@@ -130,7 +130,6 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string, scope c
 	env["PATH"] = safePath(env["PATH"], writable)
 	scopedGitEnv(env, s.signsInScope(scope, cfg))
 	s.sshScopedEnv(ctx, args, scope, cfg, env)
-	agentBrowserSocketEnv(args, env)
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)

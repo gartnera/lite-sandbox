@@ -5,67 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/gartnera/lite-sandbox/config"
-
-	"mvdan.cc/sh/v3/syntax"
 )
-
-// profileHooks are the parser hooks of the profiles (config/profiles.go): the
-// argument validators of the commands a profile whitelists. The sandbox never
-// asks which profile is enabled — it is handed one commands list with each
-// enabled profile's commands already in it (config.Config.Effective) — so a
-// hook runs whenever its command runs, whitelisted or not: in denylist mode an
-// unlisted `go run pkg@latest` is still refused.
-//
-// Commands with nothing to validate (gofmt, rustc, swiftc, flutter/dart/fvm,
-// uvx) have no hook: gofmt is a pure formatter, rustc and swiftc compile what
-// they are given, the Flutter tools and uvx run code the OS sandbox confines
-// like `go test`.
-var profileHooks = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	// go generate runs the shell commands in //go:generate directives; go
-	// install writes the host's GOBIN.
-	"go": func(s *Sandbox, args []*syntax.Word) error {
-		return validateGoArgs(args, s.extraAllowsTokens("go", "generate"), s.extraAllowsTokens("go", "install"))
-	},
-	"pnpm": func(s *Sandbox, args []*syntax.Word) error {
-		return validatePnpmArgs(args, s.extraAllowsTokens("pnpm", "publish"))
-	},
-	"cargo": func(s *Sandbox, args []*syntax.Word) error {
-		return validateCargoArgs(args, s.extraAllowsTokens("cargo", "publish"))
-	},
-	"deno": func(s *Sandbox, args []*syntax.Word) error {
-		return validateDenoArgs(args, s.extraAllowsTokens("deno", "publish"), s.getConfig().ProfileOption("deno", "allow_import"))
-	},
-	"uv": func(s *Sandbox, args []*syntax.Word) error {
-		return validateUvArgs(args, s.extraAllowsTokens("uv", "publish"))
-	},
-	// gh runs in a worker of its own holding the token (validators_gh.go).
-	"gh": func(s *Sandbox, args []*syntax.Word) error {
-		cfg := s.getConfig()
-		return validateGhArgs(args, ghOptions{
-			allowToken: cfg.ProfileOption("gh", "allow_token"),
-			allowGit:   cfg.ProfileOption("gh", "allow_git"),
-		})
-	},
-	"python":  validatePythonArgs,
-	"python3": validatePythonArgs,
-	// The xcode profile's tools (validators_xcode.go). swiftc compiles what
-	// it is given, like rustc, so it has no hook; nor has xcodegen, whose
-	// spec's preGenCommand/postGenCommand run under the OS sandbox like a
-	// build script.
-	"xcodebuild":   validateXcodebuildArgs,
-	"xcrun":        validateXcrunArgs,
-	"swift":        validateSwiftArgs,
-	"xcode-select": validateXcodeSelectArgs,
-}
-
-func init() {
-	for name, hook := range profileHooks {
-		if _, dup := commandArgValidators[name]; dup {
-			panic(fmt.Sprintf("profile hook for %q collides with a built-in validator", name))
-		}
-		commandArgValidators[name] = hook
-	}
-}
 
 // publishGate refuses a registry-publishing subcommand unless the config has
 // an allow for exactly it ("cargo publish"). Publishing changes shared state
