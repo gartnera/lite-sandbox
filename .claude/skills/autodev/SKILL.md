@@ -19,6 +19,11 @@ Invoking autodev counts as the user's explicit request to commit, push, open a
 pull request, label it, enable auto-merge and merge it once CI is green.
 **Every merge to `main` is released**, so the bar for "green" is the full CI.
 
+This skill says *what* to do and *when*. It doesn't say which tools to use.
+Use whatever this environment provides for git, GitHub and watching the PR,
+and follow the environment's own rules for branches, attribution and PR
+activity.
+
 ## Ground rules
 
 - **Headless.** Don't ask the user questions or wait for confirmation. When the
@@ -46,88 +51,57 @@ pull request, label it, enable auto-merge and merge it once CI is green.
   it, and which issues you filed. The PR body and the final report come from
   it.
 
-## 1. Set up the branch
+## 1. Develop
 
-```bash
-git fetch origin main
-```
+Work on the branch the environment designates. If it doesn't designate one,
+create a new branch from an up-to-date `main`. Read enough of the code to
+change it the way it is already written. Implement the feature or fix. Add or
+update tests that would fail without the change. Update `docs/` and code
+comments that describe the old behavior.
 
-If the session or environment names a development branch, use it. Otherwise
-create `autodev/<short-slug>` from `origin/main`. If the branch's earlier PR
-has already merged, restart the branch from `origin/main`. Don't stack new
-work on merged history.
-
-## 2. Develop
-
-Read enough of the code to change it the way it is already written. Implement
-the feature or fix. Add or update tests that would fail without the change.
-Update `docs/` and code comments that describe the old behavior.
-
-## 3. Test only what the change affects
+## 2. Test only what the change affects
 
 Full coverage is CI's job. Locally, use your judgment to pick the packages
 the change can affect, and test only those:
 
 - the packages you changed, including their `testdata/` and embedded files;
-- packages whose behavior depends on what you changed. For example, a change
-  to an exported API, a shared type, or validation logic matters to its
-  callers. Grep for the callers. Skip dependents that only import the package
-  for something you didn't touch;
-- everything (`./...`) when `go.mod` or `go.sum` changed.
+- packages whose behavior depends on what you changed, such as callers of a
+  changed API, shared type, or validation logic;
+- everything when `go.mod` or `go.sum` changed.
 
-```bash
-go build ./...
-gofmt -l <changed .go files>     # must print nothing
-go vet <packages> && go test <packages>
-```
+Build the whole module, check `gofmt` on the files you changed, then vet and
+test the packages you picked. A docs-only or CI-only change needs no Go tests.
 
-A docs-only or CI-only change needs no Go tests.
+This repo has a few extra suites that only run when you opt in. Run them when
+they apply:
 
-Add these when they apply:
+- **Sandbox packages** (`os_sandbox`, `tool/bash_sandboxed`): run them with
+  `OS_SANDBOX_TESTS=1`. On Linux this needs `bwrap`.
+- **Installer, launcher or hook code:** run the mocked-model E2E test for the
+  affected agent only (`LITE_SANDBOX_E2E=1`, see *E2E Testing* in
+  `docs/development.md`). It downloads the pinned agents first.
+- **Markdown:** check the links the way the `Docs` workflow does.
 
-- **You test `os_sandbox` or `tool/bash_sandboxed`:** rerun those
-  packages with `OS_SANDBOX_TESTS=1`. This needs `bwrap` on Linux. If it isn't
-  installed, note that CI covers it.
-- **Installer, launcher or hook code changed** (`cmd/install*`,
-  `cmd/launch*`, `cmd/hook*`, `cmd/pi_extension*`, `e2e/mockedserver`): run
-  only the relevant agent with
-  `LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v -run Test<Agent>`.
-  `TestMain` downloads every pinned agent first. If the network blocks that,
-  say so in the PR and rely on the `E2E` workflow.
-- **Markdown changed:** run `lychee './**/*.md'` if it is installed. If not,
-  the `Docs` workflow checks the links.
-- Run a test with `-run` and `-count=1` while you iterate. Rerun every
-  package you picked before you commit.
+If a suite can't run here (a missing tool, a blocked network), note it in the
+PR and rely on CI. Fix every failure before you move on. If a failure looks
+unrelated to your change, check it against `main`. If it fails there too, it's
+an unrelated problem: file an issue, and fix it only if it blocks this change.
 
-Fix every failure before you move on. If a failure is clearly not caused by
-your change, check it against `origin/main`. If it fails there too, it's an
-unrelated problem: file an issue, and fix it only if it blocks this change.
+## 3. Commit and rebase
 
-## 4. Commit
+Commit with an imperative, specific title in the style of `git log`, and
+explain the why in the body. Use one logical commit for the change and
+separate commits for any blocking fixes. Rebase onto the latest `main`,
+resolving conflicts by keeping both sides' intent. After a non-trivial
+conflict, rerun step 2.
 
-Commit with an imperative, specific title in the style of `git log`, for
-example "Hold ssh's remote command to read-only commands per host". Explain
-the why in the body. Add the attribution trailers your environment requires.
-Use one logical commit for the change and separate commits for any blocking
-fixes.
+## 4. Code review
 
-## 5. Rebase
+Review the branch diff against `main` with a reviewer that hasn't seen your
+reasoning, for example the `code-review` skill at `high`, or a fresh agent.
+Give the reviewer the diff and the request, not your conclusions.
 
-```bash
-git fetch origin main && git rebase origin/main
-```
-
-Resolve conflicts by keeping both sides' intent. After a non-trivial
-conflict, rerun step 3.
-
-## 6. Code review
-
-Review the branch diff against `origin/main` with a reviewer that hasn't seen
-your reasoning. Run the `code-review` skill at `high` on the branch diff. If
-it isn't available, start a fresh `Agent` to review it. Give the agent the
-diff and the request, not your conclusions.
-
-## 7. Triage
+## 5. Triage
 
 Put each finding in exactly one bucket and log it:
 
@@ -139,14 +113,13 @@ Put each finding in exactly one bucket and log it:
 
 Check a finding against the code before you act on it. Reviewers can be wrong.
 
-## 8. Fix, retest, commit, rebase
+## 6. Fix
 
-Apply the **Fix** findings. Rerun step 3 and commit, either amending the
-change or adding a follow-up commit. Rebase again as in step 5. If the fixes
-were substantial, run step 6 once more on the new diff. Do at most two code
-review rounds, then proceed.
+Apply the **Fix** findings. Rerun step 2, commit, and rebase again. If the
+fixes were substantial, run step 4 once more on the new diff. Do at most two
+code review rounds, then proceed.
 
-## 9. Security review (only when the change touches the security boundary)
+## 7. Security review (only when the change touches the security boundary)
 
 Run this step only if the diff changes the security boundary: decide from
 what the diff does, not just from file names. `tool/bash_sandboxed`,
@@ -155,26 +128,19 @@ what the diff does, not just from file names. `tool/bash_sandboxed`,
 Otherwise skip it and write "Security review: skipped, no security-boundary
 change" in the PR's **Review** section.
 
-When it applies, run the `security-review` skill as a separate pass on the
-diff you have after step 8, so it sees the code-review fixes. Triage its
-findings as in step 7. Fix them as in step 8, and rerun this step after a
-substantial fix. Do at most two security review rounds. Also check that
-`docs/security.md` still matches the behavior.
+When it applies, run a separate security review, for example the
+`security-review` skill, on the diff you have after step 6, so it sees the
+code-review fixes. Triage its findings as in step 5 and fix them as in step 6.
+Rerun this step after a substantial fix, with at most two security review
+rounds. Also check that `docs/security.md` still matches the behavior.
 
-## 10. Push and open the PR
+## 8. Push and open the PR
 
-```bash
-git push --force-with-lease -u origin <branch>
-```
-
-Open a PR against `main`. Use the `gh` CLI when it's installed and
-authenticated. Otherwise use the GitHub MCP tools (`create_pull_request`,
-`issue_write` for labels). If the repository has a PR template, follow its
-headings. Otherwise use:
+Push the branch and open a PR against `main`. If the repository has a PR
+template, follow its headings. Otherwise use:
 
 - **Summary:** what the PR changes and why.
-- **Testing:** the commands you ran locally, and what you left to CI (full
-  `go test ./...`, macOS, E2E).
+- **Testing:** what you ran locally, and what you left to CI.
 - **Review:** what the code review and the security review found, each
   separately: findings fixed, findings rejected with reasons, and links to the
   issues you filed. If you skipped the security review, say so.
@@ -184,70 +150,52 @@ Add **exactly one** `release:*` label: `release:minor` for a feature,
 `release:patch` for a fix or refactor, `release:skip` for a docs-only,
 CI-only or tests-only change, `release:major` for a breaking change.
 
-## 11. Auto-merge and watch
+## 9. Auto-merge and watch
 
-Nothing gates a merge on CI here: there is no merge queue, and `main` may not
-require status checks. Enabling auto-merge right away could therefore merge
-before CI runs.
+Nothing in this repo gates a merge on CI: there is no merge queue, and `main`
+may not require status checks. Enabling auto-merge right away could therefore
+merge, and release, before CI runs.
 
-1. Wait until every check on the PR's **current head SHA** is green: CI on
-   Linux and macOS, E2E, PR labels, and Docs when it runs. Then enable
-   auto-merge with the squash method (`gh pr merge --auto --squash`, or
-   `enable_pr_auto_merge`). If GitHub refuses because the PR is already
-   mergeable or auto-merge is turned off for the repository, merge it with
-   squash directly. A green PR is what auto-merge would have merged.
-2. Keep watching until the PR is merged or closed:
-   - **Cloud session with `subscribe_pr_activity`:** subscribe to the PR and
-     end the turn. CI results, reviews and conflicts wake the session. Follow
-     the rules that arrive with the subscription.
-   - **Otherwise:** run `gh pr checks <pr> --watch --fail-fast` in the
-     background, and check `gh pr view <pr> --json
-     state,mergeable,mergeStateStatus,autoMergeRequest` whenever it finishes
-     or `main` moves. Space the checks out to match how long CI takes.
-3. **CI failure:** read the failing job's log (`gh run view <run>
-   --log-failed`, or `get_job_logs`). Reproduce the failure locally with the
-   job's exact command and environment (`OS_SANDBOX_TESTS=1` and so on).
-   Fix it and show the same command passing. If the fix touches the security
-   boundary, run step 9 on it. Then commit, rebase and push as
-   in steps 4, 5 and 10, and wait for green again before re-enabling auto-merge
-   if GitHub dropped it. If the failure only happens on macOS, reason from the
-   log and say so in the PR. If a failure is unrelated to the diff and passes
-   when rerun locally, rerun only the failed jobs once (`gh run rerun <run>
-   --failed`). If it fails again, file a flaky-test issue.
-4. **Merge conflict** (`mergeable: CONFLICTING` or `mergeStateStatus:
-   DIRTY`): rebase onto `origin/main`, resolve, rerun step 3, then push with
-   `--force-with-lease`.
-5. **Review comments from people:** treat them as findings and triage them as
-   in step 7. Reply to the ones you reject with the reason, ending the reply
-   with your environment's attribution footer. Don't resolve or dismiss
-   anyone else's review.
-6. If the same failure survives three fix attempts, stop. Leave the PR open
-   with auto-merge off and report what you tried.
+- Wait until every check on the PR's current head commit is green. Then
+  enable auto-merge with the squash method. If GitHub won't enable it
+  (for example because the PR is already mergeable), squash-merge the green
+  PR directly.
+- Keep watching until the PR merges or closes, in whatever way this
+  environment supports.
+- **CI failure:** read the failing job's log and reproduce the failure
+  locally with the job's command and environment. Fix it and show the same
+  command passing. If the fix touches the security boundary, run step 7 on
+  it. Commit, rebase, push, and wait for green again before re-enabling
+  auto-merge if it was dropped. If the failure can't be reproduced here (for
+  example, it only happens on macOS), reason from the log and say so in the
+  PR. If a failure is unrelated to the diff and looks flaky, rerun the failed
+  jobs once. If it fails again, file an issue.
+- **Merge conflict:** rebase onto `main`, resolve, rerun step 2, and push.
+- **Review comments from people:** triage them as in step 5. Reply to the
+  ones you reject with the reason. Don't resolve or dismiss anyone else's
+  review.
+- If the same failure survives three fix attempts, stop. Leave the PR open
+  with auto-merge off and report what you tried.
 
-After the merge, check that the `CI` and `Release` runs on `main` for the
-merge commit pass. If this change broke `main`, start a new autodev run to fix
-it forward.
+After the merge, check that CI and the release on `main` pass for the merge
+commit. If this change broke `main`, start a new autodev run to fix it
+forward.
 
 ## Filing issues
 
 For each unrelated, non-blocking problem:
 
-1. Search for an existing issue first, with `gh issue list --search
-   "<keywords>" --state all` or `gh api -X GET search/issues -f
-   q='repo:<owner>/<repo> <keywords>'`. If one already covers it, comment on
-   it only if you have new information.
-2. Otherwise file a new one with `gh issue create` or the `issue_write` MCP
-   tool. Give it a specific title. In the body, cover:
-   - what's wrong and where, as `path:line` on `main`'s current SHA;
+1. Search the repository's issues, open and closed, for an existing one. If
+   one covers the problem, comment on it only if you have new information.
+2. Otherwise file a new issue with a specific title. In the body, cover:
+   - what's wrong and where, as `path:line` on `main`;
    - how to reproduce it, or the evidence;
    - why it's out of scope for the autodev PR, with a link to the PR.
-
-   End the body with your environment's attribution footer.
 3. Link the issue from the PR's **Review** section and list it in the final
    report.
 
-Don't file an issue for style preferences or speculation. File one only for a
-problem you have confirmed.
+File an issue only for a problem you have confirmed, not for style
+preferences or speculation.
 
 ## Final report
 
