@@ -92,7 +92,7 @@ func commandTable() map[string]commandSpec {
 		"tr":    {noFlagPaths: true}, // character classes
 
 		// Writers: every path argument is checked against the write set, and
-		// the ones they write against .claude too.
+		// the ones they write against agent configuration too.
 		"rm":        {writes: true, validate: validateRmArgs, args: writesOperands(optSpec{})},
 		"tee":       {writes: true, args: writesOperands(optSpec{})},
 		"unlink":    {writes: true, args: writesOperands(optSpec{})},
@@ -114,7 +114,7 @@ func commandTable() map[string]commandSpec {
 		"sed":       {writes: true, validate: validateSedArgs, args: sedLayout},
 
 		// Readers that write only some of their arguments: those are checked
-		// against the write set and .claude.
+		// against the write set and agent configuration.
 		"gzip":    {validate: validateGzipArgs, args: gzipLayout},
 		"gunzip":  {validate: validateGzipArgs, args: gzipLayout},
 		"xz":      {validate: validateXzArgs, args: xzLayout},
@@ -141,7 +141,7 @@ func commandTable() map[string]commandSpec {
 			},
 		},
 		// mktemp writes under $TMPDIR, contained by the OS sandbox's private
-		// /tmp (see allowedCommands); only its .claude check applies.
+		// /tmp (see allowedCommands); only its agent-config check applies.
 		"mktemp": {args: mktempLayout, targetsConfinedElsewhere: true},
 
 		// Archivers (validators_archive.go).
@@ -160,7 +160,8 @@ func commandTable() map[string]commandSpec {
 
 		// git's global path flags (-C, --git-dir, ...) say where it runs, not
 		// what it reads; what it writes in the work tree is confined by its
-		// level checks, so only .claude is checked against its targets.
+		// level checks, so only agent configuration is checked against its
+		// targets.
 		"git": {
 			validate:                 validateGitCommand,
 			nonPathArgs:              gitGlobalPathArgIndices,

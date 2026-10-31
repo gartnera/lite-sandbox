@@ -12,7 +12,7 @@ import (
 // its arguments, beyond whether it may run at all (the whitelist:
 // allowedCommands, the profiles, the ssh section). The generic validation
 // layers — the static walk, the runtime Call/Exec handlers, the path
-// checks, the .claude write check, wrapper recursion, and unsandboxed
+// checks, the agent-config write check, wrapper recursion, and unsandboxed
 // routing — look a command up here instead of switching on its name, so a
 // command's behavior lives in one registration next to its validator.
 //
@@ -33,11 +33,11 @@ type commandSpec struct {
 	writes bool
 	// writeTargets returns the arguments that name a file the command
 	// creates, modifies, or removes; each is checked against the write set
-	// (validateWriteTargets) and the read-only .claude directories
-	// (validateAgentConfigDirWrites). skip holds the arguments nonPathArgs
+	// (validateWriteTargets) and the read-only agent configuration
+	// (validateAgentConfigWrites). skip holds the arguments nonPathArgs
 	// reported. It errs toward listing an argument.
 	writeTargets func(args []string, skip map[int]bool) []string
-	// targetsConfinedElsewhere leaves writeTargets to the .claude check
+	// targetsConfinedElsewhere leaves writeTargets to the agent-config check
 	// alone: the command's writes are confined by its own validator (git)
 	// or land under $TMPDIR (mktemp).
 	targetsConfinedElsewhere bool

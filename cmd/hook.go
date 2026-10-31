@@ -498,7 +498,7 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	}
 	// pi's file tools.
 	if pt, ok := event.ToolInput.(*hook.PiPathInput); ok {
-		return evaluatePiPaths(event, pt)
+		return evaluatePaths(event, pt.Describe(), pt.Paths(), pt.Write())
 	}
 
 	path, write, governed := fsTarget(event)
@@ -523,44 +523,47 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if event.ToolInput != nil {
 		what = event.ToolInput.Describe()
 	}
-	return boundaryDenial(sb, cwd, what, path, write, event.FromGrok())
+	if d := boundaryDenial(sb, cwd, what, path, write, event.FromGrok()); d != nil || !write {
+		return d
+	}
+	return agentConfigWriteDecision(event, cwd, what, path)
 }
 
-// evaluatePiPaths enforces the sandbox boundary on one of pi's file tools.
-// pi never asks before a tool call, so unlike Claude Code's file tools a pi
-// write into a .claude or .pi directory is denied outright, as it is for
-// sandboxed commands: the project's .claude holds Claude Code's hooks and the
-// project's .pi the extensions, settings and MCP servers pi loads, both run
-// outside the sandbox.
-func evaluatePiPaths(event *hook.Event, pt *hook.PiPathInput) *hook.Decision {
-	paths := pt.Paths()
-	if pt.Write() {
-		cwd := eventCWD(event)
-		for _, p := range paths {
-			if cwd == "" && !filepath.IsAbs(p) {
-				continue
-			}
-			resolved := bash_sandboxed.ResolvePath(p, cwd)
-			dir := bash_sandboxed.AgentConfigDir(filepath.Clean(p))
-			if dir == "" {
-				dir = bash_sandboxed.AgentConfigDir(resolved)
-			}
-			if dir == "" {
-				continue
-			}
-			reason := fmt.Sprintf(
-				"Blocked by lite-sandbox: %s\n"+
-					"%q resolves to %q, which is inside a %s directory: agent configuration, "+
-					"which is read-only in the sandbox. Ask the user to make this change.",
-				pt.Describe(), p, resolved, dir,
-			)
-			if !auditHookFinding(cwd, pt.Describe(), resolved, reason) {
-				return nil
-			}
-			return hook.NewDecision(hook.DecisionDeny, reason)
-		}
+// agentConfigWriteDecision returns the decision for a file tool's write to
+// path when it lands in a coding agent's configuration
+// (bash_sandboxed.AgentConfigWrite), or nil when it does not. Those paths are
+// read-only to sandboxed commands, since the agents run or obey them outside
+// the sandbox: .pi's extensions, .claude's hooks, opencode.json's
+// permissions and .opencode's plugins, .grok's hooks, Crush's crushrc. The
+// agents' file tools are held to the same rule. Codex and Grok Build can't put
+// an "ask" to the user, and pi doesn't prompt before a tool call on its own,
+// so their writes are denied; Claude Code's are asked about, so the user
+// decides, as Claude Code does itself for .claude (see isClaudeConfigTarget,
+// which runs first) and .mcp.json. In open mode the finding is only audited.
+func agentConfigWriteDecision(event *hook.Event, cwd, what, path string) *hook.Decision {
+	match, resolved := bash_sandboxed.AgentConfigWrite(path, cwd)
+	if match == "" {
+		return nil
 	}
-	return evaluatePaths(event, pt.Describe(), paths, pt.Write())
+	reason := fmt.Sprintf(
+		"Blocked by lite-sandbox: %s\n"+
+			"%q resolves to %q, which is %s: agent configuration, "+
+			"which is read-only in the sandbox. Ask the user to make this change.",
+		what, path, resolved, match,
+	)
+	if !auditHookFinding(cwd, what, resolved, reason) {
+		return nil
+	}
+	if event.CanAsk() && !event.FromPi() {
+		return hook.NewDecision(hook.DecisionAsk, fmt.Sprintf(
+			"lite-sandbox: %s writes %q, which is %s: a coding agent's configuration, which runs or "+
+				"is obeyed outside the sandbox and is read-only to sandboxed commands.",
+			what, resolved, match))
+	}
+	if event.FromGrok() {
+		reason = fmt.Sprintf("Blocked by lite-sandbox: writing %s (agent configuration) is not allowed; ask the user to make this change. Path: %s", match, resolved)
+	}
+	return hook.NewDecision(hook.DecisionDeny, reason)
 }
 
 // isClaudeConfigTarget reports whether a Claude Code file tool's target
@@ -622,6 +625,11 @@ func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *
 	for _, p := range paths {
 		if d := boundaryDenial(sb, cwd, what, p, write, event.FromGrok()); d != nil {
 			return d
+		}
+		if write {
+			if d := agentConfigWriteDecision(event, cwd, what, p); d != nil {
+				return d
+			}
 		}
 	}
 	return nil

@@ -272,6 +272,50 @@ func TestEvaluatePathPolicy(t *testing.T) {
 	}
 }
 
+// TestEvaluatePathPolicyAgentConfig covers file-tool writes into another
+// agent's configuration inside the project: Claude Code is asked about them
+// (it can prompt), Codex, which can't, is denied, and .claude itself stays
+// with Claude Code's own protected-path prompt.
+func TestEvaluatePathPolicyAgentConfig(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	patch := func(path string) *hook.ApplyPatchInput {
+		return &hook.ApplyPatchInput{Command: "*** Begin Patch\n*** Add File: " + path + "\n+x\n*** End Patch"}
+	}
+	tests := []struct {
+		name  string
+		event *hook.Event
+		want  hook.PermissionDecision // "" for defer
+	}{
+		{"claude write opencode.json asks", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "opencode.json")}}, hook.DecisionAsk},
+		{"claude edit .opencode plugin asks", &hook.Event{ToolName: hook.ToolEdit, CWD: cwd, ToolInput: &hook.EditInput{FilePath: filepath.Join(cwd, ".opencode", "plugin", "x.ts")}}, hook.DecisionAsk},
+		{"claude write .claude defers", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, ".claude", "settings.json")}}, ""},
+		{"claude write AGENTS.md defers", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "AGENTS.md")}}, ""},
+		{"claude read opencode.json defers", &hook.Event{ToolName: hook.ToolRead, CWD: cwd, ToolInput: &hook.ReadInput{FilePath: filepath.Join(cwd, "opencode.json")}}, ""},
+		{"codex apply_patch .codex/config.toml denied", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch(".codex/config.toml")}, hook.DecisionDeny},
+		{"codex apply_patch crushrc denied", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch("crushrc")}, hook.DecisionDeny},
+		{"codex apply_patch .claude denied", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch(".claude/settings.json")}, hook.DecisionDeny},
+		{"codex apply_patch main.go defers", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch("main.go")}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluatePathPolicy(tt.event)
+			if tt.want == "" {
+				if got != nil {
+					t.Fatalf("expected defer, got %q: %s", got.HookSpecificOutput.PermissionDecision, got.HookSpecificOutput.PermissionDecisionReason)
+				}
+				return
+			}
+			if got == nil || got.HookSpecificOutput.PermissionDecision != tt.want {
+				t.Fatalf("expected %q, got %+v", tt.want, got)
+			}
+			if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "agent") {
+				t.Errorf("reason %q does not name agent configuration", got.HookSpecificOutput.PermissionDecisionReason)
+			}
+		})
+	}
+}
+
 // TestEvaluatePathPolicyClaudeDir covers the .claude special case: Claude
 // Code's file tools on a path that resolves into .claude defer to Claude
 // Code's own protected-path prompt, except where that would loosen the hook —
