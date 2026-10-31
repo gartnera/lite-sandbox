@@ -168,14 +168,6 @@ func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
-// sourcedFile is the commandSpec.script of source and .: the file they read.
-func sourcedFile(args []*syntax.Word) int {
-	if len(args) < 2 {
-		return -1
-	}
-	return 1
-}
-
 // validateBashArgs validates bash/sh command arguments at the AST level:
 // the flags parseShellArgs refuses, and a shell that would read commands
 // from stdin. The -c command string's content, and a script file's, is
@@ -255,9 +247,18 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		return fmt.Errorf("%s: no command or script file specified", cmdName)
 	}
 
-	// Prepend shell flags as set commands
+	// Prepend shell flags as set commands, each quoted: an -o value is the
+	// option's name, never shell syntax.
 	if len(inv.set) > 0 {
-		script = "set " + strings.Join(inv.set, " ") + "\n" + script
+		set := make([]string, len(inv.set))
+		for i, w := range inv.set {
+			q, err := syntax.Quote(w, syntax.LangBash)
+			if err != nil {
+				return fmt.Errorf("%s: option %q: %w", cmdName, w, err)
+			}
+			set[i] = q
+		}
+		script = "set " + strings.Join(set, " ") + "\n" + script
 	}
 
 	// Parse the script

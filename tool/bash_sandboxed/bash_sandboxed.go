@@ -766,7 +766,7 @@ func collectDeclaredFunctions(f *syntax.File, workDir string) map[string]bool {
 			funcs[n.Name.Value] = true
 		case *syntax.CallExpr:
 			if len(n.Args) > 0 && workDir != "" && lookupCommand(n.Args[0].Lit()).sourcesScript {
-				if filePath := scriptOperand(n.Args); filePath != "" {
+				if filePath, inline := scriptOperand(n.Args); filePath != "" && !inline {
 					extractFunctionsFromFile(filePath, workDir, funcs)
 				}
 			}
@@ -1117,11 +1117,14 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 			return true
 		}
 
-		script := cmdName
+		script, inline := cmdName, false
 		if !isScriptPath(cmdName) {
-			script = scriptOperand(ce.Args)
+			script, inline = scriptOperand(ce.Args)
 		}
-		if script != "" {
+		switch {
+		case inline:
+			validationErr = s.validateScriptText(cmdName, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
+		case script != "":
 			validationErr = s.validateScriptFile(script, workDir, readAllowedPaths, writeAllowedPaths, depth)
 		}
 
@@ -1164,20 +1167,36 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
 }
 
+// validateScriptText parses and validates a script given on the command line
+// (bash -c's command string), as validateScriptFile does a file's. executeBash
+// validates it again when it runs; this pass is what the PreToolUse hook's
+// --bash-ast-hook-mode, which hands the command to the real bash, relies on.
+func (s *Sandbox) validateScriptText(cmdName, script, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+	sf, err := ParseBash(script)
+	if err != nil {
+		return fmt.Errorf("%s -c: %w", cmdName, err)
+	}
+	if err := s.validateFile(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		return fmt.Errorf("%s -c: %w", cmdName, err)
+	}
+	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
+}
+
 // scriptOperand returns the shell script a command line runs as one of its
-// arguments (see commandSpec.script), or "" when it runs none or its name is
+// arguments (see commandSpec.script): a file's path, or with inline the
+// script itself. It returns "" when the command runs none or the word is
 // only known after expansion.
-func scriptOperand(args []*syntax.Word) string {
+func scriptOperand(args []*syntax.Word) (script string, inline bool) {
 	find := lookupCommand(args[0].Lit()).script
 	if find == nil {
-		return ""
+		return "", false
 	}
-	i := find(args)
+	i, inline := find(args)
 	if i < 0 {
-		return ""
+		return "", false
 	}
-	path, _ := wordLiteral(args[i])
-	return path
+	script, _ = wordLiteral(args[i])
+	return script, inline
 }
 
 // firstCommandWord extracts the first word from a command string, stopping at

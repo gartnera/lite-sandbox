@@ -17,7 +17,7 @@ import (
 // an initialization cycle; lookupCommand builds it once, on first use.
 func commandTable() map[string]commandSpec {
 	bash := commandSpec{
-		validate: validateBashArgs, script: shellScriptOperand, notWrappable: true, revalidatesItself: true, inProcess: true,
+		validate: validateBashArgs, script: shellScript, notWrappable: true, revalidatesItself: true, inProcess: true,
 		run: func(ctx context.Context, s *Sandbox, args []string, _ execEnv) (bool, error) {
 			return true, s.executeBash(ctx, args)
 		},

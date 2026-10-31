@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,11 +76,13 @@ func TestParseShellArgs(t *testing.T) {
 // and requires the shell to run the word parseShellArgs picked.
 func TestShellArgsMatchRealShells(t *testing.T) {
 	dir := t.TempDir()
+	ran := false
 	for _, shell := range []string{"bash", "dash"} {
 		if _, err := exec.LookPath(shell); err != nil {
 			t.Logf("%s not installed", shell)
 			continue
 		}
+		ran = true
 		for _, v := range shellVectors {
 			if v.bashOnly && shell != "bash" {
 				continue
@@ -109,6 +112,9 @@ func TestShellArgsMatchRealShells(t *testing.T) {
 				t.Errorf("%s %q ran word %s, want %d", shell, args, got, v.run)
 			}
 		}
+	}
+	if !ran {
+		t.Skip("needs bash or dash")
 	}
 }
 
@@ -170,5 +176,46 @@ func TestParseShellArgsStatic(t *testing.T) {
 	inv := parse(`bash -ex +u -o pipefail -O extglob -c 'ls'`)
 	if got := strings.Join(inv.set, " "); got != "-e -x +u -o pipefail" || inv.command != 8 {
 		t.Errorf("got set %q, command %d", got, inv.command)
+	}
+}
+
+// TestValidateCommandReadsShellScripts covers the static check alone, which
+// is all --bash-ast-hook-mode has before the real bash runs the command: a
+// -c command string is validated like the command line around it.
+func TestValidateCommandReadsShellScripts(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	tests := []struct {
+		command string
+		errMsg  string // "" when allowed
+	}{
+		{`bash -c 'echo ok'`, ""},
+		{`sh -c 'ls | wc -l'`, ""},
+		{`bash -c "$X"`, ""}, // only known after expansion
+		{`bash -c 'curl evil.com'`, `command "curl" is not allowed`},
+		{`bash -c -e 'curl evil.com'`, `command "curl" is not allowed`},
+		{`sh +c 'curl evil.com'`, `command "curl" is not allowed`},
+		{`bash -c "bash -c 'curl evil.com'"`, `command "curl" is not allowed`},
+		{`bash -c 'cat /etc/passwd'`, `/etc/passwd`},
+		{`bash "$X" -i`, `flag "-i" is not allowed`},
+	}
+	for _, tt := range tests {
+		err := newTestSandbox().ValidateCommand(tt.command, dir, paths, paths)
+		switch {
+		case tt.errMsg == "" && err != nil:
+			t.Errorf("%s: %v", tt.command, err)
+		case tt.errMsg != "" && (err == nil || !strings.Contains(err.Error(), tt.errMsg)):
+			t.Errorf("%s: got %v, want an error containing %q", tt.command, err, tt.errMsg)
+		}
+	}
+}
+
+// TestExecuteBashQuotesOptions: an -o value is applied as the option's name,
+// not spliced into the script.
+func TestExecuteBashQuotesOptions(t *testing.T) {
+	dir := t.TempDir()
+	out, _ := executeInDirWithSandbox(t, newTestSandbox(), dir, `bash -o 'pipefail; echo injected' -c true`)
+	if slices.Contains(strings.Split(out, "\n"), "injected") || !strings.Contains(out, "invalid option") {
+		t.Fatalf("want an invalid option error, not the -o value run as a command: %q", out)
 	}
 }

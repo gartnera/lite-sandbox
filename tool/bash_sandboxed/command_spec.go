@@ -56,11 +56,12 @@ type commandSpec struct {
 	// (dd if=, tar -c's operands under -C, what unzip extracts into).
 	checkPaths func(args []string, workDir string, sets resolvedPathSets) error
 
-	// script returns the index in args of the shell script the command runs
-	// (bash's script operand, source's file), or -1, so the static pass can
-	// validate the script's commands before anything runs
-	// (validateScriptContents).
-	script func(args []*syntax.Word) int
+	// script returns the index in args of the shell script the command
+	// runs, or -1, so the static pass can validate the script's commands
+	// before anything runs (validateScriptContents): the file it reads
+	// (bash's script operand, source's file), or with inline the script
+	// itself (bash -c's command string).
+	script func(args []*syntax.Word) (idx int, inline bool)
 	// sourcesScript: script runs in the calling shell (source, .), so the
 	// functions it declares can be called after it (collectDeclaredFunctions).
 	sourcesScript bool

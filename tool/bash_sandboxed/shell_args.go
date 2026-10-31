@@ -23,8 +23,10 @@ type shellInvocation struct {
 	// either are the script's $0 (-c only), $1, ...
 	command, script int
 	// complete is false when a word whose value is only known after
-	// expansion stopped the parse in the options: it may be an option or the
-	// first operand. The runtime layer parses the expanded argv again.
+	// expansion sits among the options: it may be an option (taking the next
+	// word as its value, or ending the options) or the first operand, so
+	// command and script are -1. The words after it are still checked
+	// against blocked. The runtime layer parses the expanded argv again.
 	complete bool
 }
 
@@ -80,8 +82,10 @@ var blockedBashFlags = map[string]string{
 // of words (-norc's o takes the next one); such a word is refused, so every
 // shell agrees on which word runs.
 //
-// A word that is not literal text stops the parse (complete is false): its
-// value decides whether it is an option or an operand.
+// A word that is not literal text leaves the parse incomplete: its value
+// decides whether it is an option or an operand. It is skipped, and the
+// words after it are still read as options, so a blocked flag among them is
+// refused whatever it turns out to be.
 func parseShellArgs(words []*syntax.Word, blocked map[string]string) (shellInvocation, error) {
 	n := len(words)
 	inv := shellInvocation{vals: make([]string, n), command: -1, script: -1}
@@ -117,11 +121,12 @@ func parseShellArgs(words []*syntax.Word, blocked map[string]string) (shellInvoc
 		}
 	}
 
-	cmdMode := false
+	cmdMode, unknown := false, false
 options:
 	for ; i < n; i++ {
 		if !literal[i] {
-			return inv, nil
+			unknown = true
+			continue
 		}
 		w := inv.vals[i]
 		switch {
@@ -132,7 +137,7 @@ options:
 			break options
 		case strings.HasPrefix(w, "--"):
 			return inv, fmt.Errorf("%s: long option %q must come before the single-letter options", name, w)
-		case w[0] == '-' && hasKey(bashLongOptions, w[1:]):
+		case w[0] == '-' && isBashLongOption(w[1:]):
 			return inv, fmt.Errorf("%s: option %q is read as --%s by bash and as single letters by sh; write --%s", name, w, w[1:], w[1:])
 		}
 		sign := w[:1]
@@ -154,6 +159,9 @@ options:
 		}
 	}
 
+	if unknown {
+		return inv, nil
+	}
 	inv.complete = true
 	switch {
 	case i < n && cmdMode:
@@ -166,17 +174,29 @@ options:
 	return inv, nil
 }
 
-func hasKey[K comparable, V any](m map[K]V, k K) bool {
-	_, ok := m[k]
+func isBashLongOption(name string) bool {
+	_, ok := bashLongOptions[name]
 	return ok
 }
 
-// shellScriptOperand is the commandSpec.script of bash and sh: the script
-// file operand, or -1.
-func shellScriptOperand(args []*syntax.Word) int {
+// shellScript is the commandSpec.script of bash and sh: the -c command
+// string, or the script file.
+func shellScript(args []*syntax.Word) (int, bool) {
 	inv, err := parseShellArgs(args, blockedBashFlags)
-	if err != nil {
-		return -1
+	switch {
+	case err != nil:
+		return -1, false
+	case inv.command >= 0:
+		return inv.command, true
+	default:
+		return inv.script, false
 	}
-	return inv.script
+}
+
+// sourcedFile is the commandSpec.script of source and .: the file they read.
+func sourcedFile(args []*syntax.Word) (int, bool) {
+	if len(args) < 2 {
+		return -1, false
+	}
+	return 1, false
 }
