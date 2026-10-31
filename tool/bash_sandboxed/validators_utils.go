@@ -81,11 +81,10 @@ var sortSpec = optSpec{
 
 // sortLongOpts are all of sort's long options (GNU and BSD).
 var sortLongOpts = append(append([]string(nil), sortSpec.long...),
-	"check", "check-silent", "debug", "dictionary-order", "general-numeric-sort", "help",
+	"check", "debug", "dictionary-order", "general-numeric-sort", "help",
 	"human-numeric-sort", "ignore-case", "ignore-leading-blanks", "ignore-nonprinting",
 	"merge", "month-sort", "numeric-sort", "random-sort", "reverse", "stable", "unique",
 	"version", "version-sort", "zero-terminated", "radix-sort", "mergesort", "qsort", "heapsort",
-	"ignore-leading-blanks", "sort-version",
 )
 
 // validateSortArgs refuses --compress-program (and any abbreviation of it):

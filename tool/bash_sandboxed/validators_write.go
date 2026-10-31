@@ -61,6 +61,22 @@ func validateSedArgs(_ *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
+// unescapeLit removes the backslash before each character of an unquoted
+// literal, which is how the shell reads it.
+func unescapeLit(v string) string {
+	if !strings.Contains(v, `\`) {
+		return v
+	}
+	var sb strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] == '\\' && i+1 < len(v) {
+			i++
+		}
+		sb.WriteByte(v[i])
+	}
+	return sb.String()
+}
+
 // wordText extracts the literal text content from a Word node,
 // including content inside single and double quotes.
 func wordText(w *syntax.Word) string {
@@ -68,7 +84,9 @@ func wordText(w *syntax.Word) string {
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			sb.WriteString(p.Value)
+			// An unquoted literal keeps its backslashes (--comp\ress is
+			// --compress to the program); drop them as the shell does.
+			sb.WriteString(unescapeLit(p.Value))
 		case *syntax.SglQuoted:
 			sb.WriteString(p.Value)
 		case *syntax.DblQuoted:
