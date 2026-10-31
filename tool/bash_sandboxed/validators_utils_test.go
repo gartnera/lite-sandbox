@@ -49,7 +49,7 @@ func TestUtilCommands_Allowed(t *testing.T) {
 		"less -R a.txt", "less -N -S a.txt", "less -p pattern a.txt", "less -pko a.txt",
 		"less --long-prompt a.txt", "less -- -o", "PAGER=cat git log",
 		"sort -k2 -t, a.txt", "sort -u --output=out.txt a.txt", "sort -S 64K a.txt",
-		"sort --files0-from=" + ro + "/list a", "sort --random-source=" + ro + "/r a",
+		"sort --random-source=" + ro + "/r a",
 		"sort --random-source " + ro + "/r a", "sort -T. a", "sort -T out a", "sort --temporary-directory=out a",
 		"shuf -n 1 a.txt", "shuf -o out.txt a.txt", "shuf -i 1-10",
 
@@ -104,6 +104,9 @@ func TestUtilCommands_Blocked(t *testing.T) {
 		{"sdiff --out=out a b", "runs another program"},
 		{"split --filter='sh -c x' a.txt", "runs a shell command"},
 		{"split --f=sh a.txt", "runs a shell command"},
+		{"sort --files0-from=a.txt", "reads file names"},
+		{"sort --files0-from -", "reads file names"},
+		{"sort --files0-f=a.txt", "reads file names"},
 		{"sort --compress-program=sh a.txt", "runs a program"},
 		{"sort --compress-program sh a.txt", "runs a program"},
 		{"sort --compress-prog=sh a.txt", "runs a program"},
@@ -148,10 +151,7 @@ func TestUtilCommands_Blocked(t *testing.T) {
 
 		// Writes outside the write set
 		{"sort -o " + outside + " a.txt", "outside allowed directories"},
-		{"sort --files0-from=" + outside + " a", "outside allowed directories"},
 		{"sort --random-source=" + outside + " a", "outside allowed directories"},
-		{"sort --files0-from " + outside, "outside allowed directories"},
-		{"sort --files0-f=" + outside, "outside allowed directories"},
 		{"sort --random-source " + outside + " a", "outside allowed directories"},
 		{"sort -T" + outside + " a", "outside allowed directories"},
 		{"sort -T " + outside + " a", "outside allowed directories"},

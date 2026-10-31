@@ -80,13 +80,13 @@ var sortSpec = optSpec{
 }
 
 // sortLayout is sort's layout: -o/--output and -T/--temporary-directory are
-// written, --files0-from and --random-source read. The command has
+// written, --random-source read (--files0-from is refused). The command has
 // noFlagPaths (-t/ is a separator, not a path), so the attached forms of
 // these options are checked from the layout instead of by the generic pass.
 var sortLayout = &argLayout{opts: sortSpec, values: map[string]argRole{
 	"o": roleWrite, "output": roleWrite,
 	"T": roleWrite, "temporary-directory": roleWrite,
-	"files0-from": roleRead, "random-source": roleRead,
+	"random-source": roleRead,
 }}
 
 // checkSortReads holds the files sort reads through an option value to the
@@ -110,7 +110,12 @@ var sortLongOpts = append(append([]string(nil), sortSpec.long...),
 
 // validateSortArgs refuses --compress-program (and any abbreviation of it):
 // sort runs the program, through sh on macOS, whenever it spills temp files.
+// It also refuses --files0-from, which reads the names it sorts from a file
+// the path check can't see into (as for xz --files).
 func validateSortArgs(_ *Sandbox, args []*syntax.Word) error {
+	if opt := refusedOption(wordTexts(args), sortSpec, sortLongOpts, "--files0-from"); opt != "" {
+		return fmt.Errorf("sort option %q is not allowed: it reads file names from a file", opt)
+	}
 	if opt := refusedOption(wordTexts(args), sortSpec, sortLongOpts, "--compress-program"); opt != "" {
 		return fmt.Errorf("sort option %q is not allowed: it runs a program", opt)
 	}
