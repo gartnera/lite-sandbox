@@ -22,6 +22,30 @@ The `Docs` workflow runs [lychee](https://github.com/lycheeverse/lychee) on ever
 lychee './**/*.md'
 ```
 
+### Adding or changing a command
+
+Everything the sandbox knows about how a command treats its arguments is one
+`commandSpec` (`tool/bash_sandboxed/command_spec.go`), registered with
+`registerCommands` from an `init` function in the file that implements the
+command: its argument validator, whether its paths are checked against the
+write set, which arguments it writes (for the write and `.claude` checks),
+which arguments are not paths, any paths its own syntax hides from the generic
+check, and, for a wrapper, the command it runs. The static walk, the runtime
+handlers, the path checks, wrapper recursion, and routing all look the command
+up there, so none of them change when a command is added. A command with no
+registration is a plain reader. To add one:
+
+1. Put it on the whitelist: `allowedCommands` (`commands.go`) for a built-in,
+   or a profile in `config/profiles.go` (with its spec in `profileCommands`,
+   `tool/bash_sandboxed/profiles.go`).
+2. Register its spec next to its validator. `commands_core.go` holds the small
+   coreutils-style ones; a command with a module of its own (git, tar, ssh,
+   gh, the wrappers) registers in that module. `optSpec` (`opts.go`) parses
+   getopt-style options for `writeTargets` and validators; a new wrapper is an
+   entry in `wrapperSpecs` (`wrappers.go`).
+3. If the command must not see part of the environment, add that to
+   `restrictCommandEnv` (`ssh_agent.go`), which every exec path applies.
+
 ## Releasing
 
 **Every push to `main` is tagged and released** by `.github/workflows/release.yaml`. It builds Linux and macOS (amd64/arm64) binaries with [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) and uploads them, with a `checksums.txt` and GitHub-generated release notes, to a [GitHub release](https://github.com/gartnera/lite-sandbox/releases). Every asset gets a signed build-provenance attestation, and releases are published as immutable. No manual steps are needed.

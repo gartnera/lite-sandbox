@@ -783,3 +783,18 @@ func sshpassNonPathArgIndices(args []string) map[int]bool {
 	}
 	return skip
 }
+
+func init() {
+	registerCommands(commandSpec{validate: validateSSHCommand, nonPathArgs: sshNonPathArgIndices}, "ssh")
+	registerCommands(commandSpec{
+		validate:    validateSSHPassCommand,
+		nonPathArgs: sshpassNonPathArgIndices,
+		writeTargets: func(args []string, _ map[int]bool) []string {
+			if inner := sshpassCopyArgs(args); inner != nil {
+				return copyWrites(inner)
+			}
+			return nil
+		},
+		checkPaths: copyReadPaths("sshpass"),
+	}, "sshpass")
+}

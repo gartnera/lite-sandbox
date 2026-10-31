@@ -131,10 +131,10 @@ type Sandbox struct {
 	// scoped_workers.go.
 	scopes        map[string]config.CommandScope
 	scopedWorkers map[string]*scopedWorker
-	// argValidators holds a reference to commandArgValidators so that
-	// validateSubCommand can look up per-command validators at runtime
-	// without creating a package-level initialization cycle.
-	argValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+	// argValidators is the validator table this Sandbox validates with:
+	// commandArgValidators (every registered commandSpec's validate), or
+	// for a remote-command checker the remote table.
+	argValidators map[string]argValidator
 	// remote, when set, makes this a checker of one ssh host's remote command
 	// rather than of local commands: the walk and the wrapped-command checks
 	// are the same, with the policy's commands, validators, and rules (see
@@ -1437,8 +1437,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	if err != nil {
 		return err
 	}
-	stripSSHPass(args, envMap)
-	stripRsyncHome(args, envMap)
+	restrictCommandEnv(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
@@ -1794,8 +1793,7 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	stripSSHPass(args, envMap)
-	stripRsyncHome(args, envMap)
+	restrictCommandEnv(args, envMap)
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

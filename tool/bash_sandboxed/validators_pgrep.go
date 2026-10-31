@@ -123,3 +123,7 @@ func validatePgrepArgs(_ *Sandbox, args []*syntax.Word) error {
 	}
 	return nil
 }
+
+func init() {
+	registerCommands(commandSpec{validate: validatePgrepArgs, nonPathArgs: pgrepNonPathArgIndices}, "pgrep")
+}

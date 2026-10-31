@@ -27,39 +27,6 @@ import (
 // (`xcrun curl` runs /usr/bin/curl) — so it is validated as a wrapper: the tool
 // it runs goes through the same gates as if it had been typed.
 
-// staticWordText returns w's text when it is fully determined by the source —
-// literals and quoted literals, no expansions — and false otherwise. Unlike
-// Lit it accepts quoting, which xcodebuild destinations always need
-// (-destination 'platform=iOS Simulator,name=iPhone 17').
-func staticWordText(w *syntax.Word) (string, bool) {
-	var sb strings.Builder
-	for _, part := range w.Parts {
-		switch p := part.(type) {
-		case *syntax.Lit:
-			sb.WriteString(p.Value)
-		case *syntax.SglQuoted:
-			if p.Dollar {
-				return "", false
-			}
-			sb.WriteString(p.Value)
-		case *syntax.DblQuoted:
-			if p.Dollar {
-				return "", false
-			}
-			for _, dp := range p.Parts {
-				lit, ok := dp.(*syntax.Lit)
-				if !ok {
-					return "", false
-				}
-				sb.WriteString(lit.Value)
-			}
-		default:
-			return "", false
-		}
-	}
-	return sb.String(), true
-}
-
 // xcodebuildRefusedOptions are the options xcodebuild is refused outright, with
 // why. They act outside anything the sandbox can confine — Apple's servers,
 // the user's developer account, the whole host — so they are the user's to
@@ -127,7 +94,7 @@ func validateXcodebuildArgs(s *Sandbox, args []*syntax.Word) error {
 	var destinations []string
 	dynamicDestination := false
 	for i := 1; i < len(args); i++ {
-		text, ok := staticWordText(args[i])
+		text, ok := wordLiteral(args[i])
 		if !ok {
 			return fmt.Errorf("xcodebuild options and actions must be literal strings (only an option's value may be expanded)")
 		}
@@ -150,7 +117,7 @@ func validateXcodebuildArgs(s *Sandbox, args []*syntax.Word) error {
 		if xcodebuildValueOptions[name] && !strings.Contains(text, "=") && i+1 < len(args) {
 			i++
 			if name == "-destination" {
-				if dest, ok := staticWordText(args[i]); ok {
+				if dest, ok := wordLiteral(args[i]); ok {
 					destinations = append(destinations, dest)
 				} else {
 					dynamicDestination = true
@@ -294,7 +261,7 @@ var simctlValueOptions = map[string]bool{"--set": true}
 func validateXcrunArgs(s *Sandbox, args []*syntax.Word) error {
 	lits := make([]string, len(args))
 	for i, w := range args {
-		text, ok := staticWordText(w)
+		text, ok := wordLiteral(w)
 		if !ok {
 			// The tool xcrun runs and the options that locate it must be
 			// known; its own arguments are checked by the tool's validator.

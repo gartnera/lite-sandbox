@@ -494,7 +494,7 @@ var remotePlainReaders = map[string]bool{}
 // remoteArgValidators are the validators of the other commands a remote
 // command may run: the wrappers, and the commands with options or verbs
 // that write. Their keys and remotePlainReaders are the read-only commands.
-var remoteArgValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+var remoteArgValidators map[string]argValidator
 
 func init() {
 	for _, c := range []string{
@@ -514,7 +514,7 @@ func init() {
 	argv := func(check func([]string) error) func(*Sandbox, []*syntax.Word) error {
 		return func(_ *Sandbox, args []*syntax.Word) error { return check(wordLits(args)) }
 	}
-	remoteArgValidators = map[string]func(*Sandbox, []*syntax.Word) error{
+	remoteArgValidators = map[string]argValidator{
 		"env":     validateWrapperArgs,
 		"timeout": validateWrapperArgs,
 		"nice":    validateWrapperArgs,

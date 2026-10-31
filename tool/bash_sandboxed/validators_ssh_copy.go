@@ -893,3 +893,22 @@ func validateCopyCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	return checkCopyArgv(argv, cfg)
 }
+
+func init() {
+	for _, name := range config.SSHCopyCommands {
+		registerCommands(commandSpec{
+			validate:     validateCopyCommand,
+			nonPathArgs:  copyNonPathArgIndices,
+			writeTargets: func(args []string, _ map[int]bool) []string { return copyWrites(args) },
+			checkPaths:   copyReadPaths(name),
+		}, name)
+	}
+}
+
+// copyReadPaths is the checkPaths of scp, rsync, and sshpass running
+// either (see validateCopyReads).
+func copyReadPaths(cmdName string) func(args []string, workDir string, sets resolvedPathSets) error {
+	return func(args []string, workDir string, sets resolvedPathSets) error {
+		return validateCopyReads(cmdName, args, workDir, sets.read)
+	}
+}

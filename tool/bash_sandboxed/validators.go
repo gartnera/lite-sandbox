@@ -193,39 +193,6 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
-// subCommandDenylist names commands that are unsafe to invoke via a command
-// wrapper (find -exec, xargs, env, timeout) because their sandbox safety relies
-// on the sandbox interpreter being the direct caller:
-//   - bash, sh: validateBashArgs explicitly defers -c content validation to
-//     executeBash, which only runs when the sandbox interp invokes them.
-//   - awk: executeAwk swaps the binary for goawk with NoExec/NoFileWrites,
-//     but the wrapper spawns the system awk that has system() etc.
-//   - time: at the top level `time` is a shell keyword (a TimeClause whose
-//     inner command is walked and validated); as a real /usr/bin/time exec it
-//     is instead a command wrapper of its own (and -o can write files), so a
-//     wrapper reaching it would run its child command unvalidated.
-//   - python/python3: these never run a host interpreter when the sandbox
-//     interpreter calls them — the ExecHandler dispatches them to the embedded
-//     monty runtime instead (see python.go). A wrapper spawns the real CPython
-//     from $PATH, which has none of monty's isolation: arbitrary file access,
-//     subprocess, and network, outside every layer of this sandbox.
-//     The exception is a user who has put python in extra_commands as a bare
-//     entry: that is an explicit request for the host interpreter with no
-//     validation, and it already runs unwrapped, so a wrapper adds nothing
-//     (see pythonOptedOutToHost).
-//
-// When a wrapper spawns these as native processes, the interpreter's hooks are
-// bypassed entirely, so the -c / awk program / wrapped command would execute
-// unvalidated.
-var subCommandDenylist = map[string]bool{
-	"bash":    true,
-	"sh":      true,
-	"awk":     true,
-	"time":    true,
-	"python":  true,
-	"python3": true,
-}
-
 // validateSubCommand validates a command name and its arguments against the
 // whitelist, including any per-command argument validators. args[0] must be
 // the command name. Used for recursive validation of commands embedded in
@@ -252,7 +219,12 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 	if entry, ok := matchCommandEntries(s.getAskCommands(), cmdName, wordLits(args[1:])); ok {
 		return askWrappedError(cmdName, entry)
 	}
-	if subCommandDenylist[cmdName] && !pythonOptedOutToHost(s, cmdName) {
+	// A command whose safety relies on the sandbox interpreter being its
+	// direct caller (commandSpec.notWrappable: bash, sh, awk, time, python)
+	// would run here as a native child, with the -c script, awk program, or
+	// wrapped command unvalidated. A user's bare allow of python is the
+	// exception (pythonOptedOutToHost).
+	if lookupCommand(cmdName).notWrappable && !pythonOptedOutToHost(s, cmdName) {
 		return tagRule(ruleStructural, cmdName, fmt.Errorf("command %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, nice, nohup, setsid, stdbuf, xcrun)", cmdName))
 	}
 	extra := s.getExtraCommands()

@@ -37,6 +37,13 @@ func wordValues(words []*syntax.Word) []string {
 	return out
 }
 
+// wordLiteral returns the value of a word made only of literal text, quoted
+// or not (see literalWord), and false for a word with an expansion in it.
+func wordLiteral(w *syntax.Word) (string, bool) {
+	v, bad := literalWord(w)
+	return v.val, bad == nil
+}
+
 // literalWord returns w's value as the shell sees it once quotes are removed,
 // for a word made only of literal text, quoted or not. Otherwise it returns
 // the first part that is not: an expansion, or $'...' or $"..." quoting,

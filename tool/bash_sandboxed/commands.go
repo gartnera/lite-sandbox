@@ -332,82 +332,9 @@ var osSandboxOnlyCommands = map[string]bool{
 	"pkill": true,
 }
 
-// writeCommands is the set of commands that perform write operations.
-// Path arguments to these commands are validated against writeAllowedPaths
-// rather than readAllowedPaths. This matches the "Scoped write commands"
-// category in allowedCommands, plus mkdir, less dd and sync. Commands that
-// write only some of their arguments (dd of=, sort -o, gzip's operands) are
-// read commands whose written arguments (writeTargets) are write-checked by
-// validateWriteTargets.
-var writeCommands = map[string]bool{
-	"cp":        true,
-	"mv":        true,
-	"rm":        true,
-	"touch":     true,
-	"chmod":     true,
-	"chown":     true,
-	"chgrp":     true,
-	"ln":        true,
-	"link":      true,
-	"unlink":    true,
-	"rmdir":     true,
-	"mkfifo":    true,
-	"truncate":  true,
-	"fallocate": true,
-	"shred":     true,
-	"install":   true,
-	"sed":       true,
-	"tee":       true,
-	"mkdir":     true,
-}
-
-// commandArgValidators is a registry of per-command argument validation functions.
-// Commands with dangerous flags (e.g., find -exec, find -delete) register a
-// validator here to block those flags while still allowing the command itself.
-// Validators receive the *Sandbox so they can access config (e.g., profile options, git).
-var commandArgValidators = map[string]func(s *Sandbox, args []*syntax.Word) error{
-	"awk":     validateAwkArgs,
-	"bash":    validateBashArgs,
-	"sh":      validateBashArgs,
-	"source":  validateSourceArgs,
-	".":       validateSourceArgs,
-	"rg":      validateRgArgs,
-	"find":    validateFindArgs,
-	"tar":     validateTarArgs,
-	"unzip":   validateUnzipArgs,
-	"zip":     validateZipArgs,
-	"ar":      validateArArgs,
-	"pgrep":   validatePgrepArgs,
-	"rm":      validateRmArgs,
-	"sed":     validateSedArgs,
-	"git":     validateGitCommand,
-	"aws":     validateAWSCommand,
-	"docker":  validateDockerCommand,
-	"ssh":     validateSSHCommand,
-	"sshpass": validateSSHPassCommand,
-	"scp":     validateCopyCommand,
-	"rsync":   validateCopyCommand,
-	"xargs":   validateWrapperArgs,
-	"env":     validateWrapperArgs,
-	"timeout": validateWrapperArgs,
-	"nice":    validateWrapperArgs,
-	"nohup":   validateWrapperArgs,
-	"setsid":  validateWrapperArgs,
-	"stdbuf":  validateWrapperArgs,
-	"diff3":   validateDiff3Args,
-	"sdiff":   validateSdiffArgs,
-	"split":   validateSplitArgs,
-	"install": validateInstallArgs,
-	"gzip":    validateGzipArgs,
-	"gunzip":  validateGzipArgs,
-	"xz":      validateXzArgs,
-	"unxz":    validateXzArgs,
-	"xzcat":   validateXzArgs,
-	"less":    validateLessArgs,
-	"arch":    validateArchArgs,
-	"zless":   validateLessArgs,
-	"bzless":  validateLessArgs,
-	"xzless":  validateLessArgs,
+func init() {
+	registerCommands(commandSpec{validate: validateAWSCommand}, "aws")
+	registerCommands(commandSpec{validate: validateDockerCommand}, "docker")
 }
 
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {

@@ -224,7 +224,7 @@ resolved path.
 
 `python`/`python3` are also refused in *wrapped* position (as the child of
 `xargs`, `env`, `timeout`, or `find -exec`), as `bash`, `sh`, and `awk` are
-(see `subCommandDenylist`). Commands are dispatched to monty only when the
+(see `commandSpec.notWrappable`). Commands are dispatched to monty only when the
 sandbox interpreter is the direct caller. A wrapper spawns its child as a
 native process, which would find the real CPython on `$PATH` and run it outside
 every layer of the sandbox.

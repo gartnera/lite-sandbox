@@ -266,20 +266,6 @@ func wordLeadingLits(words []*syntax.Word) []string {
 	return lits
 }
 
-// wrapperUnwrappers maps wrapper commands to a function that, given a full
-// invocation (command name first), returns the wrapped command's args (also
-// command name first) or nil when there is none.
-var wrapperUnwrappers = map[string]func([]string) []string{
-	"timeout": unwrapWrapper,
-	"env":     unwrapWrapper,
-	"xargs":   unwrapWrapper,
-	"xcrun":   unwrapXcrunArgs,
-	"nice":    unwrapWrapper,
-	"nohup":   unwrapWrapper,
-	"setsid":  unwrapWrapper,
-	"stdbuf":  unwrapWrapper,
-}
-
 // unwrapWrapperArgs repeatedly strips leading wrapper commands (timeout, env,
 // xcrun, xargs, ...) to expose the real command being run, so path checks and
 // unsandboxed routing evaluate the wrapped command rather than the wrapper.
@@ -289,8 +275,8 @@ var wrapperUnwrappers = map[string]func([]string) []string{
 // is belt-and-suspenders.
 func unwrapWrapperArgs(args []string) []string {
 	for guard := 0; guard <= maxBashDepth && len(args) > 0; guard++ {
-		unwrap, ok := wrapperUnwrappers[args[0]]
-		if !ok {
+		unwrap := lookupCommand(args[0]).unwrap
+		if unwrap == nil {
 			return args
 		}
 		inner := unwrap(args)
@@ -315,4 +301,10 @@ func sliceWrappedCommand(args []string, idx int) []string {
 		return nil
 	}
 	return args[idx:]
+}
+
+func init() {
+	for name := range wrapperSpecs {
+		registerCommands(commandSpec{validate: validateWrapperArgs, unwrap: unwrapWrapper}, name)
+	}
 }

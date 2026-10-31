@@ -85,45 +85,27 @@ func validatePathsResolved(f *syntax.File, workDir string, sets resolvedPathSets
 }
 
 // validateCommandPaths checks every path a single command touches: its
-// path-like arguments (against the read or write set, per writeCommands), the
-// arguments it writes (against the write set, see validateWriteTargets), for
-// tar, unzip, and zip, what they write (see validateArchiveWrites) and what a
-// creating tar reads (see validateTarCreateReads), what scp and rsync read
-// (see validateCopyReads), and, for
-// a wrapper (timeout, env, nice, ...), the paths of the command it runs, which
-// never passes back through the interpreter.
+// path-like arguments (against the read or write set, per commandSpec.writes),
+// the paths its own syntax names that the generic pass cannot see
+// (commandSpec.checkPaths: dd if=, what tar and unzip extract into, what scp
+// reads, ...), the arguments it writes (against the write set, see
+// validateWriteTargets), and, for a wrapper (timeout, env, nice, ...), the
+// paths of the command it runs, which never passes back through the
+// interpreter.
 func validateCommandPaths(cmdName string, args []string, workDir string, sets resolvedPathSets) error {
+	spec := lookupCommand(cmdName)
 	if err := validateCommandArgPaths(cmdName, args, workDir, sets.forCommand(cmdName)); err != nil {
 		return err
 	}
-	if cmdName == "dd" {
-		if err := validateDdReads(args, workDir, sets.read); err != nil {
-			return err
-		}
-	}
-	if cmdName == "gh" {
-		if err := validateGhReads(args, workDir, sets.read); err != nil {
-			return err
-		}
-	}
-	if cmdName == "tar" {
-		if err := validateTarCreateReads(args, workDir, sets.read); err != nil {
-			return err
-		}
-	}
-	switch cmdName {
-	case "scp", "rsync", "sshpass":
-		if err := validateCopyReads(cmdName, args, workDir, sets.read); err != nil {
+	if spec.checkPaths != nil {
+		if err := spec.checkPaths(args, workDir, sets); err != nil {
 			return err
 		}
 	}
 	if err := validateWriteTargets(cmdName, args, workDir, sets.write); err != nil {
 		return err
 	}
-	if err := validateArchiveWrites(cmdName, args, workDir, sets.write); err != nil {
-		return err
-	}
-	if _, wrapper := wrapperUnwrappers[cmdName]; wrapper {
+	if spec.unwrap != nil {
 		if inner := unwrapWrapperArgs(args); len(inner) > 0 {
 			return validateCommandPaths(inner[0], inner, workDir, sets)
 		}
@@ -135,11 +117,11 @@ func validateCommandPaths(cmdName string, args []string, workDir string, sets re
 // against the write set, whatever the set its other arguments are checked
 // against: `sort -o FILE`, `shuf -o FILE`, `dd of=FILE`, the operands gzip
 // replaces. Unlike the generic pass it checks a target that does not look
-// like a path (split's prefix x) and one that does not exist yet. mktemp is
-// left out: it writes under $TMPDIR, contained by the OS sandbox (see
-// allowedCommands); git's targets are confined by its own validator.
+// like a path (split's prefix x) and one that does not exist yet. A command
+// whose writes are confined elsewhere (commandSpec.targetsConfinedElsewhere:
+// mktemp, git) is left out.
 func validateWriteTargets(cmdName string, args []string, workDir string, write []resolvedAllowedPath) error {
-	if cmdName == "mktemp" || cmdName == "git" {
+	if lookupCommand(cmdName).targetsConfinedElsewhere {
 		return nil
 	}
 	for _, t := range writeTargets(cmdName, args, nonPathArgIndices(cmdName, args)) {
@@ -159,9 +141,10 @@ func validateWriteTargets(cmdName string, args []string, workDir string, write [
 // for non-literal words) and the interpreter's CallHandler
 // (validateExpandedPaths, which passes post-expansion values). args includes
 // the command name at index 0; allowed must already be selected for read vs
-// write commands (see writeCommands) and pre-resolved.
+// write commands (see resolvedPathSets.forCommand) and pre-resolved.
 func validateCommandArgPaths(cmdName string, args []string, workDir string, allowed []resolvedAllowedPath) error {
-	isWriteCmd := writeCommands[cmdName]
+	spec := lookupCommand(cmdName)
+	isWriteCmd := spec.writes
 	skipIndices := nonPathArgIndices(cmdName, args)
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
@@ -175,7 +158,7 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 		if strings.HasPrefix(arg, "-") {
 			// Extract any path embedded in a flag (e.g., -f/etc/passwd, --file=/etc/passwd).
 			// Skip for commands whose flag values are never paths (e.g., cut -d/).
-			if noFlagPathExtractionCommands[cmdName] {
+			if spec.noFlagPaths {
 				continue
 			}
 			pathToCheck = extractPathFromFlag(arg)
@@ -198,43 +181,13 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 
 // nonPathArgIndices returns the argument indices (within args, which includes
 // the command name at index 0) that are known not to be file paths for
-// cmdName — git global-flag values (e.g., -C /repo, which controls where git
-// runs, not what files are accessed), sed script expressions, grep
-// patterns, and pgrep patterns — so they are excluded from file-path security checks.
+// cmdName (commandSpec.nonPathArgs) — git global-flag values (e.g., -C /repo,
+// which controls where git runs, not what files are accessed), sed script
+// expressions, grep patterns, ssh hosts — so they are excluded from file-path
+// security checks.
 func nonPathArgIndices(cmdName string, args []string) map[int]bool {
-	switch cmdName {
-	case "python", "python3":
-		return pythonNonPathArgIndices(args)
-	case "git":
-		return gitGlobalPathArgIndices(args)
-	case "ssh":
-		return sshNonPathArgIndices(args)
-	case "sshpass":
-		return sshpassNonPathArgIndices(args)
-	case "scp", "rsync":
-		return copyNonPathArgIndices(args)
-	case "sed":
-		return sedNonPathArgIndices(args)
-	case "grep", "egrep", "fgrep", "rgrep", "zgrep", "zegrep", "zfgrep",
-		"bzgrep", "bzegrep", "bzfgrep", "xzgrep", "xzegrep", "xzfgrep":
-		return grepNonPathArgIndices(args)
-	case "pgrep":
-		return pgrepNonPathArgIndices(args)
-	case "gh":
-		// gh api's endpoint (gh api /user) is a URL path, not a file.
-		if i, _ := ghAPIPaths(args); i > 0 {
-			return map[int]bool{i: true}
-		}
-		return nil
-	case "pidof", "dd":
-		// pidof's operands are program names, matched against running
-		// processes; dd's are KEY=VALUE (if= and of= are checked by
-		// validateDdReads and validateWriteTargets).
-		skip := make(map[int]bool, len(args))
-		for i := 1; i < len(args); i++ {
-			skip[i] = true
-		}
-		return skip
+	if f := lookupCommand(cmdName).nonPathArgs; f != nil {
+		return f(args)
 	}
 	return nil
 }
@@ -367,15 +320,6 @@ func IsGitInternalPath(resolved string) bool {
 func isGitInternalPath(resolved string) bool {
 	// Check each path component for ".git"
 	return slices.Contains(strings.Split(resolved, string(filepath.Separator)), ".git")
-}
-
-// noFlagPathExtractionCommands is the set of commands whose short-flag values
-// are never file paths (e.g., cut -d/ uses / as a delimiter, not a path).
-// For these commands, extractPathFromFlag is skipped to avoid false positives.
-var noFlagPathExtractionCommands = map[string]bool{
-	"cut":  true, // -d<delim>, -f<fields>, -b<bytes>, -c<chars>
-	"sort": true, // -t<sep>
-	"tr":   true, // operands are char classes, not paths
 }
 
 // looksLikePath returns true if the string looks like it references a filesystem
@@ -583,10 +527,10 @@ func resolvePathSets(readAllowedPaths, writeAllowedPaths []string) resolvedPathS
 }
 
 // forCommand returns the allowed-path set that applies to cmdName: write
-// commands (cp, mv, rm, ...) are checked against the write set, everything else
-// against the read set.
+// commands (commandSpec.writes: cp, mv, rm, ...) are checked against the write
+// set, everything else against the read set.
 func (p resolvedPathSets) forCommand(cmdName string) []resolvedAllowedPath {
-	if writeCommands[cmdName] {
+	if lookupCommand(cmdName).writes {
 		return p.write
 	}
 	return p.read

@@ -25,7 +25,7 @@ import (
 //
 // This is a static pass. executePython re-derives everything it needs from the
 // expanded argv, and the runtime layer re-runs this validator (python is not in
-// runtimeValidatorSkip), so nothing here is load-bearing for security; it is
+// commandSpec.revalidatesItself), so nothing here is load-bearing for security; it is
 // here to fail fast with a good message.
 func validatePythonArgs(s *Sandbox, args []*syntax.Word) error {
 	if name := wordOrDefault(args, 0, "python"); !s.commandWhitelisted(name) {
@@ -117,4 +117,18 @@ func pythonNonPathArgIndices(args []string) map[int]bool {
 		}
 	}
 	return skip
+}
+
+// pythonCommandSpec is python's and python3's entry in profileCommands.
+// They never run a host interpreter when the sandbox interpreter calls
+// them — the ExecHandler dispatches them to the embedded monty runtime
+// (python.go). A wrapper would spawn the real CPython from $PATH, which has
+// none of monty's isolation: arbitrary file access, subprocess, and
+// network, outside every layer of this sandbox (notWrappable; see
+// pythonOptedOutToHost for the exception).
+var pythonCommandSpec = commandSpec{
+	validate:     validatePythonArgs,
+	nonPathArgs:  pythonNonPathArgIndices,
+	notWrappable: true,
+	inProcess:    true,
 }

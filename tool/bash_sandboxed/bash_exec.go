@@ -705,18 +705,6 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	return s.dispatchExec(ctx, args, useOSSandbox)
 }
 
-// runtimeValidatorSkip lists commands whose per-command validator must NOT be
-// re-run by the runtime Call/Exec handlers. bash/sh/awk are dispatched to
-// dedicated executors (executeBash/executeAwk) that re-parse and re-validate
-// their contents through the sandbox interpreter, so running their AST-level
-// arg validators against the expanded argv here is both redundant and, for the
-// interpreter-form checks, incorrect.
-var runtimeValidatorSkip = map[string]bool{
-	"bash": true,
-	"sh":   true,
-	"awk":  true,
-}
-
 // runtimeArgValidator re-runs the per-command argument validator for name
 // against the fully expanded argv, shared by the runtime Call and Exec
 // handlers. Static validation already runs these validators for statically
@@ -725,11 +713,11 @@ var runtimeValidatorSkip = map[string]bool{
 // concrete at runtime. An invocation a commands allow admits is user-opted-in
 // and bypasses validation, matching static — and, as there, a restricted allow
 // ("cargo publish") admits only the invocations it names, so the rest of the
-// command's invocations keep their validator; runtimeValidatorSkip commands
-// are dispatched to dedicated executors that re-validate their contents
+// command's invocations keep their validator; commands that revalidate
+// themselves (commandSpec.revalidatesItself) are dispatched to dedicated executors that re-validate their contents
 // instead. args is the full argv.
 func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
-	if s.extraAllowsArgs(name, args[1:]) || runtimeValidatorSkip[name] {
+	if s.extraAllowsArgs(name, args[1:]) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
 	validator, ok := commandArgValidators[name]

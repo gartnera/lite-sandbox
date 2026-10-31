@@ -541,12 +541,12 @@ func (s *Sandbox) checkPythonSyntax(ctx context.Context, runner *montygo.Runner,
 	return nil
 }
 
-// pythonOptedOutToHost reports whether python is on the subCommandDenylist only
-// by default — i.e. the user has a bare extra_commands / unsandboxed_commands
-// entry for it, which is an explicit request for the host interpreter with no
-// validation.
+// pythonOptedOutToHost reports whether python is refused under a wrapper
+// (commandSpec.notWrappable) only by default — i.e. the user has a bare
+// extra_commands / unsandboxed_commands entry for it, which is an explicit
+// request for the host interpreter with no validation.
 //
-// The denylist exists because a wrapper spawns its child as a native process,
+// The refusal exists because a wrapper spawns its child as a native process,
 // so `xargs python3` would run the real CPython outside every sandbox layer.
 // That reasoning does not apply once the user has asked for exactly that: a
 // bare entry already lets `python3 anything` run unwrapped, so refusing the

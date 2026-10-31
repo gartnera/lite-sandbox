@@ -218,10 +218,8 @@ func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.
 		if vr := hc.Env.Get("SSHPASS"); isExportedEnvVar(vr) {
 			env["SSHPASS"] = vr.String()
 		}
-	} else {
-		stripSSHPass(args, env)
 	}
-	stripRsyncHome(args, env)
+	restrictCommandEnv(args, env)
 	if !s.isSSHAgentScope(scope) {
 		return
 	}
@@ -246,6 +244,16 @@ func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.
 // the user set them (scopedGitEnv).
 func (s *Sandbox) signsInScope(scope config.CommandScope, cfg *config.Config) bool {
 	return cfg.SSH.GitSigningEnabled() && s.isSSHAgentScope(scope)
+}
+
+// restrictCommandEnv drops what args's command must not see from env, its
+// environment, on every path a command runs by (the host, the shared OS
+// sandbox worker, a scoped worker): $SSHPASS from every command but sshpass
+// (stripSSHPass), $HOME from rsync (stripRsyncHome). A new per-command
+// environment rule goes here, and every exec path applies it.
+func restrictCommandEnv(args []string, env map[string]string) {
+	stripSSHPass(args, env)
+	stripRsyncHome(args, env)
 }
 
 // stripSSHPass drops $SSHPASS from the environment of every command but
