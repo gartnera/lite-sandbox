@@ -30,8 +30,8 @@ const e2eEnv = "LITE_SANDBOX_E2E"
 // for every subprocess so `lite-sandbox install` autodetection and the agents'
 // own PATH lookups (e.g. `crush --version`) find them.
 var bins struct {
-	sandbox, crush, codex, claude, opencode, grok string
-	pathDirs                                      []string
+	sandbox, crush, codex, claude, opencode, opencodeV2, grok string
+	pathDirs                                                  []string
 }
 
 func TestMain(m *testing.M) {
@@ -65,7 +65,7 @@ func requireE2E(t *testing.T) {
 // every run; each agent is installed once into its own versioned directory
 // (agents/<agent>/<version>), so switching versions — by editing versions.go or
 // setting E2E_CRUSH_VERSION / E2E_CODEX_VERSION / E2E_CLAUDE_CODE_VERSION /
-// E2E_OPENCODE_VERSION / E2E_GROK_VERSION for one run — never re-downloads a
+// E2E_OPENCODE_VERSION / E2E_OPENCODE_V2_VERSION / E2E_GROK_VERSION for one run — never re-downloads a
 // version that is already there.
 func provision() error {
 	binDir := os.Getenv("E2E_BIN_DIR")
@@ -91,17 +91,20 @@ func provision() error {
 	codexVersion := versionFromEnv("E2E_CODEX_VERSION", CodexVersion)
 	claudeVersion := versionFromEnv("E2E_CLAUDE_CODE_VERSION", ClaudeCodeVersion)
 	opencodeVersion := versionFromEnv("E2E_OPENCODE_VERSION", OpencodeVersion)
+	opencodeV2Version := versionFromEnv("E2E_OPENCODE_V2_VERSION", OpencodeV2Version)
 	grokVersion := versionFromEnv("E2E_GROK_VERSION", GrokVersion)
 	crushDir := filepath.Join(agentsDir, "crush", crushVersion)
 	codexDir := filepath.Join(agentsDir, "codex", codexVersion)
 	claudeDir := filepath.Join(agentsDir, "claude-code", claudeVersion)
 	opencodeDir := filepath.Join(agentsDir, "opencode", opencodeVersion)
+	opencodeV2Dir := filepath.Join(agentsDir, "opencode", opencodeV2Version)
 	grokDir := filepath.Join(agentsDir, "grok", grokVersion)
 	var g errgroup.Group
 	bins.crush = filepath.Join(crushDir, "crush")
 	bins.codex = filepath.Join(codexDir, "codex")
 	bins.claude = filepath.Join(claudeDir, "claude")
 	bins.opencode = filepath.Join(opencodeDir, "opencode")
+	bins.opencodeV2 = filepath.Join(opencodeV2Dir, "opencode")
 	bins.grok = filepath.Join(grokDir, "grok")
 	g.Go(func() error {
 		return ensureInstalled(bins.crush, "crush "+crushVersion, func() error { return installCrush(crushDir, crushVersion) })
@@ -116,19 +119,24 @@ func provision() error {
 		return ensureInstalled(bins.opencode, "opencode "+opencodeVersion, func() error { return installOpencode(opencodeDir, opencodeVersion) })
 	})
 	g.Go(func() error {
+		return ensureInstalled(bins.opencodeV2, "opencode "+opencodeV2Version, func() error { return installOpencode(opencodeV2Dir, opencodeV2Version) })
+	})
+	g.Go(func() error {
 		return ensureInstalled(bins.grok, "grok "+grokVersion, func() error { return installGrok(grokDir, grokVersion) })
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
 
+	// Both opencode majors are named opencode, so only v1 goes on the shared
+	// PATH; TestOpencodeV2 puts v2's directory ahead of it.
 	bins.pathDirs = []string{binDir, filepath.Dir(bins.crush), filepath.Dir(bins.codex), filepath.Dir(bins.claude), filepath.Dir(bins.opencode), filepath.Dir(bins.grok)}
-	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode, bins.grok} {
+	for _, b := range []string{bins.sandbox, bins.crush, bins.codex, bins.claude, bins.opencode, bins.opencodeV2, bins.grok} {
 		if _, err := os.Stat(b); err != nil {
 			return fmt.Errorf("provisioned binary missing: %w", err)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s, grok %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion, grokVersion)
+	fmt.Fprintf(os.Stderr, "e2e: crush %s, codex %s, claude-code %s, opencode %s and %s, grok %s\n", crushVersion, codexVersion, claudeVersion, opencodeVersion, opencodeV2Version, grokVersion)
 	return nil
 }
 

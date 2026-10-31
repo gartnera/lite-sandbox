@@ -251,12 +251,26 @@ func DefaultDeniedWritePaths() []DeniedPath {
 			dir(filepath.Join(codex, "prompts")),
 		)
 	}
-	if oc := filepath.Join(xdg, "opencode"); dirExists(oc) {
+	// opencode: its config (MCP server, permission rules) and usage directive,
+	// plus the agent definitions (which carry permission rules of their own)
+	// and the plugins it runs as unsandboxed JavaScript. v2 reads
+	// OPENCODE_CONFIG_DIR in place of the XDG directory when it is set.
+	ocDirs := []string{filepath.Join(xdg, "opencode")}
+	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" && d != ocDirs[0] {
+		ocDirs = append(ocDirs, d)
+	}
+	for _, oc := range ocDirs {
+		if !dirExists(oc) {
+			continue
+		}
 		out = append(out,
 			file(filepath.Join(oc, "opencode.json")),
 			file(filepath.Join(oc, "opencode.jsonc")),
 			file(filepath.Join(oc, "AGENTS.md")),
 		)
+		for _, sub := range []string{"agent", "agents", "mode", "modes", "plugin", "plugins"} {
+			out = append(out, dir(filepath.Join(oc, sub)))
+		}
 	}
 	if cr := filepath.Join(xdg, "crush"); dirExists(cr) {
 		out = append(out,

@@ -28,7 +28,7 @@ The default is strict: only allowlisted commands run, and toolchains like Go, Ru
 
 ## Agent support
 
-| | [Claude Code](docs/installation.md#claude-code) | [Codex CLI](docs/installation.md#openai-codex-cli) | [opencode v1](docs/installation.md#opencode) | [Crush](docs/installation.md#crush) | [Grok Build](docs/installation.md#grok-build) |
+| | [Claude Code](docs/installation.md#claude-code) | [Codex CLI](docs/installation.md#openai-codex-cli) | [opencode](docs/installation.md#opencode) (v1 & v2) | [Crush](docs/installation.md#crush) | [Grok Build](docs/installation.md#grok-build) |
 |---|:-:|:-:|:-:|:-:|:-:|
 | Sandboxed `bash` tool, built-in shell blocked | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Built-in file tools confined to sandbox paths | `--with-tool-hook` | `--with-tool-hook` | | | ✅ |

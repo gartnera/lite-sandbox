@@ -172,6 +172,7 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GROK_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 
 	// No agent installed: none of their paths are listed (so none get created).
@@ -201,8 +202,8 @@ func TestDefaultDeniedPaths_AgentEntriesOnlyWhenInstalled(t *testing.T) {
 
 func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 	root := t.TempDir()
-	cc, cx, gk, xdg := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "gk"), filepath.Join(root, "xdg")
-	for _, d := range []string{cc, cx, gk, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
+	cc, cx, gk, xdg, oc := filepath.Join(root, "cc"), filepath.Join(root, "cx"), filepath.Join(root, "gk"), filepath.Join(root, "xdg"), filepath.Join(root, "oc")
+	for _, d := range []string{cc, cx, gk, oc, filepath.Join(xdg, "opencode"), filepath.Join(xdg, "crush")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -211,6 +212,7 @@ func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 	t.Setenv("CODEX_HOME", cx)
 	t.Setenv("GROK_HOME", gk)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("OPENCODE_CONFIG_DIR", oc)
 	read := deniedPathStrings(DefaultDeniedReadPaths())
 	for _, want := range []string{cc + "/.claude.json", cc + "/.credentials.json", cx + "/auth.json", gk + "/auth.json", gk + "/mcp_credentials.json", xdg + "/gh"} {
 		if !slices.Contains(read, want) {
@@ -218,7 +220,7 @@ func TestDefaultDeniedPaths_HonorAgentEnv(t *testing.T) {
 		}
 	}
 	write := deniedPathStrings(DefaultDeniedWritePaths())
-	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/crush/crushrc", xdg + "/git/config"} {
+	for _, want := range []string{cc + "/settings.json", cx + "/config.toml", gk + "/config.toml", gk + "/hooks", gk + "/disabled-hooks", gk + "/rules", xdg + "/opencode/opencode.json", xdg + "/opencode/plugins", xdg + "/opencode/agents", oc + "/opencode.json", oc + "/AGENTS.md", oc + "/plugins", xdg + "/crush/crushrc", xdg + "/git/config"} {
 		if !slices.Contains(write, want) {
 			t.Errorf("write-denied defaults missing %s: %v", want, write)
 		}

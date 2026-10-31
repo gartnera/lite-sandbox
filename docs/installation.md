@@ -57,7 +57,7 @@ It downloads the archive for this OS/arch, verifies it against the release's `ch
 lite-sandbox install
 ```
 
-With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), [Crush](#crush), and [Grok Build](#grok-build)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`, `grok`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`, `~/.grok`/`$GROK_HOME`). Name agents to configure only those:
+With no arguments, `install` detects which supported agent CLIs are installed ([Claude Code](#claude-code), [OpenAI Codex CLI](#openai-codex-cli), [opencode](#opencode), [Crush](#crush), and [Grok Build](#grok-build)) and configures each one. A CLI counts as installed when its binary is on `PATH` (`claude`, `codex`, `opencode`, `crush`, `grok`) or its config directory exists (`~/.claude`/`$CLAUDE_CONFIG_DIR`, `~/.codex`/`$CODEX_HOME`, `~/.config/opencode`/`$XDG_CONFIG_HOME/opencode`/`$OPENCODE_CONFIG_DIR`, `~/.config/crush`/`$XDG_CONFIG_HOME/crush`/`$CRUSH_GLOBAL_CONFIG`, `~/.grok`/`$GROK_HOME`). Name agents to configure only those:
 
 ```bash
 lite-sandbox install                  # autodetect claude / codex / opencode / crush / grok
@@ -159,7 +159,7 @@ To let the sandbox tools be deferred like any other MCP server, pass `--always-l
 lite-sandbox install claude --always-load=false
 ```
 
-Codex works the same way. Newer Codex models defer MCP tools behind Codex's `tool_search` by default, so `install codex` sets `omit_tools_from = ["deferred"]` on its server table, which keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag does nothing for opencode, Crush, and Grok Build (which always reaches MCP tools through its `search_tool`/`use_tool` pair), or in `--bash-ast-hook-mode` (which doesn't configure the MCP server).
+Codex works the same way. Newer Codex models defer MCP tools behind Codex's `tool_search` by default, so `install codex` sets `omit_tools_from = ["deferred"]` on its server table, which keeps the sandbox tools in the model's initial tool list. `--always-load=false` omits it there too. The flag does nothing for opencode, Crush, and Grok Build (which always reaches MCP tools through its `search_tool`/`use_tool` pair; opencode v2 reaches them through Code Mode), or in `--bash-ast-hook-mode` (which doesn't configure the MCP server).
 
 Restart the agent after running the install command.
 
@@ -236,19 +236,51 @@ To configure [opencode](https://opencode.ai), run the install (autodetected, or 
 lite-sandbox install opencode
 ```
 
-This edits opencode's **global** config and rules in `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`):
+This edits opencode's **global** config and rules in `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`, and for v2 `$OPENCODE_CONFIG_DIR`, which v2 reads in its place):
 
-1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json` (or `opencode.jsonc`, whichever exists)
-2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked (replacing any existing granular `bash` rule), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_list_shells`, ...) never prompt
+1. Registers the MCP server in `opencode.json` (or `opencode.jsonc`, whichever exists)
+2. Denies the built-in shell tool, and auto-allows the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_list_shells`, ...) so they never prompt
 3. Adds a usage directive to `AGENTS.md`
+
+opencode v2 changed the config format, so the install writes the one that matches the installed opencode. If `opencode --version` reports v2, it writes v2's native format. If it reports v1, it writes v1's. If there's no `opencode` on `PATH`, the existing config decides: a config that already uses v2's `permissions` array or `mcp.servers` gets v2's format, and anything else gets v1's, which v2 also reads.
+
+| | v1 | v2 |
+|---|---|---|
+| MCP server | `mcp.lite-sandbox` | `mcp.servers.lite-sandbox` |
+| Built-in shell | `permission.bash = "deny"` (replacing any existing granular `bash` rule) | `{"action": "shell", "resource": "*", "effect": "deny"}`, appended to `permissions` |
+| Sandbox tools | `permission."lite-sandbox*" = "allow"` | `{"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}`, appended to `permissions` |
+
+On v2 the sandbox's tools are reached through [Code Mode](https://opencode.ai/v2/docs/mcp-servers/), v2's default for MCP servers: the model calls `tools["lite-sandbox"].bash({command: ...})` from a short program it passes to the `execute` tool. Code Mode is an interpreter with no filesystem, network, or process access of its own. It can only call the tools opencode offers, so commands still run only through the sandbox. v2 starts MCP servers in the background, so in a fresh session the sandbox's tools can be missing from the first turn and appear from the next one.
+
+v2 applies the *last* matching permission rule, so the install appends its rules after yours and moves them back to the end on every re-run; your own rules are kept. Upgrading from v1 and re-running the install replaces the v1 entries it wrote with their v2 equivalents. v2 applies global rules after its built-in agents' rules, so the deny also covers the explore subagent, which allows the shell itself. A rule in a project config, or in an agent's own `permissions`, is applied after the global rules and can still re-allow the shell.
 
 All other keys are preserved, and re-running is idempotent. `opencode.json` (plain JSON) and `opencode.jsonc` (JSONC, with comments and trailing commas) are both edited in place; comments and formatting in a `.jsonc` file are preserved. If both exist, `opencode.json` is edited; if neither exists, a new `opencode.json` is created. To configure it by hand, see below.
 
-opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` does nothing for opencode (use opencode's `permission.edit` / `permission.external_directory` rules to confine its file tools), and `--bash-ast-hook-mode` skips it. Reads and writes made *through the sandboxed shell* are still confined at runtime.
+opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` does nothing for opencode (use opencode's `edit` / `external_directory` permission rules to confine its file tools; note v2 allows `external_directory` by default), and `--bash-ast-hook-mode` skips it. Reads and writes made *through the sandboxed shell* are still confined at runtime.
 
 ### Manual opencode setup
 
-Add this to `~/.config/opencode/opencode.json` (replace the path with your built binary):
+For opencode v2, add this to `~/.config/opencode/opencode.json` (replace the path with your built binary). Keep the two rules at the end of `permissions`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "lite-sandbox": {
+        "type": "local",
+        "command": ["/path/to/lite-sandbox", "serve-mcp"]
+      }
+    }
+  },
+  "permissions": [
+    {"action": "shell", "resource": "*", "effect": "deny"},
+    {"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}
+  ]
+}
+```
+
+For opencode v1:
 
 ```json
 {
@@ -270,7 +302,7 @@ Add this to `~/.config/opencode/opencode.json` (replace the path with your built
 Then add a directive to `~/.config/opencode/AGENTS.md` (global) or a project-level `AGENTS.md`:
 
 ```markdown
-ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands. The built-in bash tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands. The built-in shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
 ```
 
 Restart opencode after making these changes.
