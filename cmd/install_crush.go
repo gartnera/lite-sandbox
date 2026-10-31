@@ -176,6 +176,13 @@ var semverRe = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
 // release that reads crushrc (v0.88.0 and later). Output without a parseable
 // version (a dev/nightly build) is assumed current.
 func crushVersionSupportsRC(versionOutput string) bool {
+	return versionAtLeast(versionOutput, 0, 88, 0)
+}
+
+// versionAtLeast reports whether the first major.minor.patch version in a
+// `--version` output is min or later. Output without one (a development or
+// nightly build) is assumed current.
+func versionAtLeast(versionOutput string, min ...int) bool {
 	m := semverRe.FindStringSubmatch(versionOutput)
 	if m == nil {
 		return true
@@ -184,7 +191,7 @@ func crushVersionSupportsRC(versionOutput string) bool {
 	for i := range v {
 		v[i], _ = strconv.Atoi(m[i+1])
 	}
-	return slices.Compare(v[:], []int{0, 88, 0}) >= 0
+	return slices.Compare(v[:], min) >= 0
 }
 
 // configureCrushRC registers the lite-sandbox MCP server and the tool

@@ -201,3 +201,147 @@ func TestOSSandboxGitCheckoutTrackedClaudeDir(t *testing.T) {
 		t.Fatalf("SKILL.md not checked out: %q, %v", got, err)
 	}
 }
+
+func TestIsPiConfigPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/repo/.pi", true},
+		{"/repo/.pi/settings.json", true},
+		{"/repo/.pi/extensions/x.ts", true},
+		{"/home/u/.pi/agent/settings.json", true},
+		{"/repo/.PI/mcp.json", true},
+		{"/repo/pi/settings.json", false},
+		{"/repo/.pip/x", false},
+		{"/repo/.pi.json", false},
+		{"/repo/src/main.go", false},
+	}
+	for _, tt := range tests {
+		if got := IsPiConfigPath(tt.path); got != tt.want {
+			t.Errorf("IsPiConfigPath(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestBashSandboxed_PiDirReadOnly checks that a project's .pi directory, which
+// pi loads extensions, settings and MCP servers from, can be read but not
+// written, like .claude.
+func TestBashSandboxed_PiDirReadOnly(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, ".pi", "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".pi", "settings.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".pi", filepath.Join(workDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, command := range []string{
+		"cat .pi/settings.json",
+		"ls .pi/extensions",
+		"cp .pi/settings.json backup.json",
+	} {
+		t.Run("allowed/"+command, func(t *testing.T) {
+			if _, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	for _, command := range []string{
+		"touch .pi/extensions/evil.ts",
+		"echo '{}' > .pi/settings.json",
+		"echo x | tee .pi/mcp.json",
+		"mkdir .pi/skills",
+		"rm -rf .pi",
+		"cd .pi && touch APPEND_SYSTEM.md",
+		"touch link/x",
+		"touch .PI/x",
+		"cp backup.json .pi/settings.json",
+	} {
+		t.Run("blocked/"+command, func(t *testing.T) {
+			_, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir})
+			if err == nil {
+				t.Fatal("expected .pi write to be blocked")
+			}
+			if !strings.Contains(err.Error(), ".pi directory") {
+				t.Fatalf("expected .pi error, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestBashSandboxed_PiDirFollowsGit checks that a tracked .pi file still
+// follows git commands that don't name it — switching branches, merging,
+// pulling — while a git command that names it is refused, as for .claude.
+func TestBashSandboxed_PiDirFollowsGit(t *testing.T) {
+	root := t.TempDir()
+	upstream := filepath.Join(root, "upstream")
+	workDir := filepath.Join(root, "work")
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	settings := func(dir string) string { return filepath.Join(dir, ".pi", "settings.json") }
+	if err := os.MkdirAll(filepath.Join(upstream, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings(upstream), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstream, "init", "-q", "-b", "main")
+	git(upstream, "add", ".")
+	git(upstream, "commit", "-q", "-m", "v1")
+	git(root, "clone", "-q", upstream, workDir)
+
+	// A local branch that changes the file.
+	git(workDir, "checkout", "-q", "-b", "other")
+	if err := os.WriteFile(settings(workDir), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(workDir, "commit", "-q", "-am", "other")
+	git(workDir, "checkout", "-q", "main")
+	// An upstream commit that changes it.
+	if err := os.WriteFile(settings(upstream), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstream, "commit", "-q", "-am", "v2")
+
+	run := func(command string) error {
+		t.Helper()
+		_, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir})
+		return err
+	}
+	expect := func(want string) {
+		t.Helper()
+		if got, err := os.ReadFile(settings(workDir)); err != nil || string(got) != want {
+			t.Fatalf(".pi/settings.json = %q (%v), want %q", got, err, want)
+		}
+	}
+
+	if err := run("git checkout -q other"); err != nil {
+		t.Fatalf("git checkout other: %v", err)
+	}
+	expect("other\n")
+	if err := run("git checkout -q main"); err != nil {
+		t.Fatalf("git checkout main: %v", err)
+	}
+	expect("v1\n")
+	if err := run("git pull -q --ff-only"); err != nil {
+		t.Fatalf("git pull: %v", err)
+	}
+	expect("v2\n")
+
+	// Naming the file is a write into .pi, refused.
+	if err := run("git checkout other -- .pi/settings.json"); err == nil || !strings.Contains(err.Error(), ".pi directory") {
+		t.Fatalf("git checkout of a .pi path = %v, want the .pi refusal", err)
+	}
+	expect("v2\n")
+}

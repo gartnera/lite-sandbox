@@ -176,7 +176,7 @@ func validateCommandArgPaths(cmdName string, args []string, workDir string, allo
 			return err
 		}
 	}
-	return validateClaudeDirWrites(cmdName, args, workDir, skipIndices)
+	return validateAgentConfigDirWrites(cmdName, args, workDir, skipIndices)
 }
 
 // nonPathArgIndices returns the argument indices (within args, which includes
@@ -194,7 +194,7 @@ func nonPathArgIndices(cmdName string, args []string) map[int]bool {
 
 // checkPathBoundary validates one path a command opens, creates, or extracts
 // into: checkBoundary, plus, for a write, the read-only .claude directories
-// (see checkClaudeDirWrite). Command arguments use checkBoundary instead,
+// (see checkAgentConfigDirWrite). Command arguments use checkBoundary instead,
 // since a write command's arguments are not all written (validateCommandArgPaths
 // checks .claude against the ones that are).
 func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedAllowedPath) error {
@@ -202,7 +202,7 @@ func checkPathBoundary(orig, path, workDir string, isWrite bool, allowed []resol
 		return err
 	}
 	if isWrite {
-		return checkClaudeDirWrite(orig, path, workDir)
+		return checkAgentConfigDirWrite(orig, path, workDir)
 	}
 	return nil
 }
@@ -296,7 +296,7 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 				return false
 			}
 			if r.Op != syntax.RdrIn {
-				if err := checkClaudeDirWrite(lit, lit, workDir); err != nil {
+				if err := checkAgentConfigDirWrite(lit, lit, workDir); err != nil {
 					validationErr = err
 					return false
 				}

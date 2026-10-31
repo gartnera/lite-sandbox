@@ -1,9 +1,11 @@
 package bash_sandboxed
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"slices"
 	"strings"
@@ -167,8 +169,22 @@ func glibcGetopt(sp optSpec, argv []string) (string, error) {
 			}
 		}
 	}
-	for r, suffix := range letters {
-		short += string(r) + suffix
+	// In a fixed order, with + and - last: getopt(1) reads a leading + as
+	// "stop at the first operand" and a leading - as "return operands in
+	// order", and chmod's option letters include +, so ranging over the map
+	// made the mode depend on iteration order.
+	order := slices.Collect(maps.Keys(letters))
+	slices.SortFunc(order, func(a, b rune) int {
+		lead := func(r rune) int {
+			if r == '+' || r == '-' {
+				return 1
+			}
+			return 0
+		}
+		return cmp.Or(cmp.Compare(lead(a), lead(b)), cmp.Compare(a, b))
+	})
+	for _, r := range order {
+		short += string(r) + letters[r]
 	}
 	var long []string
 	for _, l := range sp.long {

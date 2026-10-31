@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Mode is the sandbox's enforcement posture. It selects which validation
@@ -172,6 +173,10 @@ func DefaultDeniedReadPaths() []DeniedPath {
 		// The sign-in tokens and the MCP servers' OAuth tokens (plaintext).
 		out = append(out, file(filepath.Join(grok, "auth.json")), file(filepath.Join(grok, "mcp_credentials.json")))
 	}
+	if pi := PiAgentDir(home); dirExists(pi) {
+		// Saved API keys and OAuth credentials, and the MCP servers' tokens.
+		out = append(out, file(filepath.Join(pi, "auth.json")), file(filepath.Join(pi, "mcp-auth.json")))
+	}
 	return append(out, SSHPrivateKeyEntries(home)...)
 }
 
@@ -298,6 +303,15 @@ func DefaultDeniedWritePaths() []DeniedPath {
 			dir(filepath.Join(grok, "agents")),
 			dir(filepath.Join(grok, "plugins")),
 		)
+	}
+	// pi: the whole agent directory. Everything pi loads from it runs or
+	// steers pi outside the sandbox — settings.json (which tools are enabled,
+	// packages and extensions to load), mcp.json, extensions/ (where the
+	// lite-sandbox extension lives), packages, skills, prompts, and the
+	// AGENTS.md and SYSTEM.md instruction files — and pi itself, not the
+	// commands it runs, writes its sessions there.
+	if pi := PiAgentDir(home); dirExists(pi) {
+		out = append(out, dir(pi))
 	}
 	return out
 }
@@ -483,6 +497,23 @@ func GrokHome(home string) string {
 		return d
 	}
 	return filepath.Join(home, ".grok")
+}
+
+// PiAgentDir mirrors pi's own resolution of its agent directory:
+// $PI_CODING_AGENT_DIR when set (with a leading ~ expanded, as pi does),
+// otherwise ~/.pi/agent. The pi installer resolves it through here too, so it
+// and the deny lists always agree.
+func PiAgentDir(home string) string {
+	if d := os.Getenv("PI_CODING_AGENT_DIR"); d != "" {
+		if d == "~" {
+			return home
+		}
+		if strings.HasPrefix(d, "~/") {
+			return filepath.Join(home, d[2:])
+		}
+		return d
+	}
+	return filepath.Join(home, ".pi", "agent")
 }
 
 func xdgConfigHome(home string) string {
