@@ -350,17 +350,16 @@ var remoteShells = map[string]bool{"sh": true, "bash": true, "dash": true}
 // a remote command; any other invocation reads commands from stdin or a
 // file.
 func validateRemoteShell(s *Sandbox, args []*syntax.Word) error {
-	vals := wordLits(args)
-	idx, err := bashCommandStringIndex(vals, remoteBlockedShellFlags)
+	inv, err := parseShellArgs(args, remoteBlockedShellFlags)
 	if err != nil {
 		return err
 	}
-	if idx < 0 {
-		return fmt.Errorf("%s is only allowed as %s -c 'commands'", vals[0], vals[0])
+	if inv.command < 0 {
+		return fmt.Errorf("%s is only allowed as %s -c 'commands'", inv.vals[0], inv.vals[0])
 	}
 	s.remote.depth++
 	defer func() { s.remote.depth-- }()
-	return s.validateRemoteScript(vals[idx])
+	return s.validateRemoteScript(inv.vals[inv.command])
 }
 
 // validateRemoteFind is validateFindArgs, refusing a shell under -exec and

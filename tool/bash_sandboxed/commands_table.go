@@ -17,11 +17,12 @@ import (
 // an initialization cycle; lookupCommand builds it once, on first use.
 func commandTable() map[string]commandSpec {
 	bash := commandSpec{
-		validate: validateBashArgs, notWrappable: true, revalidatesItself: true, inProcess: true,
+		validate: validateBashArgs, script: shellScriptOperand, notWrappable: true, revalidatesItself: true, inProcess: true,
 		run: func(ctx context.Context, s *Sandbox, args []string, _ execEnv) (bool, error) {
 			return true, s.executeBash(ctx, args)
 		},
 	}
+	source := commandSpec{validate: validateSourceArgs, script: sourcedFile, sourcesScript: true}
 	grep := commandSpec{args: grepLayout}
 	less := commandSpec{validate: validateLessArgs}
 	wrapper := commandSpec{validate: validateWrapperArgs, unwrap: unwrapWrapper}
@@ -51,8 +52,8 @@ func commandTable() map[string]commandSpec {
 				return true, executeAwk(ctx, args)
 			},
 		},
-		"source": {validate: validateSourceArgs},
-		".":      {validate: validateSourceArgs},
+		"source": source,
+		".":      source,
 		// At the top level `time` is a shell keyword (a TimeClause whose
 		// inner command is walked and validated); as a real /usr/bin/time
 		// exec it is a command wrapper of its own (and -o can write files),

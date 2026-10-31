@@ -168,92 +168,28 @@ func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
-// blockedBashFlags lists bash/sh flags that are not allowed.
-var blockedBashFlags = map[string]string{
-	"-i":            "interactive mode is not allowed",
-	"--interactive": "interactive mode is not allowed",
-	"-s":            "reading commands from stdin is not allowed",
-	"--init-file":   "sourcing init files is not allowed",
-	"--rcfile":      "sourcing rc files is not allowed",
-	"-l":            "login shell is not allowed",
-	"--login":       "login shell is not allowed",
+// sourcedFile is the commandSpec.script of source and .: the file they read.
+func sourcedFile(args []*syntax.Word) int {
+	if len(args) < 2 {
+		return -1
+	}
+	return 1
 }
 
-// allowedBashFlags lists bash/sh flags that are safe to use.
-var allowedBashFlags = map[string]bool{
-	"-e":          true,
-	"-x":          true,
-	"-u":          true,
-	"-n":          true,
-	"-v":          true,
-	"-c":          true,
-	"--norc":      true,
-	"--noprofile": true,
-}
-
-// validateBashArgs validates bash/sh command arguments at the AST level.
-// The -c command string's content is fully validated at runtime by
-// executeBash (parse → validate → path checks), to avoid an initialization
-// cycle; a script file's too.
-func validateBashArgs(s *Sandbox, args []*syntax.Word) error {
-	if _, err := bashCommandStringIndex(wordTexts(args), blockedBashFlags); err != nil {
+// validateBashArgs validates bash/sh command arguments at the AST level:
+// the flags parseShellArgs refuses, and a shell that would read commands
+// from stdin. The -c command string's content, and a script file's, is
+// validated at runtime by executeBash (parse → validate → path checks), to
+// avoid an initialization cycle.
+func validateBashArgs(_ *Sandbox, args []*syntax.Word) error {
+	inv, err := parseShellArgs(args, blockedBashFlags)
+	if err != nil {
 		return err
 	}
-	// Bare bash/sh with no -c and no script file reads from stdin
-	if len(args) == 1 {
-		return fmt.Errorf("bare %q (no -c or script file) is not allowed: reads from stdin", wordText(args[0]))
+	if inv.readsStdin() {
+		return fmt.Errorf("bare %q (no -c or script file) is not allowed: reads from stdin", inv.vals[0])
 	}
 	return nil
-}
-
-// bashCommandStringIndex walks a bash/sh invocation's options (lits[0] is
-// the shell) and returns the index of its -c command string, or -1 when it
-// has none: it runs a script file, or reads commands from stdin. The flags
-// in blocked (blockedBashFlags: those that make it interactive, read stdin,
-// or source init files) are refused. Unknown flags are passed over, and a
-// word that is not literal ("") is skipped. Words after the command string
-// are its $0, $1, ...
-func bashCommandStringIndex(lits []string, blocked map[string]string) (int, error) {
-	cmdName := lits[0]
-	cmdString := func(i int) (int, error) {
-		if i >= len(lits) {
-			return 0, fmt.Errorf("%s -c requires a command string argument", cmdName)
-		}
-		return i, nil
-	}
-	for i := 1; i < len(lits); i++ {
-		text := lits[i]
-		if text == "" {
-			continue
-		}
-		if reason, ok := blocked[text]; ok {
-			return 0, fmt.Errorf("%s: flag %q is not allowed: %s", cmdName, text, reason)
-		}
-		switch {
-		case text == "-o":
-			i++ // takes a value argument (e.g., -o pipefail)
-		case text == "-c":
-			return cmdString(i + 1)
-		case allowedBashFlags[text]:
-		case len(text) > 1 && text[0] == '-' && text[1] != '-':
-			// Combined short flags like -ex, -eu, -exu
-			foundC := false
-			for _, ch := range text[1:] {
-				flag := "-" + string(ch)
-				if _, ok := blocked[flag]; ok {
-					return 0, fmt.Errorf("%s: flag %q (in %q) is not allowed", cmdName, flag, text)
-				}
-				foundC = foundC || flag == "-c"
-			}
-			if foundC {
-				return cmdString(i + 1)
-			}
-		case !strings.HasPrefix(text, "-") && !strings.HasPrefix(text, "+"):
-			// A script file; the remaining args are its arguments.
-			return -1, nil
-		}
-	}
-	return -1, nil
 }
 
 // executeBash runs a bash/sh command by parsing and executing it through
@@ -275,97 +211,26 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	}
 
 	cmdName := args[0]
-
-	// Parse arguments
-	var cmdString string
-	var scriptFile string
-	var shellFlags []string
-	foundC := false
-
-	i := 1
-	for i < len(args) {
-		arg := args[i]
-
-		if arg == "-o" {
-			if i+1 < len(args) {
-				shellFlags = append(shellFlags, "-o", args[i+1])
-				i += 2
-				continue
-			}
-			i++
-			continue
-		}
-
-		if arg == "-c" {
-			foundC = true
-			i++
-			if i < len(args) {
-				cmdString = args[i]
-			}
-			i++
-			continue
-		}
-
-		// Known safe flags. --norc/--noprofile are accepted but not forwarded:
-		// they configure a real bash's startup files and are not `set` options.
-		// -c cannot reach here (handled above).
-		if allowedBashFlags[arg] {
-			if arg != "--norc" && arg != "--noprofile" {
-				shellFlags = append(shellFlags, arg)
-			}
-			i++
-			continue
-		}
-
-		// Combined short flags
-		if len(arg) > 1 && arg[0] == '-' && arg[1] != '-' {
-			for _, ch := range arg[1:] {
-				flag := "-" + string(ch)
-				if flag == "-c" {
-					foundC = true
-					continue
-				}
-				if allowedBashFlags[flag] {
-					shellFlags = append(shellFlags, flag)
-				}
-			}
-			if foundC {
-				i++
-				if i < len(args) {
-					cmdString = args[i]
-				}
-				i++
-				continue
-			}
-			i++
-			continue
-		}
-
-		// Script file (first non-flag argument when not -c mode)
-		if !foundC && !strings.HasPrefix(arg, "-") {
-			scriptFile = arg
-			i++
-			break
-		}
-
-		// Args after -c command_string
-		i++
+	inv, err := parseShellArgs(literalWords(args), blockedBashFlags)
+	if err != nil {
+		return err
 	}
-
 	hc := interp.HandlerCtx(ctx)
 
 	// Determine the script content
-	var script string
-	if foundC {
-		if cmdString == "" {
+	var script, scriptFile string
+	switch {
+	case inv.command >= 0:
+		script = args[inv.command]
+		if script == "" {
 			return fmt.Errorf("%s -c: empty command string", cmdName)
 		}
-		script = cmdString
-	} else if scriptFile != "" {
+	case inv.script >= 0:
+		scriptFile = args[inv.script]
 		// `bash <script>` runs the script as surely as `./<script>` does, so a
 		// ask entry for the script applies here too; past it, the
 		// script's own commands are not covered by the call's approval.
-		if _, err := s.checkAsk(ctx, scriptFile, args[i:]); err != nil {
+		if _, err := s.checkAsk(ctx, scriptFile, args[inv.script+1:]); err != nil {
 			if err := s.report(ctx, layerRuntime, ruleCommandAsk, err); err != nil {
 				return err
 			}
@@ -386,13 +251,13 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 			return fmt.Errorf("%s: cannot read script %s: %w", cmdName, path, err)
 		}
 		script = string(data)
-	} else {
+	default:
 		return fmt.Errorf("%s: no command or script file specified", cmdName)
 	}
 
 	// Prepend shell flags as set commands
-	if len(shellFlags) > 0 {
-		script = "set " + strings.Join(shellFlags, " ") + "\n" + script
+	if len(inv.set) > 0 {
+		script = "set " + strings.Join(inv.set, " ") + "\n" + script
 	}
 
 	// Parse the script
