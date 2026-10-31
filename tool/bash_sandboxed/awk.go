@@ -42,7 +42,7 @@ func validateAwkArgs(s *Sandbox, args []*syntax.Word) error {
 }
 
 // executeAwk runs an awk command via goawk with unsafe features disabled.
-// It is called from the ExecHandler in executeWithInterp when args[0] == "awk".
+// It is awk's commandSpec.run, called from the ExecHandler (execArgv).
 //
 // Disabled features (enforced by goawk):
 //   - system() function and command pipes (NoExec)

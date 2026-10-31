@@ -7,15 +7,21 @@ import (
 	"strings"
 )
 
-// sedSpec lists sed's options that take a value, and sedLongOpts all of
-// GNU sed's long options, for matching an abbreviated one (BSD sed has no
-// long options).
+// sedSpec is GNU sed's option table, and sedLongOpts all of its long
+// options (BSD sed has none; see bsdSedOpts).
 var (
-	sedSpec     = optSpec{short: "efl", long: []string{"expression", "file", "line-length"}}
-	sedLongOpts = append(slices.Clone(sedSpec.long),
-		"in-place", "quiet", "silent", "debug", "posix", "regexp-extended", "separate",
-		"sandbox", "unbuffered", "null-data", "zero-terminated", "follow-symlinks", "binary",
-		"help", "version")
+	sedSpec = optSpec{
+		short:    "efl",
+		long:     []string{"expression", "file", "line-length"},
+		optional: "i",
+		flags: []string{
+			"in-place", "quiet", "silent", "debug", "posix", "regexp-extended", "separate",
+			"sandbox", "unbuffered", "null-data", "zero-terminated", "follow-symlinks", "binary",
+			"help", "version",
+		},
+		alias: map[string]string{"expression": "e", "file": "f", "line-length": "l", "in-place": "i"},
+	}
+	sedLongOpts = append(slices.Clone(sedSpec.long), sedSpec.flags...)
 )
 
 // sedScripts returns the scripts a sed invocation runs (argv[0] is "sed"):

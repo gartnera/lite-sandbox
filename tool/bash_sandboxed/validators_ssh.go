@@ -650,50 +650,17 @@ func validateSSHUnderXargs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
 // words (opts, "xargs" first) set: -I R, -IR, BSD -J R, GNU -i[R] and
 // --replace[=R] (both "{}" without R).
 func xargsReplaceStrings(opts []string) []string {
+	sp := wrapperSpecs["xargs"].opts
+	sp.stopAtOperand = true
 	var out []string
-	for i := 1; i < len(opts); i++ {
-		a := opts[i]
-		if a == "--" || len(a) < 2 || a[0] != '-' {
-			break
-		}
-		if name, ok := strings.CutPrefix(a, "--"); ok {
-			name, val, hasVal := strings.Cut(name, "=")
-			if name != "" && strings.HasPrefix("replace", name) {
-				if !hasVal {
-					val = "{}"
-				}
-				out = append(out, val)
-			}
-			continue
-		}
-	bundle:
-		for j := 1; j < len(a); j++ {
-			rest := a[j+1:]
-			switch c := a[j]; c {
-			case 'I', 'J':
-				if rest == "" && i+1 < len(opts) {
-					i++
-					rest = opts[i]
-				}
-				out = append(out, rest)
-				break bundle
-			case 'i':
-				if rest == "" {
-					rest = "{}"
-				}
-				out = append(out, rest)
-				break bundle
-			case 'e', 'l':
-				// GNU optional values: the rest of the word.
-				break bundle
-			default:
-				if xargsArgConsumingFlags["-"+string(c)] {
-					if rest == "" {
-						i++
-					}
-					break bundle
-				}
-			}
+	for _, o := range sp.scan(opts).opts {
+		switch {
+		case o.name == "I" || o.name == "J":
+			out = append(out, o.value)
+		case o.name == "i" && o.hasValue:
+			out = append(out, o.value)
+		case o.name == "i":
+			out = append(out, "{}")
 		}
 	}
 	return out

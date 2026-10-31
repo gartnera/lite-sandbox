@@ -640,3 +640,11 @@ func validateArchiveWrites(cmdName string, args []string, workDir string, write 
 	}
 	return nil
 }
+
+// archiveWrites is the checkPaths of an archiver that writes (see
+// validateArchiveWrites).
+func archiveWrites(cmdName string) func(args []string, workDir string, sets resolvedPathSets) error {
+	return func(args []string, workDir string, sets resolvedPathSets) error {
+		return validateArchiveWrites(cmdName, args, workDir, sets.write)
+	}
+}

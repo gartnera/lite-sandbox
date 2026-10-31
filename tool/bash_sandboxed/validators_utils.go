@@ -2,7 +2,6 @@ package bash_sandboxed
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -17,52 +16,6 @@ func wordTexts(words []*syntax.Word) []string {
 		texts[i] = wordText(w)
 	}
 	return texts
-}
-
-// scanOptions walks args (command name at index 0) the way getopt_long does,
-// options anywhere before "--", and returns each option seen: "-x" for a
-// short one, "--name" for a long one, with an abbreviated long name expanded
-// against allLong (an ambiguous or unknown one is returned as written). spec
-// lists the options that take a value, so a value is never read as an option.
-func scanOptions(args []string, spec optSpec, allLong []string) []string {
-	all := optSpec{long: allLong}
-	var opts []string
-	for i := 1; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--":
-			return opts
-		case strings.HasPrefix(a, "--"):
-			name, _, hasVal := strings.Cut(a[2:], "=")
-			name = all.longName(name)
-			opts = append(opts, "--"+name)
-			if !hasVal && slices.Contains(spec.long, name) {
-				i++
-			}
-		case len(a) > 1 && a[0] == '-':
-			for j := 1; j < len(a); j++ {
-				opts = append(opts, "-"+string(a[j]))
-				if strings.IndexByte(spec.short, a[j]) >= 0 {
-					if j == len(a)-1 {
-						i++
-					}
-					break
-				}
-			}
-		}
-	}
-	return opts
-}
-
-// refusedOption returns the first option of args that is one of refused
-// ("-x" or "--full-name"), or "" when there is none. See scanOptions.
-func refusedOption(args []string, spec optSpec, allLong []string, refused ...string) string {
-	for _, opt := range scanOptions(args, spec, allLong) {
-		if slices.Contains(refused, opt) {
-			return opt
-		}
-	}
-	return ""
 }
 
 // diff3LongOpts and sdiffLongOpts are the GNU diffutils long options of diff3
@@ -123,6 +76,11 @@ func validateSplitArgs(_ *Sandbox, args []*syntax.Word) error {
 var installSpec = optSpec{
 	short: "gmoSt",
 	long:  []string{"group", "mode", "owner", "suffix", "target-directory", "strip-program"},
+	flags: []string{
+		"backup", "compare", "context", "debug", "directory", "help", "no-target-directory",
+		"preserve-context", "preserve-timestamps", "strip", "verbose", "version",
+	},
+	alias: map[string]string{"target-directory": "t", "directory": "d"},
 }
 
 // validateInstallArgs refuses -s/--strip and --strip-program: install runs

@@ -158,7 +158,7 @@ func isBinaryExecutable(path string) bool {
 
 // validateSourceArgs validates source/. command arguments at the AST level.
 // Requires a file path argument (no bare "source" which would be a no-op).
-// The *Sandbox parameter is unused but required by the commandArgValidators
+// The *Sandbox parameter is unused but required by the argValidator
 // function type.
 func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	cmdName := wordText(args[0])
@@ -621,49 +621,17 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	if err := s.runtimeArgValidator(ctx, cmdName, args); err != nil {
 		return err
 	}
-	// Configure deno's permission flags to mirror the sandbox policy, from
-	// the deno profile's options. The whitelist (deno profile enabled) is
-	// enforced earlier in allowlist mode; in denylist mode deno may run with
-	// the profile off, in which case the options' defaults apply
-	// (auto-sandbox on, network denied). Network and import denials are
-	// applied independent of auto_sandbox so the policy holds even when
-	// filesystem auto-scoping is off.
-	if cmdName == "deno" {
-		cfg := s.getConfig()
-		// Deno needs real directories for --allow-read/-write, so strip
-		// any descendants-only "/*" markers down to their base subtree.
-		denoRead := stripNestedOnlyMarkers(readAllowedPaths)
-		denoWrite := stripNestedOnlyMarkers(writeAllowedPaths)
-		args = applyDenoSandbox(args, denoRead, denoWrite,
-			cfg.ProfileOption("deno", "auto_sandbox"),
-			cfg.ProfileOption("deno", "allow_network"),
-			cfg.ProfileOption("deno", "allow_import"))
+	// The command's own preparation (deno's permission flags, SwiftPM's
+	// nested sandbox) and in-process executor (awk, bash, sh, python); see
+	// commandSpec.prepareExec and run.
+	spec := lookupCommand(cmdName)
+	x := execEnv{useOSSandbox: useOSSandbox, readAllowedPaths: readAllowedPaths, writeAllowedPaths: writeAllowedPaths, sets: sets}
+	if spec.prepareExec != nil {
+		args = spec.prepareExec(ctx, s, args, x)
 	}
-	// SwiftPM (under swift and xcodebuild) sandboxes package manifests with a
-	// sandbox-exec of its own, which macOS refuses inside the worker's; turn
-	// it off where the worker's sandbox confines them instead.
-	if useOSSandbox && (cmdName == "swift" || cmdName == "xcodebuild" || cmdName == "xcrun") && !s.execIsUnsandboxed(ctx, args) {
-		args = xcodeDisableNestedSandbox(args)
-	}
-	switch cmdName {
-	case "awk":
-		return executeAwk(ctx, args)
-	case "bash", "sh":
-		return s.executeBash(ctx, args)
-	case "python", "python3":
-		// Normally dispatched to the embedded monty interpreter rather
-		// than any python on PATH. sets is the authorization input for
-		// its OS-call handler, which is what keeps Python file I/O
-		// inside the same boundary as bash. See python.go.
-		//
-		// An explicit extra_commands / unsandboxed_commands entry is
-		// the exception: naming python there is a deliberate request
-		// for the real interpreter (monty is a subset and cannot import
-		// third-party packages), so honour it and fall through to the
-		// normal exec path. Those entries already bypass validation by
-		// design — this only decides which interpreter runs.
-		if !s.pythonExplicitlyRequested(args) {
-			return s.executePython(ctx, args, sets)
+	if spec.run != nil {
+		if handled, err := spec.run(ctx, s, args, x); handled {
+			return err
 		}
 	}
 	if isScriptPath(cmdName) {
@@ -705,18 +673,6 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	return s.dispatchExec(ctx, args, useOSSandbox)
 }
 
-// runtimeValidatorSkip lists commands whose per-command validator must NOT be
-// re-run by the runtime Call/Exec handlers. bash/sh/awk are dispatched to
-// dedicated executors (executeBash/executeAwk) that re-parse and re-validate
-// their contents through the sandbox interpreter, so running their AST-level
-// arg validators against the expanded argv here is both redundant and, for the
-// interpreter-form checks, incorrect.
-var runtimeValidatorSkip = map[string]bool{
-	"bash": true,
-	"sh":   true,
-	"awk":  true,
-}
-
 // runtimeArgValidator re-runs the per-command argument validator for name
 // against the fully expanded argv, shared by the runtime Call and Exec
 // handlers. Static validation already runs these validators for statically
@@ -725,14 +681,14 @@ var runtimeValidatorSkip = map[string]bool{
 // concrete at runtime. An invocation a commands allow admits is user-opted-in
 // and bypasses validation, matching static — and, as there, a restricted allow
 // ("cargo publish") admits only the invocations it names, so the rest of the
-// command's invocations keep their validator; runtimeValidatorSkip commands
-// are dispatched to dedicated executors that re-validate their contents
+// command's invocations keep their validator; commands that revalidate
+// themselves (commandSpec.revalidatesItself) are dispatched to dedicated executors that re-validate their contents
 // instead. args is the full argv.
 func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
-	if s.extraAllowsArgs(name, args[1:]) || runtimeValidatorSkip[name] {
+	if s.extraAllowsArgs(name, args[1:]) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
-	validator, ok := commandArgValidators[name]
+	validator, ok := s.validator(name)
 	if !ok {
 		return nil
 	}

@@ -131,10 +131,10 @@ type Sandbox struct {
 	// scoped_workers.go.
 	scopes        map[string]config.CommandScope
 	scopedWorkers map[string]*scopedWorker
-	// argValidators holds a reference to commandArgValidators so that
-	// validateSubCommand can look up per-command validators at runtime
-	// without creating a package-level initialization cycle.
-	argValidators map[string]func(s *Sandbox, args []*syntax.Word) error
+	// argValidators, when set, replaces the commandSpecs' validators: a
+	// remote-command checker validates with the remote table (see
+	// Sandbox.validator).
+	argValidators map[string]argValidator
 	// remote, when set, makes this a checker of one ssh host's remote command
 	// rather than of local commands: the walk and the wrapped-command checks
 	// are the same, with the policy's commands, validators, and rules (see
@@ -161,9 +161,8 @@ type Sandbox struct {
 // commands, and only the default-on profiles.
 func NewSandbox() *Sandbox {
 	s := &Sandbox{
-		cfg:           &config.Config{},
-		argValidators: commandArgValidators,
-		bg:            newBackgroundManager(),
+		cfg: &config.Config{},
+		bg:  newBackgroundManager(),
 	}
 	// The built-in deny entries and default profiles hold before any config is
 	// loaded, so a sandbox that never sees another UpdateConfig (or one whose
@@ -243,18 +242,11 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 			processEntry(e.Command, e.NoSandbox)
 		}
 	}
-	// The ssh section's hosts whitelist ssh and sshpass, and a host that
-	// allows writes scp and rsync, whose validators then hold them to those
-	// hosts.
-	if cfg.SSH.HostsConfigured() {
-		for _, name := range config.SSHCommands {
-			whitelisted[name] = true
-		}
-	}
-	if cfg.SSH.WriteHostsConfigured() {
-		for _, name := range config.SSHCopyCommands {
-			whitelisted[name] = true
-		}
+	// A config section whitelists its commands once it is set up (the ssh
+	// section's hosts: ssh and sshpass, and scp and rsync with a host that
+	// allows writes), and its validators then hold them to it.
+	for _, name := range cfg.SectionCommands() {
+		whitelisted[name] = true
 	}
 	s.mu.Lock()
 	// The OS sandbox toggle and the AWS credential mask are read straight off
@@ -1023,7 +1015,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					if !inExtra {
 						// The command's own argument validator applies in every
 						// enforcing mode.
-						if validator, ok := s.argValidators[cmdName]; ok {
+						if validator, ok := s.validator(cmdName); ok {
 							if fail(layerStatic, ruleArgValidator, validator(s, n.Args)) {
 								return false
 							}
@@ -1437,8 +1429,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	if err != nil {
 		return err
 	}
-	stripSSHPass(args, envMap)
-	stripRsyncHome(args, envMap)
+	restrictCommandEnv(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
@@ -1794,8 +1785,7 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	stripSSHPass(args, envMap)
-	stripRsyncHome(args, envMap)
+	restrictCommandEnv(args, envMap)
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

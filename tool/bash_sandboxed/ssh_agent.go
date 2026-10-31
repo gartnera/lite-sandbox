@@ -218,10 +218,8 @@ func (s *Sandbox) sshScopedEnv(ctx context.Context, args []string, scope config.
 		if vr := hc.Env.Get("SSHPASS"); isExportedEnvVar(vr) {
 			env["SSHPASS"] = vr.String()
 		}
-	} else {
-		stripSSHPass(args, env)
 	}
-	stripRsyncHome(args, env)
+	restrictCommandEnv(args, env)
 	if !s.isSSHAgentScope(scope) {
 		return
 	}
@@ -248,6 +246,16 @@ func (s *Sandbox) signsInScope(scope config.CommandScope, cfg *config.Config) bo
 	return cfg.SSH.GitSigningEnabled() && s.isSSHAgentScope(scope)
 }
 
+// restrictCommandEnv drops what args's command must not see from env, its
+// environment, on every path a command runs by (the host, the shared OS
+// sandbox worker, a scoped worker): $SSHPASS from every command but sshpass
+// (stripSSHPass), $HOME from rsync (stripRsyncHome). A new per-command
+// environment rule goes here, and every exec path applies it.
+func restrictCommandEnv(args []string, env map[string]string) {
+	stripSSHPass(args, env)
+	stripRsyncHome(args, env)
+}
+
 // stripSSHPass drops $SSHPASS from the environment of every command but
 // sshpass, so the password the agent loaded for it reaches no other program.
 func stripSSHPass(args []string, env map[string]string) {
@@ -261,7 +269,7 @@ func stripSSHPass(args []string, env map[string]string) {
 // runs by: popt, which parses rsync's options, reads aliases from
 // $HOME/.popt, and an alias can add any option or operand, -e with any
 // program or a host included, past the rsync validator. env HOME=... rsync,
-// which would set it again, is refused (validateEnvArgs). The ssh that rsync
+// which would set it again, is refused (validateEnvAssignments). The ssh that rsync
 // starts finds ~/.ssh by the user's passwd entry, not $HOME; rsync -C loses
 // ~/.cvsignore.
 func stripRsyncHome(args []string, env map[string]string) {
