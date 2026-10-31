@@ -771,3 +771,71 @@ func TestOpencodeV2ConfigDir(t *testing.T) {
 		t.Errorf("OPENCODE_CONFIG_DIR not honored, got %s", dir)
 	}
 }
+
+// TestRunInstallOpencodeSelectsDirAndFormat verifies the install writes v2's
+// format to OPENCODE_CONFIG_DIR (which v2 reads in place of the XDG dir) and
+// v1's to the XDG dir, editing an existing opencode.jsonc rather than adding
+// an opencode.json beside it.
+func TestRunInstallOpencodeSelectsDirAndFormat(t *testing.T) {
+	stub := func(out string) {
+		orig := opencodeVersionOutput
+		opencodeVersionOutput = func() (string, error) { return out, nil }
+		t.Cleanup(func() { opencodeVersionOutput = orig })
+	}
+
+	t.Run("v2", func(t *testing.T) {
+		root := t.TempDir()
+		xdg, oc := filepath.Join(root, "xdg"), filepath.Join(root, "oc")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		t.Setenv("OPENCODE_CONFIG_DIR", oc)
+		if err := os.MkdirAll(oc, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(oc, "opencode.jsonc"), []byte("{\n  // mine\n}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stub("2.2.5\n")
+
+		if err := runInstallOpencode("/bin/lite-sandbox"); err != nil {
+			t.Fatalf("runInstallOpencode failed: %v", err)
+		}
+		if fileExists(filepath.Join(oc, "opencode.json")) {
+			t.Error("opencode.json created beside the existing opencode.jsonc")
+		}
+		cfg, _ := parseOpencodeV2Config(t, filepath.Join(oc, "opencode.jsonc"))
+		if _, ok := cfg.MCP.Servers["lite-sandbox"]; !ok {
+			t.Errorf("v2 server not written to OPENCODE_CONFIG_DIR")
+		}
+		if !strings.Contains(readFile(t, filepath.Join(oc, "opencode.jsonc")), "// mine") {
+			t.Error("comment lost")
+		}
+		if !strings.Contains(readFile(t, filepath.Join(oc, "AGENTS.md")), opencodeDirective) {
+			t.Error("directive not written to OPENCODE_CONFIG_DIR")
+		}
+		if fileExists(filepath.Join(xdg, "opencode")) {
+			t.Error("XDG opencode dir written although v2 reads OPENCODE_CONFIG_DIR")
+		}
+	})
+
+	t.Run("v1", func(t *testing.T) {
+		root := t.TempDir()
+		xdg, oc := filepath.Join(root, "xdg"), filepath.Join(root, "oc")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		t.Setenv("OPENCODE_CONFIG_DIR", oc)
+		stub("1.18.29\n")
+
+		if err := runInstallOpencode("/bin/lite-sandbox"); err != nil {
+			t.Fatalf("runInstallOpencode failed: %v", err)
+		}
+		cfg := parseOpencodeConfig(t, filepath.Join(xdg, "opencode", "opencode.json"))
+		if _, ok := cfg["permissions"]; ok {
+			t.Error("v2 permissions written for v1")
+		}
+		if string(cfg["permission"]) == "" {
+			t.Error("v1 permission map not written")
+		}
+		if fileExists(oc) {
+			t.Error("OPENCODE_CONFIG_DIR written for v1")
+		}
+	})
+}

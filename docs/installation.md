@@ -302,7 +302,7 @@ For opencode v1:
 Then add a directive to `~/.config/opencode/AGENTS.md` (global) or a project-level `AGENTS.md`:
 
 ```markdown
-ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands. The built-in shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands (in Code Mode, call `tools["lite-sandbox"].bash({ command })` from `execute`). The built-in shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
 ```
 
 Restart opencode after making these changes.

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,17 +10,21 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/tailscale/hujson"
 )
 
 // opencodeDirective is appended to the global AGENTS.md so opencode prefers the
-// sandboxed bash tool. opencode namespaces MCP tools as <server>_<tool>, so the
-// sandbox's shell surfaces as lite-sandbox_bash. The built-in shell tool is
-// named bash in opencode v1 and shell in v2, so the directive names neither.
+// sandboxed bash tool. opencode v1 offers it as lite-sandbox_bash (MCP tools
+// are named <server>_<tool>); v2 by default only through Code Mode, as
+// tools["lite-sandbox"].bash in an execute program, so the directive names
+// both. The built-in shell tool is named bash in v1 and shell in v2, so the
+// directive names neither.
 const opencodeDirective = "ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell " +
-	"commands. The built-in shell tool is denied by the permission config and will not run. The sandboxed " +
-	"tool runs commands through lite-sandbox's AST validation and filesystem path boundaries."
+	"commands (in Code Mode, call `tools[\"lite-sandbox\"].bash({ command })` from `execute`). The built-in " +
+	"shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through " +
+	"lite-sandbox's AST validation and filesystem path boundaries."
 
 // opencodeLegacyDirectives are directives earlier releases wrote to AGENTS.md;
 // a re-install replaces them with opencodeDirective instead of appending a
@@ -70,12 +75,19 @@ func opencodeV2ConfigDir() (string, error) {
 // opencodeVersionOutput returns the output of `opencode --version` for the
 // opencode on PATH. A variable so tests can stub it.
 var opencodeVersionOutput = func() (string, error) {
-	out, err := exec.Command("opencode", "--version").Output()
+	// v2 boots its whole runtime before printing the version; don't let a
+	// wedged opencode hang the install.
+	ctx, cancel := context.WithTimeout(context.Background(), opencodeVersionTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "opencode", "--version").Output()
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
 }
+
+// opencodeVersionTimeout bounds `opencode --version`.
+const opencodeVersionTimeout = 15 * time.Second
 
 // opencodeMajorVersion returns the major version named in `opencode --version`
 // output, or 0 when it names none (a dev build, or no opencode on PATH).
@@ -118,29 +130,35 @@ func opencodeConfigUsesV2Keys(path string) bool {
 	if err != nil {
 		return false
 	}
-	std, err := hujson.Standardize(data)
+	v, err := hujson.Parse(data)
 	if err != nil {
 		return false
 	}
-	var cfg struct {
-		Permissions json.RawMessage            `json:"permissions"`
-		MCP         map[string]json.RawMessage `json:"mcp"`
-	}
-	if err := json.Unmarshal(std, &cfg); err != nil {
+	root, ok := v.Value.(*hujson.Object)
+	if !ok {
 		return false
 	}
-	var rules []json.RawMessage
-	if json.Unmarshal(cfg.Permissions, &rules) == nil && cfg.Permissions != nil {
-		return true
+	if pv := hujsonFindMember(root, "permissions"); pv != nil {
+		if _, ok := pv.Value.(*hujson.Array); ok {
+			return true
+		}
 	}
-	if raw, ok := cfg.MCP["servers"]; ok {
-		var servers map[string]json.RawMessage
-		if json.Unmarshal(raw, &servers) == nil {
-			_, legacy := servers["type"]
-			return !legacy
+	if mv := hujsonFindMember(root, "mcp"); mv != nil {
+		if mcp, ok := mv.Value.(*hujson.Object); ok {
+			if sv := hujsonFindMember(mcp, "servers"); sv != nil {
+				servers, ok := sv.Value.(*hujson.Object)
+				return ok && !isV1ServerEntry(servers)
+			}
 		}
 	}
 	return false
+}
+
+// isV1ServerEntry reports whether an mcp.servers object is really a v1 MCP
+// server that happens to be named "servers" (v1 servers carry a type); v2
+// reads it that way too.
+func isV1ServerEntry(servers *hujson.Object) bool {
+	return hujsonFindMember(servers, "type") != nil
 }
 
 // runInstallOpencode configures opencode to use lite-sandbox. Unlike Claude
@@ -320,6 +338,32 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// opencodeParseTree parses an opencode config as a JWCC syntax tree and returns
+// it with its top-level object, adding $schema if it is missing.
+func opencodeParseTree(configPath string, data []byte) (hujson.Value, *hujson.Object, error) {
+	v, err := hujson.Parse(data)
+	if err != nil {
+		return v, nil, fmt.Errorf("failed to parse %s as JSONC: %w", configPath, err)
+	}
+	root, ok := v.Value.(*hujson.Object)
+	if !ok {
+		return v, nil, fmt.Errorf("%s: expected a JSON object at the top level", configPath)
+	}
+	if hujsonFindMember(root, "$schema") == nil {
+		hujsonSetMember(root, "$schema", hujsonString("https://opencode.ai/config.json"))
+	}
+	return v, root, nil
+}
+
+// hujsonMarshal JSON-encodes x as a hujson Value.
+func hujsonMarshal(x any) (hujson.Value, error) {
+	raw, err := json.Marshal(x)
+	if err != nil {
+		return hujson.Value{}, err
+	}
+	return hujson.Parse(raw)
+}
+
 // configureOpencodeJSONC applies the same edits as configureOpencodeConfig to a
 // JSONC (opencode.jsonc) global config, but parses and re-serializes it as a
 // JWCC syntax tree (via hujson) so the user's comments, trailing commas, and
@@ -332,17 +376,9 @@ func configureOpencodeJSONC(configPath, binPath string) error {
 	if err != nil {
 		return err
 	}
-	v, err := hujson.Parse(data)
+	v, root, err := opencodeParseTree(configPath, data)
 	if err != nil {
-		return fmt.Errorf("failed to parse %s as JSONC: %w", configPath, err)
-	}
-	root, ok := v.Value.(*hujson.Object)
-	if !ok {
-		return fmt.Errorf("%s: expected a JSON object at the top level", configPath)
-	}
-
-	if hujsonFindMember(root, "$schema") == nil {
-		hujsonSetMember(root, "$schema", hujsonString("https://opencode.ai/config.json"))
+		return err
 	}
 
 	// mcp.lite-sandbox — a local server launched via `lite-sandbox serve-mcp`.
@@ -350,15 +386,11 @@ func configureOpencodeJSONC(configPath, binPath string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", configPath, err)
 	}
-	serverRaw, err := json.Marshal(opencodeMCPLocal{
+	serverVal, err := hujsonMarshal(opencodeMCPLocal{
 		Type:    "local",
 		Command: []string{binPath, "serve-mcp"},
 		Enabled: true,
 	})
-	if err != nil {
-		return err
-	}
-	serverVal, err := hujson.Parse(serverRaw)
 	if err != nil {
 		return err
 	}
@@ -530,17 +562,9 @@ func configureOpencodeV2(configPath, binPath string, jsonc bool) error {
 	case !jsonc && !json.Valid(data):
 		return fmt.Errorf("failed to parse %s (note lite-sandbox can only edit plain JSON in opencode.json; use opencode.jsonc for comments)", configPath)
 	}
-	v, err := hujson.Parse(data)
+	v, root, err := opencodeParseTree(configPath, data)
 	if err != nil {
-		return fmt.Errorf("failed to parse %s as JSONC: %w", configPath, err)
-	}
-	root, ok := v.Value.(*hujson.Object)
-	if !ok {
-		return fmt.Errorf("%s: expected a JSON object at the top level", configPath)
-	}
-
-	if hujsonFindMember(root, "$schema") == nil {
-		hujsonSetMember(root, "$schema", hujsonString("https://opencode.ai/config.json"))
+		return err
 	}
 
 	mcp, err := hujsonEnsureObject(root, "mcp")
@@ -552,14 +576,10 @@ func configureOpencodeV2(configPath, binPath string, jsonc bool) error {
 	if err != nil {
 		return fmt.Errorf("%s: mcp.%w", configPath, err)
 	}
-	if hujsonFindMember(servers, "type") != nil {
+	if isV1ServerEntry(servers) {
 		return fmt.Errorf("%s: mcp.servers is a v1 MCP server named \"servers\"; rename it before installing", configPath)
 	}
-	serverRaw, err := json.Marshal(opencodeV2MCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}})
-	if err != nil {
-		return err
-	}
-	serverVal, err := hujson.Parse(serverRaw)
+	serverVal, err := hujsonMarshal(opencodeV2MCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}})
 	if err != nil {
 		return err
 	}
@@ -595,11 +615,7 @@ func configureOpencodeV2(configPath, binPath string, jsonc bool) error {
 	}
 	rules.Elements = kept
 	for _, r := range opencodeV2Rules {
-		raw, err := json.Marshal(r)
-		if err != nil {
-			return err
-		}
-		rv, err := hujson.Parse(raw)
+		rv, err := hujsonMarshal(r)
 		if err != nil {
 			return err
 		}
