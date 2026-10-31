@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 )
@@ -78,14 +79,17 @@ func opencodeLaunchConfig(binPath, directivePath, existing string) (string, erro
 }
 
 // mergeJSON merges over into base: objects recursively, arrays concatenated,
-// anything else replaced by over's value. A permission given as a bare action
-// string in base is kept as the catch-all "*" rule when over sets an object,
-// as the installer does.
+// anything else replaced by over's value. A top-level permission given as a
+// bare action string in base is kept as the catch-all "*" rule when over sets
+// an object, as the installer does.
 func mergeJSON(base, over map[string]any) map[string]any {
-	out := make(map[string]any, len(base)+len(over))
-	for k, v := range base {
-		out[k] = v
+	if action, ok := base["permission"].(string); ok {
+		if _, ok := over["permission"].(map[string]any); ok {
+			base = maps.Clone(base)
+			base["permission"] = map[string]any{"*": action}
+		}
 	}
+	out := maps.Clone(base)
 	for k, ov := range over {
 		bv, ok := out[k]
 		if !ok {
@@ -94,12 +98,9 @@ func mergeJSON(base, over map[string]any) map[string]any {
 		}
 		switch o := ov.(type) {
 		case map[string]any:
-			switch b := bv.(type) {
-			case map[string]any:
+			if b, ok := bv.(map[string]any); ok {
 				out[k] = mergeJSON(b, o)
-			case string:
-				out[k] = mergeJSON(map[string]any{"*": b}, o)
-			default:
+			} else {
 				out[k] = o
 			}
 		case []any:

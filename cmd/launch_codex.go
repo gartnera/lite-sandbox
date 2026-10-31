@@ -32,6 +32,7 @@ const codexLaunchDirective = "ALWAYS use the `bash` tool from the `lite-sandbox`
 //     that trust is recorded in config.toml, so a hook launch passes would
 //     silently never run. --dangerously-bypass-hook-trust is Codex's only
 //     per-run way past that; it applies to every enabled hook in the session.
+//     The hooks feature is enabled too, in case the user turned it off.
 //
 // Codex's root options carry over to its subcommands, so they go first and
 // the user's arguments (`exec ...`, a prompt) follow.
@@ -71,7 +72,9 @@ func codexLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
 		}
 		override("hooks.PreToolUse",
 			`[{matcher = `+tomlString(matcher)+`, hooks = [{type = "command", command = `+tomlString(command)+`}]}]`)
-		spec.args = append(spec.args, "--dangerously-bypass-hook-trust")
+		// --enable hooks: a user who switched hooks off in config.toml would
+		// otherwise get no confinement while launch reports the hook as on.
+		spec.args = append(spec.args, "--enable", "hooks", "--dangerously-bypass-hook-trust")
 		spec.notes = append(spec.notes,
 			"Codex runs only hooks trusted in /hooks, so this session passes --dangerously-bypass-hook-trust for the sandbox's hook;"+
 				" your own enabled hooks run unreviewed too (--with-tool-hook=false avoids this)")

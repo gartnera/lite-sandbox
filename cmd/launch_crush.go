@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,8 +18,9 @@ import (
 // for the user's:
 //
 //   - crush.json is a symlink to the user's global crush.json, if any;
-//   - crushrc changes into the user's config directory and sources their
-//     global crushrc, if any, so it runs as it would without the launch, then
+//   - crushrc sources the user's global crushrc, if any, from their config
+//     directory and in a subshell, so it runs as it would without the launch
+//     and an `exit` in it can't skip what follows, then
 //     adds the sandbox's rules (crushRCRules, as `install crush` writes them);
 //   - the global context paths are set to the user's CRUSH.md and the AGENTS.md
 //     beside their config directory (Crush's defaults, which it would otherwise
@@ -33,15 +36,16 @@ func crushLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
 	if err != nil {
 		return launchSpec{}, err
 	}
-	dir, err := launchCacheDir("crush")
+	// One stand-in directory per (config directory, binary): Crush reloads its
+	// crushrc while running, so a launch for another config must not rewrite
+	// the one a running session reads. This also keeps a launch from inside a
+	// launched Crush from sourcing its own crushrc: its config directory is the
+	// first stand-in, which gets a stand-in of its own.
+	key := sha256.Sum256([]byte(userDir + "\x00" + binPath))
+	dir, err := launchCacheDir(filepath.Join("crush", hex.EncodeToString(key[:6])))
 	if err != nil {
 		return launchSpec{}, err
 	}
-	if sameDir(userDir, dir) {
-		// A launch from inside a launched Crush: sourcing would recurse.
-		return launchSpec{}, fmt.Errorf("CRUSH_GLOBAL_CONFIG already points at launch's own directory %s; unset it to launch Crush", dir)
-	}
-
 	directivePath := filepath.Join(dir, "lite-sandbox.md")
 	if err := writeFileAtomic(directivePath, []byte(crushDirective+"\n")); err != nil {
 		return launchSpec{}, fmt.Errorf("failed to write %s: %w", directivePath, err)
@@ -80,7 +84,10 @@ func crushLaunchRC(binPath, userDir, directivePath string) (string, error) {
 			return "", err
 		}
 		// Crush runs a crushrc from its own directory; do the same for theirs.
-		b.WriteString("cd " + q + " && source ./crushrc\n")
+		// The subshell keeps an `exit` in their file from ending this script
+		// before the sandbox's rules below are added (Crush's builtins record
+		// into the config from a subshell too), and keeps their cd local.
+		b.WriteString("(cd " + q + " && source ./crushrc)\n")
 	}
 	rules, err := crushRCRules(binPath)
 	if err != nil {
@@ -121,16 +128,4 @@ func linkCrushJSON(target, link string) error {
 		return fmt.Errorf("failed to link %s: %w", target, err)
 	}
 	return nil
-}
-
-// sameDir reports whether a and b name the same directory, comparing resolved
-// paths when they exist.
-func sameDir(a, b string) bool {
-	if ra, err := filepath.EvalSymlinks(a); err == nil {
-		a = ra
-	}
-	if rb, err := filepath.EvalSymlinks(b); err == nil {
-		b = rb
-	}
-	return filepath.Clean(a) == filepath.Clean(b)
 }

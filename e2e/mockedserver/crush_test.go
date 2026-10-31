@@ -53,7 +53,7 @@ func runCrush(t *testing.T, format string) {
 }
 
 // crushEnv isolates Crush for one run against model and writes the user's own
-// global config in format (crushrc or crush.json). It returns the global
+// global config in format (crushrc, crushrc-exit, or crush.json). It returns the global
 // config directory, a project directory, and the environment.
 func crushEnv(t *testing.T, model *mockmodel.Server, format string) (configDir, project string, environ []string) {
 	t.Helper()
@@ -72,8 +72,8 @@ func crushEnv(t *testing.T, model *mockmodel.Server, format string) (configDir, 
 	// Provider auto-update and metrics are off so the run makes no network
 	// calls beyond the mock.
 	switch format {
-	case "crushrc":
-		writeFile(t, filepath.Join(configDir, "crushrc"), strings.Join([]string{
+	case "crushrc", "crushrc-exit":
+		lines := []string{
 			"# user config",
 			"provider add mock --type openai-compat --base-url " + model.BaseURL + " --api-key dummy",
 			"model add mock/" + model.ModelID + " --name Mock --context-window 128000 --default-max-tokens 4096",
@@ -82,8 +82,12 @@ func crushEnv(t *testing.T, model *mockmodel.Server, format string) (configDir, 
 			"option provider-auto-update false",
 			"option metrics false",
 			"option notifications disabled",
-			"",
-		}, "\n"))
+		}
+		if format == "crushrc-exit" {
+			// A crushrc that ends the script early (e.g. a guard clause).
+			lines = append(lines, "exit 0")
+		}
+		writeFile(t, filepath.Join(configDir, "crushrc"), strings.Join(append(lines, ""), "\n"))
 	case "crush.json":
 		cfg := map[string]any{
 			"providers": map[string]any{
@@ -110,9 +114,11 @@ func crushEnv(t *testing.T, model *mockmodel.Server, format string) (configDir, 
 // the user's provider — which lives only in their config — must still work,
 // the sandbox tools replace the built-in bash, the directive and the user's
 // own CRUSH.md both reach the model, and the user's directory is unchanged.
+// crushrc-exit is a user crushrc ending in `exit`, which must not keep the
+// sandbox's rules from being added after it.
 func TestCrushLaunch(t *testing.T) {
 	requireE2E(t)
-	for _, format := range []string{"crushrc", "crush.json"} {
+	for _, format := range []string{"crushrc", "crushrc-exit", "crush.json"} {
 		t.Run(format, func(t *testing.T) {
 			calls := sandboxCalls(crushSandboxTool)
 			model := startModel(t, calls)

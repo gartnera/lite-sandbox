@@ -221,7 +221,7 @@ func checkLaunchFlags(target launchTarget, flags *pflag.FlagSet) error {
 		return fmt.Errorf("--permission-mode applies only to Claude Code; pass %s's own permission flags after the agent name instead", target.displayName)
 	}
 	if !target.hooks {
-		if launchBashASTHookMode {
+		if on, _ := flags.GetBool("bash-ast-hook-mode"); on {
 			return fmt.Errorf("--bash-ast-hook-mode needs lite-sandbox's PreToolUse hook, which %s has no compatible protocol for", target.displayName)
 		}
 		if on, _ := flags.GetBool("with-tool-hook"); on && flags.Changed("with-tool-hook") {

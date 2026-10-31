@@ -99,6 +99,9 @@ func TestCodexLaunchSpecDefault(t *testing.T) {
 	if !slices.Contains(spec.args, "--dangerously-bypass-hook-trust") {
 		t.Errorf("hook passed without the trust bypass; Codex would skip it: %v", spec.args)
 	}
+	if i := slices.Index(spec.args, "--enable"); i == -1 || spec.args[i+1] != "hooks" {
+		t.Errorf("hooks feature not enabled for the hook: %v", spec.args)
+	}
 	if len(spec.notes) == 0 {
 		t.Error("no note telling the user hook trust is bypassed")
 	}
@@ -303,7 +306,7 @@ func TestCrushLaunchSpec(t *testing.T) {
 		t.Errorf("args = %v", spec.args)
 	}
 	dir := crushLaunchDir(t, spec)
-	if sameDir(dir, userDir) {
+	if dir == userDir {
 		t.Fatal("CRUSH_GLOBAL_CONFIG still points at the user's directory")
 	}
 
@@ -313,7 +316,7 @@ func TestCrushLaunchSpec(t *testing.T) {
 	}
 	rules, _ := crushRCRules(testBin)
 	for _, want := range []string{
-		"cd " + userDir + " && source ./crushrc\n",
+		"(cd " + userDir + " && source ./crushrc)\n",
 		rules,
 		"option global-context-path " + filepath.Join(userDir, "CRUSH.md") + "\n",
 		"option global-context-path " + filepath.Join(filepath.Dir(userDir), "AGENTS.md") + "\n",
@@ -354,19 +357,26 @@ func TestCrushLaunchSpec(t *testing.T) {
 	}
 }
 
-// TestCrushLaunchSpecRefusesOwnDir checks a launch whose CRUSH_GLOBAL_CONFIG
-// already is the stand-in directory (a launch from a launched Crush) is
-// refused rather than having its crushrc source itself.
-func TestCrushLaunchSpecRefusesOwnDir(t *testing.T) {
+// TestCrushLaunchSpecDirPerConfig checks launches for different config
+// directories don't share (and so rewrite) one stand-in crushrc, while
+// repeated launches for the same one reuse theirs.
+func TestCrushLaunchSpecDirPerConfig(t *testing.T) {
 	isolateUserDirs(t)
 	stubCrushVersion(t, "v0.92.0")
-	dir, err := launchCacheDir("crush")
-	if err != nil {
-		t.Fatal(err)
+	dirFor := func(userDir string) string {
+		t.Setenv("CRUSH_GLOBAL_CONFIG", userDir)
+		spec, err := crushLaunchSpec(testBin, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crushLaunchDir(t, spec)
 	}
-	t.Setenv("CRUSH_GLOBAL_CONFIG", dir)
-	if _, err := crushLaunchSpec(testBin, nil); err == nil {
-		t.Error("launch accepted its own directory as the user's config")
+	a, b := t.TempDir(), t.TempDir()
+	if dirFor(a) == dirFor(b) {
+		t.Error("two config directories share one stand-in directory")
+	}
+	if dirFor(a) != dirFor(a) {
+		t.Error("the same config directory got a new stand-in directory")
 	}
 }
 
@@ -391,6 +401,7 @@ func TestCheckLaunchFlags(t *testing.T) {
 		fs := pflag.NewFlagSet("launch", pflag.ContinueOnError)
 		fs.String("permission-mode", "acceptEdits", "")
 		fs.Bool("with-tool-hook", true, "")
+		fs.Bool("bash-ast-hook-mode", false, "")
 		for _, f := range set {
 			name, value, _ := strings.Cut(f, "=")
 			if err := fs.Set(name, value); err != nil {
@@ -400,7 +411,6 @@ func TestCheckLaunchFlags(t *testing.T) {
 		return fs
 	}
 
-	setLaunchFlags(t)
 	for _, name := range []string{"claude", "codex", "opencode", "crush"} {
 		if err := checkLaunchFlags(target(name), flags()); err != nil {
 			t.Errorf("%s with default flags: %v", name, err)
@@ -416,11 +426,10 @@ func TestCheckLaunchFlags(t *testing.T) {
 		t.Errorf("--with-tool-hook=false refused for crush: %v", err)
 	}
 
-	setLaunchFlags(t, bashASTHookMode)
-	if err := checkLaunchFlags(target("crush"), flags()); err == nil {
+	if err := checkLaunchFlags(target("crush"), flags("bash-ast-hook-mode=true")); err == nil {
 		t.Error("--bash-ast-hook-mode accepted for crush")
 	}
-	if err := checkLaunchFlags(target("codex"), flags()); err != nil {
+	if err := checkLaunchFlags(target("codex"), flags("bash-ast-hook-mode=true")); err != nil {
 		t.Errorf("--bash-ast-hook-mode refused for codex: %v", err)
 	}
 }

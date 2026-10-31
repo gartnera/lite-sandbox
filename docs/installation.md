@@ -98,9 +98,9 @@ Grok Build isn't supported. Its `GROK_CONFIG` overlay only accepts soft settings
 | | Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings`, merged with your `settings.json` |
 | | Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
 | Codex | `[mcp_servers.lite-sandbox]` in `config.toml` | `-c mcp_servers.lite-sandbox.*` overrides |
-| | Usage directive in `AGENTS.md` | `-c developer_instructions`, after any `developer_instructions` of your own from `config.toml` |
+| | Usage directive in `AGENTS.md` | `-c developer_instructions`, after any `developer_instructions` of your own from `config.toml` (one from a `--profile` file is replaced for the session) |
 | | `PreToolUse` hook redirecting the built-in shell | `--disable shell_tool`: the built-in shell is removed from the session |
-| | `PreToolUse` hook for the file tools (`--with-tool-hook`) | `-c hooks.PreToolUse` and `--dangerously-bypass-hook-trust` ([below](#codex-hook-trust)) |
+| | `PreToolUse` hook for the file tools (`--with-tool-hook`) | `-c hooks.PreToolUse`, `--enable hooks`, and `--dangerously-bypass-hook-trust` ([below](#codex-hook-trust)) |
 | opencode | MCP server and permissions in `opencode.json` | `OPENCODE_CONFIG_CONTENT`, which opencode merges over your global and project configs (and over an `OPENCODE_CONFIG_CONTENT` you already set) |
 | | Usage directive in `AGENTS.md` | `instructions` naming a file in lite-sandbox's cache directory |
 | Crush | MCP server and permissions in `crushrc` (or `crush.json`) | `CRUSH_GLOBAL_CONFIG` pointing at a stand-in config directory ([below](#crush-stand-in-config)) |
@@ -108,14 +108,14 @@ Grok Build isn't supported. Its `GROK_CONFIG` overlay only accepts soft settings
 
 #### Codex hook trust
 
-Codex runs only the hooks you've trusted in its `/hooks` screen, and it records that trust in `config.toml`, so a hook passed for one session would be silently skipped. Its only per-session way past that is `--dangerously-bypass-hook-trust`, which `launch codex` passes whenever it registers a hook (the default `--with-tool-hook`, or `--bash-ast-hook-mode`). The bypass covers every enabled hook in the session, so **your own enabled user and plugin hooks also run without review**. Project hooks still need the project to be trusted. Pass `--with-tool-hook=false` to launch with no hook and no bypass. The built-in shell is removed either way, so blocking it doesn't depend on a hook.
+Codex runs only the hooks you've trusted in its `/hooks` screen, and it records that trust in `config.toml`, so a hook passed for one session would be silently skipped. Its only per-session way past that is `--dangerously-bypass-hook-trust`, which `launch codex` passes whenever it registers a hook (the default `--with-tool-hook`, or `--bash-ast-hook-mode`), along with `--enable hooks` in case you turned the hooks feature off. The bypass covers every enabled hook in the session, so **your own enabled user and plugin hooks also run without review**. Project hooks still need the project to be trusted. Pass `--with-tool-hook=false` to launch with no hook and no bypass. The built-in shell is removed either way, so blocking it doesn't depend on a hook.
 
 #### Crush stand-in config
 
-Crush has no flag or variable that adds configuration, only `CRUSH_GLOBAL_CONFIG`, which moves its whole global config directory. `launch crush` points it at `<cache>/lite-sandbox/launch/crush` (`<cache>` is `~/.cache` on Linux, `~/Library/Caches` on macOS), which it rewrites on every launch:
+Crush has no flag or variable that adds configuration, only `CRUSH_GLOBAL_CONFIG`, which moves its whole global config directory. `launch crush` points it at a stand-in directory, `<cache>/lite-sandbox/launch/crush/<id>` (`<cache>` is `~/.cache` on Linux, `~/Library/Caches` on macOS). There's one per config directory and lite-sandbox binary, since Crush reloads its `crushrc` while it runs, and launch rewrites it on every launch:
 
 - `crush.json` is a symlink to your global `crush.json`, if you have one.
-- `crushrc` changes into your config directory and sources your global `crushrc`, if you have one. Then it adds the sandbox's MCP server, `permissions deny bash`, and `permissions allow` for the sandbox tools, as `install crush` writes them. Last, it sets the global context paths to your `CRUSH.md`, the `AGENTS.md` beside your config directory (Crush's defaults), and the usage directive.
+- `crushrc` sources your global `crushrc`, if you have one, in a subshell from your config directory, so it runs as it would without the launch and an `exit` in it can't skip what follows. Then it adds the sandbox's MCP server, `permissions deny bash`, and `permissions allow` for the sandbox tools, as `install crush` writes them. Last, it sets the global context paths to your `CRUSH.md`, the `AGENTS.md` beside your config directory (Crush's defaults), and the usage directive. These are added to any `global_context_paths` you set yourself, so if you dropped one of the defaults, it comes back for launched sessions.
 
 Crush's data directory, skills, and commands don't depend on `CRUSH_GLOBAL_CONFIG`, and project configs still load. `launch crush` needs crush v0.88.0 or newer, since older versions don't read `crushrc`.
 
