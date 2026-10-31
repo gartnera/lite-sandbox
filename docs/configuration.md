@@ -558,7 +558,9 @@ instead. There are two kinds:
   config file, audit log, and mask cache, plus the settings and instruction
   files of each *installed* agent (`~/.claude/settings.json`,
   `~/.claude/{skills,agents,commands,plugins}`, `~/.codex/config.toml`,
-  `~/.codex/prompts`, opencode's and Crush's configs, and Grok Build's
+  `~/.codex/prompts`, opencode's config, `AGENTS.md`, and agent and plugin
+  directories (also under `$OPENCODE_CONFIG_DIR`, which opencode v2 reads in
+  place of `~/.config/opencode`), Crush's configs, and Grok Build's
   `config.toml`, `hooks/`, `disabled-hooks`, `rules/`, and the other files in
   `~/.grok` that decide what it loads, and pi's whole agent directory,
   `~/.pi/agent` or `$PI_CODING_AGENT_DIR`, which holds its settings,

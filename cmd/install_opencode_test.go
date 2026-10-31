@@ -362,3 +362,161 @@ func TestOpencodeConfigDir(t *testing.T) {
 		t.Errorf("unexpected default dir: %s", dir)
 	}
 }
+
+func TestOpencodeMajorVersion(t *testing.T) {
+	for out, want := range map[string]int{
+		"1.18.29\n":       1,
+		"2.2.5\n":         2,
+		"opencode v2.0.0": 2,
+		"local\n":         0,
+		"":                0,
+		"10.0.1-beta.3\n": 10,
+		"0.15.3\n":        0,
+	} {
+		if got := opencodeMajorVersion(out); got != want {
+			t.Errorf("opencodeMajorVersion(%q) = %d, want %d", out, got, want)
+		}
+	}
+}
+
+func TestDetectOpencodeConfigVersion(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	v1 := write("v1.json", `{"mcp": {"x": {"type": "local", "command": ["x"]}}, "permission": {"bash": "deny"}}`)
+	v2Perms := write("v2-perms.jsonc", "{\n  // c\n  \"permissions\": [],\n}")
+	v2Servers := write("v2-servers.json", `{"mcp": {"servers": {"x": {"type": "local", "command": ["x"]}}}}`)
+	legacyServers := write("legacy-servers.json", `{"mcp": {"servers": {"type": "local", "command": ["x"]}}}`)
+	missing := filepath.Join(dir, "missing.json")
+
+	stub := func(out string, err error) { stubOpencodeVersion(t, out, err) }
+
+	tests := []struct {
+		name    string
+		out     string
+		err     error
+		configs []string
+		want    opencodeConfigVersion
+	}{
+		{"v2 binary", "2.2.5\n", nil, []string{v1}, opencodeConfigV2},
+		{"v1 binary wins over v2 keys", "1.18.29\n", nil, []string{v2Perms}, opencodeConfigV1},
+		{"no binary, v1 config", "", os.ErrNotExist, []string{v1}, opencodeConfigV1},
+		{"no binary, no config", "", os.ErrNotExist, []string{missing}, opencodeConfigV1},
+		{"no binary, v2 permissions", "", os.ErrNotExist, []string{missing, v2Perms}, opencodeConfigV2},
+		{"no binary, v2 servers", "", os.ErrNotExist, []string{v2Servers}, opencodeConfigV2},
+		{"no binary, v1 server named servers", "", os.ErrNotExist, []string{legacyServers}, opencodeConfigV1},
+		{"dev build, v2 config", "local\n", nil, []string{v2Servers}, opencodeConfigV2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub(tt.out, tt.err)
+			if got := detectOpencodeConfigVersion(tt.configs...); got != tt.want {
+				t.Errorf("got v%d, want v%d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConfigureOpencodeAGENTSMDReplacesLegacyDirective verifies a directive
+// written by an earlier release is swapped for the current one rather than
+// gaining a near-duplicate.
+func TestConfigureOpencodeAGENTSMDReplacesLegacyDirective(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "AGENTS.md")
+	legacy := "# My rules\n\n" + opencodeLegacyDirectives[0] + "\n\nBe nice.\n"
+	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := configureOpencodeAGENTSMD(tmpDir); err != nil {
+		t.Fatalf("configureOpencodeAGENTSMD failed: %v", err)
+	}
+	content := readFile(t, path)
+	if strings.Contains(content, opencodeLegacyDirectives[0]) {
+		t.Errorf("legacy directive left in place:\n%s", content)
+	}
+	if strings.Count(content, opencodeDirective) != 1 {
+		t.Errorf("expected the directive once:\n%s", content)
+	}
+	if !strings.HasPrefix(content, "# My rules\n") || !strings.HasSuffix(content, "Be nice.\n") {
+		t.Errorf("surrounding content changed:\n%s", content)
+	}
+}
+
+// TestRunInstallOpencodeSelectsDirAndFormat verifies the install writes v2's
+// format to OPENCODE_CONFIG_DIR (which v2 reads in place of the XDG dir) and
+// v1's to the XDG dir, editing an existing opencode.jsonc rather than adding
+// an opencode.json beside it.
+func TestRunInstallOpencodeSelectsDirAndFormat(t *testing.T) {
+	stub := func(out string) { stubOpencodeVersion(t, out, nil) }
+
+	t.Run("v2", func(t *testing.T) {
+		root := t.TempDir()
+		xdg, oc := filepath.Join(root, "xdg"), filepath.Join(root, "oc")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		t.Setenv("OPENCODE_CONFIG_DIR", oc)
+		if err := os.MkdirAll(oc, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(oc, "opencode.jsonc"), []byte("{\n  // mine\n}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stub("2.2.5\n")
+
+		if err := runInstallOpencode("/bin/lite-sandbox"); err != nil {
+			t.Fatalf("runInstallOpencode failed: %v", err)
+		}
+		if fileExists(filepath.Join(oc, "opencode.json")) {
+			t.Error("opencode.json created beside the existing opencode.jsonc")
+		}
+		cfg, _ := parseOpencodeV2Config(t, filepath.Join(oc, "opencode.jsonc"))
+		if _, ok := cfg.MCP.Servers["lite-sandbox"]; !ok {
+			t.Errorf("v2 server not written to OPENCODE_CONFIG_DIR")
+		}
+		if !strings.Contains(readFile(t, filepath.Join(oc, "opencode.jsonc")), "// mine") {
+			t.Error("comment lost")
+		}
+		if !strings.Contains(readFile(t, filepath.Join(oc, "AGENTS.md")), opencodeDirective) {
+			t.Error("directive not written to OPENCODE_CONFIG_DIR")
+		}
+		if fileExists(filepath.Join(xdg, "opencode")) {
+			t.Error("XDG opencode dir written although v2 reads OPENCODE_CONFIG_DIR")
+		}
+	})
+
+	t.Run("v1", func(t *testing.T) {
+		root := t.TempDir()
+		xdg, oc := filepath.Join(root, "xdg"), filepath.Join(root, "oc")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		t.Setenv("OPENCODE_CONFIG_DIR", oc)
+		stub("1.18.29\n")
+
+		if err := runInstallOpencode("/bin/lite-sandbox"); err != nil {
+			t.Fatalf("runInstallOpencode failed: %v", err)
+		}
+		cfg := parseOpencodeConfig(t, filepath.Join(xdg, "opencode", "opencode.json"))
+		if _, ok := cfg["permissions"]; ok {
+			t.Error("v2 permissions written for v1")
+		}
+		if string(cfg["permission"]) == "" {
+			t.Error("v1 permission map not written")
+		}
+		if fileExists(oc) {
+			t.Error("OPENCODE_CONFIG_DIR written for v1")
+		}
+	})
+}
+
+// stubOpencodeVersion makes `opencode --version` report out (or fail with
+// err) for the rest of the test.
+func stubOpencodeVersion(t *testing.T, out string, err error) {
+	t.Helper()
+	orig := opencodeVersionOutput
+	opencodeVersionOutput = func() (string, error) { return out, err }
+	t.Cleanup(func() { opencodeVersionOutput = orig })
+}

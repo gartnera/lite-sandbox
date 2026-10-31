@@ -1,60 +1,47 @@
 package cmd
 
+// lite-sandbox launch opencode: dispatches on the installed opencode's major
+// version to the v1 spec (launch_opencode_v1.go) or the v2 spec
+// (launch_opencode_v2.go). Both pass what `install opencode` would write in
+// OPENCODE_CONFIG_CONTENT, opencode's inline config, which it merges over the
+// global and project configs (only managed config ranks higher), plus an
+// instructions file holding the usage directive. opencode only takes
+// instructions from files, so the directive is kept in lite-sandbox's cache
+// (launchCacheDir) rather than in opencode's config directory; the user's own
+// AGENTS.md and instructions still load. An OPENCODE_CONFIG_CONTENT the user
+// already set is kept, with ours merged over it.
+
 import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 )
 
-// opencodeLaunchSpec builds opencode's environment for a sandboxed run. What
-// `install opencode` writes to the global opencode.json goes in
-// OPENCODE_CONFIG_CONTENT, opencode's inline config, which it merges over the
-// global and project configs (only managed config ranks higher):
-//
-//   - mcp.lite-sandbox, the MCP server;
-//   - permission.bash = "deny" and permission."lite-sandbox*" = "allow";
-//   - instructions naming a file with the usage directive. opencode only takes
-//     instructions from files, so the directive is kept in lite-sandbox's
-//     cache (launchCacheDir) rather than in opencode's config directory. The
-//     user's own AGENTS.md and instructions still load.
-//
-// An OPENCODE_CONFIG_CONTENT the user already set is kept: ours is merged
-// over it.
 func opencodeLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
-	dir, err := launchCacheDir("opencode")
-	if err != nil {
-		return launchSpec{}, err
+	if out, err := opencodeVersionOutput(); err == nil && opencodeMajorVersion(out) >= 2 {
+		return opencodeV2LaunchSpec(binPath, agentArgs)
 	}
-	directivePath := filepath.Join(dir, "lite-sandbox.md")
-	if err := writeFileAtomic(directivePath, []byte(opencodeDirective+"\n")); err != nil {
-		return launchSpec{}, fmt.Errorf("failed to write %s: %w", directivePath, err)
-	}
-
-	content, err := opencodeLaunchConfig(binPath, directivePath, os.Getenv("OPENCODE_CONFIG_CONTENT"))
-	if err != nil {
-		return launchSpec{}, err
-	}
-	return launchSpec{
-		args: agentArgs,
-		env:  []string{"OPENCODE_CONFIG_CONTENT=" + content},
-	}, nil
+	return opencodeV1LaunchSpec(binPath, agentArgs)
 }
 
-// opencodeLaunchConfig renders the inline config, merged over existing (the
-// user's own OPENCODE_CONFIG_CONTENT, or "").
-func opencodeLaunchConfig(binPath, directivePath, existing string) (string, error) {
-	ours := map[string]any{
-		"mcp": map[string]any{
-			"lite-sandbox": opencodeMCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}, Enabled: true},
-		},
-		"permission": map[string]any{
-			"bash":          "deny",
-			"lite-sandbox*": "allow",
-		},
-		"instructions": []any{directivePath},
+// opencodeLaunchDirective writes the usage directive to lite-sandbox's cache
+// and returns its path, for the inline config's instructions.
+func opencodeLaunchDirective() (string, error) {
+	dir, err := launchCacheDir("opencode")
+	if err != nil {
+		return "", err
 	}
+	path := filepath.Join(dir, "lite-sandbox.md")
+	if err := writeFileAtomic(path, []byte(opencodeDirective+"\n")); err != nil {
+		return "", fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// opencodeLaunchContent renders ours as the inline config, merged over
+// existing (the user's own OPENCODE_CONFIG_CONTENT, or "").
+func opencodeLaunchContent(ours map[string]any, existing string) (string, error) {
 	// Round-trip through JSON so ours holds only plain maps and slices.
 	data, err := json.Marshal(ours)
 	if err != nil {

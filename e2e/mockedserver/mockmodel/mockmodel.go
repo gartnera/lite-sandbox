@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ToolCall is one scripted function call the mock model issues.
@@ -59,6 +60,11 @@ type Script struct {
 	// tools are all in this list is a side request too (Grok Build generates
 	// the session title by offering a lone session_title tool).
 	SideTools []string
+	// FirstTurnDelay holds the reply to the first agent turn this long, for
+	// harnesses that only offer tools that finish loading after the first
+	// request was sent (opencode v2 connects MCP servers in the background):
+	// script a harmless first call, and the next turn sees the late tools.
+	FirstTurnDelay time.Duration
 }
 
 // DefaultFinalText is the FinalText used when Script.FinalText is nil: it
@@ -262,6 +268,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.turns = append(s.turns, turn)
 	s.mu.Unlock()
+	if turn.IsAgentTurn() && s.agentTurnCount() == 1 {
+		time.Sleep(s.script.FirstTurnDelay)
+	}
 
 	// respond only fails before writing anything (bad scripted arguments), so a
 	// plain error response is still possible here.

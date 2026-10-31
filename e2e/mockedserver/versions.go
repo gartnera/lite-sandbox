@@ -1,5 +1,5 @@
 // Package mockedserver drives real agent binaries (Crush, Codex, Claude Code,
-// opencode, Grok Build, pi) through
+// opencode v1 and v2, Grok Build, pi) through
 // `lite-sandbox install` and a non-interactive run against a mocked model
 // server (the mockmodel package), so it needs no API key. The sibling
 // e2e/claude suite uses a real model instead. See the *_test.go files; this file pins the agent
@@ -17,8 +17,11 @@ const (
 	// ClaudeCodeVersion is a Claude Code release, fetched from the native
 	// distribution that https://claude.ai/install.sh uses.
 	ClaudeCodeVersion = "2.1.261"
-	// OpencodeVersion is an anomalyco/opencode GitHub release (without the "v").
+	// OpencodeVersion is an anomalyco/opencode v1 GitHub release (without the "v").
 	OpencodeVersion = "1.18.29"
+	// OpencodeV2Version is an anomalyco/opencode v2 GitHub release (without
+	// the "v"). v2 changed the config format, so both majors are tested.
+	OpencodeV2Version = "2.2.5"
 	// GrokVersion is a Grok Build release, fetched from the distribution that
 	// https://x.ai/cli/install.sh uses.
 	GrokVersion = "1.0.41"
