@@ -124,14 +124,11 @@ func commandTable() map[string]commandSpec {
 		"split":   {validate: validateSplitArgs, args: splitLayout},
 		"csplit":  {args: csplitLayout},
 		"shuf":    {args: outputOptionLayout(optSpec{short: "ino", long: []string{"input-range", "head-count", "output", "random-source"}})},
-		"sort": {noFlagPaths: true, args: outputOptionLayout(optSpec{ // sort -t<sep>
-			short: "ktSTo",
-			long:  []string{"key", "field-separator", "buffer-size", "temporary-directory", "output", "batch-size", "compress-program", "files0-from", "parallel", "random-source", "sort"},
-		})},
-		"iconv": {args: outputOptionLayout(optSpec{short: "fto", long: []string{"from-code", "to-code", "output"}})},
-		"uniq":  {args: secondOperandLayout(optSpec{short: "fsw", long: []string{"skip-fields", "skip-chars", "check-chars"}})},
-		"xxd":   {args: secondOperandLayout(optSpec{short: "cglosnR"})},
-		"yq":    {args: yqLayout},
+		"sort":    {noFlagPaths: true, validate: validateSortArgs, args: outputOptionLayout(sortSpec)}, // sort -t<sep>
+		"iconv":   {args: outputOptionLayout(optSpec{short: "fto", long: []string{"from-code", "to-code", "output"}})},
+		"uniq":    {args: secondOperandLayout(optSpec{short: "fsw", long: []string{"skip-fields", "skip-chars", "check-chars"}})},
+		"xxd":     {args: secondOperandLayout(optSpec{short: "cglosnR"})},
+		"yq":      {args: yqLayout},
 		// dd's operands are KEY=VALUE: if= is read-checked, of= write-checked.
 		"dd": {
 			nonPathArgs:  allArgsNonPaths,

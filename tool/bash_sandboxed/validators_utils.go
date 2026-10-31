@@ -72,6 +72,30 @@ func validateSplitArgs(_ *Sandbox, args []*syntax.Word) error {
 	return nil
 }
 
+// sortSpec lists sort's value-taking options (sort -t<sep> takes its
+// separator even when it is a path character).
+var sortSpec = optSpec{
+	short: "ktSTo",
+	long:  []string{"key", "field-separator", "buffer-size", "temporary-directory", "output", "batch-size", "compress-program", "files0-from", "parallel", "random-source", "sort"},
+}
+
+// sortLongOpts are all of sort's long options (GNU and BSD).
+var sortLongOpts = append(append([]string(nil), sortSpec.long...),
+	"check", "debug", "dictionary-order", "general-numeric-sort", "help",
+	"human-numeric-sort", "ignore-case", "ignore-leading-blanks", "ignore-nonprinting",
+	"merge", "month-sort", "numeric-sort", "random-sort", "reverse", "stable", "unique",
+	"version", "version-sort", "zero-terminated", "radix-sort", "mergesort", "qsort", "heapsort",
+)
+
+// validateSortArgs refuses --compress-program (and any abbreviation of it):
+// sort runs the program, through sh on macOS, whenever it spills temp files.
+func validateSortArgs(_ *Sandbox, args []*syntax.Word) error {
+	if opt := refusedOption(wordTexts(args), sortSpec, sortLongOpts, "--compress-program"); opt != "" {
+		return fmt.Errorf("sort option %q is not allowed: it runs a program", opt)
+	}
+	return nil
+}
+
 // installSpec lists install's value-taking options.
 var installSpec = optSpec{
 	short: "gmoSt",
