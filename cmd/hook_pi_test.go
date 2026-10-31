@@ -125,8 +125,8 @@ func TestPiHookValidateBash(t *testing.T) {
 	if d := runPiHook(t, cwd, hook.PiToolBash, map[string]any{"command": "ls"}, opts); decisionOf(d) != hook.DecisionAllow {
 		t.Errorf("ls: decision = %+v, want allow", d)
 	}
-	if d := runPiHook(t, cwd, hook.PiToolBash, map[string]any{"command": "cat /etc/shadow"}, opts); decisionOf(d) != hook.DecisionDeny {
-		t.Errorf("cat /etc/shadow: decision = %+v, want deny", d)
+	if d := runPiHook(t, cwd, hook.PiToolBash, map[string]any{"command": "cat /etc/hosts"}, opts); decisionOf(d) != hook.DecisionDeny {
+		t.Errorf("cat /etc/hosts: decision = %+v, want deny", d)
 	}
 	// PowerShell is not bash: it is redirected even when bash is validated.
 	if d := runPiHook(t, cwd, hook.PiToolPowerShell, map[string]any{"command": "ls"}, opts); decisionOf(d) != hook.DecisionDeny {
