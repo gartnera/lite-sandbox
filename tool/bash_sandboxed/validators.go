@@ -239,7 +239,7 @@ func validateSubCommand(s *Sandbox, args []*syntax.Word) error {
 		}
 		return nil
 	}
-	if validator, ok := s.argValidators[cmdName]; ok {
+	if validator, ok := s.validator(cmdName); ok {
 		if err := validator(s, args); err != nil {
 			return err
 		}

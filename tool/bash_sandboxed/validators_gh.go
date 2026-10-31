@@ -532,24 +532,20 @@ func validateGhReads(args []string, workDir string, read []resolvedAllowedPath) 
 	return nil
 }
 
-// ghCommandSpec is gh's entry in profileCommands. gh api's endpoint (gh api
-// /user) is a URL path, not a file; the files it and --attach upload are
-// read-checked.
-var ghCommandSpec = commandSpec{
-	validate: func(s *Sandbox, args []*syntax.Word) error {
-		cfg := s.getConfig()
-		return validateGhArgs(args, ghOptions{
-			allowToken: cfg.ProfileOption("gh", "allow_token"),
-			allowGit:   cfg.ProfileOption("gh", "allow_git"),
-		})
-	},
-	nonPathArgs: func(args []string) map[int]bool {
-		if i, _ := ghAPIPaths(args); i > 0 {
-			return map[int]bool{i: true}
-		}
-		return nil
-	},
-	checkPaths: func(args []string, workDir string, sets resolvedPathSets) error {
-		return validateGhReads(args, workDir, sets.read)
-	},
+// validateGhCommand is gh's validator, with the gh profile's options.
+func validateGhCommand(s *Sandbox, args []*syntax.Word) error {
+	cfg := s.getConfig()
+	return validateGhArgs(args, ghOptions{
+		allowToken: cfg.ProfileOption("gh", "allow_token"),
+		allowGit:   cfg.ProfileOption("gh", "allow_git"),
+	})
+}
+
+// ghNonPathArgIndices: gh api's endpoint (gh api /user) is a URL path, not a
+// file.
+func ghNonPathArgIndices(args []string) map[int]bool {
+	if i, _ := ghAPIPaths(args); i > 0 {
+		return map[int]bool{i: true}
+	}
+	return nil
 }

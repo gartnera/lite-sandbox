@@ -10,7 +10,7 @@ import (
 // whitelist (a typo registers a spec no invocation ever looks up, and the
 // command it meant runs as a plain reader).
 func TestCommandSpecsReachable(t *testing.T) {
-	for name := range commandSpecs {
+	for name := range commandTable() {
 		switch {
 		case allowedCommands[name],
 			len(config.ProfilesForCommand(name)) > 0,

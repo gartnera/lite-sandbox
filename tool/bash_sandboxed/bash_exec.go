@@ -158,7 +158,7 @@ func isBinaryExecutable(path string) bool {
 
 // validateSourceArgs validates source/. command arguments at the AST level.
 // Requires a file path argument (no bare "source" which would be a no-op).
-// The *Sandbox parameter is unused but required by the commandArgValidators
+// The *Sandbox parameter is unused but required by the argValidator
 // function type.
 func validateSourceArgs(_ *Sandbox, args []*syntax.Word) error {
 	cmdName := wordText(args[0])
@@ -688,7 +688,7 @@ func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []s
 	if s.extraAllowsArgs(name, args[1:]) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
-	validator, ok := commandArgValidators[name]
+	validator, ok := s.validator(name)
 	if !ok {
 		return nil
 	}

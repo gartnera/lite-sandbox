@@ -834,15 +834,3 @@ func gitSubcommandWriteTargets(args []string) []string {
 	}
 	return out
 }
-
-func init() {
-	// git's global path flags (-C, --git-dir, ...) say where it runs, not
-	// what it reads; what it writes in the work tree is confined by its
-	// level checks, so only .claude is checked against its targets.
-	registerCommands(commandSpec{
-		validate:                 validateGitCommand,
-		nonPathArgs:              gitGlobalPathArgIndices,
-		writeTargets:             func(args []string, _ map[int]bool) []string { return gitWriteTargets(args) },
-		targetsConfinedElsewhere: true,
-	}, "git")
-}

@@ -76,6 +76,11 @@ func validateSplitArgs(_ *Sandbox, args []*syntax.Word) error {
 var installSpec = optSpec{
 	short: "gmoSt",
 	long:  []string{"group", "mode", "owner", "suffix", "target-directory", "strip-program"},
+	flags: []string{
+		"backup", "compare", "context", "debug", "directory", "help", "no-target-directory",
+		"preserve-context", "preserve-timestamps", "strip", "verbose", "version",
+	},
+	alias: map[string]string{"target-directory": "t", "directory": "d"},
 }
 
 // validateInstallArgs refuses -s/--strip and --strip-program: install runs

@@ -332,11 +332,6 @@ var osSandboxOnlyCommands = map[string]bool{
 	"pkill": true,
 }
 
-func init() {
-	registerCommands(commandSpec{validate: validateAWSCommand}, "aws")
-	registerCommands(commandSpec{validate: validateDockerCommand}, "docker")
-}
-
 func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
 	return validateGitArgs(args, s.getConfig().Git)
 }

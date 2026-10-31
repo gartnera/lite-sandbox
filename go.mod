@@ -9,6 +9,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/fugue-labs/monty-go v0.2.0
 	github.com/jellydator/ttlcache/v3 v3.4.0
+	github.com/jonathonwebb/getopt v1.0.2
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/peterh/liner v1.2.3

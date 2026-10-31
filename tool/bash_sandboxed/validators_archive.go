@@ -641,21 +641,6 @@ func validateArchiveWrites(cmdName string, args []string, workDir string, write 
 	return nil
 }
 
-func init() {
-	registerCommands(commandSpec{
-		validate: validateTarArgs,
-		checkPaths: func(args []string, workDir string, sets resolvedPathSets) error {
-			if err := validateTarCreateReads(args, workDir, sets.read); err != nil {
-				return err
-			}
-			return validateArchiveWrites("tar", args, workDir, sets.write)
-		},
-	}, "tar")
-	registerCommands(commandSpec{validate: validateUnzipArgs, checkPaths: archiveWrites("unzip")}, "unzip")
-	registerCommands(commandSpec{validate: validateZipArgs, checkPaths: archiveWrites("zip")}, "zip")
-	registerCommands(commandSpec{validate: validateArArgs}, "ar")
-}
-
 // archiveWrites is the checkPaths of an archiver that writes (see
 // validateArchiveWrites).
 func archiveWrites(cmdName string) func(args []string, workDir string, sets resolvedPathSets) error {

@@ -258,7 +258,7 @@ func (r *remotePolicy) command(s *Sandbox, args []*syntax.Word) error {
 	if r.allows(vals) || remotePlainReaders[name] {
 		return nil
 	}
-	validator, ok := s.argValidators[name]
+	validator, ok := s.validator(name)
 	if !ok {
 		return fmt.Errorf("%s is not one of the read-only commands", name)
 	}
@@ -400,7 +400,7 @@ var (
 // the ones above are allowed, so -e (sudoedit), -i, and -s (a shell) are
 // refused, as are VAR=value operands.
 func remoteSudoIndex(argv []string) (int, error) {
-	idx := wrapperSpec{opts: sudoSpec, long: append(slices.Clone(sudoSpec.long), sudoLongFlags...)}.commandIndex(argv, argv)
+	idx := wrapperSpec{opts: optSpec{short: sudoSpec.short, long: sudoSpec.long, flags: sudoLongFlags}}.commandIndex(argv, argv)
 	end := idx
 	if idx < 0 {
 		end = len(argv)

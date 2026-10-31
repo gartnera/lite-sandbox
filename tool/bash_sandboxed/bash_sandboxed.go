@@ -131,9 +131,9 @@ type Sandbox struct {
 	// scoped_workers.go.
 	scopes        map[string]config.CommandScope
 	scopedWorkers map[string]*scopedWorker
-	// argValidators is the validator table this Sandbox validates with:
-	// commandArgValidators (every registered commandSpec's validate), or
-	// for a remote-command checker the remote table.
+	// argValidators, when set, replaces the commandSpecs' validators: a
+	// remote-command checker validates with the remote table (see
+	// Sandbox.validator).
 	argValidators map[string]argValidator
 	// remote, when set, makes this a checker of one ssh host's remote command
 	// rather than of local commands: the walk and the wrapped-command checks
@@ -161,9 +161,8 @@ type Sandbox struct {
 // commands, and only the default-on profiles.
 func NewSandbox() *Sandbox {
 	s := &Sandbox{
-		cfg:           &config.Config{},
-		argValidators: commandArgValidators,
-		bg:            newBackgroundManager(),
+		cfg: &config.Config{},
+		bg:  newBackgroundManager(),
 	}
 	// The built-in deny entries and default profiles hold before any config is
 	// loaded, so a sandbox that never sees another UpdateConfig (or one whose
@@ -1016,7 +1015,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					if !inExtra {
 						// The command's own argument validator applies in every
 						// enforcing mode.
-						if validator, ok := s.argValidators[cmdName]; ok {
+						if validator, ok := s.validator(cmdName); ok {
 							if fail(layerStatic, ruleArgValidator, validator(s, n.Args)) {
 								return false
 							}

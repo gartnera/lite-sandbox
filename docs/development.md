@@ -25,25 +25,33 @@ lychee './**/*.md'
 ### Adding or changing a command
 
 Everything the sandbox knows about how a command treats its arguments is one
-`commandSpec` (`tool/bash_sandboxed/command_spec.go`), registered with
-`registerCommands` from an `init` function in the file that implements the
-command: its argument validator, whether its paths are checked against the
-write set, which arguments it writes (for the write and `.claude` checks),
-which arguments are not paths, any paths its own syntax hides from the generic
-check, and, for a wrapper, the command it runs. The static walk, the runtime
-handlers, the path checks, wrapper recursion, and routing all look the command
-up there, so none of them change when a command is added. A command with no
-registration is a plain reader. To add one:
+`commandSpec` entry in `commandTable` (`tool/bash_sandboxed/commands_table.go`),
+a single statically declared table: its argument validator, whether its paths
+are checked against the write set, what its option values and operands are,
+any paths its own syntax hides from the generic check, and, for a wrapper, the
+command it runs. The static walk, the runtime handlers, the path checks,
+wrapper recursion, and routing all look the command up there, so none of them
+change when a command is added. A command with no entry is a plain reader. To
+add one:
 
 1. Put it on the whitelist: `allowedCommands` (`commands.go`) for a built-in,
-   or a profile in `config/profiles.go` (with its spec in `profileCommands`,
-   `tool/bash_sandboxed/profiles.go`).
-2. Register its spec next to its validator. `commands_core.go` holds the small
-   coreutils-style ones; a command with a module of its own (git, tar, ssh,
-   gh, the wrappers) registers in that module. `optSpec` (`opts.go`) parses
-   getopt-style options for `writeTargets` and validators; a new wrapper is an
-   entry in `wrapperSpecs` (`wrappers.go`).
-3. If the command must not see part of the environment, add that to
+   or a profile in `config/profiles.go`; a command a config section allows
+   goes in `config/section_commands.go`.
+2. Add its `commandTable` entry. Never walk an argv by hand: declare the
+   command's options as an `optSpec` (`opts.go`), from its `--help` or man
+   page (every option that takes a value, plus the long flags so
+   abbreviations expand as the tool expands them), and what its option values
+   and operands are as an `argLayout` (`arg_layout.go`; `commands_core.go` has
+   the coreutils-style ones). The command line is parsed by
+   [`jonathonwebb/getopt`](https://github.com/jonathonwebb/getopt), a port of
+   glibc's `getopt_long`, under both GNU permutation and a stop at the first
+   operand (`POSIXLY_CORRECT`, BSD tools). A new wrapper is an entry in
+   `wrapperSpecs` (`wrappers.go`).
+3. Add the new command lines to `getoptVectors` (`opts_test.go`).
+   `TestGetoptMatchesGlibc` checks the parser's reading of each against
+   util-linux `getopt(1)`, which parses with glibc itself (skipped where it
+   isn't installed, as on macOS).
+4. If the command must not see part of the environment, add that to
    `restrictCommandEnv` (`ssh_agent.go`), which every exec path applies.
 
 ## Releasing

@@ -2,7 +2,6 @@ package bash_sandboxed
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -41,16 +40,11 @@ const (
 
 // wrapperSpec describes how a wrapper parses its own arguments.
 type wrapperSpec struct {
-	// opts lists the options that take a value: short ones by letter,
-	// long ones by full name.
+	// opts is the wrapper's option table; it is read in "+" mode,
+	// stopping at the first operand.
 	opts optSpec
-	// long lists every long option, value-taking or not, so an
-	// abbreviation expands the way getopt_long expands it (--sig for
-	// --signal). It must include opts.long.
-	long []string
-	// rejected lists options ("-S", "--split-string") that build the
-	// command from a string, so it cannot be known: commandIndex returns
-	// wrapperRejected.
+	// rejected lists options (by name) that build the command from a
+	// string, so it cannot be known: commandIndex returns wrapperRejected.
 	rejected []string
 	// dashIsOption makes a lone "-" an option (env's spelling of -i)
 	// rather than the command.
@@ -72,45 +66,24 @@ type wrapperSpec struct {
 // FOO=$BAR still reads as one) where every option test keeps to the strict
 // literal; callers with already-expanded strings pass lits for both.
 func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
-	all := optSpec{long: sp.long}
-	i := 1 // skip the wrapper
-	for i < len(lits) {
-		lit := lits[i]
-		if lit == "--" {
-			i++
+	opts := sp.opts
+	opts.stopAtOperand = true
+	p := parsedArgs{args: lits}
+	for start := 1; ; {
+		n := len(p.operands)
+		opts.scanFrom(&p, start)
+		if !sp.dashIsOption || p.dashdash || len(p.operands) == n || lits[p.operands[n]] != "-" {
 			break
 		}
-		if lit == "-" && sp.dashIsOption {
-			i++
-			continue
-		}
-		if name, ok := strings.CutPrefix(lit, "--"); ok {
-			name, _, hasVal := strings.Cut(name, "=")
-			name = all.longName(name)
-			if slices.Contains(sp.rejected, "--"+name) {
-				return wrapperRejected
-			}
-			if !hasVal && slices.Contains(sp.opts.long, name) {
-				i++ // consumes the following value argument
-			}
-			i++
-			continue
-		}
-		if len(lit) < 2 || lit[0] != '-' {
-			break
-		}
-		for j := 1; j < len(lit); j++ {
-			if slices.Contains(sp.rejected, "-"+string(lit[j])) {
-				return wrapperRejected
-			}
-			if strings.IndexByte(sp.opts.short, lit[j]) >= 0 {
-				if j == len(lit)-1 {
-					i++ // consumes the following value argument
-				}
-				break
-			}
-		}
-		i++
+		start = p.operands[n] + 1
+		p.operands = p.operands[:n]
+	}
+	if p.has(sp.rejected...) {
+		return wrapperRejected
+	}
+	i := len(lits)
+	if len(p.operands) > 0 {
+		i = p.operands[0]
 	}
 	if sp.assignments {
 		for i < len(lits) && strings.Contains(assignLits[i], "=") {
@@ -129,17 +102,16 @@ var wrapperSpecs = map[string]wrapperSpec{
 	// GNU xargs "+0a:E:e::I:i::L:l::n:oprP:s:txd:", BSD xargs
 	// "+0E:I:J:L:n:oP:pR:S:s:rtx". -e, -i, and -l take an optional value,
 	// which getopt only reads attached.
-	"xargs": {
-		opts: optSpec{
-			short: "adEIJLnPRSs",
-			long:  []string{"arg-file", "delimiter", "max-lines", "max-args", "max-procs", "max-chars", "process-slot-var"},
+	"xargs": {opts: optSpec{
+		short:    "adEIJLnPRSs",
+		long:     []string{"arg-file", "delimiter", "max-lines", "max-args", "max-procs", "max-chars", "process-slot-var"},
+		optional: "eil",
+		flags: []string{
+			"null", "eof", "replace", "open-tty", "interactive", "no-run-if-empty",
+			"show-limits", "verbose", "exit", "help", "version",
 		},
-		long: []string{
-			"null", "arg-file", "delimiter", "eof", "replace", "max-lines", "max-args",
-			"open-tty", "max-procs", "interactive", "process-slot-var", "no-run-if-empty",
-			"max-chars", "show-limits", "verbose", "exit", "help", "version",
-		},
-	},
+		alias: map[string]string{"replace": "i"},
+	}},
 	// GNU env "+C:iS:u:v0" (newer releases add -a/--argv0), BSD env
 	// "-0C:iL:P:S:U:u:v": -P names the directories the command is looked
 	// up in, -L and -U a user.
@@ -147,36 +119,33 @@ var wrapperSpecs = map[string]wrapperSpec{
 		opts: optSpec{
 			short: "aCLPSUu",
 			long:  []string{"argv0", "chdir", "split-string", "unset"},
+			flags: []string{
+				"ignore-environment", "null", "block-signal", "default-signal", "ignore-signal",
+				"list-signal-handling", "debug", "help", "version",
+			},
+			alias: map[string]string{"split-string": "S"},
 		},
-		long: []string{
-			"argv0", "ignore-environment", "null", "unset", "chdir", "split-string",
-			"block-signal", "default-signal", "ignore-signal", "list-signal-handling",
-			"debug", "help", "version",
-		},
-		rejected:     []string{"-S", "--split-string"},
+		rejected:     []string{"S"},
 		dashIsOption: true,
 		assignments:  true,
 	},
 	// GNU timeout "+fk:ps:v", then DURATION.
 	"timeout": {
-		opts:     optSpec{short: "ks", long: []string{"kill-after", "signal"}},
-		long:     []string{"foreground", "kill-after", "preserve-status", "signal", "verbose", "help", "version"},
+		opts: optSpec{
+			short: "ks",
+			long:  []string{"kill-after", "signal"},
+			flags: []string{"foreground", "preserve-status", "verbose", "help", "version"},
+		},
 		operands: 1,
 	},
 	// GNU nice "+n:", BSD nice "n:". A legacy `nice -10` is an option
 	// cluster with no value-taking letter, so it is skipped too.
-	"nice": {
-		opts: optSpec{short: "n", long: []string{"adjustment"}},
-		long: []string{"adjustment", "help", "version"},
-	},
-	"nohup": {long: []string{"help", "version"}},
+	"nice":  {opts: optSpec{short: "n", long: []string{"adjustment"}, flags: []string{"help", "version"}}},
+	"nohup": {opts: optSpec{flags: []string{"help", "version"}}},
 	// util-linux setsid "+Vhcfw".
-	"setsid": {long: []string{"ctty", "fork", "wait", "help", "version"}},
+	"setsid": {opts: optSpec{flags: []string{"ctty", "fork", "wait", "help", "version"}}},
 	// GNU stdbuf "+i:o:e:".
-	"stdbuf": {
-		opts: optSpec{short: "ioe", long: []string{"input", "output", "error"}},
-		long: []string{"input", "output", "error", "help", "version"},
-	},
+	"stdbuf": {opts: optSpec{short: "ioe", long: []string{"input", "output", "error"}, flags: []string{"help", "version"}}},
 }
 
 // wrapperCommandIndex is wrapperSpecs[lits[0]].commandIndex over
@@ -301,10 +270,4 @@ func sliceWrappedCommand(args []string, idx int) []string {
 		return nil
 	}
 	return args[idx:]
-}
-
-func init() {
-	for name := range wrapperSpecs {
-		registerCommands(commandSpec{validate: validateWrapperArgs, unwrap: unwrapWrapper}, name)
-	}
 }
