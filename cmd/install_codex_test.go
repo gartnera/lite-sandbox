@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestConfigureCodexMCPServerNewFile(t *testing.T) {
@@ -306,10 +308,15 @@ func TestTOMLString(t *testing.T) {
 		"/usr/local/bin/lite-sandbox": `"/usr/local/bin/lite-sandbox"`,
 		`C:\bin\lite-sandbox`:         `"C:\\bin\\lite-sandbox"`,
 		`weird"path`:                  `"weird\"path"`,
+		"two\nlines\tand\x01":         `"two\nlines\tand\u0001"`,
 	}
 	for in, want := range cases {
 		if got := tomlString(in); got != want {
 			t.Errorf("tomlString(%q) = %q, want %q", in, got, want)
+		}
+		var doc map[string]string
+		if err := toml.Unmarshal([]byte("v = "+tomlString(in)), &doc); err != nil || doc["v"] != in {
+			t.Errorf("tomlString(%q) does not round-trip: %v %q", in, err, doc["v"])
 		}
 	}
 }

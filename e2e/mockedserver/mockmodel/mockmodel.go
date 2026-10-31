@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ToolCall is one scripted function call the mock model issues.
@@ -38,7 +39,9 @@ type ToolCall struct {
 	// e.g. "mcp_lite-sandbox_bash" (Crush) or "mcp__lite-sandbox__bash" (Claude
 	// Code).
 	Name string
-	// Arguments is JSON-marshalled into the call's arguments.
+	// Arguments is JSON-marshalled into the call's arguments. For a tool that
+	// takes freeform input (a Responses custom tool), a string Arguments is
+	// sent as that input verbatim.
 	Arguments any
 }
 
@@ -57,6 +60,11 @@ type Script struct {
 	// tools are all in this list is a side request too (Grok Build generates
 	// the session title by offering a lone session_title tool).
 	SideTools []string
+	// FirstTurnDelay holds the reply to the first agent turn this long, for
+	// harnesses that only offer tools that finish loading after the first
+	// request was sent (opencode v2 connects MCP servers in the background):
+	// script a harmless first call, and the next turn sees the late tools.
+	FirstTurnDelay time.Duration
 }
 
 // DefaultFinalText is the FinalText used when Script.FinalText is nil: it
@@ -186,6 +194,9 @@ type parsed struct {
 	// namespaces maps an offered function name to its namespace, for protocols
 	// that group tools (Responses); "" for top-level functions.
 	namespaces map[string]string
+	// custom names the offered tools that take freeform text input instead of
+	// JSON arguments (Responses "custom" tools, e.g. Codex's apply_patch).
+	custom map[string]bool
 }
 
 // protocol is one wire-format adapter. Each decodes its request into typed
@@ -257,6 +268,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.turns = append(s.turns, turn)
 	s.mu.Unlock()
+	if turn.IsAgentTurn() && s.agentTurnCount() == 1 {
+		time.Sleep(s.script.FirstTurnDelay)
+	}
 
 	// respond only fails before writing anything (bad scripted arguments), so a
 	// plain error response is still possible here.

@@ -71,39 +71,71 @@ The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to
 
 ## Temporary setup: `lite-sandbox launch`
 
-`launch` starts an agent CLI with the sandbox wired up, without writing to the agent's configuration. Everything `install` would write to the agent's config files is passed on the agent's command line instead, so the sandbox applies to that session only.
+`launch` starts an agent CLI with the sandbox wired up, without writing to the agent's configuration. Everything `install` would write to the agent's config files is passed on the agent's command line or in its environment instead, so the sandbox applies to that session only.
 
-**Only Claude Code is supported for now**, since its CLI accepts an MCP server, settings, and a system-prompt addition per run:
+It supports Claude Code, Codex, opencode, and Crush:
 
 ```bash
 lite-sandbox launch claude                     # interactive session, sandboxed
 lite-sandbox launch claude -p "run the tests"  # arguments after the agent are passed through
-lite-sandbox launch --dry-run claude           # print the command instead of running it
+lite-sandbox launch codex exec "run the tests"
+lite-sandbox launch opencode
+lite-sandbox launch crush
+lite-sandbox launch --dry-run codex            # print the command instead of running it
 ```
 
 Everything after the agent name is passed to the agent unchanged, so lite-sandbox's own flags go before it (or are separated with `--`).
 
+Grok Build isn't supported. Its `GROK_CONFIG` overlay only accepts soft settings and `--plugin-dir` only works with `grok agent stdio`, so the interactive CLI has no way to add an MCP server or hook for one session. Use `lite-sandbox install grok`.
+
 ### What it passes
 
-| What `install claude` writes | What `launch claude` passes |
-| --- | --- |
-| MCP server in `~/.claude.json` | `--mcp-config` |
-| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` |
-| Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+**These are added on top of your own configuration.** Your own settings, MCP servers, and instruction files still load, and your sign-in state is untouched.
 
-**These are added on top of your own configuration.** Your `settings.json` permission rules still apply (the allow/deny lists are merged), your own MCP servers still load (`--strict-mcp-config` is not passed), your `CLAUDE.md` still reaches the model, and your sign-in state is untouched.
+| Agent | What `install` writes | What `launch` passes |
+| --- | --- | --- |
+| Claude Code | MCP server in `~/.claude.json` | `--mcp-config` (without `--strict-mcp-config`, so your servers still load) |
+| | Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings`, merged with your `settings.json` |
+| | Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+| Codex | `[mcp_servers.lite-sandbox]` in `config.toml` | `-c mcp_servers.lite-sandbox.*` overrides |
+| | Usage directive in `AGENTS.md` | `-c developer_instructions`, after any `developer_instructions` of your own from `config.toml` (one from a `--profile` file is replaced for the session) |
+| | `PreToolUse` hook redirecting the built-in shell | `--disable shell_tool`: the built-in shell is removed from the session |
+| | `PreToolUse` hook for the file tools (`--with-tool-hook`) | `-c hooks.PreToolUse`, `--enable hooks`, and `--dangerously-bypass-hook-trust` ([below](#codex-hook-trust)) |
+| opencode v1 | MCP server and permissions in `opencode.json` | `OPENCODE_CONFIG_CONTENT`, which opencode merges over your global and project configs (and over an `OPENCODE_CONFIG_CONTENT` you already set) |
+| opencode v2 | v2's MCP server and permission rules in `opencode.json` | The same in `OPENCODE_CONFIG_CONTENT`, plus `--standalone` (see [below](#opencode-v2-standalone)) |
+| | Usage directive in `AGENTS.md` | `instructions` naming a file in lite-sandbox's cache directory |
+| Crush | MCP server and permissions in `crushrc` (or `crush.json`) | `CRUSH_GLOBAL_CONFIG` pointing at a stand-in config directory ([below](#crush-stand-in-config)) |
+| | Usage directive in `CRUSH.md` | A global context path in the stand-in `crushrc` |
+
+<a id="opencode-v2-standalone"></a>
+#### opencode v2: `--standalone`
+
+By default, v2's TUI and `opencode run` hand the session to a background service that every opencode client shares. The service is started with whatever environment its first client had and is reused while it's healthy, so a launched session's `OPENCODE_CONFIG_CONTENT` would never reach it, and the session would run with the built-in shell and without the sandbox. `launch` therefore adds `--standalone`, which runs a private server that inherits the sandbox configuration, and refuses `--server`, which connects to a server started without it.
+
+#### Codex hook trust
+
+Codex runs only the hooks you've trusted in its `/hooks` screen, and it records that trust in `config.toml`, so a hook passed for one session would be silently skipped. Its only per-session way past that is `--dangerously-bypass-hook-trust`, which `launch codex` passes whenever it registers a hook (the default `--with-tool-hook`, or `--bash-ast-hook-mode`), along with `--enable hooks` in case you turned the hooks feature off. The bypass covers every enabled hook in the session, so **your own enabled user and plugin hooks also run without review**. Project hooks still need the project to be trusted. Pass `--with-tool-hook=false` to launch with no hook and no bypass. The built-in shell is removed either way, so blocking it doesn't depend on a hook.
+
+#### Crush stand-in config
+
+Crush has no flag or variable that adds configuration, only `CRUSH_GLOBAL_CONFIG`, which moves its whole global config directory. `launch crush` points it at a stand-in directory, `<cache>/lite-sandbox/launch/crush/<id>` (`<cache>` is `~/.cache` on Linux, `~/Library/Caches` on macOS). There's one per config directory and lite-sandbox binary, since Crush reloads its `crushrc` while it runs, and launch rewrites it on every launch:
+
+- `crush.json` is a symlink to your global `crush.json`, if you have one.
+- `crushrc` sources your global `crushrc`, if you have one, in a subshell from your config directory, so it runs as it would without the launch and an `exit` in it can't skip what follows. Then it adds the sandbox's MCP server, `permissions deny bash`, and `permissions allow` for the sandbox tools, as `install crush` writes them. Last, it sets the global context paths to your `CRUSH.md`, the `AGENTS.md` beside your config directory (Crush's defaults), and the usage directive. These are added to any `global_context_paths` you set yourself, so if you dropped one of the defaults, it comes back for launched sessions.
+
+Crush's data directory, skills, and commands don't depend on `CRUSH_GLOBAL_CONFIG`, and project configs still load. `launch crush` needs crush v0.88.0 or newer, since older versions don't read `crushrc`.
 
 ### Defaults
 
 Because it configures one session rather than every project, `launch` is stricter than `install` by default:
 
-- **The built-in `Bash` tool is denied**, as in the default install, so the model isn't offered it.
-- **`--with-tool-hook` is on**, so the `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` to its writable paths. This is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior.
-- **`--permission-mode acceptEdits`**, written as `permissions.defaultMode`, so edits apply without a prompt. The hook keeps them inside the boundary, and a write outside it is still denied. Pass `--permission-mode ""` to keep Claude Code's own default, or pass your own `--permission-mode` *after* the agent name, which overrides the setting.
+- **The built-in shell is blocked outright.** Claude Code's `Bash` is denied as in the default install, so the model isn't offered it. Codex's is removed with `--disable shell_tool`. opencode's `bash` (v2: `shell`) is denied and Crush's is disabled, as `install` does.
+- **`--with-tool-hook` is on** for Claude Code and Codex. The `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` (and Codex's `apply_patch`) to its writable paths. For Claude Code this is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior. opencode and Crush have no compatible hook, so their file tools aren't confined, as with `install`.
+- **`--permission-mode acceptEdits`** (Claude Code only), written as `permissions.defaultMode`, so edits apply without a prompt. The hook keeps them inside the boundary, and a write outside it is still denied. Pass `--permission-mode ""` to keep Claude Code's own default, or pass your own `--permission-mode` *after* the agent name, which overrides the setting.
 
-`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below).
+`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below), for Claude Code and Codex. A flag that has no effect on the chosen agent (`--permission-mode` for anything but Claude Code, `--bash-ast-hook-mode` or an explicit `--with-tool-hook` for opencode or Crush) is refused rather than ignored.
 
-`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup.
+`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup. The only files `launch` writes are opencode's directive and Crush's stand-in config, under lite-sandbox's cache directory. That directory is as protected as lite-sandbox's config file: outside the path boundary, and read-only under the OS sandbox in `denylist` mode. This matters for Crush, which runs the stand-in `crushrc` as a script.
 
 ## Claude Code
 
@@ -236,51 +268,32 @@ To configure [opencode](https://opencode.ai), run the install (autodetected, or 
 lite-sandbox install opencode
 ```
 
-This edits opencode's **global** config and rules in `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`, and for v2 `$OPENCODE_CONFIG_DIR`, which v2 reads in its place):
+opencode v1 and v2 are configured differently enough to be treated as two agents that share a binary name, so the install writes the setup that matches the installed one:
 
-1. Registers the MCP server in `opencode.json` (or `opencode.jsonc`, whichever exists)
-2. Denies the built-in shell tool, and auto-allows the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_list_shells`, ...) so they never prompt
-3. Adds a usage directive to `AGENTS.md`
+- If `opencode --version` reports v2, the install writes [v2's setup](#opencode-v2). If it reports v1, it writes [v1's](#opencode-v1).
+- With no `opencode` on `PATH`, the existing config decides. A config that already uses v2's `permissions` array or `mcp.servers` gets v2's setup. Anything else gets v1's, which v2 also reads (normalizing it in memory).
 
-opencode v2 changed the config format, so the install writes the one that matches the installed opencode. If `opencode --version` reports v2, it writes v2's native format. If it reports v1, it writes v1's. If there's no `opencode` on `PATH`, the existing config decides: a config that already uses v2's `permissions` array or `mcp.servers` gets v2's format, and anything else gets v1's, which v2 also reads.
+Both edit opencode's **global** config and add a usage directive to its `AGENTS.md`. All other keys are preserved, and re-running is idempotent. `opencode.json` (plain JSON) and `opencode.jsonc` (JSONC, with comments and trailing commas) are both edited in place, and comments and formatting in a `.jsonc` file are preserved. If both exist, `opencode.json` is edited; if neither exists, a new `opencode.json` is created.
 
-| | v1 | v2 |
-|---|---|---|
-| MCP server | `mcp.lite-sandbox` | `mcp.servers.lite-sandbox` |
-| Built-in shell | `permission.bash = "deny"` (replacing any existing granular `bash` rule) | `{"action": "shell", "resource": "*", "effect": "deny"}`, appended to `permissions` |
-| Sandbox tools | `permission."lite-sandbox*" = "allow"` | `{"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}`, appended to `permissions` |
+opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` does nothing for opencode (use opencode's own `edit` / `external_directory` permission rules to confine its file tools), and `--bash-ast-hook-mode` skips it. Reads and writes made *through the sandboxed shell* are still confined at runtime.
 
-On v2 the sandbox's tools are reached through [Code Mode](https://opencode.ai/v2/docs/mcp-servers/), v2's default for MCP servers: the model calls `tools["lite-sandbox"].bash({command: ...})` from a short program it passes to the `execute` tool. Code Mode is an interpreter with no filesystem, network, or process access of its own. It can only call the tools opencode offers, so commands still run only through the sandbox. v2 starts MCP servers in the background, so in a fresh session the sandbox's tools can be missing from the first turn and appear from the next one.
+The directive, for `~/.config/opencode/AGENTS.md` (global) or a project-level `AGENTS.md` when configuring by hand:
 
-v2 applies the *last* matching permission rule, so the install appends its rules after yours and moves them back to the end on every re-run; your own rules are kept. Upgrading from v1 and re-running the install replaces the v1 entries it wrote with their v2 equivalents. v2 applies global rules after its built-in agents' rules, so the deny also covers the explore subagent, which allows the shell itself. A rule in a project config, or in an agent's own `permissions`, is applied after the global rules and can still re-allow the shell.
-
-All other keys are preserved, and re-running is idempotent. `opencode.json` (plain JSON) and `opencode.jsonc` (JSONC, with comments and trailing commas) are both edited in place; comments and formatting in a `.jsonc` file are preserved. If both exist, `opencode.json` is edited; if neither exists, a new `opencode.json` is created. To configure it by hand, see below.
-
-opencode has **no PreToolUse hook protocol** (its plugins are JavaScript), so the hook-based modes don't apply: `--with-tool-hook` does nothing for opencode (use opencode's `edit` / `external_directory` permission rules to confine its file tools; note v2 allows `external_directory` by default), and `--bash-ast-hook-mode` skips it. Reads and writes made *through the sandboxed shell* are still confined at runtime.
-
-### Manual opencode setup
-
-For opencode v2, add this to `~/.config/opencode/opencode.json` (replace the path with your built binary). Keep the two rules at the end of `permissions`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "lite-sandbox": {
-        "type": "local",
-        "command": ["/path/to/lite-sandbox", "serve-mcp"]
-      }
-    }
-  },
-  "permissions": [
-    {"action": "shell", "resource": "*", "effect": "deny"},
-    {"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}
-  ]
-}
+```markdown
+ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands (in Code Mode, call `tools["lite-sandbox"].bash({ command })` from `execute`). The built-in shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
 ```
 
-For opencode v1:
+Restart opencode after the install or a manual change.
+
+### opencode v1
+
+The install edits `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`):
+
+1. Registers the MCP server under `mcp.lite-sandbox` in `opencode.json` (or `opencode.jsonc`)
+2. Sets `permission.bash` to `"deny"` so the built-in bash tool is blocked (replacing any existing granular `bash` rule), and sets `permission."lite-sandbox*"` to `"allow"` so the sandbox's tools (`lite-sandbox_bash`, `lite-sandbox_list_shells`, ...) never prompt
+3. Adds the usage directive to `AGENTS.md`
+
+The model calls `lite-sandbox_bash` directly. To configure it by hand, add this to `~/.config/opencode/opencode.json` (replace the path with your built binary), then add the directive above:
 
 ```json
 {
@@ -299,13 +312,41 @@ For opencode v1:
 }
 ```
 
-Then add a directive to `~/.config/opencode/AGENTS.md` (global) or a project-level `AGENTS.md`:
+### opencode v2
 
-```markdown
-ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell commands (in Code Mode, call `tools["lite-sandbox"].bash({ command })` from `execute`). The built-in shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through lite-sandbox's AST validation and filesystem path boundaries.
+The install edits `~/.config/opencode` (honoring `$XDG_CONFIG_HOME`), or `$OPENCODE_CONFIG_DIR` when set, which v2 reads in its place:
+
+1. Registers the MCP server under `mcp.servers.lite-sandbox` in `opencode.json` (or `opencode.jsonc`)
+2. Appends two rules to the end of `permissions`: `{"action": "shell", "resource": "*", "effect": "deny"}` blocks the built-in shell tool (v1's `bash`) and removes it from the model's tools, and `{"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}` auto-allows the sandbox's tools
+3. Adds the usage directive to `AGENTS.md`
+
+What differs from v1, and why the setup accounts for it:
+
+- **Rule order.** v2 applies the *last* matching permission rule, so the install appends its rules after yours and moves them back to the end on every re-run; your own rules are kept. v2 applies global rules after its built-in agents' rules, so the deny also covers the explore subagent, which allows the shell itself. A rule in a project config, or in an agent's own `permissions`, is applied after the global rules and can still re-allow the shell.
+- **Code Mode.** v2 reaches MCP tools through [Code Mode](https://opencode.ai/v2/docs/mcp-servers/) by default: the model calls `tools["lite-sandbox"].bash({ command })` from a short program it passes to the `execute` tool. The install leaves that on (and keeps a `codemode` setting you add to the server entry). Code Mode is an interpreter with no filesystem, network, or process access of its own. It can only call the tools opencode offers, so commands still run only through the sandbox.
+- **Background MCP startup.** v2 connects MCP servers in the background, so in a fresh session the sandbox's tools can be missing from the first turn and appear from the next one.
+- **External directories.** v2 allows `external_directory` by default; add an `ask` rule for it to restore v1's prompting.
+- **Upgrading.** Re-running the install after upgrading from v1 replaces the v1 entries it wrote in the same file with their v2 equivalents.
+
+To configure it by hand, add this to `opencode.json` (replace the path with your built binary), keeping the two rules at the end of `permissions`, then add the directive above:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "lite-sandbox": {
+        "type": "local",
+        "command": ["/path/to/lite-sandbox", "serve-mcp"]
+      }
+    }
+  },
+  "permissions": [
+    {"action": "shell", "resource": "*", "effect": "deny"},
+    {"action": "lite-sandbox_*", "resource": "*", "effect": "allow"}
+  ]
+}
 ```
-
-Restart opencode after making these changes.
 
 ## Crush
 

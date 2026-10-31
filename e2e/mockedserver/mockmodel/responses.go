@@ -17,8 +17,14 @@ import (
 // scripted call to that name is emitted as a function_call item carrying the
 // namespace and the bare function name, which is how the API addresses it.
 //
+// Custom tools ({"type":"custom","name":...}, which take freeform text rather
+// than JSON — Codex's apply_patch) are recorded by name, and a scripted call to
+// one is emitted as a custom_tool_call item whose input is the call's string
+// Arguments.
+//
 // The transcript is the flat "input" list, where tool results are
-// {"type":"function_call_output","call_id":...,"output":...} items. Only the
+// {"type":"function_call_output","call_id":...,"output":...} items (or
+// custom_tool_call_output, for custom tools). Only the
 // stateless flavor is served — every request must carry the whole transcript,
 // which is how Codex uses it (store=false).
 //
@@ -66,8 +72,9 @@ type responsesInputItem struct {
 // values marshal as their concrete type.
 type responsesOutputItem interface{ isResponsesOutputItem() }
 
-func (responsesFunctionCall) isResponsesOutputItem() {}
-func (responsesMessage) isResponsesOutputItem()      {}
+func (responsesFunctionCall) isResponsesOutputItem()   {}
+func (responsesCustomToolCall) isResponsesOutputItem() {}
+func (responsesMessage) isResponsesOutputItem()        {}
 
 // responsesFunctionCall is a function_call output item.
 type responsesFunctionCall struct {
@@ -78,6 +85,17 @@ type responsesFunctionCall struct {
 	Namespace string `json:"namespace,omitempty"`
 	Arguments string `json:"arguments"`
 	Status    string `json:"status"`
+}
+
+// responsesCustomToolCall is a custom_tool_call output item: a call to a
+// custom tool, carrying freeform input.
+type responsesCustomToolCall struct {
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+	Status string `json:"status"`
 }
 
 // responsesMessage is an assistant message output item.
@@ -141,9 +159,15 @@ func (responsesProtocol) parse(body []byte) (parsed, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return parsed{}, err
 	}
-	out := parsed{tools: map[string]bool{}, stream: req.Stream, namespaces: req.namespaces()}
+	out := parsed{tools: map[string]bool{}, stream: req.Stream, namespaces: req.namespaces(), custom: map[string]bool{}}
 	for name := range out.namespaces {
 		out.tools[name] = true
+	}
+	for _, tool := range req.Tools {
+		if tool.Type == "custom" {
+			out.tools[tool.Name] = true
+			out.custom[tool.Name] = true
+		}
 	}
 	var texts []string
 	if req.Instructions != "" {
@@ -151,7 +175,7 @@ func (responsesProtocol) parse(body []byte) (parsed, error) {
 	}
 	for _, item := range req.Input {
 		switch {
-		case item.Type == "function_call_output":
+		case item.Type == "function_call_output" || item.Type == "custom_tool_call_output":
 			out.results = append(out.results, string(item.Output))
 			texts = append(texts, string(item.Output))
 		case item.Type == "message" || (item.Type == "" && item.Role != ""):
@@ -187,7 +211,15 @@ func (responsesProtocol) respond(w http.ResponseWriter, req parsed, r reply, mod
 	// output_item.added event.
 	var item, added responsesOutputItem
 	var itemID string
-	if r.call != nil {
+	if input, ok := r.call.customInput(req.custom); ok {
+		ct := responsesCustomToolCall{
+			Type: "custom_tool_call", ID: "ctc_" + strconv.Itoa(r.callIndex+1), CallID: chatCallID(r.callIndex),
+			Name: r.call.Name, Input: input, Status: "completed",
+		}
+		started := ct
+		started.Input, started.Status = "", "in_progress"
+		item, added, itemID = ct, started, ct.ID
+	} else if r.call != nil {
 		args, err := marshalArgs(r.call)
 		if err != nil {
 			return err
@@ -260,4 +292,14 @@ func splitNamespace(callName string, namespaces map[string]string) (ns, name str
 		return "", "", false
 	}
 	return ns, strings.TrimPrefix(callName, ns+"__"), true
+}
+
+// customInput returns the freeform input of a scripted call to a custom tool
+// (one of custom): its string Arguments.
+func (c *ToolCall) customInput(custom map[string]bool) (string, bool) {
+	if c == nil || !custom[c.Name] {
+		return "", false
+	}
+	input, ok := c.Arguments.(string)
+	return input, ok
 }

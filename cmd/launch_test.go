@@ -212,14 +212,16 @@ func TestClaudeLaunchArgsAlwaysLoadOff(t *testing.T) {
 }
 
 // TestLaunchUnsupportedAgent checks that an agent launch does not support
-// points at install instead.
+// says why and points at install instead.
 func TestLaunchUnsupportedAgent(t *testing.T) {
-	err := runLaunch(launchCmd, []string{"codex"})
+	err := runLaunch(launchCmd, []string{"grok"})
 	if err == nil {
 		t.Fatal("expected an error for an unsupported agent")
 	}
-	if !strings.Contains(err.Error(), "lite-sandbox install codex") {
-		t.Errorf("error %q does not point at install", err)
+	for _, want := range []string{"lite-sandbox install grok", "MCP server", "codex, opencode, crush"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
