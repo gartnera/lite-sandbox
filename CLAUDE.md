@@ -15,4 +15,5 @@ cd e2e/claude && uv run pytest -v                    # real-model e2e (needs API
 - `docs/security.md` is the source of truth for the security model; keep `docs/` in sync with behavior changes.
 - monty (embedded Python) comes from the `gartnera/monty-go` fork; changing the Go/wasm boundary means rebuilding `monty.wasm` there.
 - Always inspect local `man` pages of commands you are asked to parse.
+- `/autodev <request>` (`.claude/skills/autodev`) runs develop → affected-package tests → review → PR with auto-merge → CI/conflict watch headlessly.
 - Label every PR with exactly one `release:*` label (`minor` feature, `patch` fix/refactor, `skip` docs/CI/tests only, `major` breaking). Every merge to `main` is released.

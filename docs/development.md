@@ -22,6 +22,19 @@ The `Docs` workflow runs [lychee](https://github.com/lycheeverse/lychee) on ever
 lychee './**/*.md'
 ```
 
+### Headless development with `autodev`
+
+The repository ships a Claude Code skill, `autodev`
+(`.claude/skills/autodev/SKILL.md`), that takes a feature or fix all the way to
+a merged pull request without check-ins. It implements the change, tests only
+the affected packages (`.claude/skills/autodev/affected-packages.sh`) and
+leaves full coverage to CI, then commits, rebases, reviews the diff and
+triages the findings, and opens a PR with one `release:*` label. Once CI is
+green it enables auto-merge, and it keeps fixing CI failures and merge
+conflicts until the PR merges. It files GitHub issues for unrelated,
+non-blocking problems rather than fixing them in the PR. Start it with
+`/autodev <request>`, or include the word "autodev" in a prompt.
+
 ### Adding or changing a command
 
 Everything the sandbox knows about how a command treats its arguments is one
