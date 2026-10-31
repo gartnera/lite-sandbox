@@ -149,7 +149,10 @@ ssh build-box 'cat $(ls)'                # refused: no substitutions or variable
 - **Wrappers** are looked through: `sudo` (not `-e`, `-i`, `-s`, or
   `VAR=value`), `env`, `timeout`, `nice`, and `stdbuf` (checked as they are
   locally), `command`, and `sh`/`bash` `-c '...'` (`-l` included), whose
-  script is checked the same way.
+  script is checked the same way. The script is the word the shell itself
+  runs: `-c` takes the first operand after the options (`sh -c -e '...'`),
+  and a long option spelled with one dash (`bash -norc`), which bash and
+  dash read differently, is refused.
 - **The shell around them**: pipes, `&&`, `||`, `;`, `if`, `while`, `case`,
   subshells, and input redirections and heredocs are fine. Output redirections
   may only go to `/dev/null` (or another descriptor, `2>&1`). Variables,

@@ -37,6 +37,10 @@ func TestValidateBashArgs_Allowed(t *testing.T) {
 		{"bash -o pipefail -c", `bash -o pipefail -c 'echo hello'`},
 		{"sh script.sh", `sh script.sh`},
 		{"bash script with args", `bash script.sh arg1 arg2`},
+		{"options after -c", `bash -c -e 'echo hello'`},
+		{"plus option", `bash +e script.sh`},
+		{"shopt option", `bash -O extglob script.sh`},
+		{"dash ends options", `bash -e -- script.sh`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,6 +72,11 @@ func TestValidateBashArgs_Blocked(t *testing.T) {
 		{"bash -c missing arg", `bash -c`, `-c requires a command string`},
 		{"bash -ei combined blocked", `bash -ei -c 'echo hi'`, `flag "-i"`},
 		{"bash -si combined blocked", `bash -si`, `flag "-s"`},
+		{"bash +l", `bash +l -c 'echo hi'`, `flag "-l" (in "+l")`},
+		{"blocked after -c", `bash -c -i 'echo hi'`, `flag "-i"`},
+		{"options only", `bash -e`, `bare "bash"`},
+		{"single-dash long option", `bash -norc deploy.sh -c ls`, `write --norc`},
+		{"unknown long option", `bash --rcf x -c ls`, `unknown option "--rcf"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,6 +123,16 @@ func TestExecuteBash(t *testing.T) {
 			name:    "bash -e -c fails on error",
 			command: `bash -e -c 'false; echo no'`,
 			wantErr: true,
+		},
+		{
+			name:    "options after -c apply",
+			command: `bash -c -e 'false; echo no'`,
+			wantErr: true,
+		},
+		{
+			name:    "plus option",
+			command: `bash -e +e -c 'false; echo yes'`,
+			wantOut: "yes\n",
 		},
 		{
 			name:    "nested bash",

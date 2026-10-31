@@ -765,13 +765,9 @@ func collectDeclaredFunctions(f *syntax.File, workDir string) map[string]bool {
 		case *syntax.FuncDecl:
 			funcs[n.Name.Value] = true
 		case *syntax.CallExpr:
-			if len(n.Args) >= 2 {
-				cmdName := n.Args[0].Lit()
-				if cmdName == "source" || cmdName == "." {
-					filePath := n.Args[1].Lit()
-					if filePath != "" && workDir != "" {
-						extractFunctionsFromFile(filePath, workDir, funcs)
-					}
+			if len(n.Args) > 0 && workDir != "" && lookupCommand(n.Args[0].Lit()).sourcesScript {
+				if filePath, inline := scriptOperand(n.Args); filePath != "" && !inline {
+					extractFunctionsFromFile(filePath, workDir, funcs)
 				}
 			}
 		}
@@ -1121,13 +1117,15 @@ func (s *Sandbox) validateScriptContents(f *syntax.File, workDir string, readAll
 			return true
 		}
 
+		script, inline := cmdName, false
+		if !isScriptPath(cmdName) {
+			script, inline = scriptOperand(ce.Args)
+		}
 		switch {
-		case isScriptPath(cmdName):
-			validationErr = s.validateScriptFile(cmdName, workDir, readAllowedPaths, writeAllowedPaths, depth)
-		case cmdName == "bash" || cmdName == "sh":
-			validationErr = s.validateBashScriptArg(ce.Args, workDir, readAllowedPaths, writeAllowedPaths, depth)
-		case cmdName == "source" || cmdName == ".":
-			validationErr = s.validateSourceFileArg(ce.Args, workDir, readAllowedPaths, writeAllowedPaths, depth)
+		case inline:
+			validationErr = s.validateScriptText(cmdName, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
+		case script != "":
+			validationErr = s.validateScriptFile(script, workDir, readAllowedPaths, writeAllowedPaths, depth)
 		}
 
 		return validationErr == nil
@@ -1169,63 +1167,36 @@ func (s *Sandbox) validateScriptFile(scriptPath, workDir string, readAllowedPath
 	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
 }
 
-// validateBashScriptArg extracts the script file argument from bash/sh args
-// (when not using -c) and validates the script contents.
-func (s *Sandbox) validateBashScriptArg(args []*syntax.Word, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
-	i := 1
-	foundC := false
-	for i < len(args) {
-		text := wordText(args[i])
-		if text == "" {
-			i++
-			continue
-		}
-		if text == "-c" {
-			foundC = true
-			break
-		}
-		if text == "-o" {
-			i += 2
-			continue
-		}
-		// Combined short flags
-		if len(text) > 1 && text[0] == '-' && text[1] != '-' {
-			for _, ch := range text[1:] {
-				if string(ch) == "c" {
-					foundC = true
-				}
-			}
-			if foundC {
-				break
-			}
-			i++
-			continue
-		}
-		// Known flags
-		if strings.HasPrefix(text, "-") || strings.HasPrefix(text, "+") {
-			i++
-			continue
-		}
-		// First non-flag argument is the script file
-		if !foundC {
-			return s.validateScriptFile(text, workDir, readAllowedPaths, writeAllowedPaths, depth)
-		}
-		i++
+// validateScriptText parses and validates a script given on the command line
+// (bash -c's command string), as validateScriptFile does a file's. executeBash
+// validates it again when it runs; this pass is what the PreToolUse hook's
+// --bash-ast-hook-mode, which hands the command to the real bash, relies on.
+func (s *Sandbox) validateScriptText(cmdName, script, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+	sf, err := ParseBash(script)
+	if err != nil {
+		return fmt.Errorf("%s -c: %w", cmdName, err)
 	}
-	return nil
+	if err := s.validateFile(sf, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		return fmt.Errorf("%s -c: %w", cmdName, err)
+	}
+	return s.validateScriptContents(sf, workDir, readAllowedPaths, writeAllowedPaths, depth+1)
 }
 
-// validateSourceFileArg extracts the file argument from source/. args
-// and validates the file contents recursively.
-func (s *Sandbox) validateSourceFileArg(args []*syntax.Word, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
-	if len(args) < 2 {
-		return nil
+// scriptOperand returns the shell script a command line runs as one of its
+// arguments (see commandSpec.script): a file's path, or with inline the
+// script itself. It returns "" when the command runs none or the word is
+// only known after expansion.
+func scriptOperand(args []*syntax.Word) (script string, inline bool) {
+	find := lookupCommand(args[0].Lit()).script
+	if find == nil {
+		return "", false
 	}
-	filePath := wordText(args[1])
-	if filePath == "" {
-		return nil // dynamic path, can't validate statically
+	i, inline := find(args)
+	if i < 0 {
+		return "", false
 	}
-	return s.validateScriptFile(filePath, workDir, readAllowedPaths, writeAllowedPaths, depth)
+	script, _ = wordLiteral(args[i])
+	return script, inline
 }
 
 // firstCommandWord extracts the first word from a command string, stopping at
