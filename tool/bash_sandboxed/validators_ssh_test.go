@@ -64,30 +64,31 @@ func TestValidateSSHCommand(t *testing.T) {
 		{command: "ssh -tA box", errSubstr: "-A is not allowed"},
 		{command: "ssh box -A", errSubstr: "-A is not allowed"},
 		{command: "ssh -X box", errSubstr: "-X is not allowed"},
-		{command: "ssh -L 8080:internal:80 box", errSubstr: "-L is not allowed"},
-		{command: "ssh -R 9000:localhost:22 box", errSubstr: "-R is not allowed"},
-		{command: "ssh -D 1080 box", errSubstr: "-D is not allowed"},
+		// Forwarding and sharing need a host that allows writes.
+		{command: "ssh -L 8080:internal:80 box", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -R 9000:localhost:22 box", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -D 1080 box", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -M -S cm-%C box", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -O exit box", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -o LocalForward='8080 internal:80' box", errSubstr: "only to a host that allows writes"},
 		{command: "ssh -W evil:22 box", errSubstr: "-W is not allowed"},
 		{command: "ssh -f box sleep 100", errSubstr: "-f is not allowed"},
-		{command: "ssh -M box", errSubstr: "-M is not allowed"},
-		{command: "ssh -O exit box", errSubstr: "-O is not allowed"},
 		{command: "ssh -I /tmp/lib.so box", errSubstr: "-I is not allowed"},
 		{command: "ssh -E log box", errSubstr: "-E is not allowed"},
 		{command: "ssh -F ./cfg box", errSubstr: "-F ./cfg is not allowed"},
 		{command: "ssh -S ./ctl box", errSubstr: "-S ./ctl is not allowed"},
 		{command: "ssh -Z box", errSubstr: "unknown option"},
-		{command: "ssh -o ProxyCommand='nc evil 22' box", errSubstr: "-o ProxyCommand=nc evil 22 is not allowed"},
+		{command: "ssh -o ProxyCommand='nc evil 22' box", errSubstr: `-o ProxyCommand="nc evil 22" is not allowed: ProxyCommand may only be none`},
 		{command: "ssh -oProxyCommand=sh box", errSubstr: "ProxyCommand"},
 		{command: "ssh -o 'LocalCommand touch x' -o PermitLocalCommand=yes box", errSubstr: "LocalCommand"},
-		{command: "ssh -o PermitLocalCommand=yes box", errSubstr: "PermitLocalCommand=yes is not allowed"},
+		{command: "ssh -o PermitLocalCommand=yes box", errSubstr: `PermitLocalCommand="yes" is not allowed`},
 		{command: "ssh -o KnownHostsCommand=id box", errSubstr: "KnownHostsCommand"},
 		{command: "ssh -o Hostname=evil box", errSubstr: "Hostname"},
-		{command: "ssh -o IdentityAgent=/tmp/other.sock box", errSubstr: "IdentityAgent=/tmp/other.sock"},
+		{command: "ssh -o IdentityAgent=/tmp/other.sock box", errSubstr: `IdentityAgent="/tmp/other.sock"`},
 		{command: "ssh -o SendEnv=GITHUB_TOKEN box", errSubstr: "SendEnv"},
-		{command: "ssh -o ForwardAgent=yes box", errSubstr: "ForwardAgent=yes"},
-		{command: "ssh -o LocalForward='8080 internal:80' box", errSubstr: "LocalForward"},
+		{command: "ssh -o ForwardAgent=yes box", errSubstr: `ForwardAgent="yes"`},
 		{command: "ssh -o IdentityFile=./k box", errSubstr: "pass the key with -i"},
-		{command: "ssh -o UserKnownHostsFile=./kh box", errSubstr: "UserKnownHostsFile=./kh"},
+		{command: "ssh -o UserKnownHostsFile=./kh box", errSubstr: `UserKnownHostsFile="./kh"`},
 		{command: "ssh -o PKCS11Provider=/x.so box", errSubstr: "PKCS11Provider"},
 		{command: "ssh -o Include=/x box", errSubstr: "Include"},
 		{command: "ssh -qi./id box", errSubstr: "must not be bundled"},
@@ -106,6 +107,141 @@ func TestValidateSSHCommand(t *testing.T) {
 				t.Fatalf("error = %v, want one containing %q", err, tt.errSubstr)
 			}
 		})
+	}
+}
+
+// TestSSHForwardingAndSharing covers port forwarding and connection sharing,
+// allowed to a host that allows writes only.
+func TestSSHForwardingAndSharing(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	yes := true
+	s := newTestSandboxWithConfig(&config.Config{SSH: &config.SSHConfig{Hosts: []config.SSHHost{
+		{Host: "vm", Write: &yes},
+		{Host: "ro"},
+	}}})
+	tests := []struct {
+		command   string
+		errSubstr string // "" when allowed
+	}{
+		{command: "ssh -N -L 8080:localhost:80 vm"},
+		{command: "ssh -L 127.0.0.1:8080:db.internal:5432 vm true"},
+		{command: "ssh -L localhost:8080:localhost:80 -L [::1]:8081:localhost:81 vm true"},
+		{command: "ssh -L 8080:/run/app.sock vm true"},
+		{command: "ssh -NL8080:localhost:80 vm"},
+		{command: "ssh -D 1080 vm true"},
+		{command: "ssh -D localhost:1080 vm true"},
+		{command: "ssh -R 9000:localhost:3000 vm true"},
+		{command: "ssh -R 0.0.0.0:9000:localhost:3000 vm true"},
+		{command: "ssh -R 9000 vm true"},
+		{command: "ssh -R /tmp/remote.sock:localhost:3000 vm true"},
+		{command: "ssh -o LocalForward='8080 localhost:80' vm true"},
+		{command: "ssh -o RemoteForward=9000 vm true"},
+		{command: "ssh -o DynamicForward=1080 vm true"},
+		{command: "ssh -o ExitOnForwardFailure=yes -N -L 8080:localhost:80 vm"},
+		{command: "ssh -M -S cm-%C -N vm"},
+		{command: "ssh -S ./cm-%C vm uptime"},
+		{command: "ssh -o ControlMaster=auto -o ControlPath=cm-%C -o ControlPersist=10m vm true"},
+		{command: "ssh -o ControlMaster=yes -o ControlPath=" + dir + "/cm-%C -N vm"},
+		{command: "ssh -S cm-%C -O check vm"},
+		{command: "ssh -S cm-%C -O exit vm"},
+		{command: "ssh -S cm-%C -O forward -L 8080:localhost:80 vm"},
+		{command: "ssh -O stop vm"},
+		{command: "ssh -S cm-100%%-%C vm true"},
+
+		// The local side stays on this machine's loopback.
+		{command: "ssh -L 0.0.0.0:8080:localhost:80 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -L *:8080:localhost:80 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -L :8080:localhost:80 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -L 192.168.1.5:8080:localhost:80 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -D 0.0.0.0:1080 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -o DynamicForward=*:1080 vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -o LocalForward='0.0.0.0:8080 localhost:80' vm", errSubstr: "would open the port to other machines"},
+		{command: "ssh -L ./local.sock:localhost:80 vm", errSubstr: "local Unix socket listener"},
+		{command: "ssh -L /tmp/l.sock:/run/r.sock vm", errSubstr: "local Unix socket listener"},
+		{command: "ssh -D /tmp/socks.sock vm", errSubstr: "local Unix socket listener"},
+		{command: "ssh -R 9000:/var/run/docker.sock vm", errSubstr: "to a local Unix socket"},
+		{command: "ssh -R /tmp/r.sock:/var/run/docker.sock vm", errSubstr: "to a local Unix socket"},
+		{command: "ssh -R 0.0.0.0:9000:/var/run/docker.sock vm", errSubstr: "to a local Unix socket"},
+		{command: `ssh -L '8080\:x:localhost:80' vm`, errSubstr: "backslashes"},
+		{command: "ssh -L 1:2:3:4:5 vm", errSubstr: "more than four fields"},
+		{command: "ssh -W localhost:22 vm", errSubstr: "-W is not allowed"},
+		{command: "ssh -g -L 8080:localhost:80 vm", errSubstr: "-g is not allowed"},
+		{command: "ssh -o GatewayPorts=yes -L 8080:localhost:80 vm", errSubstr: "GatewayPorts"},
+
+		// Control paths carry %C, stay in the write set, and need no
+		// expansion ssh would do itself.
+		{command: "ssh -S ./ctl vm true", errSubstr: "without %C"},
+		{command: "ssh -o ControlPath=cm-%h vm true", errSubstr: "ssh expands %h"},
+		{command: "ssh -S '~/.ssh/cm-%C' vm true", errSubstr: "expands ~ itself"},
+		{command: "ssh -S '${HOME}/cm-%C' vm true", errSubstr: "environment variables"},
+		{command: "ssh -S '%d/cm-%C' vm true", errSubstr: "ssh expands %d"},
+		{command: "ssh -S cm-%C% vm true", errSubstr: "lone %"},
+		{command: "ssh -S /tmp/elsewhere/cm-%C vm true", errSubstr: "outside allowed directories"},
+		{command: "ssh -o ControlPath=/tmp/elsewhere/cm-%C vm true", errSubstr: "outside allowed directories"},
+		{command: "ssh -M vm true", errSubstr: "without a control path"},
+		{command: "ssh -o ControlMaster=auto vm true", errSubstr: "without a control path"},
+		{command: "ssh -o ControlPersist=yes vm true", errSubstr: "without a control path"},
+		{command: "ssh -MM -S cm-%C vm", errSubstr: "-M given twice"},
+		{command: "ssh -M -M -S cm-%C vm", errSubstr: "-M given twice"},
+		{command: "ssh -o ControlMaster=ask -S cm-%C vm", errSubstr: "ControlMaster may only be yes or no or auto"},
+		{command: "ssh -o ControlMaster=autoask -S cm-%C vm", errSubstr: "ControlMaster"},
+		{command: "ssh -S cm-%C -O proxy vm", errSubstr: "-O proxy is not allowed"},
+		{command: "ssh -S cm-%C -O forward -L 0.0.0.0:8080:localhost:80 vm", errSubstr: "would open the port"},
+
+		// A read-only host gets neither.
+		{command: "ssh -N -L 8080:localhost:80 ro", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -S cm-%C ro uptime", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -O check ro", errSubstr: "only to a host that allows writes"},
+		{command: "ssh -J vm -L 8080:localhost:80 ro", errSubstr: "only to a host that allows writes"},
+
+		// scp and rsync leave forwarding and sharing to ssh.
+		{command: "scp -o ControlPath=cm-%C ./f vm:/tmp/", errSubstr: "forward and share connections with ssh"},
+		{command: "scp -o LocalForward='8080 localhost:80' ./f vm:/tmp/", errSubstr: "forward and share connections with ssh"},
+		{command: "rsync -e 'ssh -S cm-%C' ./f vm:/tmp/", errSubstr: "forward and share connections with ssh"},
+		{command: "rsync -e 'ssh -L 8080:localhost:80' ./f vm:/tmp/", errSubstr: "forward and share connections with ssh"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			err := s.ValidateCommand(tt.command, dir, paths, paths)
+			if tt.errSubstr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.errSubstr)
+			}
+		})
+	}
+}
+
+func TestSSHForwardFields(t *testing.T) {
+	tests := []struct {
+		spec string
+		want []sshForwardField
+	}{
+		{"8080", []sshForwardField{{arg: "8080"}}},
+		{"8080:localhost:80", []sshForwardField{{arg: "8080"}, {arg: "localhost"}, {arg: "80"}}},
+		{"[::1]:8080:[fe80::1]:80", []sshForwardField{{arg: "::1"}, {arg: "8080"}, {arg: "fe80::1"}, {arg: "80"}}},
+		{":8080:h:80", []sshForwardField{{arg: ""}, {arg: "8080"}, {arg: "h"}, {arg: "80"}}},
+		{"8080:/run/x.sock", []sshForwardField{{arg: "8080"}, {arg: "/run/x.sock", path: true}}},
+		{"[/a:b]:h:1", []sshForwardField{{arg: "/a:b", path: true}, {arg: "h"}, {arg: "1"}}},
+	}
+	for _, tt := range tests {
+		got, err := sshForwardFields(tt.spec)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.spec, err)
+		}
+		if len(got) != len(tt.want) {
+			t.Fatalf("%s: got %+v, want %+v", tt.spec, got, tt.want)
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Fatalf("%s: got %+v, want %+v", tt.spec, got, tt.want)
+			}
+		}
 	}
 }
 

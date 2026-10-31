@@ -179,6 +179,9 @@ func parseSCPArgs(args []string) (copyArgs, error) {
 		}
 	}
 	c.jumps = append(c.jumps, ssh.jumps...)
+	if what := ssh.sharing(); what != "" {
+		c.refuse("scp with %s is not allowed: forward and share connections with ssh", what)
+	}
 	ops := args[i:]
 	if len(ops) < 2 {
 		// scp prints its usage.
@@ -590,6 +593,9 @@ func (c *copyArgs) rsh(val string) {
 	p, err := parseSSHArgs(argv)
 	if err == nil && (p.dest != host || p.cmdIdx != len(argv) || p.endOpts) {
 		err = fmt.Errorf("give ssh only options")
+	}
+	if what := p.sharing(); err == nil && what != "" {
+		err = fmt.Errorf("%s is not supported; forward and share connections with ssh", what)
 	}
 	if err != nil {
 		c.refuse("rsync -e %q is not allowed: %v", val, err)

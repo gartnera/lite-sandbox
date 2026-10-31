@@ -174,13 +174,20 @@ func commandTable() map[string]commandSpec {
 		"docker": {validate: validateDockerCommand},
 
 		// The ssh section's commands (validators_ssh*.go).
-		"ssh": {validate: validateSSHCommand, nonPathArgs: sshNonPathArgIndices},
+		"ssh": {
+			validate:     validateSSHCommand,
+			nonPathArgs:  sshNonPathArgIndices,
+			writeTargets: func(args []string, _ map[int]bool) []string { return sshControlPathWrites(args) },
+		},
 		"sshpass": {
 			validate:    validateSSHPassCommand,
 			nonPathArgs: sshpassNonPathArgIndices,
 			writeTargets: func(args []string, _ map[int]bool) []string {
 				if inner := sshpassCopyArgs(args); inner != nil {
 					return copyWrites(inner)
+				}
+				if cmdIdx, _, _, err := parseSSHPassArgs(args); err == nil && cmdIdx < len(args) && args[cmdIdx] == "ssh" {
+					return sshControlPathWrites(args[cmdIdx:])
 				}
 				return nil
 			},

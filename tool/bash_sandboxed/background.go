@@ -441,6 +441,10 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
 			return nil, fmt.Errorf("validation failed: %w", err)
 		}
+		// The scripts it runs, before any of it runs (as Execute does).
+		if err := s.validateScriptContents(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
+			return nil, fmt.Errorf("validation failed: %w", err)
+		}
 	}
 
 	// create derives the run context from the manager's shared parent (so

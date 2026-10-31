@@ -258,7 +258,9 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 			}
 			set[i] = q
 		}
-		script = "set " + strings.Join(set, " ") + "\n" + script
+		// bash refuses to start (status 2) on an option it does not know;
+		// stop before the script runs too.
+		script = "set " + strings.Join(set, " ") + " || exit 2\n" + script
 	}
 
 	// Parse the script

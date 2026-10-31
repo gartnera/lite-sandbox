@@ -63,7 +63,8 @@ type SSHConfig struct {
 type SSHHost struct {
 	Host string `yaml:"host"`
 	// Write lifts the remote command check: the command runs as written. It
-	// also lets scp and rsync copy files to and from the host.
+	// also lets scp and rsync copy files to and from the host, and ssh forward
+	// ports (-L, -R, -D) and share connections (-M, -S, -O) with it.
 	Write *bool `yaml:"write,omitempty"`
 	// Commands are allowed in the remote command beyond the read-only ones: a
 	// command name, or a name and the leading arguments it is limited to
@@ -110,7 +111,7 @@ func (h *SSHHost) Writes() bool { return h != nil && h.Write != nil && *h.Write 
 func (h SSHHost) Describe() string {
 	switch {
 	case h.Writes():
-		return "any remote command; scp and rsync"
+		return "any remote command; scp and rsync; port forwarding and connection sharing"
 	case len(h.Commands) > 0:
 		return "read-only remote commands, and " + strings.Join(h.Commands, ", ")
 	}
