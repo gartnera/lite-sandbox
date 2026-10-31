@@ -273,3 +273,75 @@ func TestBashSandboxed_PiDirReadOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestBashSandboxed_PiDirFollowsGit checks that a tracked .pi file still
+// follows git commands that don't name it — switching branches, merging,
+// pulling — while a git command that names it is refused, as for .claude.
+func TestBashSandboxed_PiDirFollowsGit(t *testing.T) {
+	root := t.TempDir()
+	upstream := filepath.Join(root, "upstream")
+	workDir := filepath.Join(root, "work")
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	settings := func(dir string) string { return filepath.Join(dir, ".pi", "settings.json") }
+	if err := os.MkdirAll(filepath.Join(upstream, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings(upstream), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstream, "init", "-q", "-b", "main")
+	git(upstream, "add", ".")
+	git(upstream, "commit", "-q", "-m", "v1")
+	git(root, "clone", "-q", upstream, workDir)
+
+	// A local branch that changes the file.
+	git(workDir, "checkout", "-q", "-b", "other")
+	if err := os.WriteFile(settings(workDir), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(workDir, "commit", "-q", "-am", "other")
+	git(workDir, "checkout", "-q", "main")
+	// An upstream commit that changes it.
+	if err := os.WriteFile(settings(upstream), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstream, "commit", "-q", "-am", "v2")
+
+	run := func(command string) error {
+		t.Helper()
+		_, err := NewSandbox().Execute(context.Background(), command, workDir, []string{workDir}, []string{workDir})
+		return err
+	}
+	expect := func(want string) {
+		t.Helper()
+		if got, err := os.ReadFile(settings(workDir)); err != nil || string(got) != want {
+			t.Fatalf(".pi/settings.json = %q (%v), want %q", got, err, want)
+		}
+	}
+
+	if err := run("git checkout -q other"); err != nil {
+		t.Fatalf("git checkout other: %v", err)
+	}
+	expect("other\n")
+	if err := run("git checkout -q main"); err != nil {
+		t.Fatalf("git checkout main: %v", err)
+	}
+	expect("v1\n")
+	if err := run("git pull -q --ff-only"); err != nil {
+		t.Fatalf("git pull: %v", err)
+	}
+	expect("v2\n")
+
+	// Naming the file is a write into .pi, refused.
+	if err := run("git checkout other -- .pi/settings.json"); err == nil || !strings.Contains(err.Error(), ".pi directory") {
+		t.Fatalf("git checkout of a .pi path = %v, want the .pi refusal", err)
+	}
+	expect("v2\n")
+}
