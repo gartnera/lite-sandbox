@@ -146,6 +146,11 @@ template, follow its headings. Otherwise use:
   issues you filed. If you skipped the security review, say so.
 - **Assumptions:** how you read anything ambiguous in the request.
 
+If the request names a GitHub issue, or an open issue already describes the
+work, add `Closes #<n>` to the PR description so the merge closes the issue.
+Don't use a closing keyword for issues the PR only touches on or that you
+filed during this run.
+
 Add **exactly one** `release:*` label: `release:minor` for a feature,
 `release:patch` for a fix or refactor, `release:skip` for a docs-only,
 CI-only or tests-only change, `release:major` for a breaking change.
@@ -178,7 +183,7 @@ merge, and release, before CI runs.
   with auto-merge off and report what you tried.
 
 After the merge, check that CI and the release on `main` pass for the merge
-commit. If this change broke `main`, start a new autodev run to fix it
+commit, and that any issue the PR closes is closed. If this change broke `main`, start a new autodev run to fix it
 forward.
 
 ## Filing issues
