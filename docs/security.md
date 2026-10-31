@@ -58,6 +58,13 @@ neither the prompt nor a ticket. The tickets live in lite-sandbox's cache direct
 protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 
+Sandbox errors name the config change that would lift them, so the agent can
+ask for it. A path-boundary refusal names a `paths allow` entry, but never for
+a path the sandbox refuses on purpose: the home directory itself, anything
+under a deny-list entry (granting one lifts it), system directories outside
+the home directory, `.git`, or a write to agent configuration. Naming a fix
+grants nothing; the user still approves each request.
+
 A `commands` entry with `ask: true` uses the same ticket: the hook answers
 `ask` for a bash tool call whose command line runs a prompted command and
 records a single-use ticket for that exact command, and the server lets the

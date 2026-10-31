@@ -226,47 +226,12 @@ func checkBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedA
 		return nil
 	}
 	if !isUnderResolvedAllowedPaths(resolved, allowed) {
-		return tagRule(rulePathBoundary, resolved, outsideBoundaryError("path", orig, resolved, isWrite))
+		return tagRule(rulePathBoundary, resolved, newBoundaryError("path", orig, path, workDir, resolved, isWrite))
 	}
 	if isGitInternalPath(resolved) {
 		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q accesses .git directory which is not allowed", orig))
 	}
 	return nil
-}
-
-// outsideBoundaryError reports that orig (what refers to the kind of path:
-// "path", "redirect path") resolves to resolved, which is outside the allowed
-// directories, and names the config command that would let it through:
-// `lite-sandbox config paths allow <resolved>`, with --write when the path was
-// checked against the write set. The command is the user's to approve (see
-// docs/configuration.md, "Config requests"), so naming it grants nothing.
-// The .git and agent-configuration refusals have no such fix and don't use
-// this.
-func outsideBoundaryError(what, orig, resolved string, isWrite bool) error {
-	return fmt.Errorf("%s %q resolves to %q which is outside allowed directories; if it is needed, the user can allow it with `%s`",
-		what, orig, resolved, pathAllowFix(resolved, isWrite))
-}
-
-// pathAllowFix returns the `lite-sandbox config paths allow` command that
-// adds resolved to the read set, or to the write set when isWrite is set.
-func pathAllowFix(resolved string, isWrite bool) string {
-	fix := "lite-sandbox config paths allow " + configWord(resolved)
-	if isWrite {
-		fix += " --write"
-	}
-	return fix
-}
-
-// configWord quotes s as one literal shell word when it is not a plain word,
-// so the fix can be run as written: a config request accepts only literal
-// arguments (see internal/configrequest).
-func configWord(s string) string {
-	if s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./:=@+,", r))
-	}) < 0 {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // validateRedirectPaths checks that file targets in redirections resolve to
@@ -323,7 +288,7 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 			}
 			resolved := ResolvePath(lit, workDir)
 			if !isUnderResolvedAllowedPaths(resolved, allowedPaths) {
-				validationErr = tagRule(rulePathBoundary, resolved, outsideBoundaryError("redirect path", lit, resolved, r.Op != syntax.RdrIn))
+				validationErr = tagRule(rulePathBoundary, resolved, newBoundaryError("redirect path", lit, lit, workDir, resolved, r.Op != syntax.RdrIn))
 				return false
 			}
 			if isGitInternalPath(resolved) {

@@ -197,7 +197,9 @@ func (s *Sandbox) report(ctx context.Context, layer string, fallback rule, err e
 	}
 
 	if blocked {
-		return err
+		// The audit record keeps the bare refusal; the agent also gets the
+		// config command that lifts a boundary refusal, if there is one.
+		return withBoundaryFix(s.getConfig(), err)
 	}
 	return nil
 }

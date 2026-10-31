@@ -401,13 +401,22 @@ the base's entry by entry, so a directory lists only the paths it changes.
 
 When the bash tool refuses a path for being outside the boundary (a command
 argument, a redirection target, or a file a sandboxed Python program opens),
-the error names the entry that would let it through: `lite-sandbox config
-paths allow <path>` for the real path the argument resolves to, with
-`--write` when the path is written. With [config
+the error names the entry that would let it through. For a read it is
+`lite-sandbox config paths allow <path>`, for the real path the argument
+resolves to. For a path checked as a write (one the command writes, or any
+operand of a command that writes, such as `cp`'s source) it is `lite-sandbox
+config paths allow <dir> --write` for the directory that holds the path,
+unless the path is itself an existing directory: the OS sandbox creates a
+missing write grant as a directory, so granting the file itself would turn
+it into one. With [config
 requests](#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval)
-the agent can ask you to approve that command. A refusal that no config entry
-lifts, such as a path inside `.git` or a coding agent's configuration, names
-none.
+the agent can ask you to approve that command. The error names no entry where
+the sandbox refuses on purpose, the same places [`audit
+report`](adoption.md#audit-tighten-with-evidence) never suggests: the home directory itself, anything
+under a deny-list entry (credentials, shell startup files, lite-sandbox's own
+config and audit log, agent settings), and system directories outside the
+home directory. Nor does it for a path inside `.git` or a write to a coding
+agent's configuration, which no paths entry lifts.
 
 ### Grants: `read: true`, `write: true`
 

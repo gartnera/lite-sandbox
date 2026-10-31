@@ -245,6 +245,7 @@ func (s *Sandbox) executePython(ctx context.Context, args []string, sets resolve
 	hc := interp.HandlerCtx(ctx)
 
 	fs := newMontyFS(hc.Dir, sets)
+	fs.cfg = s.getConfig()
 	defer fs.close()
 
 	inlineOnly := s.getConfig().ProfileOption("montypython", "inline_only")
