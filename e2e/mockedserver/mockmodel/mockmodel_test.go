@@ -276,3 +276,34 @@ func TestSideTools(t *testing.T) {
 		t.Errorf("agent turn offering a side tool among others did not get the scripted call: %s", body)
 	}
 }
+
+// TestResponsesCustomTool covers Responses custom tools (Codex's freeform
+// apply_patch): offered ones are recorded, a scripted call to one comes back
+// as a custom_tool_call carrying the string input verbatim, and its
+// custom_tool_call_output counts as the call's result.
+func TestResponsesCustomTool(t *testing.T) {
+	const patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+	s := Start(Script{ToolCalls: []ToolCall{{Name: "apply_patch", Arguments: patch}}})
+	defer s.Close()
+	tools := []any{map[string]any{"type": "custom", "name": "apply_patch"}}
+	user := map[string]any{"role": "user", "content": "go"}
+
+	for _, stream := range []bool{false, true} {
+		body := post(t, s.BaseURL+"/responses", map[string]any{"stream": stream, "tools": tools, "input": []any{user}})
+		if !strings.Contains(body, `"type":"custom_tool_call"`) || !strings.Contains(body, `"input":`+quote(patch)) {
+			t.Errorf("stream=%v: no custom_tool_call with the patch as input: %s", stream, body)
+		}
+	}
+	if !s.Turns()[0].Tools["apply_patch"] {
+		t.Errorf("custom tool not recorded as offered: %v", s.Turns()[0].Tools)
+	}
+
+	output := map[string]any{"type": "custom_tool_call_output", "call_id": chatCallID(0), "output": "patched"}
+	body := post(t, s.BaseURL+"/responses", map[string]any{"tools": tools, "input": []any{user, output}})
+	if strings.Contains(body, "custom_tool_call") {
+		t.Errorf("custom_tool_call_output not taken as the result: %s", body)
+	}
+	if turn, ok := s.AnswerTurn(); !ok || len(turn.ToolResults) != 1 || turn.ToolResults[0] != "patched" {
+		t.Errorf("answer turn = %+v, %v", turn, ok)
+	}
+}

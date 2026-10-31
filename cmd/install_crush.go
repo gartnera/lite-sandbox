@@ -193,19 +193,11 @@ func crushVersionSupportsRC(versionOutput string) bool {
 // and a fresh one appended, so re-running (or a changed binary path)
 // converges to a single block and the user's own content is untouched.
 func configureCrushRC(rcPath, binPath string) error {
-	quoted, err := syntax.Quote(binPath, syntax.LangBash)
+	rules, err := crushRCRules(binPath)
 	if err != nil {
-		return fmt.Errorf("cannot quote binary path %q for crushrc: %w", binPath, err)
+		return err
 	}
-	block := crushBlockStart + "\n" +
-		"mcp add " + crushServerName + " --type stdio --command " + quoted + " --args serve-mcp\n" +
-		// Hide the built-in shell so Crush must use the sandbox (this is
-		// options.disabled_tools; the tool disappears from the agent entirely).
-		"permissions deny bash\n" +
-		// Auto-allow the sandbox's own tools so they never prompt, mirroring
-		// the Claude installer's allow entries.
-		"permissions allow " + strings.Join(crushToolPermissions, " ") + "\n" +
-		crushBlockEnd + "\n"
+	block := crushBlockStart + "\n" + rules + crushBlockEnd + "\n"
 
 	data, err := os.ReadFile(rcPath)
 	if err != nil {
@@ -216,6 +208,23 @@ func configureCrushRC(rcPath, binPath string) error {
 	}
 	content := stripManagedBlock(string(data), crushBlockStart, crushBlockEnd)
 	return os.WriteFile(rcPath, []byte(appendConfigBlock(content, block)), 0644)
+}
+
+// crushRCRules returns the crushrc builtins that wire Crush to the sandbox:
+// the MCP server, the built-in bash denied, and the sandbox tools allowed.
+// Shared by `install crush` and `launch crush`.
+func crushRCRules(binPath string) (string, error) {
+	quoted, err := syntax.Quote(binPath, syntax.LangBash)
+	if err != nil {
+		return "", fmt.Errorf("cannot quote binary path %q for crushrc: %w", binPath, err)
+	}
+	return "mcp add " + crushServerName + " --type stdio --command " + quoted + " --args serve-mcp\n" +
+		// Hide the built-in shell so Crush must use the sandbox (this is
+		// options.disabled_tools; the tool disappears from the agent entirely).
+		"permissions deny bash\n" +
+		// Auto-allow the sandbox's own tools so they never prompt, mirroring
+		// the Claude installer's allow entries.
+		"permissions allow " + strings.Join(crushToolPermissions, " ") + "\n", nil
 }
 
 // crushMCPStdio is the stdio MCPConfig shape from Crush's config schema

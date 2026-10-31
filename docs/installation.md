@@ -71,39 +71,65 @@ The `--with-tool-hook` and `--bash-ast-hook-mode` flags described below apply to
 
 ## Temporary setup: `lite-sandbox launch`
 
-`launch` starts an agent CLI with the sandbox wired up, without writing to the agent's configuration. Everything `install` would write to the agent's config files is passed on the agent's command line instead, so the sandbox applies to that session only.
+`launch` starts an agent CLI with the sandbox wired up, without writing to the agent's configuration. Everything `install` would write to the agent's config files is passed on the agent's command line or in its environment instead, so the sandbox applies to that session only.
 
-**Only Claude Code is supported for now**, since its CLI accepts an MCP server, settings, and a system-prompt addition per run:
+It supports Claude Code, Codex, opencode, and Crush:
 
 ```bash
 lite-sandbox launch claude                     # interactive session, sandboxed
 lite-sandbox launch claude -p "run the tests"  # arguments after the agent are passed through
-lite-sandbox launch --dry-run claude           # print the command instead of running it
+lite-sandbox launch codex exec "run the tests"
+lite-sandbox launch opencode
+lite-sandbox launch crush
+lite-sandbox launch --dry-run codex            # print the command instead of running it
 ```
 
 Everything after the agent name is passed to the agent unchanged, so lite-sandbox's own flags go before it (or are separated with `--`).
 
+Grok Build isn't supported. Its `GROK_CONFIG` overlay only accepts soft settings and `--plugin-dir` only works with `grok agent stdio`, so the interactive CLI has no way to add an MCP server or hook for one session. Use `lite-sandbox install grok`.
+
 ### What it passes
 
-| What `install claude` writes | What `launch claude` passes |
-| --- | --- |
-| MCP server in `~/.claude.json` | `--mcp-config` |
-| Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings` |
-| Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+**These are added on top of your own configuration.** Your own settings, MCP servers, and instruction files still load, and your sign-in state is untouched.
 
-**These are added on top of your own configuration.** Your `settings.json` permission rules still apply (the allow/deny lists are merged), your own MCP servers still load (`--strict-mcp-config` is not passed), your `CLAUDE.md` still reaches the model, and your sign-in state is untouched.
+| Agent | What `install` writes | What `launch` passes |
+| --- | --- | --- |
+| Claude Code | MCP server in `~/.claude.json` | `--mcp-config` (without `--strict-mcp-config`, so your servers still load) |
+| | Permissions + `PreToolUse` hook in `~/.claude/settings.json` | `--settings`, merged with your `settings.json` |
+| | Usage directive in `~/.claude/CLAUDE.md` | `--append-system-prompt` |
+| Codex | `[mcp_servers.lite-sandbox]` in `config.toml` | `-c mcp_servers.lite-sandbox.*` overrides |
+| | Usage directive in `AGENTS.md` | `-c developer_instructions`, after any `developer_instructions` of your own from `config.toml` (one from a `--profile` file is replaced for the session) |
+| | `PreToolUse` hook redirecting the built-in shell | `--disable shell_tool`: the built-in shell is removed from the session |
+| | `PreToolUse` hook for the file tools (`--with-tool-hook`) | `-c hooks.PreToolUse`, `--enable hooks`, and `--dangerously-bypass-hook-trust` ([below](#codex-hook-trust)) |
+| opencode | MCP server and permissions in `opencode.json` | `OPENCODE_CONFIG_CONTENT`, which opencode merges over your global and project configs (and over an `OPENCODE_CONFIG_CONTENT` you already set) |
+| | Usage directive in `AGENTS.md` | `instructions` naming a file in lite-sandbox's cache directory |
+| Crush | MCP server and permissions in `crushrc` (or `crush.json`) | `CRUSH_GLOBAL_CONFIG` pointing at a stand-in config directory ([below](#crush-stand-in-config)) |
+| | Usage directive in `CRUSH.md` | A global context path in the stand-in `crushrc` |
+
+#### Codex hook trust
+
+Codex runs only the hooks you've trusted in its `/hooks` screen, and it records that trust in `config.toml`, so a hook passed for one session would be silently skipped. Its only per-session way past that is `--dangerously-bypass-hook-trust`, which `launch codex` passes whenever it registers a hook (the default `--with-tool-hook`, or `--bash-ast-hook-mode`), along with `--enable hooks` in case you turned the hooks feature off. The bypass covers every enabled hook in the session, so **your own enabled user and plugin hooks also run without review**. Project hooks still need the project to be trusted. Pass `--with-tool-hook=false` to launch with no hook and no bypass. The built-in shell is removed either way, so blocking it doesn't depend on a hook.
+
+#### Crush stand-in config
+
+Crush has no flag or variable that adds configuration, only `CRUSH_GLOBAL_CONFIG`, which moves its whole global config directory. `launch crush` points it at a stand-in directory, `<cache>/lite-sandbox/launch/crush/<id>` (`<cache>` is `~/.cache` on Linux, `~/Library/Caches` on macOS). There's one per config directory and lite-sandbox binary, since Crush reloads its `crushrc` while it runs, and launch rewrites it on every launch:
+
+- `crush.json` is a symlink to your global `crush.json`, if you have one.
+- `crushrc` sources your global `crushrc`, if you have one, in a subshell from your config directory, so it runs as it would without the launch and an `exit` in it can't skip what follows. Then it adds the sandbox's MCP server, `permissions deny bash`, and `permissions allow` for the sandbox tools, as `install crush` writes them. Last, it sets the global context paths to your `CRUSH.md`, the `AGENTS.md` beside your config directory (Crush's defaults), and the usage directive. These are added to any `global_context_paths` you set yourself, so if you dropped one of the defaults, it comes back for launched sessions.
+
+Crush's data directory, skills, and commands don't depend on `CRUSH_GLOBAL_CONFIG`, and project configs still load. `launch crush` needs crush v0.88.0 or newer, since older versions don't read `crushrc`.
 
 ### Defaults
 
 Because it configures one session rather than every project, `launch` is stricter than `install` by default:
 
-- **The built-in `Bash` tool is denied**, as in the default install, so the model isn't offered it.
-- **`--with-tool-hook` is on**, so the `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` to its writable paths. This is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior.
-- **`--permission-mode acceptEdits`**, written as `permissions.defaultMode`, so edits apply without a prompt. The hook keeps them inside the boundary, and a write outside it is still denied. Pass `--permission-mode ""` to keep Claude Code's own default, or pass your own `--permission-mode` *after* the agent name, which overrides the setting.
+- **The built-in shell is blocked outright.** Claude Code's `Bash` is denied as in the default install, so the model isn't offered it. Codex's is removed with `--disable shell_tool`. opencode's `bash` is denied and Crush's is disabled, as `install` does.
+- **`--with-tool-hook` is on** for Claude Code and Codex. The `PreToolUse` hook confines the built-in `Read`/`Glob`/`Grep` to the sandbox's readable paths and `Write`/`Edit`/`NotebookEdit` (and Codex's `apply_patch`) to its writable paths. For Claude Code this is stricter than `install --with-tool-hook`, which moves the `Bash` block into the hook so the redirect message reaches the model; `launch` keeps the permission deny and adds the file-tool boundary. Pass `--with-tool-hook=false` to get install's default behavior. opencode and Crush have no compatible hook, so their file tools aren't confined, as with `install`.
+- **`--permission-mode acceptEdits`** (Claude Code only), written as `permissions.defaultMode`, so edits apply without a prompt. The hook keeps them inside the boundary, and a write outside it is still denied. Pass `--permission-mode ""` to keep Claude Code's own default, or pass your own `--permission-mode` *after* the agent name, which overrides the setting.
 
-`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below).
+`--bash-ast-hook-mode` and `--always-load` behave as they do for `install` (see below), for Claude Code and Codex. A flag that has no effect on the chosen agent (`--permission-mode` for anything but Claude Code, `--bash-ast-hook-mode` or an explicit `--with-tool-hook` for opencode or Crush) is refused rather than ignored.
 
-`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup.
+`launch` reads lite-sandbox's own config (`lite-sandbox config path`) as usual but, unlike `install`, never creates or modifies it. A host without one runs at the `allowlist` default. Use `lite-sandbox config ...` to change it, and `install` for a persistent agent setup. The only files `launch` writes are opencode's directive and Crush's stand-in config, under lite-sandbox's cache directory. That directory is as protected as lite-sandbox's config file: outside the path boundary, and read-only under the OS sandbox in `denylist` mode. This matters for Crush, which runs the stand-in `crushrc` as a script.
 
 ## Claude Code
 

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/gartnera/lite-sandbox/config"
 )
@@ -21,51 +22,73 @@ var launchPermissionMode string
 var launchDryRun bool
 
 var launchCmd = &cobra.Command{
-	Use:   "launch <agent> [agent args...]",
+	Use:   "launch <claude|codex|opencode|crush> [agent args...]",
 	Short: "Run an agent CLI through lite-sandbox without changing its config",
 	Long: `Starts an agent CLI configured to route shell commands through lite-sandbox,
 without writing anything to the agent's configuration.
 
 This is the temporary alternative to "lite-sandbox install": the same MCP
-server, permissions, PreToolUse hook, and usage directive that install writes
-to disk are passed as command-line flags for this one run. Nothing on disk is
-changed, so the sandbox applies to the launched session only and quitting it
-leaves no trace. The agent's own settings (including its sign-in state) are
-still loaded and the sandbox settings are layered on top.
-
-Claude Code is the only supported agent for now:
+server, permissions, hook, and usage directive that install writes to disk are
+passed on the agent's command line (or in its environment) for this one run.
+The agent's configuration is not changed, so the sandbox applies to the
+launched session only. The agent's own settings (including its sign-in state)
+are still loaded and the sandbox settings are layered on top.
 
   lite-sandbox launch claude                      # interactive session, sandboxed
   lite-sandbox launch claude -p "run the tests"   # arguments after the agent are passed through
+  lite-sandbox launch codex exec "run the tests"
+  lite-sandbox launch opencode
+  lite-sandbox launch crush
   lite-sandbox launch --with-tool-hook=false claude  # lite-sandbox's own flags come first
 
 Everything after the agent name is handed to the agent untouched, so
 lite-sandbox's flags must precede it (or be separated with --).
 
+Per agent:
+
+  claude    --mcp-config (MCP server), --settings (permissions, permission
+            mode, PreToolUse hook), --append-system-prompt (directive).
+  codex     -c overrides (MCP server, developer_instructions), --disable
+            shell_tool (the built-in shell is removed, so no hook is needed to
+            block it), and with a hook -c hooks.PreToolUse plus
+            --dangerously-bypass-hook-trust: Codex skips hooks the user has not
+            trusted, and trust can only be granted in its /hooks screen. The
+            bypass applies to every enabled hook for the session, your own
+            included; --with-tool-hook=false avoids it.
+  opencode  OPENCODE_CONFIG_CONTENT (MCP server, bash denied, directive file).
+  crush     CRUSH_GLOBAL_CONFIG pointing at a generated directory whose
+            crushrc sources your own global crushrc (and links your
+            crush.json), then adds the MCP server and denies bash.
+
+opencode's directive and Crush's generated config are kept in lite-sandbox's
+cache directory (rewritten on each launch), not in the agent's config. Grok
+Build is not supported: its CLI has no way to add an MCP server or hook for a
+single session. Use "lite-sandbox install grok".
+
 Because it configures a single session rather than every project the user
 opens, launch is stricter than install by default:
 
-  --with-tool-hook      ON by default: a PreToolUse hook confines the built-in
-                        Read/Glob/Grep to the sandbox's readable paths and
-                        Write/Edit/NotebookEdit to its writable paths, so the
-                        built-in file tools respect the same boundary as the
-                        bash tool. The built-in Bash tool stays denied outright
-                        (unlike "install --with-tool-hook", which moves that
-                        block into the hook). Pass --with-tool-hook=false for
-                        install's default posture.
-  --permission-mode     Claude Code's permission mode for the session, set as
-                        permissions.defaultMode; "acceptEdits" by default, so
-                        edits inside the boundary apply without a prompt — the
-                        hook is what keeps them inside it. Pass an empty value
-                        to leave Claude Code's own default alone, or your own
-                        --permission-mode after the agent name (a CLI flag wins
-                        over the setting).
-  --bash-ast-hook-mode  do not configure the MCP server; instead AST-check each
-                        built-in Bash command in the hook and allow it when it
-                        passes (Bash still runs UNSANDBOXED — a weaker
-                        guarantee; see "install --help")
-  --always-load         exempt the sandbox MCP tools from tool-search deferral
-                        so they load at session start (on by default)
+  --with-tool-hook      ON by default (claude, codex): a PreToolUse hook
+                        confines the built-in file tools (Read/Glob/Grep,
+                        Write/Edit/NotebookEdit, Codex's apply_patch) to the
+                        sandbox's readable/writable paths. The built-in shell
+                        stays blocked outright. Pass --with-tool-hook=false for
+                        install's default posture. opencode and Crush have no
+                        compatible hook, so their file tools are not confined.
+  --permission-mode     Claude Code only: its permission mode for the session,
+                        set as permissions.defaultMode; "acceptEdits" by
+                        default, so edits inside the boundary apply without a
+                        prompt — the hook is what keeps them inside it. Pass an
+                        empty value to leave Claude Code's own default alone,
+                        or your own --permission-mode after the agent name (a
+                        CLI flag wins over the setting).
+  --bash-ast-hook-mode  claude, codex: do not configure the MCP server;
+                        instead AST-check each built-in shell command in the
+                        hook and allow it when it passes (the shell still runs
+                        UNSANDBOXED — a weaker guarantee; see "install --help")
+  --always-load         claude, codex: exempt the sandbox MCP tools from
+                        tool-search deferral so they load at session start (on
+                        by default)
 
 lite-sandbox's own config (lite-sandbox config path) is read as usual — launch
 neither creates nor modifies it, so a host with no config runs at the strict
@@ -77,13 +100,13 @@ make the agent configuration permanent.`,
 
 func init() {
 	launchCmd.Flags().BoolVar(&launchWithToolHook, "with-tool-hook", true,
-		"confine the built-in Read/Write/Edit tools to the sandbox's readable/writable paths with a PreToolUse hook; --with-tool-hook=false for install's default posture (built-in Bash is denied either way)")
+		"confine the built-in file tools to the sandbox's readable/writable paths with a PreToolUse hook (claude, codex); --with-tool-hook=false for install's default posture (the built-in shell is blocked either way)")
 	launchCmd.Flags().StringVar(&launchPermissionMode, "permission-mode", "acceptEdits",
 		"Claude Code permission mode for the session (permissions.defaultMode), e.g. acceptEdits, plan, default; empty leaves Claude Code's own default alone")
 	launchCmd.Flags().BoolVar(&launchBashASTHookMode, "bash-ast-hook-mode", false,
-		"statically AST-check the built-in Bash tool in the hook instead of redirecting it — Bash still runs unsandboxed (no runtime enforcement), no MCP server, no Bash deny; combine with --with-tool-hook to also confine Read/Write/Edit")
+		"statically AST-check the built-in shell in the hook instead of replacing it (claude, codex) — the shell still runs unsandboxed (no runtime enforcement), no MCP server; combine with --with-tool-hook to also confine the file tools")
 	launchCmd.Flags().BoolVar(&launchAlwaysLoad, "always-load", true,
-		"exempt the sandbox MCP tools from tool-search deferral so they load at session start; --always-load=false to defer them")
+		"exempt the sandbox MCP tools from tool-search deferral so they load at session start (claude, codex); --always-load=false to defer them")
 	launchCmd.Flags().BoolVar(&launchDryRun, "dry-run", false,
 		"print the command that would be run, with the generated configuration, instead of starting the agent")
 	// Flags after the agent name belong to the agent, not to us.
@@ -91,23 +114,41 @@ func init() {
 	rootCmd.AddCommand(launchCmd)
 }
 
-// launchTarget is one agent CLI that can be launched through the sandbox. args
-// builds the agent's argv (after the binary name) from the sandbox binary path
-// and the user's own arguments.
+// launchSpec is how one agent is started through the sandbox: its arguments
+// (the agent's own arguments already placed among them) and the environment
+// variables to set on top of ours.
+type launchSpec struct {
+	args []string
+	env  []string // KEY=VALUE
+	// notes are printed to stderr before the agent starts.
+	notes []string
+}
+
+// launchTarget is one agent CLI that can be launched through the sandbox.
 type launchTarget struct {
 	name        string // positional-arg name
 	displayName string
 	bin         string // executable to look up on PATH
-	args        func(binPath string, agentArgs []string) ([]string, error)
+	// hooks reports that the agent takes lite-sandbox's PreToolUse hook, so
+	// --with-tool-hook and --bash-ast-hook-mode apply to it.
+	hooks bool
+	// permissionMode reports that --permission-mode applies.
+	permissionMode bool
+	prepare        func(binPath string, agentArgs []string) (launchSpec, error)
 }
 
-// launchTargets lists the supported agents. Only Claude Code is supported for
-// now; the other agents' CLIs have no equivalent way to pass an MCP server,
-// permissions, and a hook for a single run.
 func launchTargets() []launchTarget {
 	return []launchTarget{
-		{"claude", "Claude Code", "claude", claudeLaunchArgs},
+		{"claude", "Claude Code", "claude", true, true, claudeLaunchSpec},
+		{"codex", "Codex", "codex", true, false, codexLaunchSpec},
+		{"opencode", "opencode", "opencode", false, false, opencodeLaunchSpec},
+		{"crush", "Crush", "crush", false, false, crushLaunchSpec},
 	}
+}
+
+// launchUnsupported explains, per agent install supports, why launch can't.
+var launchUnsupported = map[string]string{
+	"grok": "Grok Build's CLI can't add an MCP server or a hook for a single session (its GROK_CONFIG overlay only accepts soft settings, and --plugin-dir is limited to `grok agent stdio`)",
 }
 
 func runLaunch(cmd *cobra.Command, args []string) error {
@@ -119,10 +160,17 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		for j, t := range targets {
 			names[j] = t.name
 		}
-		return fmt.Errorf("unsupported agent %q (supported: %s) — use `lite-sandbox install %s` to configure it permanently instead",
-			agent, strings.Join(names, ", "), agent)
+		why := ""
+		if reason, ok := launchUnsupported[agent]; ok {
+			why = ": " + reason
+		}
+		return fmt.Errorf("unsupported agent %q%s (launch supports: %s) — use `lite-sandbox install %s` to configure it permanently instead",
+			agent, why, strings.Join(names, ", "), agent)
 	}
 	target := targets[i]
+	if err := checkLaunchFlags(target, cmd.Flags()); err != nil {
+		return err
+	}
 
 	binPath, err := os.Executable()
 	if err != nil {
@@ -138,24 +186,61 @@ func runLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s CLI not found on PATH (looked for %q): %w", target.displayName, target.bin, err)
 	}
 
-	argv, err := target.args(binPath, agentArgs)
+	spec, err := target.prepare(binPath, agentArgs)
 	if err != nil {
 		return err
 	}
 
 	if launchDryRun {
-		fmt.Println(shellQuote(append([]string{agentPath}, argv...)))
+		var line []string
+		for _, kv := range spec.env {
+			k, v, _ := strings.Cut(kv, "=")
+			line = append(line, k+"="+shellQuote([]string{v}))
+		}
+		fmt.Println(strings.Join(append(line, shellQuote(append([]string{agentPath}, spec.args...))), " "))
 		return nil
 	}
 
 	fmt.Fprintf(os.Stderr, "lite-sandbox: launching %s through the sandbox (mode: %s) — no %s configuration was changed\n",
 		target.displayName, launchMode(), target.displayName)
+	for _, note := range spec.notes {
+		fmt.Fprintf(os.Stderr, "lite-sandbox: %s\n", note)
+	}
 
 	// Replace this process with the agent: it owns the terminal from here, and
 	// signals, exit status, and job control all behave as if it had been run
 	// directly. There is nothing to clean up afterwards — the configuration
-	// lives entirely in argv.
-	return syscall.Exec(agentPath, append([]string{agentPath}, argv...), os.Environ())
+	// lives in argv, the environment, and lite-sandbox's own cache.
+	return syscall.Exec(agentPath, append([]string{agentPath}, spec.args...), withEnv(os.Environ(), spec.env))
+}
+
+// checkLaunchFlags rejects lite-sandbox flags the user set explicitly that do
+// nothing for target, rather than silently running without them.
+func checkLaunchFlags(target launchTarget, flags *pflag.FlagSet) error {
+	if !target.permissionMode && flags.Changed("permission-mode") {
+		return fmt.Errorf("--permission-mode applies only to Claude Code; pass %s's own permission flags after the agent name instead", target.displayName)
+	}
+	if !target.hooks {
+		if on, _ := flags.GetBool("bash-ast-hook-mode"); on {
+			return fmt.Errorf("--bash-ast-hook-mode needs lite-sandbox's PreToolUse hook, which %s has no compatible protocol for", target.displayName)
+		}
+		if on, _ := flags.GetBool("with-tool-hook"); on && flags.Changed("with-tool-hook") {
+			return fmt.Errorf("--with-tool-hook needs lite-sandbox's PreToolUse hook, which %s has no compatible protocol for", target.displayName)
+		}
+	}
+	return nil
+}
+
+// withEnv returns environ with each KEY=VALUE in extra set, replacing any
+// existing value for the key.
+func withEnv(environ, extra []string) []string {
+	out := slices.Clone(environ)
+	for _, kv := range extra {
+		key, _, _ := strings.Cut(kv, "=")
+		out = slices.DeleteFunc(out, func(e string) bool { return strings.HasPrefix(e, key+"=") })
+		out = append(out, kv)
+	}
+	return out
 }
 
 // launchMode reports the enforcement mode the launched agent's commands will be
@@ -173,7 +258,53 @@ func launchMode() config.Mode {
 	return cfg.EffectiveMode()
 }
 
-// claudeLaunchArgs builds Claude Code's arguments for a sandboxed run: the same
+// launchCacheDir returns (creating it) the directory launch keeps generated
+// files in for agent: lite-sandbox's own cache directory, never the agent's
+// config. It is as protected as lite-sandbox's config: outside the path
+// boundary, and write-denied under the OS sandbox in denylist mode (see
+// config.DefaultDeniedWritePaths), which matters because Crush executes the
+// crushrc kept there. The files are rewritten on every launch, so nothing
+// needs cleaning up after the agent exits.
+func launchCacheDir(agent string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("unable to determine cache directory: %w", err)
+	}
+	dir := filepath.Join(cache, "lite-sandbox", "launch", agent)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("failed to create %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// writeFileAtomic writes data to path through a temporary file and a rename,
+// so an agent started by a concurrent launch never reads a partial file.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return err
+	}
+	if err := os.Chmod(f.Name(), 0o644); err != nil {
+		os.Remove(f.Name())
+		return err
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		os.Remove(f.Name())
+		return err
+	}
+	return nil
+}
+
+// claudeLaunchSpec builds Claude Code's arguments for a sandboxed run: the same
 // plan `install claude` writes to ~/.claude.json, settings.json and CLAUDE.md,
 // expressed as the flags Claude Code accepts for a single session.
 //
@@ -187,6 +318,11 @@ func launchMode() config.Mode {
 //
 // --mcp-config is variadic, so it goes first and the agent's own arguments go
 // last: a variadic flag would otherwise swallow whatever follows it.
+func claudeLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
+	argv, err := claudeLaunchArgs(binPath, agentArgs)
+	return launchSpec{args: argv}, err
+}
+
 func claudeLaunchArgs(binPath string, agentArgs []string) ([]string, error) {
 	plan := claudeLaunchOptions().plan(binPath)
 
@@ -230,7 +366,7 @@ func claudeLaunchOptions() claudeOptions {
 func shellQuote(argv []string) string {
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
-		if a == "" || strings.ContainsAny(a, " \t\n\"'$`\\*?[]{}()<>|&;#~!") {
+		if a == "" || strings.ContainsAny(a, " \t\n\"'$`\\*?[]{}()<>|&;#~!=") {
 			a = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
 		quoted[i] = a

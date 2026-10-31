@@ -97,7 +97,7 @@ There are two suites under `e2e/`. `e2e/mockedserver` runs the real agent binari
 
 ### `e2e/mockedserver`: agents against a mocked model server
 
-This suite runs the **real agent binaries** ([Crush](https://github.com/charmbracelet/crush), [Codex](https://developers.openai.com/codex), [Claude Code](https://code.claude.com), [opencode](https://opencode.ai), and [Grok Build](https://x.ai/cli)) through `lite-sandbox install <agent>` and a non-interactive run. It checks that each agent loaded the generated config, launched `lite-sandbox serve-mcp`, offered the sandbox tools (and dropped or blocked its built-in shell), and passed the sandbox's results back to the model. `e2e/mockedserver/mockmodel` stands in for the LLM, so no API key is needed.
+This suite runs the **real agent binaries** ([Crush](https://github.com/charmbracelet/crush), [Codex](https://developers.openai.com/codex), [Claude Code](https://code.claude.com), [opencode](https://opencode.ai), and [Grok Build](https://x.ai/cli)) through `lite-sandbox install <agent>` (and, for every agent but Grok Build, `lite-sandbox launch <agent>`) and a non-interactive run. It checks that each agent loaded the generated config, launched `lite-sandbox serve-mcp`, offered the sandbox tools (and dropped or blocked its built-in shell), and passed the sandbox's results back to the model. `e2e/mockedserver/mockmodel` stands in for the LLM, so no API key is needed.
 
 ```bash
 LITE_SANDBOX_E2E=1 go test ./e2e/mockedserver/ -v                 # all agents

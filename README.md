@@ -34,7 +34,7 @@ The default is strict: only allowlisted commands run, and toolchains like Go, Ru
 | Built-in file tools confined to sandbox paths | `--with-tool-hook` | `--with-tool-hook` | | | ✅ |
 | AST-check the built-in shell (`--bash-ast-hook-mode`) | ✅ | ✅ | | | ✅ |
 | [Config requests](docs/configuration.md#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval) | ✅ | | | | |
-| [`lite-sandbox launch`](docs/installation.md#temporary-setup-lite-sandbox-launch) | ✅ | | | | |
+| [`lite-sandbox launch`](docs/installation.md#temporary-setup-lite-sandbox-launch) | ✅ | ✅ | ✅ | ✅ | |
 
 ## Documentation
 

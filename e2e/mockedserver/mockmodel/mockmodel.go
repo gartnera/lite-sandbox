@@ -38,7 +38,9 @@ type ToolCall struct {
 	// e.g. "mcp_lite-sandbox_bash" (Crush) or "mcp__lite-sandbox__bash" (Claude
 	// Code).
 	Name string
-	// Arguments is JSON-marshalled into the call's arguments.
+	// Arguments is JSON-marshalled into the call's arguments. For a tool that
+	// takes freeform input (a Responses custom tool), a string Arguments is
+	// sent as that input verbatim.
 	Arguments any
 }
 
@@ -186,6 +188,9 @@ type parsed struct {
 	// namespaces maps an offered function name to its namespace, for protocols
 	// that group tools (Responses); "" for top-level functions.
 	namespaces map[string]string
+	// custom names the offered tools that take freeform text input instead of
+	// JSON arguments (Responses "custom" tools, e.g. Codex's apply_patch).
+	custom map[string]bool
 }
 
 // protocol is one wire-format adapter. Each decodes its request into typed
