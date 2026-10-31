@@ -1,6 +1,6 @@
 ---
 name: autodev
-description: Headless end-to-end development. Takes a requested feature or fix all the way to a merged PR without check-ins - implement, test the affected Go packages, commit, rebase, code review, triage and fix findings, open a labeled PR with auto-merge, then watch CI and merge conflicts until it merges. File GitHub issues for unrelated problems instead of fixing them. Use whenever the prompt contains the word "autodev" or asks for hands-off develop-to-merge work.
+description: Headless end-to-end development. Takes a requested feature or fix all the way to a merged PR without check-ins - implement, test the affected Go packages, commit, rebase, code review, triage and fix findings, open a labeled PR with auto-merge, then watch CI and merge conflicts until it merges. Use whenever the prompt contains the word "autodev" or asks for hands-off develop-to-merge work.
 argument-hint: <feature or fix to make>
 allowed-tools: Bash(go *) Bash(gofmt *) Bash(git *) Bash(gh *)
 ---
