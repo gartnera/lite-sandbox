@@ -1,7 +1,7 @@
 # Toolchain Profiles
 
 A profile is a built-in preset of **commands** and **paths** for one toolchain:
-`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, and `montypython`. Profiles are
+`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, `agent-browser`, and `montypython`. Profiles are
 off by default and enabled one at a time:
 
 ```yaml
@@ -504,7 +504,81 @@ Everything else goes through the GitHub API with your token, so gh can do
 whatever the token allows: `gh api` reaches every endpoint, and `gh pr merge`
 merges. Scope the token accordingly.
 
-## Monty Python
+## agent-browser
+
+The `agent-browser` profile whitelists
+[agent-browser](https://github.com/vercel-labs/agent-browser), a CLI that
+drives a browser for an agent:
+
+```bash
+lite-sandbox config profiles enable agent-browser
+lite-sandbox config os-sandbox enable    # strongly recommended, see below
+```
+
+For example:
+
+```bash
+agent-browser open http://localhost:3000
+agent-browser snapshot -i
+agent-browser click @e2
+agent-browser fill @e3 "test@example.com"
+agent-browser screenshot shot.png
+agent-browser open "file://$PWD/index.html"
+```
+
+Install agent-browser and its browser yourself, outside the sandbox
+(`npm install -g agent-browser && agent-browser install`).
+
+The profile grants:
+
+- **Browsers** (read-only): Chrome for Testing from `agent-browser install`
+  (`~/.agent-browser/browsers`), and Playwright's
+  (`PLAYWRIGHT_BROWSERS_PATH`, else `~/.cache/ms-playwright`) and Puppeteer's
+  (`PUPPETEER_CACHE_DIR`, else `~/.cache/puppeteer`) caches, which
+  agent-browser also searches. Only the ones that exist are granted. None is
+  writable, since a browser planted there would run outside the sandbox the
+  next time you run agent-browser yourself.
+- **Your defaults** (read-only): `~/.agent-browser/config.json`, if it exists.
+- **Output directories** (read and write): `~/.agent-browser/tmp/screenshots`,
+  `pdfs`, `har`, and `traces`, where a screenshot or PDF taken without a path
+  lands, so the agent can read it back.
+
+The rest of `~/.agent-browser` stays hidden by the
+[hidden home](configuration.md#hidden-home-os_sandbox_hide_home): your saved
+sessions (`--session-name`, `state save` without a path), the auth vault and
+its key, and your installed plugins and skills. Those features fail inside the
+sandbox. So does `--profile Default`, which copies your own Chrome profile.
+
+### How it is contained
+
+agent-browser has too many commands and options to validate its arguments
+the way the `gh` profile does, so the profile doesn't. **The OS sandbox is
+what confines it**, as it confines `go test` or a Flutter build. Every
+agent-browser command talks to a daemon that holds the browser open between
+commands. The first command of a session starts the daemon, and the daemon
+starts the browser. Under the OS sandbox both run in the worker, so the
+browser reads and writes only what the worker can: a screenshot written to a
+path outside the working directory fails, and so does a `file://` URL in your
+hidden home.
+
+agent-browser puts its daemons' sockets in `$XDG_RUNTIME_DIR/agent-browser`
+or `~/.agent-browser`, which the worker hides. While the profile is enabled,
+every command the worker runs gets `AGENT_BROWSER_SOCKET_DIR` set to a
+directory in the temp dir (`lite-sandbox-ab-<uid>`). On Linux that is the
+worker's own `/tmp`, so the sandbox's daemons are separate from your own, and
+the browser closes when the worker stops (on a config change, or when the
+server exits).
+
+**Without the OS sandbox**, agent-browser runs with your full access, like any
+other program a command starts. It can write a screenshot anywhere you can,
+upload any file you can read to a page, launch the program
+`--executable-path` names, attach to your own Chrome (`--auto-connect`,
+`--cdp`), and reuse a daemon you started yourself, with its logins.
+
+The daemon resolves a relative path (`screenshot shot.png`) against the
+directory of the command that started it, not the current one. Use absolute
+paths if the agent `cd`s between commands.
+
 
 `python` and `python3` are **enabled by default** and don't run any Python on
 your `PATH`. They are served by [monty](https://github.com/pydantic/monty), a

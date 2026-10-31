@@ -36,7 +36,7 @@ All agents share one sandbox config file. See [docs/installation.md](docs/instal
 - **[Incremental adoption](docs/adoption.md)**: the other enforcement modes, audit reports, and tightening over time.
 - **[Installation](docs/installation.md)**: getting and updating the binary, automatic and manual agent setup, built-in tool boundaries, and hook modes.
 - **[Configuration](docs/configuration.md)**: the config file, CLI management, readable/writable paths, and git support.
-- **[Toolchain profiles](docs/profiles.md)**: the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, Flutter, Xcode, uv, and the GitHub CLI.
+- **[Toolchain profiles](docs/profiles.md)**: the built-in sandboxed Python, and enabling Go, pnpm, Rust, Deno, Flutter, Xcode, uv, the GitHub CLI, and agent-browser.
 - **[AWS & Docker access](docs/aws-and-docker.md)**: brokered AWS credentials and the filtering Docker proxy.
 - **[SSH access](docs/ssh.md)**: ssh and sshpass to the hosts you list, and a filtered ssh agent for them and git's remote commands.
 - **[Background processes](docs/background-processes.md)**: running and managing long-lived commands.
