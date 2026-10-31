@@ -249,11 +249,13 @@ func (s *Sandbox) signsInScope(scope config.CommandScope, cfg *config.Config) bo
 // restrictCommandEnv drops what args's command must not see from env, its
 // environment, on every path a command runs by (the host, the shared OS
 // sandbox worker, a scoped worker): $SSHPASS from every command but sshpass
-// (stripSSHPass), $HOME from rsync (stripRsyncHome). A new per-command
-// environment rule goes here, and every exec path applies it.
+// (stripSSHPass), $HOME from rsync (stripRsyncHome); and it points
+// agent-browser at lite-sandbox's own daemons (agentBrowserSocketEnv). A new
+// per-command environment rule goes here, and every exec path applies it.
 func restrictCommandEnv(args []string, env map[string]string) {
 	stripSSHPass(args, env)
 	stripRsyncHome(args, env)
+	agentBrowserSocketEnv(args, env)
 }
 
 // stripSSHPass drops $SSHPASS from the environment of every command but

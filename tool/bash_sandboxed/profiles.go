@@ -2,6 +2,9 @@ package bash_sandboxed
 
 import (
 	"fmt"
+	"path/filepath"
+
+	"github.com/gartnera/lite-sandbox/config"
 )
 
 // publishGate refuses a registry-publishing subcommand unless the config has
@@ -51,4 +54,19 @@ func (s *Sandbox) extraAllowsArgs(cmdName string, args []string) bool {
 	}
 	restrictions, ok := s.getExtraSubCommands()[cmdName]
 	return ok && argsMatchSubCommand(restrictions, args)
+}
+
+// agentBrowserSocketEnv points an agent-browser the sandbox runs — on the host,
+// in the shared worker, or in the worker of a grant scoped to it — at the
+// socket directory of lite-sandbox's own agent-browser daemons
+// (config.AgentBrowserSocketDir), never at the user's: a command reuses
+// whichever daemon's socket it finds, and the user's run outside the sandbox,
+// possibly logged in with the user's own Chrome profile.
+func agentBrowserSocketEnv(args []string, env map[string]string) {
+	if len(args) == 0 || filepath.Base(args[0]) != "agent-browser" {
+		return
+	}
+	if dir := config.AgentBrowserSocketDir(); dir != "" {
+		env["AGENT_BROWSER_SOCKET_DIR"] = dir
+	}
 }

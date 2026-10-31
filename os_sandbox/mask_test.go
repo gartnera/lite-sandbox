@@ -106,3 +106,21 @@ func TestGenerateSBPLProfile_MaskDirs(t *testing.T) {
 		t.Errorf("connection denies must follow (allow network*)\n%s", profile)
 	}
 }
+
+// TestGenerateSBPLProfile_DeniedReadBlocksConnect checks that a read-denied
+// path is also denied connections, after (allow network*): Seatbelt checks a
+// connection to a unix socket as network-outbound, which a file-read deny
+// leaves open, so a socket inside a hidden path (a daemon's under a grant
+// scoped to one command, gpg-agent's in ~/.gnupg) would stay reachable.
+func TestGenerateSBPLProfile_DeniedReadBlocksConnect(t *testing.T) {
+	dir := t.TempDir()
+	profile := generateSBPLProfile("/work", nil, nil, sbplDenylist{deniedReadPaths: []string{dir}})
+	netAllow := strings.Index(profile, "(allow network*)")
+	deny := strings.LastIndex(profile, `(deny network-outbound (subpath "`+dir+`"))`)
+	if deny < 0 {
+		t.Fatalf("profile missing the connection deny for %s\n%s", dir, profile)
+	}
+	if deny < netAllow {
+		t.Errorf("connection deny must follow (allow network*)\n%s", profile)
+	}
+}

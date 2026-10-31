@@ -1,7 +1,7 @@
 # Toolchain Profiles
 
 A profile is a built-in preset of **commands** and **paths** for one toolchain:
-`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, and `montypython`. Profiles are
+`go`, `pnpm`, `rust`, `deno`, `flutter`, `xcode`, `uv`, `gh`, `agent-browser`, and `montypython`. Profiles are
 off by default and enabled one at a time:
 
 ```yaml
@@ -503,6 +503,95 @@ forward ports on this machine, are refused either way.
 Everything else goes through the GitHub API with your token, so gh can do
 whatever the token allows: `gh api` reaches every endpoint, and `gh pr merge`
 merges. Scope the token accordingly.
+
+## agent-browser
+
+The `agent-browser` profile whitelists
+[agent-browser](https://github.com/vercel-labs/agent-browser), a CLI that
+drives a browser for an agent:
+
+```bash
+lite-sandbox config profiles enable agent-browser
+lite-sandbox config os-sandbox enable    # strongly recommended, see below
+```
+
+For example:
+
+```bash
+agent-browser open http://localhost:3000
+agent-browser snapshot -i
+agent-browser click @e2
+agent-browser fill @e3 "test@example.com"
+agent-browser screenshot shot.png
+agent-browser open "file://$PWD/index.html"
+```
+
+Install agent-browser and its browser yourself, outside the sandbox
+(`npm install -g agent-browser && agent-browser install`).
+
+### What agent-browser gets
+
+The profile gives `~/.agent-browser` to agent-browser **alone**, readable and
+writable, as a [grant for one command](configuration.md#grants-for-one-command-commands).
+That's everything agent-browser keeps there: Chrome for Testing from
+`agent-browser install`, your `config.json`, saved sessions (`--session-name`,
+`--restore`, `state list`), the auth vault and its key (`auth save`,
+`auth login`), plugins, and skills. So it works as it does outside the sandbox,
+logins included.
+
+With the OS sandbox on, agent-browser runs in an OS sandbox worker of its own
+that has the directory, and its daemon and browser run there too. The shared
+worker every other command runs in hides `~/.agent-browser`, in every mode. A
+dependency's install script, a test, or a program the agent writes can't read
+your sessions or the vault, and can't connect to the sandbox's agent-browser
+daemons to drive the browser that holds them. Only a direct `agent-browser`
+invocation is routed to that worker. One that a script or `npm test` starts
+runs in the shared worker, without the directory.
+
+agent-browser's arguments are not validated (it has too many commands and
+options for that). So whatever agent-browser can read, the agent can have it
+read, such as your sessions, or the vault and its key through a `file://` URL.
+Whatever agent-browser writes to `~/.agent-browser`, such as a plugin, the
+config, or a browser binary, is what your own agent-browser runs later. Enable
+the profile only where you're fine with the agent having your agent-browser
+logins.
+
+The profile also grants:
+
+- `~/.agent-browser/tmp`, readable and writable by the agent: a screenshot or
+  PDF taken without a path lands there, and the agent reads it back with its
+  file tools. (The shared worker still hides it with the rest of the
+  directory.)
+- Playwright's (`PLAYWRIGHT_BROWSERS_PATH`, else `~/.cache/ms-playwright`) and
+  Puppeteer's (`PUPPETEER_CACHE_DIR`, else `~/.cache/puppeteer`) browser
+  caches, readable, when they exist. agent-browser launches a Chrome from them
+  when it has none of its own.
+
+### Daemons
+
+Every agent-browser command talks to a daemon that holds the browser open
+between commands. The first command of a session starts it. A command reuses
+whatever daemon's socket it finds, wherever that daemon runs. Your own daemons
+keep their sockets in `$XDG_RUNTIME_DIR/agent-browser` or `~/.agent-browser`.
+They run outside the sandbox, possibly with your Chrome profile. So
+lite-sandbox points its agent-browser at `~/.agent-browser/lite-sandbox`
+instead (`AGENT_BROWSER_SOCKET_DIR`), and it never drives one of yours.
+
+On Linux the daemon and the browser stop with agent-browser's worker, which
+closes after five idle minutes or when the server exits. The next command
+starts a fresh browser. Use `--session-name` or `state save` to keep logins
+across that.
+
+### Without the OS sandbox
+
+agent-browser then runs with your full access, like any other program a
+command starts. It can write a screenshot anywhere you can, upload any file
+you can read to a page, launch the program `--executable-path` names, or attach
+to your own Chrome (`--auto-connect`, `--cdp`).
+
+The daemon resolves a relative path (`screenshot shot.png`) against the
+directory of the command that started it, not the current one. Use absolute
+paths if the agent `cd`s between commands.
 
 ## Monty Python
 

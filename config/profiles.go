@@ -204,6 +204,12 @@ var builtinProfiles = []Profile{
 		},
 	},
 	{
+		Name:        AgentBrowserProfile,
+		Description: "agent-browser, browser automation for agents; ~/.agent-browser (its browsers, sessions, and auth vault) for agent-browser alone",
+		Commands:    whitelist("agent-browser"),
+		paths:       agentBrowserPaths,
+	},
+	{
 		Name:           "montypython",
 		Description:    "python/python3 on monty, the Python interpreter embedded in lite-sandbox (on by default)",
 		DefaultEnabled: true,
