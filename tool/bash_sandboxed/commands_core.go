@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 )
@@ -16,8 +17,18 @@ func init() {
 	// and sourced files go back through the sandbox interpreter, awk runs
 	// as goawk with system() and file writes disabled. A wrapper would
 	// spawn the host's instead, with none of that (notWrappable).
-	registerCommands(commandSpec{validate: validateBashArgs, notWrappable: true, revalidatesItself: true, inProcess: true}, "bash", "sh")
-	registerCommands(commandSpec{validate: validateAwkArgs, notWrappable: true, revalidatesItself: true, inProcess: true}, "awk")
+	registerCommands(commandSpec{
+		validate: validateBashArgs, notWrappable: true, revalidatesItself: true, inProcess: true,
+		run: func(ctx context.Context, s *Sandbox, args []string, _ execEnv) (bool, error) {
+			return true, s.executeBash(ctx, args)
+		},
+	}, "bash", "sh")
+	registerCommands(commandSpec{
+		validate: validateAwkArgs, notWrappable: true, revalidatesItself: true, inProcess: true,
+		run: func(ctx context.Context, _ *Sandbox, args []string, _ execEnv) (bool, error) {
+			return true, executeAwk(ctx, args)
+		},
+	}, "awk")
 	registerCommands(commandSpec{validate: validateSourceArgs}, "source", ".")
 	// At the top level `time` is a shell keyword (a TimeClause whose inner
 	// command is walked and validated); as a real /usr/bin/time exec it is

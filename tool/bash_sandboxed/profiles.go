@@ -30,9 +30,12 @@ var profileCommands = map[string]commandSpec{
 	"cargo": {validate: func(s *Sandbox, args []*syntax.Word) error {
 		return validateCargoArgs(args, s.extraAllowsTokens("cargo", "publish"))
 	}},
-	"deno": {validate: func(s *Sandbox, args []*syntax.Word) error {
-		return validateDenoArgs(args, s.extraAllowsTokens("deno", "publish"), s.getConfig().ProfileOption("deno", "allow_import"))
-	}},
+	"deno": {
+		validate: func(s *Sandbox, args []*syntax.Word) error {
+			return validateDenoArgs(args, s.extraAllowsTokens("deno", "publish"), s.getConfig().ProfileOption("deno", "allow_import"))
+		},
+		prepareExec: denoPrepareExec,
+	},
 	"uv": {validate: func(s *Sandbox, args []*syntax.Word) error {
 		return validateUvArgs(args, s.extraAllowsTokens("uv", "publish"))
 	}},
@@ -45,9 +48,9 @@ var profileCommands = map[string]commandSpec{
 	// it is given, like rustc, so it has no validator; nor has xcodegen,
 	// whose spec's preGenCommand/postGenCommand run under the OS sandbox
 	// like a build script.
-	"xcodebuild":   {validate: validateXcodebuildArgs},
-	"xcrun":        {validate: validateXcrunArgs, unwrap: unwrapXcrunArgs},
-	"swift":        {validate: validateSwiftArgs},
+	"xcodebuild":   {validate: validateXcodebuildArgs, prepareExec: xcodePrepareExec},
+	"xcrun":        {validate: validateXcrunArgs, unwrap: unwrapXcrunArgs, prepareExec: xcodePrepareExec},
+	"swift":        {validate: validateSwiftArgs, prepareExec: xcodePrepareExec},
 	"xcode-select": {validate: validateXcodeSelectArgs},
 }
 

@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -373,6 +374,17 @@ func xcodeDisableNestedSandbox(args []string) []string {
 			return args
 		}
 		return slices.Concat(args[:1], []string{opt}, args[1:])
+	}
+	return args
+}
+
+// xcodePrepareExec is the prepareExec of swift, xcodebuild, and xcrun:
+// SwiftPM (under swift and xcodebuild) sandboxes package manifests with a
+// sandbox-exec of its own, which macOS refuses inside the worker's, so turn
+// it off where the worker's sandbox confines them instead.
+func xcodePrepareExec(ctx context.Context, s *Sandbox, args []string, x execEnv) []string {
+	if x.useOSSandbox && !s.execIsUnsandboxed(ctx, args) {
+		return xcodeDisableNestedSandbox(args)
 	}
 	return args
 }

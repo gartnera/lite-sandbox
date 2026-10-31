@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -67,6 +68,24 @@ type commandSpec struct {
 	// its file operands with the host's descriptors, so a standard-stream
 	// name (/dev/stdout) there is not the command's own (isStdStreamArg).
 	inProcess bool
+
+	// prepareExec rewrites the expanded argv once every gate has passed and
+	// before it runs, to make the command honor the sandbox's policy
+	// (deno's permission flags) or work inside it (SwiftPM's nested
+	// sandbox).
+	prepareExec func(ctx context.Context, s *Sandbox, args []string, x execEnv) []string
+	// run executes the command in place of a host program: awk as goawk,
+	// bash and sh through the sandbox interpreter, python in monty.
+	// handled is false to run it the ordinary way after all.
+	run func(ctx context.Context, s *Sandbox, args []string, x execEnv) (handled bool, err error)
+}
+
+// execEnv is what the ExecHandler hands a command's prepareExec and run: the
+// boundary it runs under and whether it runs in the OS sandbox.
+type execEnv struct {
+	useOSSandbox                        bool
+	readAllowedPaths, writeAllowedPaths []string
+	sets                                resolvedPathSets
 }
 
 // argValidator is a per-command argument validator. It receives the

@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -126,9 +127,23 @@ func pythonNonPathArgIndices(args []string) map[int]bool {
 // none of monty's isolation: arbitrary file access, subprocess, and
 // network, outside every layer of this sandbox (notWrappable; see
 // pythonOptedOutToHost for the exception).
+//
+// run dispatches them to monty; sets is the authorization input for its
+// OS-call handler, which keeps Python file I/O inside the same boundary as
+// bash. An explicit extra_commands / unsandboxed_commands entry is the
+// exception: naming python there is a deliberate request for the real
+// interpreter (monty is a subset and cannot import third-party packages),
+// so it runs the ordinary way. Those entries already bypass validation by
+// design — this only decides which interpreter runs.
 var pythonCommandSpec = commandSpec{
 	validate:     validatePythonArgs,
 	nonPathArgs:  pythonNonPathArgIndices,
 	notWrappable: true,
 	inProcess:    true,
+	run: func(ctx context.Context, s *Sandbox, args []string, x execEnv) (bool, error) {
+		if s.pythonExplicitlyRequested(args) {
+			return false, nil
+		}
+		return true, s.executePython(ctx, args, x.sets)
+	},
 }
