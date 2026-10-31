@@ -354,6 +354,12 @@ exec sh -c "$*"
 	if !strings.Contains(out, "home=.") {
 		t.Errorf("%s ran with $HOME set: %q", cmd, out)
 	}
+	// So does an rsync under a wrapper, which runs in the shared worker, even
+	// with $HOME set by the command.
+	cmd = "HOME=" + work + " timeout 60 rsync -a ./src/ box:" + work + "/viatimeout/"
+	if out := run(cmd); !strings.Contains(out, "home=.") || strings.Contains(out, "sandbox-test-key") {
+		t.Errorf("%s ran with $HOME set or reached the agent: %q", cmd, out)
+	}
 	if out := run("bash -c 'rsync -a ./src/ box:" + work + "/viabash/'"); strings.Contains(out, "sandbox-test-key") {
 		t.Errorf("rsync run by bash reached the agent: %q", out)
 	}

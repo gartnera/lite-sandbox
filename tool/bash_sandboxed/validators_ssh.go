@@ -626,7 +626,7 @@ func validateSSHWrappedInput(s *Sandbox, wrapper string, replace []string, args 
 // is a remote operand, so the input could name a host or an option the
 // check never sees.
 func errCopyWrapped(wrapper, name string) error {
-	return fmt.Errorf("%s %s is not allowed: the input %s adds could name a host or an option; run %s directly (rsync takes a list of files with --files-from)", wrapper, name, wrapper, name)
+	return fmt.Errorf("%s %s is not allowed: the input %s adds could name a host or an option; run %s directly (rsync takes a list of remote files with --files-from)", wrapper, name, wrapper, name)
 }
 
 // validateSSHUnderXargs is validateSSHWrappedInput for an ssh or sshpass

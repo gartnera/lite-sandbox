@@ -203,9 +203,9 @@ takes neither direction of copy. Every remote operand must name a
 local copy, held to the path checks like `cp`.
 
 Local paths are held to the path boundary: what the copy reads (the local
-sources, `-i`, `--exclude-from`, `--include-from`, `--files-from`, and
-`--compare-dest` and `--copy-dest`) must be readable, and what it writes (a
-local destination, `--log-file`, the local sources with
+sources, `-i`, `--exclude-from`, `--include-from`, a local `--files-from`
+list, and `--compare-dest` and `--copy-dest`) must be readable, and what it
+writes (a local destination, `--log-file`, the local sources with
 `--remove-source-files`, and `--backup-dir`, `--temp-dir`, `--link-dest`, and
 an absolute `--partial-dir`) must be writable. The receiver's directories
 (`--backup-dir`, ...) are checked only when the destination is local, a
@@ -220,8 +220,9 @@ Refused:
   `RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_SHELL`, and `RSYNC_PARTIAL_DIR`
   can't be set. The option parser rsync uses reads aliases from
   `$HOME/.popt`, and an alias can add any option, so rsync runs without
-  `$HOME` (`rsync -C` then skips `~/.cvsignore`; ssh finds `~/.ssh` without
-  it), and `~/.popt` is
+  `$HOME`, under a wrapper (`timeout`, `nice`, ...) too, and
+  `env HOME=... rsync` is refused (`rsync -C` then skips `~/.cvsignore`; ssh
+  finds `~/.ssh` without it), and `~/.popt` is
   [write-denied](configuration.md#denials-read-false-write-false-denylist-mode)
   like `~/.ssh`, for the rsync you run yourself;
 - scp's `-A` (agent forwarding), `-F` other than `-F none`, the `-o` keys ssh
@@ -236,6 +237,10 @@ Refused:
   local source; and, into a local destination, `rsync -K`, which writes
   through symlinked directories there, and `--trust-sender`, which drops
   rsync's checks of what a remote sender sends;
+- `--files-from` with a local source: the names in the list aren't checked,
+  and rsync follows a symlinked directory in their paths (`link/secret`) out
+  of the source; name the files as operands. A list of remote files, pulled
+  from a host, is fine;
 - rules read from files the path checks don't see: rsync's merge and dir-merge
   filter rules (`-f '. rules'`, `-f ': .rsync-filter'`, `-F`); use
   `--exclude-from` and `--include-from`;
@@ -247,7 +252,8 @@ and an unquoted glob or brace must come after a `/` (`./*.log`,
 `scratch-vm:/var/log/*.log`): before one, this machine's shell could expand
 it into an option or a `host:` operand. `xargs` and `find -exec` may not run
 scp or rsync, since the words they add could name a host or, for rsync, which
-reads options anywhere, an option; give rsync a list with `--files-from`.
+reads options anywhere, an option; give rsync a list of remote files with
+`--files-from`.
 `sshpass -e scp ...` and `sshpass -e rsync ...` are checked the same way.
 
 Without a `write: true` host, `allowlist` mode refuses scp and rsync and names

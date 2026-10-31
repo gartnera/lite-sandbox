@@ -526,6 +526,11 @@ func validateEnvArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := s.checkEnvAssign(name, val); err != nil {
 			return err
 		}
+		// The sandbox drops $HOME from rsync's environment (stripRsyncHome),
+		// and env would set it again: popt reads aliases from $HOME/.popt.
+		if name == "HOME" && rsyncInvocation(wordLits(args[idx:])) != nil {
+			return fmt.Errorf("env HOME=... rsync is not allowed: rsync reads option aliases from $HOME/.popt, which can add any option")
+		}
 	}
 	return validateSubCommand(s, args[idx:])
 }

@@ -60,6 +60,7 @@ type copyArgs struct {
 	destWrites    []string // --backup-dir, --temp-dir, --link-dest: on the receiver
 	destReads     []string // --compare-dest, --copy-dest: on the receiver
 	partialDir    string   // --partial-dir: on the receiver
+	filesFrom     string   // --files-from, local or remote: the files sent
 }
 
 // refuse records the first refused option; the parse goes on so the path
@@ -514,7 +515,11 @@ func (c *copyArgs) option(name, val string) {
 			c.reads = append(c.reads, val)
 		}
 	case rsyncFilesFrom:
-		if val == "" || val == "-" {
+		if val == "" {
+			return
+		}
+		c.filesFrom = val
+		if val == "-" {
 			return
 		}
 		if o := rsyncOperand(val); o.remote {
@@ -681,6 +686,12 @@ func (c *copyArgs) rsyncSides() {
 	if c.followsLinks != "" && localSender {
 		c.refuse("rsync %s from a local source is not allowed: it follows symlinks out of the files it was given", c.followsLinks)
 	}
+	if c.filesFrom != "" && localSender {
+		// The list's names are read under the source unchecked, and a
+		// symlinked directory in one is followed (only the last component is
+		// copied as a symlink), out of the source.
+		c.refuse("rsync --files-from=%s from a local source is not allowed: the files it lists are not checked, and rsync follows symlinked directories in their paths; name the files as operands", c.filesFrom)
+	}
 	dest := c.localDest()
 	if dest == "" {
 		return
@@ -755,6 +766,19 @@ func copyNonPathArgIndices(args []string) map[int]bool {
 	return skip
 }
 
+// rsyncInvocation returns the rsync argv that args runs, directly, by
+// sshpass, or under wrappers (timeout, env, nice, ...), or nil.
+func rsyncInvocation(args []string) []string {
+	args = unwrapWrapperArgs(args)
+	if len(args) > 0 && args[0] == "sshpass" {
+		args = sshpassCopyArgs(args)
+	}
+	if len(args) == 0 || args[0] != "rsync" {
+		return nil
+	}
+	return args
+}
+
 // sshpassCopyArgs returns the scp or rsync argv sshpass runs, or nil.
 func sshpassCopyArgs(args []string) []string {
 	cmdIdx, _, _, err := parseSSHPassArgs(args)
@@ -819,9 +843,17 @@ func checkCopyArgv(argv []string, cfg *config.SSHConfig) error {
 	if c.noCopy {
 		return nil
 	}
-	for _, o := range append(slices.Clone(c.sources), derefOperand(c.dest)...) {
+	operands := slices.Clone(c.sources)
+	if c.dest != nil {
+		operands = append(operands, *c.dest)
+	}
+	hosts := slices.Clone(c.hosts)
+	for _, o := range operands {
 		if o.daemon {
 			return fmt.Errorf("%s %s is not allowed: it names an rsync daemon; copy over ssh (host:path)", name, o.word)
+		}
+		if o.remote {
+			hosts = append(hosts, o.host)
 		}
 	}
 	for _, h := range sshJumpHostsAll(c.jumps) {
@@ -829,13 +861,7 @@ func checkCopyArgv(argv []string, cfg *config.SSHConfig) error {
 			return tagRule(ruleArgValidator, name, fmt.Errorf("%s through %q is not allowed: it is not one of the ssh hosts; the user can add it with `%s`", name, h, sshHostsFix(h)))
 		}
 	}
-	var hosts []string
-	for _, o := range append(slices.Clone(c.sources), derefOperand(c.dest)...) {
-		if o.remote {
-			hosts = append(hosts, o.host)
-		}
-	}
-	for _, h := range append(hosts, c.hosts...) {
+	for _, h := range hosts {
 		entry := cfg.Host(h)
 		switch {
 		case entry == nil:
@@ -847,13 +873,6 @@ func checkCopyArgv(argv []string, cfg *config.SSHConfig) error {
 		}
 	}
 	return nil
-}
-
-func derefOperand(o *copyOperand) []copyOperand {
-	if o == nil {
-		return nil
-	}
-	return []copyOperand{*o}
 }
 
 // validateCopyCommand is scp's and rsync's argument validator. Like ssh's,

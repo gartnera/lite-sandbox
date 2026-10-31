@@ -145,7 +145,8 @@ func TestValidateRsyncCommand(t *testing.T) {
 		{command: "rsync -a ./d box: --exclude=node_modules/ --exclude '*.o'"},
 		{command: "rsync -a --exclude-from=./excludes ./d box:"},
 		{command: "rsync -a --exclude-from=- ./d box:"},
-		{command: "rsync -a --files-from=./list ./ box:/srv/"},
+		{command: "rsync -a --files-from=./list box:/srv/ ./copy/"},
+		{command: "rsync -a --files-from=- box:/srv/ ./copy/"},
 		{command: "rsync -a --files-from=box:/srv/list box:/srv/ ./copy/"},
 		{command: "rsync -a --files-from=:/srv/list box:/srv/ ./copy/"},
 		{command: "rsync -a -f '- *.tmp' -f '+ src/' ./d box:"},
@@ -209,7 +210,12 @@ func TestValidateRsyncCommand(t *testing.T) {
 		{command: "rsync -a " + outside + " box:", errSubstr: "outside"},
 		{command: "rsync -a box:/srv/ " + outsideDir, errSubstr: "outside"},
 		{command: "rsync -a --exclude-from=" + outside + " ./d box:", errSubstr: "outside"},
-		{command: "rsync -a --files-from=" + outside + " ./ box:", errSubstr: "outside"},
+		{command: "rsync -a --files-from=" + outside + " box:/srv/ ./copy/", errSubstr: "outside"},
+		// The listed names are read unchecked from a local source, through
+		// any symlinked directory in their paths.
+		{command: "rsync -a --files-from=./list ./ box:/srv/", errSubstr: "--files-from=./list from a local source is not allowed"},
+		{command: "rsync -a --files-from=- ./ box:/srv/", errSubstr: "--files-from=- from a local source is not allowed"},
+		{command: "rsync -a --files-from=box:/srv/list ./ box:/srv/", errSubstr: "from a local source is not allowed"},
 		{command: "rsync -a --log-file=" + outsideDir + "/log ./d box:", errSubstr: "outside"},
 		{command: "rsync -a --backup-dir=" + outsideDir + " box:/srv/ ./copy/", errSubstr: "outside"},
 		{command: "rsync -a --backup-dir=../../.. box:/srv/ ./copy/", errSubstr: "outside"},
@@ -243,6 +249,9 @@ func TestCopyUnderSSHPassAndWrappers(t *testing.T) {
 		{command: "sshpass -e rsync * box:", errSubstr: "unquoted glob"},
 		{command: "timeout 60 rsync -a ./d box:"},
 		{command: "timeout 60 rsync -a ./d evil:", errSubstr: `"evil"`},
+		{command: "env HOME=/tmp rsync -a ./d box:", errSubstr: "env HOME=... rsync is not allowed"},
+		{command: "env HOME=. timeout 60 sshpass -e rsync -a ./d box:", errSubstr: "env HOME=... rsync is not allowed"},
+		{command: "env HOME=. timeout 60 scp ./d box:"},
 		{command: "xargs rsync -a -t box:/srv/", errSubstr: "xargs rsync is not allowed"},
 		{command: "xargs -I{} scp {} box:", errSubstr: "xargs scp is not allowed"},
 		{command: "xargs sshpass -e rsync ./d box:", errSubstr: "xargs rsync is not allowed"},
@@ -381,14 +390,19 @@ func TestCopyRuntimeValidation(t *testing.T) {
 // TestStripRsyncHome: rsync, run directly or by sshpass, gets no $HOME, from
 // which popt would read option aliases.
 func TestStripRsyncHome(t *testing.T) {
-	for _, args := range [][]string{{"rsync", "-a", "./d", "box:"}, {"sshpass", "-e", "rsync", "./d", "box:"}} {
+	for _, args := range [][]string{
+		{"rsync", "-a", "./d", "box:"},
+		{"sshpass", "-e", "rsync", "./d", "box:"},
+		{"timeout", "60", "rsync", "./d", "box:"},
+		{"nice", "-n", "5", "env", "TZ=UTC", "sshpass", "-e", "rsync", "./d", "box:"},
+	} {
 		env := map[string]string{"HOME": "/h", "PATH": "/bin"}
 		stripRsyncHome(args, env)
 		if _, ok := env["HOME"]; ok || env["PATH"] != "/bin" {
 			t.Errorf("%v: %v", args, env)
 		}
 	}
-	for _, args := range [][]string{{"scp", "f", "box:"}, {"sshpass", "-e", "ssh", "box"}, {"ls"}} {
+	for _, args := range [][]string{{"scp", "f", "box:"}, {"sshpass", "-e", "ssh", "box"}, {"timeout", "60", "ls"}, {"ls"}} {
 		env := map[string]string{"HOME": "/h"}
 		stripRsyncHome(args, env)
 		if env["HOME"] != "/h" {
