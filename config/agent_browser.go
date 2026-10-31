@@ -3,60 +3,54 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 )
 
 // AgentBrowserProfile is the name of the profile that whitelists
 // agent-browser (https://github.com/vercel-labs/agent-browser).
 const AgentBrowserProfile = "agent-browser"
 
-// agentBrowserOutputDirs are the directories under ~/.agent-browser/tmp where
-// agent-browser writes a screenshot, PDF, HAR file, or trace that the command
-// names no path for, and prints the path so the agent can read it back.
-var agentBrowserOutputDirs = []string{"screenshots", "pdfs", "har", "traces"}
-
 // agentBrowserPaths is the agent-browser profile's paths:
 //
-//   - read: the browsers agent-browser launches when the command names none —
-//     Chrome for Testing from `agent-browser install` (~/.agent-browser/browsers),
-//     and Playwright's and Puppeteer's caches, which agent-browser also
-//     searches — and the user's own defaults (~/.agent-browser/config.json).
-//     None of them is writable: a browser binary planted there would run
-//     outside the sandbox the next time the user runs agent-browser, and the
-//     config names the browser binary, its launch arguments, and extensions.
-//   - read and write: the output directories under ~/.agent-browser/tmp, where
-//     a screenshot or PDF taken without a path lands, so the agent can read it.
+//   - ~/.agent-browser, readable and writable by agent-browser alone: a grant
+//     scoped to it (internal, with commands: [agent-browser]), so it runs in
+//     an OS sandbox worker of its own that has the directory, and every other
+//     worker hides it, in every mode. That gives agent-browser everything it
+//     keeps there — the browsers `agent-browser install` downloads, the
+//     user's config, saved sessions (cookies and storage of the sites logged
+//     into), the auth vault and its key, plugins and skills — while a
+//     dependency's install script, a test, or a program the agent writes can
+//     read none of it. agent-browser itself takes no argument validation, so
+//     whatever it can read the agent can have it read (open a file:// URL,
+//     upload a file), and what it writes there (a plugin, the config, a
+//     browser) is what the user's own agent-browser runs later.
+//   - ~/.agent-browser/tmp, readable and writable by the agent: a screenshot
+//     or PDF taken without a path lands under it, and agent-browser prints the
+//     path for the agent to read back. The shared worker still hides it with
+//     the rest of ~/.agent-browser; the agent's own file tools can read it.
+//   - Playwright's and Puppeteer's browser caches, readable, when they exist:
+//     agent-browser launches a Chrome from there when it has none of its own.
 //
-// The rest of ~/.agent-browser stays hidden by the hidden home: the saved
-// sessions (cookies and storage of the sites the user logged into), the auth
-// vault and its encryption key, the plugins and skills the user installed,
-// and the sockets of the user's own daemons. The daemons started in the
-// sandbox use a socket directory of their own (AgentBrowserSocketDir).
+// The scoped worker's daemons put their sockets in AgentBrowserSocketDir.
 func agentBrowserPaths() []PathEntry {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return nil
 	}
 	yes := true
-	var out []PathEntry
-	root := filepath.Join(home, ".agent-browser")
-	reads := []string{
-		filepath.Join(root, "browsers"),
-		filepath.Join(root, "config.json"),
-		agentBrowserPlaywrightCache(home),
-		agentBrowserPuppeteerCache(home),
+	root := ensureDir(filepath.Join(home, ".agent-browser"))
+	if root == "" {
+		return nil
 	}
-	for _, p := range reads {
-		if p == "" {
-			continue
-		}
+	ensureDir(AgentBrowserSocketDir())
+	out := []PathEntry{
+		{Path: root, Read: &yes, Write: &yes, Internal: true, Commands: []string{"agent-browser"}},
+	}
+	if tmp := ensureDir(filepath.Join(root, "tmp")); tmp != "" {
+		out = append(out, PathEntry{Path: tmp, Read: &yes, Write: &yes})
+	}
+	for _, p := range []string{agentBrowserPlaywrightCache(home), agentBrowserPuppeteerCache(home)} {
 		if _, err := os.Stat(p); err == nil {
 			out = append(out, PathEntry{Path: p, Read: &yes})
-		}
-	}
-	for _, d := range agentBrowserOutputDirs {
-		if p := ensureDir(filepath.Join(root, "tmp", d)); p != "" {
-			out = append(out, PathEntry{Path: p, Read: &yes, Write: &yes})
 		}
 	}
 	return out
@@ -82,15 +76,19 @@ func agentBrowserPuppeteerCache(home string) string {
 }
 
 // AgentBrowserSocketDir returns the socket directory (AGENT_BROWSER_SOCKET_DIR)
-// of the agent-browser daemons started in the OS sandbox worker. agent-browser
-// keeps a daemon per session that holds the browser open between commands,
-// and by default puts its socket in $XDG_RUNTIME_DIR/agent-browser or
-// ~/.agent-browser, which the worker hides (the hidden home), so the daemon
-// could not start there. The temp dir is writable in the worker, and on Linux
-// it is the worker's own tmpfs, so the daemon (and the browser) run, and die,
-// with the worker. Every command a worker runs gets it while the profile is
-// enabled, so agent-browser started by a script or a test finds the same
-// daemons.
+// of the agent-browser daemons lite-sandbox starts in agent-browser's worker.
+// agent-browser keeps a daemon per session that holds the browser open between
+// commands, and a command reuses whichever daemon's socket it finds, wherever
+// that daemon runs. Its default directories are $XDG_RUNTIME_DIR/agent-browser
+// and ~/.agent-browser, where the user's own daemons — unsandboxed, possibly
+// logged in with the user's own Chrome profile — keep theirs; this one is
+// apart from both, inside ~/.agent-browser, so the shared worker hides it with
+// the rest of the directory and no other command can drive the sandbox's
+// daemons either.
 func AgentBrowserSocketDir() string {
-	return filepath.Join(os.TempDir(), "lite-sandbox-ab-"+strconv.Itoa(os.Getuid()))
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".agent-browser", "lite-sandbox")
 }

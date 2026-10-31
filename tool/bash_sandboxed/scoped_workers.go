@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -130,6 +131,13 @@ func (s *Sandbox) execInScopedWorker(ctx context.Context, args []string, scope c
 	env["PATH"] = safePath(env["PATH"], writable)
 	scopedGitEnv(env, s.signsInScope(scope, cfg))
 	s.sshScopedEnv(ctx, args, scope, cfg, env)
+	// agent-browser's daemons use a socket directory of the sandbox's own, not
+	// the user's (see config.AgentBrowserSocketDir).
+	if slices.Contains(scope.Commands, "agent-browser") && cfg.ProfileEnabled(config.AgentBrowserProfile) {
+		if dir := config.AgentBrowserSocketDir(); dir != "" {
+			env["AGENT_BROWSER_SOCKET_DIR"] = dir
+		}
+	}
 
 	argv := append([]string{bin}, args[1:]...)
 	exitCode, err := w.Exec(ctx, argv, hc.Dir, env, hc.Stdin, hc.Stdout, hc.Stderr)

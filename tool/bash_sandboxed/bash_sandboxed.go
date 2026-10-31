@@ -1796,12 +1796,6 @@ func (s *Sandbox) execInWorker(ctx context.Context, args []string) error {
 	}
 	stripSSHPass(args, envMap)
 	stripRsyncHome(args, envMap)
-	// agent-browser's default socket directories are hidden in the worker;
-	// point its daemons at one the worker can write (see
-	// config.AgentBrowserSocketDir).
-	if s.getConfig().ProfileEnabled(config.AgentBrowserProfile) {
-		envMap["AGENT_BROWSER_SOCKET_DIR"] = config.AgentBrowserSocketDir()
-	}
 
 	exitCode, err := w.Exec(ctx, args, hc.Dir, envMap, hc.Stdin, hc.Stdout, hc.Stderr)
 	if err != nil {

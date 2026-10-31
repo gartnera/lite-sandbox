@@ -205,7 +205,7 @@ var builtinProfiles = []Profile{
 	},
 	{
 		Name:        AgentBrowserProfile,
-		Description: "agent-browser, browser automation for agents; its installed browsers (read-only) and its screenshot/PDF output dirs",
+		Description: "agent-browser, browser automation for agents; ~/.agent-browser (its browsers, sessions, and auth vault) for agent-browser alone",
 		Commands:    whitelist("agent-browser"),
 		paths:       agentBrowserPaths,
 	},

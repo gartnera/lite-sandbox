@@ -7,72 +7,70 @@ import (
 	"testing"
 )
 
-// TestAgentBrowserPaths checks the profile grants agent-browser's installed
-// browsers and the user's config read-only, its output dirs read-write
-// (creating them), and nothing else under ~/.agent-browser: not the saved
-// sessions, the auth vault or its key, nor the user's daemon sockets.
+// TestAgentBrowserPaths checks the profile gives ~/.agent-browser to
+// agent-browser alone (a scoped, internal read-write grant), its tmp output
+// dir to the agent, and the browser caches that exist read-only.
 func TestAgentBrowserPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", "")
 	t.Setenv("PUPPETEER_CACHE_DIR", "")
+	if err := os.MkdirAll(filepath.Join(home, ".cache", "ms-playwright"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	root := filepath.Join(home, ".agent-browser")
-	for _, d := range []string{"browsers", "sessions", "auth", filepath.Join("..", ".cache", "ms-playwright")} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, f := range []string{"config.json", ".encryption-key", "default.sock"} {
-		if err := os.WriteFile(filepath.Join(root, f), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 
-	var reads, writes []string
-	for _, e := range agentBrowserPaths() {
-		if e.Read != nil && *e.Read {
-			reads = append(reads, e.Path)
+	got := agentBrowserPaths()
+	if len(got) != 3 {
+		t.Fatalf("paths = %+v, want 3 entries", got)
+	}
+	scoped := got[0]
+	if scoped.Path != root || !scoped.GrantsWrite() || !scoped.Internal || !slices.Equal(scoped.Commands, []string{"agent-browser"}) {
+		t.Errorf("first entry = %+v, want ~/.agent-browser read-write, internal, scoped to agent-browser", scoped)
+	}
+	tmp := got[1]
+	if tmp.Path != filepath.Join(root, "tmp") || !tmp.GrantsWrite() || tmp.Internal || tmp.Scoped() {
+		t.Errorf("second entry = %+v, want ~/.agent-browser/tmp read-write for the agent", tmp)
+	}
+	if pw := got[2]; pw.Path != filepath.Join(home, ".cache", "ms-playwright") || pw.GrantsWrite() {
+		t.Errorf("third entry = %+v, want the Playwright cache read-only", pw)
+	}
+	for _, d := range []string{root, filepath.Join(root, "tmp"), AgentBrowserSocketDir()} {
+		if !dirExists(d) {
+			t.Errorf("%s not created", d)
 		}
-		if e.Write != nil && *e.Write {
-			writes = append(writes, e.Path)
-		}
 	}
-	outputs := []string{
-		filepath.Join(root, "tmp", "screenshots"),
-		filepath.Join(root, "tmp", "pdfs"),
-		filepath.Join(root, "tmp", "har"),
-		filepath.Join(root, "tmp", "traces"),
-	}
-	wantReads := append([]string{
-		filepath.Join(root, "browsers"),
-		filepath.Join(root, "config.json"),
-		filepath.Join(home, ".cache", "ms-playwright"),
-	}, outputs...)
-	slices.Sort(reads)
-	slices.Sort(wantReads)
-	if !slices.Equal(reads, wantReads) {
-		t.Errorf("read grants = %v, want %v", reads, wantReads)
-	}
-	if !slices.Equal(writes, outputs) {
-		t.Errorf("write grants = %v, want %v", writes, outputs)
-	}
-	for _, d := range outputs {
-		if _, err := os.Stat(d); err != nil {
-			t.Errorf("output dir %s not created: %v", d, err)
-		}
+	if !underDir(AgentBrowserSocketDir(), root) {
+		t.Errorf("socket dir %s is not under %s, which other workers hide", AgentBrowserSocketDir(), root)
 	}
 }
 
-// TestAgentBrowserPaths_MissingBrowsers checks a browser cache that doesn't
-// exist is not granted (nothing to bind).
-func TestAgentBrowserPaths_MissingBrowsers(t *testing.T) {
+// TestAgentBrowserProfile_Scope checks enabling the profile routes
+// agent-browser to a worker of its own and hides ~/.agent-browser from
+// every other worker.
+func TestAgentBrowserProfile_Scope(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PLAYWRIGHT_BROWSERS_PATH", "")
 	t.Setenv("PUPPETEER_CACHE_DIR", "")
-	for _, e := range agentBrowserPaths() {
-		if e.Write == nil || !*e.Write {
-			t.Errorf("unexpected read-only grant %s", e.Path)
+	cfg := &Config{Profiles: []ProfileEntry{{Name: AgentBrowserProfile}}}
+	eff := cfg.Effective()
+	if _, ok := eff.ScopeForCommand("agent-browser"); !ok {
+		t.Fatal("agent-browser has no scope of its own")
+	}
+	root := filepath.Join(home, ".agent-browser")
+	var hidden bool
+	for _, d := range eff.ScopedDeniedReadEntries() {
+		if d.Path == root {
+			hidden = true
 		}
 	}
+	if !hidden {
+		t.Errorf("~/.agent-browser is not hidden from other workers: %+v", eff.ScopedDeniedReadEntries())
+	}
+}
+
+func underDir(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !filepath.IsAbs(rel) && (len(rel) < 3 || rel[:3] != "../")
 }
