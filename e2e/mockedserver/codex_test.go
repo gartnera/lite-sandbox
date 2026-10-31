@@ -1,7 +1,9 @@
 package mockedserver
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
@@ -46,14 +48,31 @@ func TestCodex(t *testing.T) {
 func runCodex(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string) agentRun {
 	t.Helper()
 	model := startModel(t, calls)
+	_, project, environ := codexEnv(t, model)
 
-	// CODEX_HOME isolates Codex's config, auth, sessions, and logs. The
-	// provider half of config.toml is what a user would already have; the
-	// installer appends its MCP server table and hook block to the same file.
-	codexHome := t.TempDir()
-	home := t.TempDir()
-	project := newProject(t)
-	environ := env(home,
+	installSandbox(t, "codex", environ, installFlags...)
+
+	// Codex skips hooks it has not been told to trust (normally done in the TUI
+	// via /hooks, which records the hook's hash); the bypass flag runs the
+	// configured hooks for this invocation without that step. Codex's own
+	// sandbox for the built-in shell is turned off: lite-sandbox's hook is what
+	// is under test here, and Codex's Linux sandbox (bubblewrap) needs
+	// unprivileged user namespaces that CI runners may not grant.
+	output := runAgent(t, project, environ, bins.codex, "exec",
+		"--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--sandbox", "danger-full-access",
+		"--json", "-C", project, prompt)
+	return agentRun{model, output}
+}
+
+// codexEnv isolates Codex for one run against model: a CODEX_HOME whose
+// config.toml holds the provider half a user would already have, a project
+// directory, and the environment to run in.
+func codexEnv(t *testing.T, model *mockmodel.Server) (codexHome, project string, environ []string) {
+	t.Helper()
+	// CODEX_HOME isolates Codex's config, auth, sessions, and logs.
+	codexHome = t.TempDir()
+	project = newProject(t)
+	environ = env(t.TempDir(),
 		"CODEX_HOME="+codexHome,
 		"MOCK_API_KEY=dummy",
 	)
@@ -71,17 +90,57 @@ func runCodex(t *testing.T, calls []mockmodel.ToolCall, installFlags ...string) 
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(codexHome, "config.toml"), string(b))
+	return codexHome, project, environ
+}
 
-	installSandbox(t, "codex", environ, installFlags...)
+// TestCodexLaunch drives `lite-sandbox launch codex exec ...`: the MCP server,
+// directive, and (in the hook modes) the PreToolUse hook reach Codex as
+// command-line overrides, with nothing written to its config.toml.
+//
+//   - default: the built-in shell is removed outright (--disable shell_tool),
+//     so the model is not even offered exec_command, and the sandbox scenario
+//     runs through the MCP tool. The default --with-tool-hook only matches
+//     apply_patch and the file tools here, which the mock model isn't offered;
+//   - --bash-ast-hook-mode: no MCP server, and the hook validates the shell in
+//     place. This proves a hook passed with -c runs: launch adds the trust
+//     bypass Codex needs for it (the test passes none of its own).
+func TestCodexLaunch(t *testing.T) {
+	requireE2E(t)
+	shell := func(command string) mockmodel.ToolCall {
+		return mockmodel.ToolCall{Name: "exec_command", Arguments: map[string]any{"cmd": command}}
+	}
+	launch := func(t *testing.T, calls []mockmodel.ToolCall, launchFlags ...string) (agentRun, string) {
+		model := startModel(t, calls)
+		codexHome, project, environ := codexEnv(t, model)
+		before := readFile(t, filepath.Join(codexHome, "config.toml"))
+		args := append([]string{"launch"}, launchFlags...)
+		args = append(args, "codex", "exec", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--json", "-C", project, prompt)
+		output := runAgent(t, project, environ, bins.sandbox, args...)
+		// Codex itself records the project's trust in config.toml; what must not
+		// appear is anything of lite-sandbox's.
+		after := readFile(t, filepath.Join(codexHome, "config.toml"))
+		if !strings.HasPrefix(after, strings.TrimRight(before, "\n")) || strings.Contains(after, "lite-sandbox") {
+			t.Errorf("launch changed config.toml:\n%s", after)
+		}
+		if _, err := os.Stat(filepath.Join(codexHome, "AGENTS.md")); err == nil {
+			t.Error("launch wrote AGENTS.md")
+		}
+		return agentRun{model, output}, codexHome
+	}
 
-	// Codex skips hooks it has not been told to trust (normally done in the TUI
-	// via /hooks, which records the hook's hash); the bypass flag runs the
-	// configured hooks for this invocation without that step. Codex's own
-	// sandbox for the built-in shell is turned off: lite-sandbox's hook is what
-	// is under test here, and Codex's Linux sandbox (bubblewrap) needs
-	// unprivileged user namespaces that CI runners may not grant.
-	output := runAgent(t, project, environ, bins.codex, "exec",
-		"--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--sandbox", "danger-full-access",
-		"--json", "-C", project, prompt)
-	return agentRun{model, output}
+	t.Run("default", func(t *testing.T) {
+		calls := sandboxCalls(codexSandboxTool)
+		run, _ := launch(t, calls)
+		tools := assertConversation(t, run.output, run.Server, calls, codexSandboxTool, true)
+		if tools["exec_command"] {
+			t.Error("built-in shell still offered despite --disable shell_tool")
+		}
+		assertDirective(t, run.Server, "built-in shell tool is disabled for this session")
+	})
+	t.Run("bash-ast-hook-mode", func(t *testing.T) {
+		calls := []mockmodel.ToolCall{shell(blockedCommand), shell(allowedCommand)}
+		run, _ := launch(t, calls, "--bash-ast-hook-mode")
+		assertConversation(t, run.output, run.Server, calls, codexSandboxTool, false)
+		assertResult(t, lastResults(t, run.Server), 0, hookRejectedCommand)
+	})
 }

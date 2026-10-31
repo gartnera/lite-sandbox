@@ -2,10 +2,14 @@ package mockedserver
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
 )
 
 // crushSandboxTool is the sandbox bash tool under Crush's mcp_<server>_<tool>
@@ -29,13 +33,36 @@ func runCrush(t *testing.T, format string) {
 	calls := sandboxCalls(crushSandboxTool)
 	model := startModel(t, calls)
 
+	configDir, project, environ := crushEnv(t, model, format)
+
+	installSandbox(t, "crush", environ)
+	if _, err := os.Stat(filepath.Join(configDir, "crushrc")); (err == nil) != (format == "crushrc") {
+		t.Fatalf("install edited the wrong config file for %s", format)
+	}
+
+	output := runAgent(t, project, environ, bins.crush, "run", "--quiet", "--verbose", "--cwd", project, prompt)
+
+	tools := assertConversation(t, output, model, calls, crushSandboxTool, true)
+	if tools["bash"] {
+		t.Errorf("built-in bash tool still offered to the model")
+	}
+	if !tools["view"] {
+		t.Errorf("unrelated built-in tools were hidden too")
+	}
+	assertDirective(t, model, crushSandboxTool)
+}
+
+// crushEnv isolates Crush for one run against model and writes the user's own
+// global config in format (crushrc or crush.json). It returns the global
+// config directory, a project directory, and the environment.
+func crushEnv(t *testing.T, model *mockmodel.Server, format string) (configDir, project string, environ []string) {
+	t.Helper()
 	// Isolate Crush completely: config dir, data dir, and HOME all point at
 	// temp directories, so the real user's config is never read or written.
-	configDir := t.TempDir()
+	configDir = t.TempDir()
 	dataDir := t.TempDir()
-	home := t.TempDir()
-	project := newProject(t)
-	environ := env(home,
+	project = newProject(t)
+	environ = env(t.TempDir(),
 		"CRUSH_GLOBAL_CONFIG="+configDir,
 		"CRUSH_GLOBAL_DATA="+dataDir,
 		"XDG_DATA_HOME="+dataDir,
@@ -74,20 +101,57 @@ func runCrush(t *testing.T, format string) {
 		b, _ := json.MarshalIndent(cfg, "", "  ")
 		writeFile(t, filepath.Join(configDir, "crush.json"), string(b))
 	}
+	return configDir, project, environ
+}
 
-	installSandbox(t, "crush", environ)
-	if _, err := os.Stat(filepath.Join(configDir, "crushrc")); (err == nil) != (format == "crushrc") {
-		t.Fatalf("install edited the wrong config file for %s", format)
-	}
+// TestCrushLaunch drives `lite-sandbox launch crush run ...`. Crush is pointed
+// at a stand-in global config directory that loads the user's own (their
+// crushrc sourced, their crush.json linked) and adds the sandbox's rules, so:
+// the user's provider — which lives only in their config — must still work,
+// the sandbox tools replace the built-in bash, the directive and the user's
+// own CRUSH.md both reach the model, and the user's directory is unchanged.
+func TestCrushLaunch(t *testing.T) {
+	requireE2E(t)
+	for _, format := range []string{"crushrc", "crush.json"} {
+		t.Run(format, func(t *testing.T) {
+			calls := sandboxCalls(crushSandboxTool)
+			model := startModel(t, calls)
+			configDir, project, environ := crushEnv(t, model, format)
+			const memoryMarker = "USER-CRUSH-MD-MARKER"
+			writeFile(t, filepath.Join(configDir, "CRUSH.md"), memoryMarker)
+			before := snapshotDir(t, configDir)
 
-	output := runAgent(t, project, environ, bins.crush, "run", "--quiet", "--verbose", "--cwd", project, prompt)
+			output := runAgent(t, project, environ, bins.sandbox,
+				"launch", "crush", "run", "--quiet", "--verbose", "--cwd", project, prompt)
 
-	tools := assertConversation(t, output, model, calls, crushSandboxTool, true)
-	if tools["bash"] {
-		t.Errorf("built-in bash tool still offered to the model")
+			tools := assertConversation(t, output, model, calls, crushSandboxTool, true)
+			if tools["bash"] {
+				t.Errorf("built-in bash tool still offered to the model")
+			}
+			if !tools["view"] {
+				t.Errorf("unrelated built-in tools were hidden too")
+			}
+			assertDirective(t, model, crushSandboxTool)
+			assertDirective(t, model, memoryMarker)
+			if after := snapshotDir(t, configDir); !maps.Equal(before, after) {
+				t.Errorf("launch changed the user's config directory: %v -> %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+			}
+		})
 	}
-	if !tools["view"] {
-		t.Errorf("unrelated built-in tools were hidden too")
+}
+
+// snapshotDir maps each regular file directly in dir to its content.
+func snapshotDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertDirective(t, model, crushSandboxTool)
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			out[e.Name()] = readFile(t, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
 }
