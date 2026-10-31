@@ -286,6 +286,29 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// NamesDir reports whether the request names a --dir of its own.
+func (r Request) NamesDir() bool {
+	for _, a := range r.Args {
+		if a == "--" {
+			return false
+		}
+		if a == "--dir" || strings.HasPrefix(a, "--dir=") {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateGlobal rejects a request that cannot be approved for the global
+// config: one that names a --dir, which would make it a per-directory
+// override after all.
+func (r Request) ValidateGlobal() error {
+	if r.NamesDir() {
+		return errors.New("a config request approved for the global config cannot name --dir")
+	}
+	return nil
+}
+
 // subject is the approval subject of request r: its arguments as the agent
 // wrote them, before Scope. Those are what the hook and the server both read
 // from the same command, whereas the scoped arguments carry cwd, which the two
@@ -295,10 +318,27 @@ func (r Request) subject() approval.Subject {
 	return append(approval.Subject{"config"}, r.Args...)
 }
 
+// globalSubject is the approval subject of request r approved for the global
+// config rather than the project. It is a kind of its own, so a project
+// approval never runs a request globally. Only `lite-sandbox approve --global`
+// issues one: the PreToolUse hook never does.
+func (r Request) globalSubject() approval.Subject {
+	return append(approval.Subject{"config-global"}, r.Args...)
+}
+
 // Issue records a ticket for request r made from cwd. The hook calls it as it
 // asks the user to approve the call.
 func Issue(cwd string, r Request) error {
 	return approval.Issue(cwd, r.subject(), r.Command())
+}
+
+// IssueGlobal records a ticket for request r made from cwd, approved to run
+// against the global config, unscoped (see globalSubject).
+func IssueGlobal(cwd string, r Request) error {
+	if err := r.ValidateGlobal(); err != nil {
+		return err
+	}
+	return approval.Issue(cwd, r.globalSubject(), r.Command()+" (global)")
 }
 
 // ErrNoTicket is returned by Consume when no live ticket matches the request:
@@ -310,4 +350,13 @@ var ErrNoTicket = approval.ErrNoTicket
 // expired one.
 func Consume(cwd string, r Request) error {
 	return approval.Consume(cwd, r.subject())
+}
+
+// ConsumeGlobal takes a global ticket for request r made from cwd (see
+// IssueGlobal), returning ErrNoTicket when there is none.
+func ConsumeGlobal(cwd string, r Request) error {
+	if r.NamesDir() {
+		return ErrNoTicket
+	}
+	return approval.Consume(cwd, r.globalSubject())
 }

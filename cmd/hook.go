@@ -85,6 +85,14 @@ type hookOptions struct {
 	// it the call is pre-approved like any other and the sandbox's deny list
 	// refuses it. Set by --config-requests.
 	configRequests bool
+	// externalApproval hands the user's approval of config requests and
+	// prompted commands to something other than the agent's permission prompt
+	// (a Claude Code plugin that asks the user and then runs
+	// `lite-sandbox approve`). The hook still refuses a malformed config
+	// request, but records no ticket and answers no "ask": the call is
+	// pre-approved like any other sandbox call, and the server runs it only on
+	// the ticket that approval recorded. Set by --external-approval.
+	externalApproval bool
 }
 
 var hookFlags hookOptions
@@ -121,6 +129,8 @@ func init() {
 		"validate the built-in Bash command through the sandbox and allow it when it passes, instead of denying it")
 	hookCmd.Flags().BoolVar(&hookFlags.configRequests, "config-requests", false,
 		"ask the user to approve each `lite-sandbox config` command run with the sandbox's bash tool (the server runs only those the hook asked about)")
+	hookCmd.Flags().BoolVar(&hookFlags.externalApproval, "external-approval", false,
+		"with --config-requests: leave the approval of config requests and prompted commands to `lite-sandbox approve` (run by an approval plugin) instead of asking in the agent's permission prompt")
 	rootCmd.AddCommand(hookCmd)
 }
 
@@ -260,6 +270,11 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
+	if opts.externalApproval {
+		// The approval plugin asks the user and records the ticket
+		// (`lite-sandbox approve`); without one the server refuses the request.
+		return nil
+	}
 	if err := configrequest.Issue(cwd, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
@@ -280,7 +295,7 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 // pre-approved like any other, and the sandbox refuses the prompted command
 // for want of an approval.
 func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
-	if !opts.configRequests || !event.CanAsk() {
+	if !opts.configRequests || opts.externalApproval || !event.CanAsk() {
 		return nil
 	}
 	var args map[string]any
@@ -295,26 +310,42 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if cwd == "" {
 		return nil
 	}
-	// The hot path for every sandbox bash call: read the settings alone, and
-	// build a sandbox only when some entry asks.
-	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
-		return nil
+	prompted, err := askCommandPrompts(cwd, command)
+	if err != nil {
+		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
 	}
-	sb := configuredSandbox(cwd)
-	defer sb.Close()
-	prompted := sb.AskCommands(command)
 	if len(prompted) == 0 {
 		return nil
-	}
-	readPaths, writePaths := sandboxPaths(sb, cwd)
-	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
-		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
 	}
 	if err := approval.Issue(cwd, approval.CommandSubject(command), command); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the command for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+}
+
+// askCommandPrompts returns the commands entries with ask: true that command,
+// run from cwd, invokes — nil when none does — once the command has passed
+// validation as the server would run it once approved. An error is that
+// validation failing: a command the sandbox refuses anyway is not put to the
+// user.
+func askCommandPrompts(cwd, command string) ([]string, error) {
+	// The hot path for every sandbox bash call: read the settings alone, and
+	// build a sandbox only when some entry asks.
+	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+		return nil, nil
+	}
+	sb := configuredSandbox(cwd)
+	defer sb.Close()
+	prompted := sb.AskCommands(command)
+	if len(prompted) == 0 {
+		return nil, nil
+	}
+	readPaths, writePaths := sandboxPaths(sb, cwd)
+	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
+		return nil, err
+	}
+	return prompted, nil
 }
 
 // askReason is the "ask" reason for a command running the prompted

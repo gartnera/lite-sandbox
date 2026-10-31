@@ -33,7 +33,7 @@ func stubConfigCommand(t *testing.T) *[][]string {
 	t.Helper()
 	var runs [][]string
 	orig := runConfigCommand
-	runConfigCommand = func(_ context.Context, _ string, args []string) (string, error) {
+	runConfigCommand = func(_ context.Context, _ string, _ []string, args []string) (string, error) {
 		runs = append(runs, args)
 		return "Allowed make\n", nil
 	}

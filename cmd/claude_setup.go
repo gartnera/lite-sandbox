@@ -28,6 +28,10 @@ type claudeOptions struct {
 	// Only `launch` sets it: it configures one session, whereas `install`
 	// writes settings that apply to every project the user opens.
 	permissionMode string
+	// externalApproval registers the hook with --external-approval: an
+	// approval plugin, not Claude Code's permission prompt, asks the user
+	// about config requests and prompted commands (see `lite-sandbox approve`).
+	externalApproval bool
 }
 
 // claudePlan is what a set of claudeOptions resolves to: the decisions both
@@ -75,6 +79,9 @@ func (o claudeOptions) plan(binPath string) claudePlan {
 	p.denyBash = !(o.redirectBash || o.bashASTHookMode)
 	p.alwaysLoad = o.alwaysLoad && p.configMCP
 	p.hookCommand, p.hookMatcher = claudeHookPlan(binPath, wantHook, p.validateBash, p.governFS, p.configMCP)
+	if o.externalApproval && p.configMCP {
+		p.hookCommand += " --external-approval"
+	}
 	return p
 }
 

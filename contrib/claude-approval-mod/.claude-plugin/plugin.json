@@ -1,0 +1,5 @@
+{
+  "name": "lite-sandbox-prompt",
+  "version": "0.1.0",
+  "description": "Answers lite-sandbox approval asks with a plain-language question picker, flagging changes that loosen the sandbox"
+}

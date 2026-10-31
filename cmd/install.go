@@ -16,6 +16,7 @@ import (
 var installWithToolHook bool
 var installBashASTHookMode bool
 var installAlwaysLoad bool
+var installExternalApproval bool
 
 // mcpToolPermissions are the Claude Code permission entries auto-allowed for the
 // lite-sandbox MCP server: the bash tool and its background-process management
@@ -138,6 +139,8 @@ func init() {
 		"exempt the sandbox MCP tools from tool-search deferral so they load at session start (claude: alwaysLoad; codex: omit_tools_from=[\"deferred\"]); --always-load=false to defer them")
 	installCmd.Flags().StringVar(&installMode, "mode", "",
 		"enforcement mode to write into the sandbox config: open, denylist, or allowlist (default: leave the config's mode alone, i.e. allowlist for a new config)")
+	installCmd.Flags().BoolVar(&installExternalApproval, "external-approval", false,
+		"claude: leave approving config requests and prompted commands to an approval plugin (which runs `lite-sandbox approve`) instead of Claude Code's permission prompt; without the plugin they are refused")
 	installCmd.Flags().BoolVar(&installCodex, "codex", false,
 		"configure OpenAI Codex CLI")
 	_ = installCmd.Flags().MarkDeprecated("codex", "use `lite-sandbox install codex` instead")
@@ -151,9 +154,10 @@ func claudeInstallOptions() claudeOptions {
 		withToolHook: installWithToolHook,
 		// --with-tool-hook has always moved the Bash block from the permission
 		// deny to the hook, so the redirect message reaches the model.
-		redirectBash:    installWithToolHook,
-		bashASTHookMode: installBashASTHookMode,
-		alwaysLoad:      installAlwaysLoad,
+		redirectBash:     installWithToolHook,
+		bashASTHookMode:  installBashASTHookMode,
+		alwaysLoad:       installAlwaysLoad,
+		externalApproval: installExternalApproval,
 	}
 }
 

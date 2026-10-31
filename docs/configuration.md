@@ -274,7 +274,8 @@ is refused, since an override there reaches beyond the project. So are the
 commands that have no per-directory form (`config path`, `config overrides
 list`, `config paths migrate`, ...), and `config overrides remove` or `config
 aws remove-override` naming another directory. Global changes stay yours to
-make in your own terminal.
+make in your own terminal, unless an approval plugin lets you approve a request
+for the global config (see [External approval](#external-approval-a-plugin-asks-instead-of-the-permission-prompt)).
 
 The server runs a config request only if the hook asked you about that exact
 command. When the hook asks, it records a ticket in lite-sandbox's cache
@@ -292,6 +293,35 @@ extension puts the `ask` to you in a confirmation dialog). Codex, opencode, Crus
 Grok Build don't get either flag, so for them the built-in deny holds exactly
 as before. In a non-interactive `claude -p` run, nobody can answer the
 prompt, so Claude Code denies the call.
+
+#### External approval: a plugin asks instead of the permission prompt
+
+`lite-sandbox install claude --external-approval` (or `lite-sandbox launch
+claude --external-approval` for one session) registers the hook with
+`--external-approval`. Config requests and [commands that ask
+first](#commands-that-ask-first) are then no longer put to you in Claude Code's
+permission prompt; a Claude Code plugin asks you instead, in whatever form it
+likes, and records your answer by running:
+
+```bash
+lite-sandbox approve [--dry-run] [--global] [--cwd DIR] '<the bash tool command>'
+```
+
+It prints JSON: `kind` (`config`, `command`, or `none` when the command needs
+no approval), `command` (what runs once approved: for a config request, the
+scoped `lite-sandbox config --dir ...`), and `approved`. `--dry-run` records
+nothing, so the plugin can show you what would run first. Without `--dry-run`
+it records the same single-use ticket the hook would, so the server runs that
+exact call once. `--global` approves a config request for the global config:
+it then runs as written, with no `--dir` added (a request that names `--dir`
+cannot be approved globally).
+
+Without the plugin, nothing records a ticket, so config requests and prompted
+commands are refused. `approve` is on the built-in command deny list, so the
+agent cannot run it from the sandbox. The plugin is what asks you, so install
+it under `~/.claude/plugins` (which the agent cannot change without your
+approval), not in a folder Claude Code hot-reloads from. See
+[security](security.md) for the full model.
 
 The hint pointing the agent at config requests is added to errors about a
 command or path that isn't allowed yet. It isn't added to a

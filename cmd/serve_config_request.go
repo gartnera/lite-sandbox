@@ -24,10 +24,11 @@ const configCommandTimeout = time.Minute
 // runConfigCommand runs `lite-sandbox config <args>` in dir and returns its
 // combined output. It runs as a separate process because the config
 // subcommands print to stdout, which in this process is the MCP transport.
-// configrequest.RootEnv makes the subprocess itself refuse a --dir outside the
-// project dir belongs to (configrequest.Roots).
+// configrequest.RootEnv, set to roots, makes the subprocess itself refuse a
+// --dir outside them; nil roots — a request the user approved for the global
+// config — leave it unset.
 // A variable so tests can stand in for the binary.
-var runConfigCommand = func(ctx context.Context, dir string, args []string) (string, error) {
+var runConfigCommand = func(ctx context.Context, dir string, roots []string, args []string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locating the lite-sandbox binary: %w", err)
@@ -36,8 +37,10 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 	defer cancel()
 	c := exec.CommandContext(ctx, exe, append([]string{"config"}, args...)...)
 	c.Dir = dir
-	roots := strings.Join(configrequest.Roots(dir), string(filepath.ListSeparator))
-	c.Env = append(c.Environ(), configrequest.RootEnv+"="+roots)
+	c.Env = c.Environ()
+	if roots != nil {
+		c.Env = append(c.Env, configrequest.RootEnv+"="+strings.Join(roots, string(filepath.ListSeparator)))
+	}
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
@@ -45,12 +48,14 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // runConfigRequest runs a config request — a bash tool command that is just
 // `lite-sandbox config ...` (configrequest.Parse) — once the user has approved
 // it. It runs on the host, not in the sandbox, whose deny list exists to stop
-// exactly this command. It is always scoped to the project (Request.Scope):
-// the change lands in a per-directory override for cwd, or for the main
-// worktree when cwd is a linked git worktree, never the global config. The approval is
-// the ticket the PreToolUse hook records
-// when it asks the user (see internal/configrequest); a request without one
-// was never shown to the user and is refused. A help request
+// exactly this command. It is scoped to the project (Request.Scope): the
+// change lands in a per-directory override for cwd, or for the main worktree
+// when cwd is a linked git worktree — unless the user approved it for the
+// global config (`lite-sandbox approve --global`), when it runs as written.
+// The approval is the ticket the PreToolUse hook records when it asks the
+// user, or `lite-sandbox approve` records for an approval plugin (see
+// internal/configrequest); a request without one was never shown to the user
+// and is refused. A help request
 // (Request.IsHelp) changes nothing, so it runs without one.
 func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts serveOptions, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
 	if background {
@@ -59,7 +64,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if req.IsHelp() {
 		// Help only prints, so it runs without the user's approval and
 		// leaves the config, and so the sandbox, as it was.
-		out, err := runConfigCommand(ctx, cwd, req.Args)
+		out, err := runConfigCommand(ctx, cwd, configrequest.Roots(cwd), req.Args)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("`%s` failed: %v\n%s", req.Command(), err, out))
 		}
@@ -72,21 +77,33 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
-	if err := configrequest.Consume(cwd, req); err != nil {
+	run, roots := scoped, configrequest.Roots(cwd)
+	err = configrequest.Consume(cwd, req)
+	if errors.Is(err, configrequest.ErrNoTicket) {
+		// The user may instead have approved it for the global config
+		// (`lite-sandbox approve --global`): it then runs as written, unscoped.
+		if gerr := configrequest.ConsumeGlobal(cwd, req); gerr == nil {
+			run, roots, err = req, nil, nil
+		} else if !errors.Is(gerr, configrequest.ErrNoTicket) {
+			err = gerr
+		}
+	}
+	if err != nil {
 		if errors.Is(err, configrequest.ErrNoTicket) {
 			return mcp.NewToolResultError(fmt.Sprintf(
-				"Refused: `%s` was not approved. lite-sandbox runs config changes only after its PreToolUse hook "+
-					"asks the user to approve them, and the hook did not run for this call (or the approval expired). "+
-					"Ask the user to run the command themselves, or to re-run `lite-sandbox install` so the hook is registered.",
+				"Refused: `%s` was not approved. lite-sandbox runs config changes only after the user approves them "+
+					"(its PreToolUse hook asks, or an approval plugin records the answer), and no approval was recorded "+
+					"for this call (or it expired). Ask the user to run the command themselves, or to re-run "+
+					"`lite-sandbox install` so the hook is registered.",
 				scoped.Command()))
 		}
 		return mcp.NewToolResultError("checking the approval: " + err.Error())
 	}
 
-	out, err := runConfigCommand(ctx, cwd, scoped.Args)
+	out, err := runConfigCommand(ctx, cwd, roots, run.Args)
 	out = strings.TrimRight(out, "\n")
 	if err != nil {
-		msg := fmt.Sprintf("`%s` failed: %v", scoped.Command(), err)
+		msg := fmt.Sprintf("`%s` failed: %v", run.Command(), err)
 		if out != "" {
 			msg += "\n" + out
 		}

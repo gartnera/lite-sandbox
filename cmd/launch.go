@@ -20,6 +20,7 @@ import (
 var launchWithToolHook bool
 var launchBashASTHookMode bool
 var launchAlwaysLoad bool
+var launchExternalApproval bool
 var launchPermissionMode string
 var launchDryRun bool
 
@@ -120,6 +121,8 @@ func init() {
 		"statically AST-check the built-in shell in the hook instead of replacing it (claude, codex) — the shell still runs unsandboxed (no runtime enforcement), no MCP server; combine with --with-tool-hook to also confine the file tools")
 	launchCmd.Flags().BoolVar(&launchAlwaysLoad, "always-load", true,
 		"exempt the sandbox MCP tools from tool-search deferral so they load at session start (claude, codex); --always-load=false to defer them")
+	launchCmd.Flags().BoolVar(&launchExternalApproval, "external-approval", false,
+		"claude: leave approving config requests and prompted commands to an approval plugin (which runs `lite-sandbox approve`) instead of Claude Code's permission prompt; without the plugin they are refused")
 	launchCmd.Flags().BoolVar(&launchDryRun, "dry-run", false,
 		"print the command that would be run, with the generated configuration, instead of starting the agent")
 	// Flags after the agent name belong to the agent, not to us.
@@ -373,10 +376,11 @@ func claudeLaunchOptions() claudeOptions {
 		// tools while the built-in Bash tool stays denied by permission: the
 		// model is not offered a shell it would only be redirected away from,
 		// and the block does not depend on the hook running.
-		redirectBash:    false,
-		bashASTHookMode: launchBashASTHookMode,
-		alwaysLoad:      launchAlwaysLoad,
-		permissionMode:  launchPermissionMode,
+		redirectBash:     false,
+		bashASTHookMode:  launchBashASTHookMode,
+		alwaysLoad:       launchAlwaysLoad,
+		permissionMode:   launchPermissionMode,
+		externalApproval: launchExternalApproval,
 	}
 }
 

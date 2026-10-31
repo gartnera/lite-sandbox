@@ -18,7 +18,9 @@ import (
 //   - update:  replaces the lite-sandbox binary, i.e. the enforcer itself.
 //   - hook:    the PreToolUse hook that confines the agent's built-in file
 //     tools; running it by hand can emit an "allow" decision.
-var selfProtectionSubcommands = []string{"config", "install", "update", "hook"}
+//   - approve: records the user's approval of a config request or prompted
+//     command, the ticket the server runs it on.
+var selfProtectionSubcommands = []string{"config", "install", "update", "hook", "approve"}
 
 // DefaultDeniedCommands returns the built-in command deny list: the sandbox's
 // own policy-editing subcommands, for both the canonical binary name and the

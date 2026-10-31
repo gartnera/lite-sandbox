@@ -38,7 +38,7 @@ Dropping the whitelist is why the **command deny list** is needed. If any
 program can run, `lite-sandbox config mode set open` can too, and since the
 config is hot-reloaded it would disable enforcement for the next command. The
 built-in entries deny the sandbox's own policy-editing subcommands (`config`,
-`install`, `update`, `hook`) at the validation layer, whether or not the OS
+`install`, `update`, `hook`, `approve`) at the validation layer, whether or not the OS
 sandbox (which mounts the same files read-only in `denylist` mode) is enabled.
 A `commands` entry with `allow: false` adds to the list; see
 [Denied commands](configuration.md#denied-commands).
@@ -86,6 +86,30 @@ config subcommands refuse to run unless the `--dir` they actually parsed is
 inside one of them. That catches an argument list that reads differently to cobra than
 to the server's own scan (for example `--socket --dir /`, where `--dir` is the
 socket's value).
+
+With `install claude --external-approval` (or `launch claude
+--external-approval`) the user's approval moves from
+Claude Code's permission prompt to an approval plugin (see
+[External approval](configuration.md#external-approval-a-plugin-asks-instead-of-the-permission-prompt)).
+The hook, registered with `--external-approval`, still refuses a malformed
+config request but answers no `ask` and records no ticket: the call is
+pre-approved like any sandbox call, and the server still refuses it unless a
+ticket exists. The plugin asks the user and, on their yes, runs
+`lite-sandbox approve`, which scopes and validates the request exactly as the
+hook would and records the same single-use ticket. So the setup fails closed:
+without the plugin, or when it errors, nothing is approved and nothing runs.
+`approve` is on the built-in command deny list, so a sandboxed command cannot
+mint a ticket. The trust moves to the plugin's code: it must be installed
+where the agent cannot rewrite it without the user's say. A plugin under
+`~/.claude/plugins` is inside a `.claude` directory, which sandboxed commands
+cannot write and Claude Code's own file tools prompt for; a development folder
+that Claude Code hot-reloads from is not protected and should not be relied on.
+
+`approve --global` is the one way a config request reaches the global config.
+Its ticket is a kind of its own (`config-global`), which the hook never
+records, and is refused for a request that names `--dir`. The server consumes
+it only after finding no project ticket, then runs the request as written,
+without `--dir` and without `LITE_SANDBOX_CONFIG_REQUEST_ROOT`.
 
 ## Static preflight (AST-level, before execution)
 
