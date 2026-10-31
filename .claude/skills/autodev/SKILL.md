@@ -2,7 +2,7 @@
 name: autodev
 description: Headless end-to-end development. Takes a requested feature or fix all the way to a merged PR without check-ins - implement, test the affected Go packages, commit, rebase, code review, triage and fix findings, open a labeled PR with auto-merge, then watch CI and merge conflicts until it merges. File GitHub issues for unrelated problems instead of fixing them. Use whenever the prompt contains the word "autodev" or asks for hands-off develop-to-merge work.
 argument-hint: <feature or fix to make>
-allowed-tools: Bash(go *) Bash(gofmt *) Bash(git *) Bash(gh *) Bash(.claude/skills/autodev/affected-packages.sh*)
+allowed-tools: Bash(go *) Bash(gofmt *) Bash(git *) Bash(gh *)
 ---
 
 # autodev
@@ -65,26 +65,27 @@ Update `docs/` and code comments that describe the old behavior.
 
 ## 3. Test only what the change affects
 
-Full coverage is CI's job. Locally, build everything and test only the
-affected packages:
+Full coverage is CI's job. Locally, use your judgment to pick the packages
+the change can affect, and test only those:
+
+- the packages you changed, including their `testdata/` and embedded files;
+- packages whose behavior depends on what you changed. For example, a change
+  to an exported API, a shared type, or validation logic matters to its
+  callers. Grep for the callers. Skip dependents that only import the package
+  for something you didn't touch;
+- everything (`./...`) when `go.mod` or `go.sum` changed.
 
 ```bash
-git fetch origin main
-pkgs="$(.claude/skills/autodev/affected-packages.sh origin/main)"
 go build ./...
-gofmt -l $(git diff --name-only --diff-filter=d origin/main... -- '*.go')
-[ -z "$pkgs" ] || { go vet $pkgs && go test $pkgs; }
+gofmt -l <changed .go files>     # must print nothing
+go vet <packages> && go test <packages>
 ```
 
-`affected-packages.sh` lists the packages the branch changes, counting
-uncommitted and untracked files, and every package in the module that
-depends on them or imports them in tests. A `go.mod` or `go.sum` change
-selects `./...`. It prints nothing for a docs-only or CI-only change.
-`gofmt -l` must print nothing.
+A docs-only or CI-only change needs no Go tests.
 
 Add these when they apply:
 
-- **`os_sandbox` or `tool/bash_sandboxed` is in `$pkgs`:** rerun those
+- **You test `os_sandbox` or `tool/bash_sandboxed`:** rerun those
   packages with `OS_SANDBOX_TESTS=1`. This needs `bwrap` on Linux. If it isn't
   installed, note that CI covers it.
 - **Installer, launcher or hook code changed** (`cmd/install*`,
@@ -95,8 +96,8 @@ Add these when they apply:
   say so in the PR and rely on the `E2E` workflow.
 - **Markdown changed:** run `lychee './**/*.md'` if it is installed. If not,
   the `Docs` workflow checks the links.
-- Run a test with `-run` and `-count=1` while you iterate. Rerun the whole
-  `$pkgs` set before you commit.
+- Run a test with `-run` and `-count=1` while you iterate. Rerun every
+  package you picked before you commit.
 
 Fix every failure before you move on. If a failure is clearly not caused by
 your change, check it against `origin/main`. If it fails there too, it's an
