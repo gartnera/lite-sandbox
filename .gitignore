@@ -1,4 +1,5 @@
-.claude
+.claude/*
+!.claude/skills/
 lite-sandbox
 __pycache__/
 .venv/
