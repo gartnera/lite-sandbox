@@ -107,7 +107,7 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 		if !isWrite {
 			return nil, "", fmt.Errorf("%s: %w", path, errPathMissing)
 		}
-		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
+		return nil, "", outsideBoundaryError("path", path, resolved, isWrite)
 	}
 
 	rd, err := m.rootFor(base)
@@ -116,7 +116,7 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 	}
 	rel, err := filepath.Rel(rd.dir, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
+		return nil, "", outsideBoundaryError("path", path, resolved, isWrite)
 	}
 	return rd.root, rel, nil
 }

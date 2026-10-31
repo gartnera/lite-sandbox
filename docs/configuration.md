@@ -399,6 +399,16 @@ directory with [`--dir`](#writing-overrides-from-the-cli---dir); on a
 `merge: true` [override](#per-directory-overrides) the list is combined with
 the base's entry by entry, so a directory lists only the paths it changes.
 
+When the bash tool refuses a path for being outside the boundary (a command
+argument, a redirection target, or a file a sandboxed Python program opens),
+the error names the entry that would let it through: `lite-sandbox config
+paths allow <path>` for the real path the argument resolves to, with
+`--write` when the path is written. With [config
+requests](#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval)
+the agent can ask you to approve that command. A refusal that no config entry
+lifts, such as a path inside `.git` or a coding agent's configuration, names
+none.
+
 ### Grants: `read: true`, `write: true`
 
 A grant widens what the agent may touch at every layer: static and runtime
