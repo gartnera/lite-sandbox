@@ -399,6 +399,32 @@ directory with [`--dir`](#writing-overrides-from-the-cli---dir); on a
 `merge: true` [override](#per-directory-overrides) the list is combined with
 the base's entry by entry, so a directory lists only the paths it changes.
 
+When the bash tool refuses a path for being outside the boundary (a command
+argument, a redirection target, or a file a sandboxed Python program opens),
+the error names the entry that would let it through. For a read it is
+`lite-sandbox config paths allow <path>`, for the real path the argument
+resolves to. For a path checked as a write (one the command writes, or any
+operand of a command that writes, such as `cp`'s source) it is `lite-sandbox
+config paths allow <dir> --write` for the directory that holds the path,
+unless the path is itself an existing directory: the OS sandbox creates a
+missing write grant as a directory, so granting the file itself would turn
+it into one. With [config
+requests](#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval)
+the agent can ask you to approve that command.
+
+The error names no entry where the sandbox refuses on purpose: when the
+grant would be the home directory or above it; would be, contain, or sit
+inside a deny-list entry (credentials, shell startup files, lite-sandbox's
+own config, audit log and approval tickets, agent settings), a credential the
+hidden home masks, the user's runtime directory, an `internal` grant, the
+lite-sandbox binary or a `PATH` directory ahead of it, a coding agent's
+configuration directory (installed or not) or control socket, or docker's
+state (buildx builders, the daemon socket); or would be in a system directory
+or `/run` outside the home directory. So
+`echo x > ~/.config/newfile` names nothing, since `~/.config` holds
+lite-sandbox's config. Nor does it name one for a path inside `.git` or a
+write to a coding agent's configuration, which no paths entry lifts.
+
 ### Grants: `read: true`, `write: true`
 
 A grant widens what the agent may touch at every layer: static and runtime

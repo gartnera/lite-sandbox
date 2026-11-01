@@ -181,6 +181,34 @@ func DefaultDeniedReadPaths() []DeniedPath {
 	return append(out, SSHPrivateKeyEntries(home)...)
 }
 
+// AgentConfigDirs returns the coding agents' configuration directories
+// whether or not the agent is installed: Claude Code's, Codex's, opencode's,
+// Crush's, Grok Build's and pi's. DefaultDeniedWritePaths protects what is
+// inside them only once the directory exists; the bash tool's boundary errors
+// use this list so they never propose a grant over one that would outlive the
+// agent's installation.
+func AgentConfigDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	claudeDir, _ := claudeConfigPaths(home)
+	xdg := xdgConfigHome(home)
+	out := []string{
+		claudeDir,
+		codexHome(home),
+		filepath.Join(xdg, "opencode"),
+		filepath.Join(home, ".opencode"),
+		filepath.Join(xdg, "crush"),
+		GrokHome(home),
+		PiAgentDir(home),
+	}
+	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" {
+		out = append(out, d)
+	}
+	return out
+}
+
 // DefaultDeniedWritePaths returns the built-in set of paths sandboxed commands
 // may read but not modify in denylist mode: shell startup files and other
 // persistence vectors, plus the sandbox's and the agents' own configuration so

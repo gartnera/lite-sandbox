@@ -226,7 +226,7 @@ func checkBoundary(orig, path, workDir string, isWrite bool, allowed []resolvedA
 		return nil
 	}
 	if !isUnderResolvedAllowedPaths(resolved, allowed) {
-		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q resolves to %q which is outside allowed directories", orig, resolved))
+		return tagRule(rulePathBoundary, resolved, newBoundaryError("path", orig, path, workDir, resolved, isWrite))
 	}
 	if isGitInternalPath(resolved) {
 		return tagRule(rulePathBoundary, resolved, fmt.Errorf("path %q accesses .git directory which is not allowed", orig))
@@ -288,7 +288,7 @@ func validateRedirectPathsResolved(f *syntax.File, workDir string, sets resolved
 			}
 			resolved := ResolvePath(lit, workDir)
 			if !isUnderResolvedAllowedPaths(resolved, allowedPaths) {
-				validationErr = tagRule(rulePathBoundary, resolved, fmt.Errorf("redirect path %q resolves to %q which is outside allowed directories", lit, resolved))
+				validationErr = tagRule(rulePathBoundary, resolved, newBoundaryError("redirect path", lit, lit, workDir, resolved, r.Op != syntax.RdrIn))
 				return false
 			}
 			if isGitInternalPath(resolved) {

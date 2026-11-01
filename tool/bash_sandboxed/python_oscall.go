@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	montygo "github.com/fugue-labs/monty-go"
+
+	"github.com/gartnera/lite-sandbox/config"
 )
 
 // The monty interpreter performs no I/O of its own: when Python touches the
@@ -42,6 +44,9 @@ import (
 type montyFS struct {
 	workDir string
 	sets    resolvedPathSets
+	// cfg decides which boundary refusals name a config fix (see
+	// withBoundaryFix); nil names one wherever the rest of boundaryFix allows.
+	cfg *config.Config
 
 	mu     sync.Mutex
 	roots  map[string]rootedDir
@@ -81,6 +86,15 @@ var errPathMissing = errors.New("no such file or directory")
 // relative to that root. The returned root must not be closed by the caller;
 // it is shared for the run and released by close.
 func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error) {
+	root, rel, err := m.authorizeBare(path, isWrite)
+	if err != nil {
+		return nil, "", withBoundaryFix(m.cfg, err)
+	}
+	return root, rel, nil
+}
+
+// authorizeBare is authorize without the config fix on a boundary refusal.
+func (m *montyFS) authorizeBare(path string, isWrite bool) (*os.Root, string, error) {
 	if path == "" {
 		return nil, "", fmt.Errorf("empty path")
 	}
@@ -107,7 +121,7 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 		if !isWrite {
 			return nil, "", fmt.Errorf("%s: %w", path, errPathMissing)
 		}
-		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
+		return nil, "", newBoundaryError("path", path, path, m.workDir, resolved, isWrite)
 	}
 
 	rd, err := m.rootFor(base)
@@ -116,7 +130,7 @@ func (m *montyFS) authorize(path string, isWrite bool) (*os.Root, string, error)
 	}
 	rel, err := filepath.Rel(rd.dir, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", fmt.Errorf("path %q resolves to %q which is outside allowed directories", path, resolved)
+		return nil, "", newBoundaryError("path", path, path, m.workDir, resolved, isWrite)
 	}
 	return rd.root, rel, nil
 }
