@@ -20,7 +20,6 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -147,11 +146,14 @@ func (r Request) Validate() error {
 
 // DirEnv names the environment variable the server sets when it runs a config
 // request: the directory the request is scoped to (DefaultDir of the working
-// directory it runs in). The config subcommands refuse to run under it unless
-// the directory they scope the change to is exactly that one, which catches
-// whatever CheckScope's reading of the arguments missed (cobra, not
-// CheckScope, decides what --dir ends up as).
+// directory it runs in). Under it the config subcommands refuse to run unless
+// the scope they parsed is the one the user approved: exactly that directory,
+// or the base config when GlobalEnv is "1".
 const DirEnv = "LITE_SANDBOX_CONFIG_REQUEST_DIR"
+
+// GlobalEnv names the environment variable that accompanies DirEnv: "1" when
+// the approved request edits the base config (--global), "0" otherwise.
+const GlobalEnv = "LITE_SANDBOX_CONFIG_REQUEST_GLOBAL"
 
 // DefaultDir is the directory a config command run from cwd is scoped to when
 // it has neither --dir nor --global: the root of the git repository cwd is in,
@@ -170,87 +172,31 @@ func DefaultDir(cwd string) string {
 	return filepath.Clean(cwd)
 }
 
-// CheckScope refuses --dir in a request: the config subcommands scope a change
-// to the agent's project (DefaultDir) by default, or to every directory with
-// --global, which the approval prompt marks (Summary). An arbitrary directory
-// is not offered, so the prompt can only ever say one of those two things.
-func (r Request) CheckScope() error {
-	for _, a := range r.Args {
-		if a == "--" {
-			break // the rest is positional
-		}
-		if a == "--dir" || strings.HasPrefix(a, "--dir=") {
-			return errors.New("`--dir` is not allowed: a config change the agent requests applies to this project, or to every directory with --global; leave out --dir")
-		}
-		// cobra reads --global=1, =t, =TRUE, ... as on; only the bare flag is
-		// accepted, so the prompt's reading of it (Global) is cobra's.
-		if strings.HasPrefix(a, "--global=") {
-			return errors.New("write `--global` without a value")
-		}
-	}
-	return nil
-}
-
-// Global reports whether the request sets --global, editing the base config.
-// CheckScope has refused every other spelling of the flag. Where another flag
-// takes "--global" as its value, this overstates the scope, which errs on the
-// side of the prompt warning the user.
-func (r Request) Global() bool {
-	for _, a := range r.Args {
-		switch a {
-		case "--":
-			return false
-		case "--global":
-			return true
-		}
-	}
-	return false
+// Scope is what a config request does, as the config command itself parses
+// it (the cmd package fills it in with cobra): whether it edits the base
+// config, and, for `paths allow`, the access it grants.
+type Scope struct {
+	Global     bool
+	PathsAllow bool
+	Write      bool
+	Internal   bool
 }
 
 // Summary renders a status line for the approval prompt, a ✓ or ✗ per thing
 // the request grants: for `paths allow`, read, write and internal access, and
-// for every request its scope: this project, or every directory (--global).
-func (r Request) Summary() string {
+// for every request its scope, naming the project directory dir.
+func (s Scope) Summary(dir string) string {
 	mark := func(on bool, label string) string {
 		if on {
 			return "✓ " + label
 		}
 		return "✗ " + label
 	}
-	// boolFlag reads a bool flag the way pflag does (strconv.ParseBool), so
-	// --write=1 is marked as the write it is. A value pflag would reject
-	// fails the command, so marking it on is harmless.
-	boolFlag := func(a, name string, v *bool) bool {
-		if a == name {
-			*v = true
-			return true
-		}
-		if val, ok := strings.CutPrefix(a, name+"="); ok {
-			b, err := strconv.ParseBool(val)
-			*v = b || err != nil
-			return true
-		}
-		return false
-	}
-	var words []string
-	write, internal, commands := false, false, false
-	for _, a := range r.Args {
-		switch {
-		case a == "--":
-		case boolFlag(a, "--write", &write), boolFlag(a, "--internal", &internal):
-		case a == "--commands" || strings.HasPrefix(a, "--commands="):
-			commands = true
-		case !strings.HasPrefix(a, "-"):
-			words = append(words, a)
-		}
-	}
-	internal = internal || commands
 	var parts []string
-	if len(words) >= 2 && words[0] == "paths" && words[1] == "allow" {
-		parts = append(parts, mark(true, "read"), mark(write, "write"), mark(internal, "internal"))
+	if s.PathsAllow {
+		parts = append(parts, mark(true, "read"), mark(s.Write, "write"), mark(s.Internal, "internal"))
 	}
-	global := r.Global()
-	parts = append(parts, mark(!global, "this project"), mark(global, "global"))
+	parts = append(parts, mark(!s.Global, "this project ("+dir+")"), mark(s.Global, "global"))
 	return strings.Join(parts, "  ")
 }
 

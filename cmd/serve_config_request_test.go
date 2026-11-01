@@ -33,7 +33,7 @@ func stubConfigCommand(t *testing.T) *[][]string {
 	t.Helper()
 	var runs [][]string
 	orig := runConfigCommand
-	runConfigCommand = func(_ context.Context, _ string, args []string) (string, error) {
+	runConfigCommand = func(_ context.Context, _ string, args []string, _ bool) (string, error) {
 		runs = append(runs, args)
 		return "Allowed make\n", nil
 	}
@@ -131,7 +131,7 @@ func TestConfigRequestRequiresHook(t *testing.T) {
 	}
 	// The config subcommands scope to the working directory by default, so
 	// the command needs no --dir.
-	scoped := "lite-sandbox config commands allow make\n✓ this project  ✗ global"
+	scoped := "lite-sandbox config commands allow make\n✓ this project ("
 	if reason := d.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, scoped) {
 		t.Errorf("ask reason %q does not name the scoped command %q", reason, scoped)
 	}
@@ -270,31 +270,40 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 }
 
 // TestCheckConfigRequestDir checks the config subcommands' own guard, which
-// holds whatever --dir cobra ends up parsing: only the request's own working
-// directory may be changed.
+// holds whatever cobra ends up parsing: only the approved scope — the
+// request's project directory, or the base config when --global was approved
+// — may be changed.
 func TestCheckConfigRequestDir(t *testing.T) {
 	root := t.TempDir()
 	origDir, origGlobal := configDir, configGlobal
 	t.Cleanup(func() { configDir, configGlobal = origDir, origGlobal })
 
 	for _, tc := range []struct {
-		env, dir string
-		global   bool
-		ok       bool
+		env, dir         string
+		global, approved bool
+		ok               bool
 	}{
 		{env: "", dir: "", ok: true}, // not a config request
 		{env: root, dir: root, ok: true},
 		{env: root, dir: root + "/", ok: true},
-		{env: root, global: true, ok: true},
+		{env: root, global: true, approved: true, ok: true},
+		// --global the server did not read, or one it read that cobra did not.
+		{env: root, global: true, ok: false},
+		{env: root, dir: root, approved: true, ok: false},
 		{env: root, dir: filepath.Join(root, "sub"), ok: false},
-		{env: root, dir: "", ok: false}, // a whole-file command without --global
+		{env: root, dir: "", ok: false}, // a whole-file command
 		{env: root, dir: "/", ok: false},
 		{env: root, dir: filepath.Dir(root), ok: false},
 	} {
 		t.Setenv(configrequest.DirEnv, tc.env)
+		approved := "0"
+		if tc.approved {
+			approved = "1"
+		}
+		t.Setenv(configrequest.GlobalEnv, approved)
 		configDir, configGlobal = tc.dir, tc.global
 		if err := checkConfigRequestDir(); (err == nil) != tc.ok {
-			t.Errorf("dir %q, --dir %q: err = %v, want ok %v", tc.env, tc.dir, err, tc.ok)
+			t.Errorf("dir %q, --dir %q, global %v (approved %v): err = %v, want ok %v", tc.env, tc.dir, tc.global, tc.approved, err, tc.ok)
 		}
 	}
 }

@@ -265,13 +265,15 @@ with what a `paths allow` grants:
 
 ```
 lite-sandbox config paths allow ~/tmp/claude-home --write
-✓ read  ✓ write  ✗ internal  ✓ this project  ✗ global
+✓ read  ✓ write  ✗ internal  ✓ this project (~/src/app)  ✗ global
 ```
 
-`--global` must be written bare (not `--global=true`), so that line reads it
-as the config command does. The commands that have no per-directory form
-(`config path`, `config overrides list`, `config paths migrate`, ...) are
-refused unless they pass `--global`.
+lite-sandbox reads the request with the config command's own argument parser,
+so that line matches what runs however the flags are spelled. The commands
+that work on the config file as a whole (`config edit`, `config path`,
+`config overrides list|remove`, `config paths migrate`, ...) and the
+deprecated aliases (`writable-paths add`, ...) are refused; run those
+yourself.
 
 The server runs a config request only if the hook asked you about that exact
 command. When the hook asks, it records a ticket in lite-sandbox's cache
@@ -963,10 +965,13 @@ parent's (or, for a linked git worktree, its main worktree's). An override
 `--dir` creates merges into the base, not into the override the directory was
 inheriting, so the settings that parent override made (a stricter `mode`, a
 denial, ...) stop applying to the directory unless the command restated them.
+The same goes the other way: a subdirectory with an override of its own does
+not see a change made for the repository root, which is where a change made
+from that subdirectory lands unless `--dir` names the subdirectory.
 
 Reads are scoped the same way: `lite-sandbox config show` prints the
-configuration in effect in the working directory (`--dir <path>` for another
-one), as does any section's `show`/`list` (`config docker show`, `config
+configuration in effect at the project root (`--dir <path>` for another
+directory), as does any section's `show`/`list` (`config docker show`, `config
 commands list`), and `--global` prints the base config.
 
 The commands that aren't per-directory settings (`config path`, `config edit`,

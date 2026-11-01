@@ -218,9 +218,9 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateConfigRequest decides a sandbox bash tool call that is a config
 // request (configrequest.Parse), or returns nil for any other command. When
 // this agent was installed to make config requests (--config-requests), it
-// refuses --dir and --global (Request.CheckScope: the change is an override
-// for the working directory, never the global config), records a ticket for
-// the exact request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
+// parses the request as the config command will (parseConfigRequest, which
+// refuses --dir and whole-file commands), records a ticket for the exact
+// request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
 // internal/configrequest). Without the flag it returns nil: the call is
 // pre-approved like any other, and the sandbox's deny list refuses it.
 func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
@@ -254,15 +254,32 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	if err := req.CheckScope(); err != nil {
+	scope, err := parseConfigRequest(req)
+	if err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	if err := configrequest.Issue(eventCWD(event), req); err != nil {
+	cwd := eventCWD(event)
+	if err := configrequest.Issue(cwd, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		req.Command()+"\n"+req.Summary())
+		req.Command()+"\n"+scope.Summary(tildePath(configrequest.DefaultDir(cwd))))
+}
+
+// tildePath abbreviates the home directory in p as ~, for display.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(p, home+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rest
+	}
+	return p
 }
 
 // evaluateAskCommand decides a sandbox bash tool call whose command runs

@@ -131,50 +131,18 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestCheckScope(t *testing.T) {
+func TestScopeSummary(t *testing.T) {
 	for _, tc := range []struct {
-		args    []string
-		wantErr string
+		scope Scope
+		want  string
 	}{
-		{args: []string{"commands", "allow", "make"}},
-		// After "--" everything is positional.
-		{args: []string{"paths", "allow", "--", "--dir"}},
-		{args: []string{"commands", "allow", "make", "--dir", "."}, wantErr: "--dir"},
-		{args: []string{"--dir=/", "show"}, wantErr: "--dir"},
-		{args: []string{"--global", "mode", "set", "open"}},
-		// Only the bare flag, so the prompt reads it as cobra does.
-		{args: []string{"mode", "set", "open", "--global=1"}, wantErr: "--global"},
-		{args: []string{"mode", "set", "open", "--global=false"}, wantErr: "--global"},
+		{Scope{PathsAllow: true}, "✓ read  ✗ write  ✗ internal  ✓ this project (~/p)  ✗ global"},
+		{Scope{PathsAllow: true, Write: true, Internal: true}, "✓ read  ✓ write  ✓ internal  ✓ this project (~/p)  ✗ global"},
+		{Scope{}, "✓ this project (~/p)  ✗ global"},
+		{Scope{Global: true}, "✗ this project (~/p)  ✓ global"},
 	} {
-		err := Request{Args: tc.args}.CheckScope()
-		if tc.wantErr == "" {
-			if err != nil {
-				t.Errorf("CheckScope(%q) = %v, want nil", tc.args, err)
-			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Errorf("CheckScope(%q) = %v, want error containing %q", tc.args, err, tc.wantErr)
-		}
-	}
-}
-
-func TestSummary(t *testing.T) {
-	for _, tc := range []struct {
-		args []string
-		want string
-	}{
-		{[]string{"paths", "allow", "~/x"}, "✓ read  ✗ write  ✗ internal  ✓ this project  ✗ global"},
-		{[]string{"paths", "allow", "~/x", "--write"}, "✓ read  ✓ write  ✗ internal  ✓ this project  ✗ global"},
-		{[]string{"paths", "allow", "--internal", "~/x", "--write=true"}, "✓ read  ✓ write  ✓ internal  ✓ this project  ✗ global"},
-		{[]string{"paths", "allow", "~/x", "--commands=npm"}, "✓ read  ✗ write  ✓ internal  ✓ this project  ✗ global"},
-		{[]string{"paths", "allow", "~/x", "--write=1", "--internal=false"}, "✓ read  ✓ write  ✗ internal  ✓ this project  ✗ global"},
-		{[]string{"commands", "allow", "make"}, "✓ this project  ✗ global"},
-		{[]string{"commands", "allow", "make", "--global"}, "✗ this project  ✓ global"},
-		{[]string{"commands", "allow", "--", "--global"}, "✓ this project  ✗ global"},
-	} {
-		if got := (Request{Args: tc.args}).Summary(); got != tc.want {
-			t.Errorf("Summary(%q) = %q, want %q", tc.args, got, tc.want)
+		if got := tc.scope.Summary("~/p"); got != tc.want {
+			t.Errorf("%+v.Summary = %q, want %q", tc.scope, got, tc.want)
 		}
 	}
 }

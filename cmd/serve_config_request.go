@@ -23,10 +23,11 @@ const configCommandTimeout = time.Minute
 // runConfigCommand runs `lite-sandbox config <args>` in dir and returns its
 // combined output. It runs as a separate process because the config
 // subcommands print to stdout, which in this process is the MCP transport.
-// configrequest.DirEnv makes the subprocess itself refuse to change any
-// directory but dir's project (configrequest.DefaultDir).
+// configrequest.DirEnv and GlobalEnv make the subprocess itself refuse any
+// scope but the approved one: dir's project (configrequest.DefaultDir), or the
+// base config when global.
 // A variable so tests can stand in for the binary.
-var runConfigCommand = func(ctx context.Context, dir string, args []string) (string, error) {
+var runConfigCommand = func(ctx context.Context, dir string, args []string, global bool) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locating the lite-sandbox binary: %w", err)
@@ -38,7 +39,12 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 	// PWD makes the subcommand's default scope (os.Getwd) the directory as
 	// spelled here, rather than its resolved form when it goes through a
 	// symlink, so it matches DirEnv.
-	c.Env = append(c.Environ(), configrequest.DirEnv+"="+configrequest.DefaultDir(dir), "PWD="+dir)
+	globalEnv := "0"
+	if global {
+		globalEnv = "1"
+	}
+	c.Env = append(c.Environ(), configrequest.DirEnv+"="+configrequest.DefaultDir(dir),
+		configrequest.GlobalEnv+"="+globalEnv, "PWD="+dir)
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
@@ -46,9 +52,10 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string) (str
 // runConfigRequest runs a config request — a bash tool command that is just
 // `lite-sandbox config ...` (configrequest.Parse) — once the user has approved
 // it. It runs on the host, not in the sandbox, whose deny list exists to stop
-// exactly this command. It is always scoped to the project (Request.CheckScope
-// refuses --dir and --global): the change lands in a per-directory override
-// for cwd, or a linked worktree's main worktree, never the global config. The approval is
+// exactly this command. It is parsed as the config command will parse it
+// (parseConfigRequest): the change lands in the project's per-directory
+// override (configrequest.DefaultDir), or the base config with --global, and
+// --dir and whole-file commands are refused. The approval is
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
 // was never shown to the user and is refused. A help request
@@ -60,7 +67,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if req.IsHelp() {
 		// Help only prints, so it runs without the user's approval and
 		// leaves the config, and so the sandbox, as it was.
-		out, err := runConfigCommand(ctx, cwd, req.Args)
+		out, err := runConfigCommand(ctx, cwd, req.Args, false)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("`%s` failed: %v\n%s", req.Command(), err, out))
 		}
@@ -69,7 +76,8 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if err := req.Validate(); err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
-	if err := req.CheckScope(); err != nil {
+	scope, err := parseConfigRequest(req)
+	if err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
 	if err := configrequest.Consume(cwd, req); err != nil {
@@ -83,7 +91,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 		return mcp.NewToolResultError("checking the approval: " + err.Error())
 	}
 
-	out, err := runConfigCommand(ctx, cwd, req.Args)
+	out, err := runConfigCommand(ctx, cwd, req.Args, scope.Global)
 	out = strings.TrimRight(out, "\n")
 	if err != nil {
 		msg := fmt.Sprintf("`%s` failed: %v", req.Command(), err)

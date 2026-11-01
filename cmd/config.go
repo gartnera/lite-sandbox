@@ -57,18 +57,25 @@ type configEdit struct {
 var currentEdit *configEdit
 
 // checkConfigRequestDir refuses a config subcommand run for a config request
-// (configrequest.DirEnv set by the MCP server) unless it is scoped to exactly
-// the request's project directory, or to the base config with --global. The
-// server already refused --dir (Request.CheckScope); this checks what cobra
-// actually parsed, which a flag taking the next word as its value could
-// otherwise make differ from what the server read.
+// (configrequest.DirEnv set by the MCP server) unless what it parsed is the
+// scope the user approved: the base config when configrequest.GlobalEnv is
+// "1", and otherwise exactly the request's project directory. The server
+// parsed the request the same way (parseConfigRequest); this holds even if
+// the two ever disagree.
 func checkConfigRequestDir() error {
 	env := os.Getenv(configrequest.DirEnv)
-	if env == "" || configGlobal {
+	if env == "" {
+		return nil
+	}
+	approvedGlobal := os.Getenv(configrequest.GlobalEnv) == "1"
+	if configGlobal != approvedGlobal {
+		return fmt.Errorf("refusing a config request whose --global (%v) differs from the one approved (%v)", configGlobal, approvedGlobal)
+	}
+	if configGlobal {
 		return nil
 	}
 	if configDir == "" || resolveDirArg(configDir) != filepath.Clean(env) {
-		return fmt.Errorf("config changes the agent requests apply to the project %s, or to every directory with --global: leave out --dir", env)
+		return fmt.Errorf("refusing a config request scoped to %q: the approved scope is the project %s", configDir, env)
 	}
 	return nil
 }

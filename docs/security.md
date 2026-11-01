@@ -89,20 +89,23 @@ A config request lands either in the agent's project or, with `--global`, in
 the base config. Config commands scope a change to the git root of the working
 directory (in a linked git worktree, the repository's main worktree, whose
 override the linked worktrees inherit; outside a repository, the working
-directory itself) unless given `--dir` or `--global`. The hook and the
-server refuse `--dir` and any `--global=<value>` spelling, so the approval
-prompt's `✓ this project` / `✓ global` line reads the scope exactly as the
-config command will. The prompt also marks the read, write and internal
-access a `paths allow` grants, reading `--write=1`-style values as pflag does. A
+directory itself) unless given `--dir` or `--global`. The hook and the server
+parse a request with the config command's own cobra parser, not a scan of
+the words, so the approval prompt's `✓ this project (<dir>)` / `✓ global`
+line, and the read, write and internal access it marks for a `paths allow`,
+are what the command will do however its flags are spelled (a value-taking
+flag swallowing `--`, `--global=1`, a root flag before the subcommand). They
+refuse `--dir`, the commands that work on the config file as a whole
+(`edit`, `overrides remove`, `migrate`, ...), and the deprecated aliases. A
 directory resolves through a single override, and one a request creates
 merges into the base, not into an override the directory was inheriting from
 a parent. So approving a request for a directory with no override of its own
 stops that inherited override's settings (a stricter `mode`, denials, ...)
 from applying to the directory. The server also runs the config subprocess
-with `LITE_SANDBOX_CONFIG_REQUEST_DIR` set to that directory, under
-which the config subcommands refuse to run unless the directory they actually
-scoped the change to is exactly that one, or they parsed `--global`. That catches an argument list that
-reads differently to cobra than to the server's own scan.
+with `LITE_SANDBOX_CONFIG_REQUEST_DIR` set to that directory and
+`LITE_SANDBOX_CONFIG_REQUEST_GLOBAL` to whether `--global` was approved, under
+which the config subcommands refuse to run unless the scope they parsed is
+the approved one, as a second check on the server's parse.
 
 ## Static preflight (AST-level, before execution)
 
