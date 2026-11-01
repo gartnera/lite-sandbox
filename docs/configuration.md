@@ -410,13 +410,17 @@ unless the path is itself an existing directory: the OS sandbox creates a
 missing write grant as a directory, so granting the file itself would turn
 it into one. With [config
 requests](#config-requests-the-agent-runs-lite-sandbox-config-with-your-approval)
-the agent can ask you to approve that command. The error names no entry where
-the sandbox refuses on purpose, the same places [`audit
-report`](adoption.md#audit-tighten-with-evidence) never suggests: the home directory itself, anything
-under a deny-list entry (credentials, shell startup files, lite-sandbox's own
-config and audit log, agent settings), and system directories outside the
-home directory. Nor does it for a path inside `.git` or a write to a coding
-agent's configuration, which no paths entry lifts.
+the agent can ask you to approve that command.
+
+The error names no entry where the sandbox refuses on purpose: when the
+grant would be the home directory or above it; would be, contain, or sit
+inside a deny-list entry (credentials, shell startup files, lite-sandbox's
+own config, audit log and approval tickets, agent settings), a credential the
+hidden home masks, the user's runtime directory, or an `internal` grant; or
+would be in a system directory or `/run` outside the home directory. So
+`echo x > ~/.config/newfile` names nothing, since `~/.config` holds
+lite-sandbox's config. Nor does it name one for a path inside `.git` or a
+write to a coding agent's configuration, which no paths entry lifts.
 
 ### Grants: `read: true`, `write: true`
 

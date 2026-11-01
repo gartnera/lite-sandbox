@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/gartnera/lite-sandbox/config"
@@ -56,15 +57,19 @@ func withBoundaryFix(cfg *config.Config, err error) error {
 // boundaryFix returns the `lite-sandbox config paths allow` command that
 // would let e's path through, or "" when there is none worth naming. The
 // command is the user's to approve (a config request asks them), but the
-// sandbox shouldn't propose widening the boundary to where it is refusing on
+// sandbox shouldn't propose widening the boundary to where it refuses on
 // purpose, so there is none for:
-//   - a path the audit report never suggests either (audit.IsProtected): the
-//     home directory itself, anything under a deny-list entry (the sandbox's
-//     own config and audit log, credentials, agent settings, ...), and system
-//     roots outside the home directory. Granting a deny-listed path would lift
-//     that entry.
-//   - a write to a coding agent's configuration, which stays read-only
-//     whatever the paths config says (checkAgentConfigWrite).
+//   - a grant that would reach something protected (protectedOverlap): the
+//     home directory or an ancestor of it; a protected entry
+//     (protectedEntries: the deny lists — the sandbox's own config, audit
+//     log and approval tickets, credentials, shell startup files, agent
+//     settings, ... — hidden-home credential masks, the runtime directory,
+//     internal grants), an entry under the path, or a path under an entry;
+//     and system roots and /run outside the home directory. The deny lists
+//     only bind the OS sandbox in denylist mode, so a grant over one would
+//     open it to the path checks and to Python everywhere else.
+//   - a path inside .git, or a write to a coding agent's configuration,
+//     which stay refused whatever the paths config says.
 //   - a path that can't be written as a literal word a config request
 //     accepts, or one whose last element is "*", which the config reads as
 //     "nested below the parent" rather than the file.
@@ -83,14 +88,13 @@ func boundaryFix(cfg *config.Config, e *boundaryError) string {
 			return ""
 		}
 	}
+	if isGitInternalPath(e.resolved) || isGitInternalPath(target) || filepath.Base(target) == ".git" {
+		return ""
+	}
 	if filepath.Base(target) == "*" {
 		return ""
 	}
-	var protected []string
-	if cfg != nil {
-		protected = append(cfg.EffectiveDeniedReadPaths(), cfg.EffectiveDeniedWritePaths()...)
-	}
-	if audit.IsProtected(e.resolved, protected) || audit.IsProtected(target, protected) {
+	if protectedOverlap(cfg, e.abs) || protectedOverlap(cfg, e.resolved) || protectedOverlap(cfg, target) {
 		return ""
 	}
 	word, ok := configWord(target)
@@ -102,6 +106,94 @@ func boundaryFix(cfg *config.Config, e *boundaryError) string {
 		fix += " --write"
 	}
 	return fix
+}
+
+// protectedOverlap reports whether a grant on path would reach something the
+// sandbox protects on purpose: path is the home directory or an ancestor of
+// it, a protected entry (protectedEntries) is path, under it or above it, or
+// path is in a system root (audit.SystemRoots, plus /run) outside the home
+// directory. Each protected entry is
+// compared both as written and with symlinks followed, and on macOS without
+// regard to case, since its default filesystem ignores case (~/.SSH is
+// ~/.ssh).
+func protectedOverlap(cfg *config.Config, path string) bool {
+	if path == string(filepath.Separator) {
+		return true
+	}
+	var homes []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		homes = withResolved(filepath.Clean(home))
+	}
+	for _, h := range homes {
+		if pathWithin(h, path) {
+			return true // the home directory itself, or above it
+		}
+	}
+	for _, d := range protectedEntries(cfg) {
+		for _, p := range withResolved(filepath.Clean(d)) {
+			if pathWithin(path, p) || pathWithin(p, path) {
+				return true
+			}
+		}
+	}
+	for _, h := range homes {
+		if pathWithin(path, h) {
+			return false // under the home directory, wherever it lives
+		}
+	}
+	for _, root := range append(audit.SystemRoots(), "/run") {
+		for _, r := range withResolved(root) {
+			if pathWithin(path, r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// protectedEntries returns the paths a fix must neither name nor cover: both
+// deny lists, the credential masks inside the hidden home, the user's runtime
+// directory (agent sockets, the session bus), and the paths of internal
+// grants, which are meant for the programs a command starts (or, scoped, for
+// one CLI) and never for the agent's own reads and writes.
+func protectedEntries(cfg *config.Config) []string {
+	var out []string
+	if d := config.UserRuntimeDir(); d != "" {
+		out = append(out, d)
+	}
+	if cfg == nil {
+		return out
+	}
+	out = append(out, cfg.EffectiveDeniedReadPaths()...)
+	out = append(out, cfg.EffectiveDeniedWritePaths()...)
+	for _, d := range cfg.HiddenHomeDeniedReadEntries() {
+		out = append(out, d.Path)
+	}
+	for _, e := range cfg.Paths {
+		if e.Internal && e.Grants() {
+			if p := config.ExpandPath(strings.TrimSuffix(e.Path, "/*")); p != "" {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// withResolved returns p and, when it differs, p with symlinks followed.
+func withResolved(p string) []string {
+	if r := ResolvePath(p, string(filepath.Separator)); r != p {
+		return []string{p, r}
+	}
+	return []string{p}
+}
+
+// pathWithin reports whether path is dir or below it, ignoring case on macOS.
+func pathWithin(path, dir string) bool {
+	if runtime.GOOS == "darwin" {
+		path, dir = strings.ToLower(path), strings.ToLower(dir)
+	}
+	dir = strings.TrimSuffix(dir, string(filepath.Separator))
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 // configWord writes s as one shell word that a config request takes as a

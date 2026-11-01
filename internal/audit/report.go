@@ -240,11 +240,11 @@ func ruleReason(rule string) string {
 // isProtected reports whether a boundary subject must not be suggested as a
 // readable path: the home directory itself, anything at or under a protected
 // (deny-listed) path, and anything under a system root.
-// IsProtected is isProtected for callers outside this package: the bash
-// tool's boundary errors use it to decide whether to name a `paths allow`
-// fix, so they and the report agree on what is never worth widening to.
-func IsProtected(path string, protected []string) bool {
-	return isProtected(path, protected)
+// SystemRoots returns the system directories the report never suggests
+// widening the boundary to. The bash tool's boundary errors use the same list
+// to decide whether to name a `paths allow` fix.
+func SystemRoots() []string {
+	return append([]string(nil), systemRoots...)
 }
 
 func isProtected(path string, protected []string) bool {

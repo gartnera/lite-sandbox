@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -34,13 +35,23 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		filepath.Join(outside, "it's"),
 		filepath.Join(home, ".ssh"),
 		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".config"),
+		filepath.Join(home, ".cache"),
+		filepath.Join(home, "internal-only"),
+		filepath.Join(outside, "repo", ".git", "hooks"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	secret := filepath.Join(outside, "secret.txt")
-	for _, f := range []string{secret, filepath.Join(home, ".ssh", "id_ed25519")} {
+	for _, f := range []string{
+		secret,
+		filepath.Join(home, ".ssh", "id_ed25519"),
+		filepath.Join(home, ".git-credentials"),
+		filepath.Join(home, "internal-only", "s"),
+		filepath.Join(outside, "repo", ".git", "config"),
+	} {
 		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -70,10 +81,21 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		{"deny-listed credentials", "cat " + home + "/.ssh/id_ed25519", ""},
 		{"agent configuration", "echo x > " + home + "/.claude/settings.json", ""},
 		{"system root", "cat /etc/hosts", ""},
+		{".git outside the boundary", "cat " + outside + "/repo/.git/config", ""},
+		{".git write outside the boundary", "echo x > " + outside + "/repo/.git/hooks/pre-commit", ""},
+		{"python .git outside the boundary", `python3 -c "open('` + outside + `/repo/.git/config').read()"`, ""},
+		{"agent configuration outside the deny lists", "echo x > " + outside + "/.mcp.json", ""},
+		{"directory holding the sandbox's own config", "echo x > " + home + "/.config/newfile", ""},
+		{"directory holding the approval tickets", "echo x > " + home + "/.cache/foo.log", ""},
+		{"hidden-home credential mask", "cat " + home + "/.git-credentials", ""},
+		{"internal grant", "cat " + home + "/internal-only/s", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestSandboxWithConfig(&config.Config{})
+			internal := true
+			s := newTestSandboxWithConfig(&config.Config{Paths: []config.PathEntry{
+				{Path: filepath.Join(home, "internal-only"), Read: boolPtr(true), Internal: internal},
+			}})
 			defer s.Close()
 			_, err := s.Execute(context.Background(), tt.command, workDir, []string{workDir}, []string{workDir})
 			if err == nil {
@@ -84,6 +106,9 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 			if tt.want == "" {
 				if m != nil || strings.Contains(msg, "lite-sandbox config") {
 					t.Fatalf("expected no config fix, got %q", msg)
+				}
+				if !strings.Contains(msg, "outside allowed directories") && !strings.Contains(msg, ".git directory") {
+					t.Fatalf("expected a boundary refusal, got %q", msg)
 				}
 				return
 			}
@@ -101,6 +126,16 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 			}
 			if !strings.Contains(msg, "outside allowed directories") {
 				t.Fatalf("expected a boundary refusal, got %q", msg)
+			}
+			// Applying the fix lifts the refusal.
+			read, write := []string{workDir}, []string{workDir}
+			if slices.Contains(req.Args, "--write") {
+				write = append(write, req.Args[2])
+			} else {
+				read = append(read, req.Args[2])
+			}
+			if _, err := s.Execute(context.Background(), tt.command, workDir, read, write); err != nil && strings.Contains(err.Error(), "outside allowed directories") {
+				t.Fatalf("still refused after applying `%s`: %v", m[1], err)
 			}
 		})
 	}
@@ -131,6 +166,45 @@ func TestConfigWord(t *testing.T) {
 		req, ok := configrequest.Parse("lite-sandbox config paths allow " + got)
 		if !ok || len(req.Args) != 3 || req.Args[2] != tt.in {
 			t.Errorf("configWord(%q) = %q does not parse back (ok=%v, args=%q)", tt.in, got, ok, req.Args)
+		}
+	}
+}
+
+func TestPathWithin(t *testing.T) {
+	if !pathWithin("/a/b/c", "/a/b") || !pathWithin("/a/b", "/a/b") || pathWithin("/a/bc", "/a/b") || pathWithin("/a", "/a/b") {
+		t.Fatal("pathWithin is wrong on plain paths")
+	}
+	// macOS's default filesystem ignores case, so ~/.SSH is ~/.ssh there.
+	if got, want := pathWithin("/Users/u/.SSH/id", "/Users/u/.ssh"), runtime.GOOS == "darwin"; got != want {
+		t.Fatalf("pathWithin across case = %v on %s, want %v", got, runtime.GOOS, want)
+	}
+}
+
+// TestBoundaryFixSymlinkedHome covers a home directory reached through a
+// symlink: the refused path resolves to the real home, which must still be
+// recognised as the home directory, along with what is under it.
+func TestBoundaryFixSymlinkedHome(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, ".ssh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", link)
+	cfg := &config.Config{}
+	for _, e := range []*boundaryError{
+		newBoundaryError("path", link, link, "/", real, false),
+		newBoundaryError("path", link+"/.bashrc", link+"/.bashrc", "/", real+"/.bashrc", true),
+		newBoundaryError("path", link+"/.ssh/id", link+"/.ssh/id", "/", real+"/.ssh/id", false),
+	} {
+		if fix := boundaryFix(cfg, e); fix != "" {
+			t.Errorf("%s: expected no fix, got %q", e.orig, fix)
 		}
 	}
 }

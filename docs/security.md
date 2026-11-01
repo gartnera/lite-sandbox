@@ -59,11 +59,16 @@ protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 
 Sandbox errors name the config change that would lift them, so the agent can
-ask for it. A path-boundary refusal names a `paths allow` entry, but never for
-a path the sandbox refuses on purpose: the home directory itself, anything
-under a deny-list entry (granting one lifts it), system directories outside
-the home directory, `.git`, or a write to agent configuration. Naming a fix
-grants nothing; the user still approves each request.
+ask for it. A path-boundary refusal names a `paths allow` entry, but never one
+that would reach what the sandbox refuses on purpose: the home directory or
+an ancestor of it; a deny-list entry, a hidden-home credential mask, the
+runtime directory, or an `internal` grant, whether the grant would be that
+path, a directory holding it, or a path under it (the deny lists bind only
+the OS sandbox in `denylist` mode, so a grant over one would open it to the
+path checks and to Python elsewhere); system directories and `/run` outside
+the home directory; `.git`; and agent configuration. Paths are compared as
+written and with symlinks followed, and without regard to case on macOS.
+Naming a fix grants nothing; the user still approves each request.
 
 A `commands` entry with `ask: true` uses the same ticket: the hook answers
 `ask` for a bash tool call whose command line runs a prompted command and
