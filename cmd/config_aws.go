@@ -239,9 +239,10 @@ func printAllowedProfilesResult(forceProfile string, profiles []string) {
 }
 
 var awsRemoveOverrideCmd = &cobra.Command{
-	Use:   "remove-override [dir]",
-	Short: "Remove the AWS directory override for the given path (defaults to --dir)",
-	Args:  cobra.MaximumNArgs(1),
+	Annotations: wholeFile,
+	Use:         "remove-override [dir]",
+	Short:       "Remove the AWS directory override for the given path (defaults to --dir)",
+	Args:        cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := dirArgOrFlag(args)
 		if err != nil {

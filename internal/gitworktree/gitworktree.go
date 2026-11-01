@@ -43,6 +43,41 @@ func MainWorktree(dir string) string {
 	return parent
 }
 
+// Toplevel returns the root of the git working tree dir is in, spelled as an
+// ancestor of dir (or dir itself) rather than with symlinks resolved as git
+// reports it, so it matches paths derived from dir lexically. Returns "" when
+// dir is not in a git working tree or detection fails.
+func Toplevel(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	top := filepath.Clean(strings.TrimSpace(string(out)))
+	if top == "." || top == "" {
+		return ""
+	}
+	resolvedTop, err := filepath.EvalSymlinks(top)
+	if err != nil {
+		return ""
+	}
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if d == top {
+			return d
+		}
+		if r, err := filepath.EvalSymlinks(d); err == nil && r == resolvedTop {
+			return d
+		}
+		if parent := filepath.Dir(d); parent == d {
+			return top
+		}
+	}
+}
+
 func detect(dir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

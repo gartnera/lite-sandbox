@@ -11,6 +11,33 @@ import (
 	"github.com/gartnera/lite-sandbox/internal/gitworktree/gitworktreetest"
 )
 
+// TestDefaultDir checks a config command from a linked worktree is scoped to
+// the main worktree, and from anywhere else to the working directory.
+func TestDefaultDir(t *testing.T) {
+	repo := gitworktreetest.InitRepo(t)
+	wt := gitworktreetest.AddWorktree(t, repo, "feature")
+	wantMain, _ := filepath.EvalSymlinks(repo)
+	if got, _ := filepath.EvalSymlinks(DefaultDir(wt)); got != wantMain {
+		t.Errorf("DefaultDir(linked worktree) = %q, want the main worktree %q", got, wantMain)
+	}
+	if got := DefaultDir(repo); got != filepath.Clean(repo) {
+		t.Errorf("DefaultDir(main worktree) = %q, want %q", got, repo)
+	}
+	// A subdirectory is scoped to the repository root, spelled as the
+	// subdirectory's ancestor.
+	sub := filepath.Join(repo, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultDir(sub); got != filepath.Clean(repo) {
+		t.Errorf("DefaultDir(subdirectory) = %q, want the repository root %q", got, repo)
+	}
+	plain := t.TempDir()
+	if got := DefaultDir(plain); got != plain {
+		t.Errorf("DefaultDir(not a repo) = %q, want %q", got, plain)
+	}
+}
+
 // isolate points the ticket directory at a fresh temp dir (os.UserCacheDir
 // reads XDG_CACHE_HOME on Linux and HOME on macOS).
 // It returns a project directory to make requests from.
@@ -86,11 +113,10 @@ func TestValidate(t *testing.T) {
 	}{
 		{args: nil, wantErr: "needs a subcommand"},
 		{args: []string{"edit"}, wantErr: "interactive"},
-		{args: []string{"--dir", "/srv", "edit"}, wantErr: "interactive"},
+		{args: []string{"-v", "edit"}, wantErr: "interactive"},
 		{args: []string{"commands", "allow", "make"}},
 		// "edit" as a value, not the subcommand.
 		{args: []string{"commands", "allow", "edit"}},
-		{args: []string{"--dir", "edit", "show"}},
 	} {
 		err := Request{Args: tc.args}.Validate()
 		if tc.wantErr == "" {
@@ -105,122 +131,51 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestScope(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cwd := filepath.Join(home, "work", "proj")
+func TestCheckScope(t *testing.T) {
 	for _, tc := range []struct {
 		args    []string
-		want    []string // nil: want an error
 		wantErr string
 	}{
-		// No --dir: scoped to cwd.
-		{args: []string{"commands", "allow", "make"}, want: []string{"--dir", cwd, "commands", "allow", "make"}},
-		// A --dir at or under cwd is kept, as the absolute directory it names.
-		{args: []string{"commands", "allow", "make", "--dir", "."}, want: []string{"commands", "allow", "make", "--dir", cwd}},
-		{args: []string{"--dir", "sub/dir", "show"}, want: []string{"--dir", filepath.Join(cwd, "sub", "dir"), "show"}},
-		{args: []string{"--dir=" + cwd + "/", "show"}, want: []string{"--dir=" + cwd, "show"}},
-		{args: []string{"--dir=x", "show"}, want: []string{"--dir=" + filepath.Join(cwd, "x"), "show"}},
-		{args: []string{"show", "--dir", "~/work/proj/x"}, want: []string{"show", "--dir", filepath.Join(cwd, "x")}},
-		// "--dir" after "--" is positional.
-		{args: []string{"paths", "allow", "--", "--dir"}, want: []string{"--dir", cwd, "paths", "allow", "--", "--dir"}},
-		// Anywhere else is refused.
-		{args: []string{"--dir", "/", "mode", "set", "open"}, wantErr: "outside the project"},
-		{args: []string{"--dir", "~", "mode", "set", "open"}, wantErr: "outside the project"},
-		{args: []string{"--dir", "..", "mode", "set", "open"}, wantErr: "outside the project"},
-		{args: []string{"--dir", "../proj-other", "show"}, wantErr: "outside the project"},
-		{args: []string{"--dir", "sub/../../x", "show"}, wantErr: "outside the project"},
-		{args: []string{"--dir=/etc", "show"}, wantErr: "outside the project"},
-		{args: []string{"--dir", ".", "show", "--dir", "/"}, wantErr: "outside the project"},
-		{args: []string{"--dir=", "mode", "set", "open"}, wantErr: "needs a directory"},
-		{args: []string{"--dir", "", "mode", "set", "open"}, wantErr: "needs a directory"},
-		{args: []string{"show", "--dir"}, wantErr: "needs a directory"},
+		{args: []string{"commands", "allow", "make"}},
+		// After "--" everything is positional.
+		{args: []string{"paths", "allow", "--", "--dir"}},
+		{args: []string{"commands", "allow", "make", "--dir", "."}, wantErr: "--dir"},
+		{args: []string{"--dir=/", "show"}, wantErr: "--dir"},
+		{args: []string{"--global", "mode", "set", "open"}},
+		// Only the bare flag, so the prompt reads it as cobra does.
+		{args: []string{"mode", "set", "open", "--global=1"}, wantErr: "--global"},
+		{args: []string{"mode", "set", "open", "--global=false"}, wantErr: "--global"},
 	} {
-		got, err := Request{Args: tc.args}.Scope(cwd)
-		if tc.wantErr != "" {
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("Scope(%q) = %q, %v; want error containing %q", tc.args, got.Args, err, tc.wantErr)
+		err := Request{Args: tc.args}.CheckScope()
+		if tc.wantErr == "" {
+			if err != nil {
+				t.Errorf("CheckScope(%q) = %v, want nil", tc.args, err)
 			}
 			continue
 		}
-		if err != nil || !slices.Equal(got.Args, tc.want) {
-			t.Errorf("Scope(%q) = %q, %v; want %q", tc.args, got.Args, err, tc.want)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("CheckScope(%q) = %v, want error containing %q", tc.args, err, tc.wantErr)
 		}
 	}
 }
 
-// TestScopeWorktree checks a request made from a linked git worktree is scoped
-// to the main worktree, whose override every worktree of the repository
-// inherits, while a --dir inside the worktree itself stays allowed.
-func TestScopeWorktree(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	main := filepath.Join(home, "src", "repo")
-	wt := filepath.Join(home, "worktrees", "repo-feature")
-	roots := roots(wt, main)
-	if !slices.Equal(roots, []string{main, wt}) {
-		t.Fatalf("roots = %q, want main worktree first", roots)
-	}
+func TestSummary(t *testing.T) {
 	for _, tc := range []struct {
-		cwd     string
-		args    []string
-		want    []string
-		wantErr string
+		args []string
+		want string
 	}{
-		{cwd: wt, args: []string{"commands", "allow", "actionlint"}, want: []string{"--dir", main, "commands", "allow", "actionlint"}},
-		// From a subdirectory of the worktree too: overrides for a linked
-		// worktree are looked up at the main worktree's root.
-		{cwd: filepath.Join(wt, "sub"), args: []string{"commands", "allow", "make"}, want: []string{"--dir", main, "commands", "allow", "make"}},
-		{cwd: wt, args: []string{"--dir", ".", "show"}, want: []string{"--dir", wt, "show"}},
-		{cwd: wt, args: []string{"--dir", main + "/x", "show"}, want: []string{"--dir", filepath.Join(main, "x"), "show"}},
-		{cwd: wt, args: []string{"--dir", filepath.Dir(main), "show"}, wantErr: "outside the project"},
-		{cwd: wt, args: []string{"--dir", "..", "show"}, wantErr: "outside the project"},
+		{[]string{"paths", "allow", "~/x"}, "✓ read  ✗ write  ✗ internal  ✓ this project  ✗ global"},
+		{[]string{"paths", "allow", "~/x", "--write"}, "✓ read  ✓ write  ✗ internal  ✓ this project  ✗ global"},
+		{[]string{"paths", "allow", "--internal", "~/x", "--write=true"}, "✓ read  ✓ write  ✓ internal  ✓ this project  ✗ global"},
+		{[]string{"paths", "allow", "~/x", "--commands=npm"}, "✓ read  ✗ write  ✓ internal  ✓ this project  ✗ global"},
+		{[]string{"paths", "allow", "~/x", "--write=1", "--internal=false"}, "✓ read  ✓ write  ✗ internal  ✓ this project  ✗ global"},
+		{[]string{"commands", "allow", "make"}, "✓ this project  ✗ global"},
+		{[]string{"commands", "allow", "make", "--global"}, "✗ this project  ✓ global"},
+		{[]string{"commands", "allow", "--", "--global"}, "✓ this project  ✗ global"},
 	} {
-		got, err := Request{Args: tc.args}.scope(tc.cwd, rootsFor(tc.cwd, wt, main))
-		if tc.wantErr != "" {
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("scope(%q) = %q, %v; want error containing %q", tc.args, got.Args, err, tc.wantErr)
-			}
-			continue
+		if got := (Request{Args: tc.args}).Summary(); got != tc.want {
+			t.Errorf("Summary(%q) = %q, want %q", tc.args, got, tc.want)
 		}
-		if err != nil || !slices.Equal(got.Args, tc.want) {
-			t.Errorf("scope(%q) = %q, %v; want %q", tc.args, got.Args, err, tc.want)
-		}
-	}
-}
-
-// rootsFor is Roots for a cwd at or under the linked worktree wt of main.
-func rootsFor(cwd, wt, main string) []string {
-	if !Within(wt, cwd) {
-		return roots(cwd, "")
-	}
-	return roots(cwd, main)
-}
-
-func TestRootsLinkedWorktree(t *testing.T) {
-	repo := gitworktreetest.InitRepo(t)
-	wt := gitworktreetest.AddWorktree(t, repo, "feature")
-	got := Roots(wt)
-	if len(got) != 2 || got[1] != filepath.Clean(wt) {
-		t.Fatalf("Roots(%q) = %q, want [main worktree, cwd]", wt, got)
-	}
-	wantMain, _ := filepath.EvalSymlinks(repo)
-	if gotMain, _ := filepath.EvalSymlinks(got[0]); gotMain != wantMain {
-		t.Errorf("Roots(%q)[0] = %q, want the main worktree %q", wt, got[0], wantMain)
-	}
-	scoped, err := Request{Args: []string{"commands", "allow", "actionlint"}}.Scope(wt)
-	if err != nil || len(scoped.Args) < 2 || scoped.Args[1] != got[0] {
-		t.Errorf("Scope from a linked worktree = %q, %v; want --dir %s", scoped.Args, err, got[0])
-	}
-}
-
-func TestRootsNotAWorktree(t *testing.T) {
-	cwd := t.TempDir()
-	if got := Roots(cwd); !slices.Equal(got, []string{cwd}) {
-		t.Errorf("Roots(%q) = %q, want just cwd", cwd, got)
-	}
-	if got := roots(cwd, cwd); !slices.Equal(got, []string{cwd}) {
-		t.Errorf("roots with main == cwd = %q, want just cwd", got)
 	}
 }
 

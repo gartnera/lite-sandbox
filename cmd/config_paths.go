@@ -188,8 +188,9 @@ var configPathsRemoveCmd = &cobra.Command{
 }
 
 var configPathsMigrateCmd = &cobra.Command{
-	Use:   "migrate",
-	Short: "Rewrite the deprecated one-list-per-kind path keys as `paths` entries, in the base config and every override",
+	Annotations: wholeFile,
+	Use:         "migrate",
+	Short:       "Rewrite the deprecated one-list-per-kind path keys as `paths` entries, in the base config and every override",
 	Long: `The deprecated keys (readable_paths, writable_paths, internal_readable_paths,
 internal_writable_paths, denied_read_paths, denied_write_paths) keep loading,
 so this is optional. It rewrites them once, everywhere in the file, keeping

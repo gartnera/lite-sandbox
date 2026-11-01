@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gartnera/lite-sandbox/config"
+	"github.com/gartnera/lite-sandbox/internal/configrequest"
 )
 
 // withConfigDir runs fn with the shared --dir flag set, restoring it afterwards
@@ -393,6 +394,61 @@ func TestConfigDir_FlagRegisteredOnce(t *testing.T) {
 	walk(configCmd)
 	if len(missing) > 0 {
 		t.Errorf("subcommands without --dir: %v", missing)
+	}
+}
+
+// TestConfigDir_DefaultsToProject checks a config change with neither --dir
+// nor --global is scoped to the project (configrequest.DefaultDir: here, the
+// repository root above the cmd package the test runs in), that --global
+// edits the base config, and that the two cannot be combined.
+func TestConfigDir_DefaultsToProject(t *testing.T) {
+	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	reset := func() { configDir, configGlobal = "", false }
+	t.Cleanup(reset)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd := configrequest.DefaultDir(cwd)
+	if wd == cwd {
+		t.Fatalf("DefaultDir(%q) = the working directory, want the repository root above it", cwd)
+	}
+
+	captureStdout(t, func() {
+		if err := runRootCmd(t, "config", "commands", "allow", "npm"); err != nil {
+			t.Fatalf("commands allow npm: %v", err)
+		}
+		reset()
+		if err := runRootCmd(t, "config", "commands", "allow", "make", "--global"); err != nil {
+			t.Fatalf("commands allow make --global: %v", err)
+		}
+		reset()
+		if err := runRootCmd(t, "config", "commands", "allow", "go", "--global", "--dir", "/work/acme"); err == nil {
+			t.Error("--global with --dir was accepted")
+		}
+		reset()
+		// A whole-file command is not scoped and needs no --global.
+		if err := runRootCmd(t, "config", "path"); err != nil {
+			t.Errorf("config path: %v", err)
+		}
+		reset()
+	})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(c *config.Config, text string) bool {
+		return slices.ContainsFunc(c.AllCommandEntries(), func(e config.CommandEntry) bool { return e.SameCommand(text) })
+	}
+	if has(cfg, "npm") || !has(cfg, "make") || has(cfg, "go") {
+		t.Errorf("base commands = %+v, want make only", cfg.AllCommandEntries())
+	}
+	if len(cfg.Overrides) != 1 || cfg.Overrides[0].Path != wd {
+		t.Fatalf("overrides = %+v, want one for %s", cfg.Overrides, wd)
+	}
+	if !has(cfg.ForDirectory(wd), "npm") {
+		t.Errorf("npm is not allowed for %s", wd)
 	}
 }
 

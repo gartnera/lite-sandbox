@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -20,11 +19,15 @@ var configCmd = &cobra.Command{
 	Short: "Manage configuration",
 	Long: `Manage configuration.
 
-Every setting under ` + "`config`" + ` accepts --dir <path>, which scopes the change to
-commands run at or under that directory instead of the whole machine: the value
-is stored as a per-directory override (the ` + "`overrides`" + ` list in the config file)
-and the base config is left alone. Reads honour it too, so
-` + "`config <section> show --dir <path>`" + ` prints what that directory resolves to.`,
+Every setting under ` + "`config`" + ` is scoped to the project by default: the root of
+the git repository the working directory is in (a linked worktree's main
+worktree), or the working directory itself outside one. The change applies to
+commands run at or under it, stored as a per-directory override (the
+` + "`overrides`" + ` list in the config file), and the base config is left alone.
+--dir <path> scopes it to that directory instead, and --global edits the base
+config, which applies everywhere. Reads honour the same scope, so
+` + "`config <section> show`" + ` prints what the project resolves to and
+` + "`config <section> show --global`" + ` prints the base config.`,
 }
 
 // configDir is the value of the `--dir` flag, registered once as a persistent
@@ -54,25 +57,51 @@ type configEdit struct {
 var currentEdit *configEdit
 
 // checkConfigRequestDir refuses a config subcommand run for a config request
-// (configrequest.RootEnv set by the MCP server) unless --dir confines it to the
-// request's project (configrequest.Roots). The server already scoped the
-// request; this checks the value cobra actually parsed, which a flag taking
-// the next word as its value could otherwise make differ from what the server
-// read.
+// (configrequest.DirEnv set by the MCP server) unless it is scoped to exactly
+// the request's project directory, or to the base config with --global. The
+// server already refused --dir (Request.CheckScope); this checks what cobra
+// actually parsed, which a flag taking the next word as its value could
+// otherwise make differ from what the server read.
 func checkConfigRequestDir() error {
-	env := os.Getenv(configrequest.RootEnv)
-	if env == "" {
+	env := os.Getenv(configrequest.DirEnv)
+	if env == "" || configGlobal {
 		return nil
 	}
-	var roots []string
-	for _, root := range filepath.SplitList(env) {
-		if root != "" {
-			roots = append(roots, filepath.Clean(root))
-		}
+	if configDir == "" || resolveDirArg(configDir) != filepath.Clean(env) {
+		return fmt.Errorf("config changes the agent requests apply to the project %s, or to every directory with --global: leave out --dir", env)
 	}
-	if len(roots) == 0 || configDir == "" || !configrequest.WithinAny(roots, resolveDirArg(configDir)) {
-		return fmt.Errorf("config changes the agent requests apply only to %s: pass --dir with one of those directories or one beneath it", strings.Join(roots, " or "))
+	return nil
+}
+
+// configGlobal is the value of the `--global` flag: edit (and read) the base
+// config rather than the per-directory override --dir defaults to.
+var configGlobal bool
+
+// wholeFileAnnotation marks a config subcommand that is not a per-directory
+// setting (the config file path, `edit`, `migrate`, the override listing):
+// --dir does not default to the working directory for it.
+const wholeFileAnnotation = "lite-sandbox/whole-file"
+
+// wholeFile is the Annotations value marking a command wholeFileAnnotation.
+var wholeFile = map[string]string{wholeFileAnnotation: "true"}
+
+// applyDefaultConfigDir scopes a config subcommand to the project — the git
+// root, a linked worktree's main worktree, or the working directory outside a
+// repository (configrequest.DefaultDir) — when neither --dir nor --global is
+// given, so a
+// change reaches beyond the current project only when asked to with --global.
+func applyDefaultConfigDir(cmd *cobra.Command) error {
+	if configGlobal && configDir != "" {
+		return fmt.Errorf("--dir and --global cannot be used together")
 	}
+	if configGlobal || configDir != "" || cmd.Annotations[wholeFileAnnotation] != "" {
+		return nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("finding the working directory to scope the change to (pass --dir or --global): %w", err)
+	}
+	configDir = configrequest.DefaultDir(wd)
 	return nil
 }
 
@@ -80,10 +109,15 @@ func init() {
 	configCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		// cobra runs only the nearest PersistentPreRun, so run the root's too.
 		rootCmd.PersistentPreRun(cmd, args)
+		if err := applyDefaultConfigDir(cmd); err != nil {
+			return err
+		}
 		return checkConfigRequestDir()
 	}
 	configCmd.PersistentFlags().StringVar(&configDir, "dir", "",
-		"apply the setting only to commands run at or under this directory (a per-directory override); reads resolve for it")
+		"apply the setting only to commands run at or under this directory (a per-directory override; default: the git root, else the working directory); reads resolve for it")
+	configCmd.PersistentFlags().BoolVar(&configGlobal, "global", false,
+		"apply the setting to every directory (the base config) instead of the project; reads show the base config")
 
 	configCmd.AddCommand(configPathCmd)
 	configCmd.AddCommand(configShowCmd)
@@ -94,8 +128,9 @@ func init() {
 }
 
 var configPathCmd = &cobra.Command{
-	Use:   "path",
-	Short: "Print the config file path",
+	Annotations: wholeFile,
+	Use:         "path",
+	Short:       "Print the config file path",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := rejectConfigDir(cmd); err != nil {
 			return err
@@ -130,8 +165,9 @@ var configOverridesCmd = &cobra.Command{
 }
 
 var configOverridesListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List the configured per-directory overrides",
+	Annotations: wholeFile,
+	Use:         "list",
+	Short:       "List the configured per-directory overrides",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := rejectConfigDir(cmd); err != nil {
 			return err
@@ -160,9 +196,10 @@ var configOverridesListCmd = &cobra.Command{
 }
 
 var configOverridesRemoveCmd = &cobra.Command{
-	Use:   "remove [dir]",
-	Short: "Remove every setting stored for a directory (defaults to --dir)",
-	Args:  cobra.MaximumNArgs(1),
+	Annotations: wholeFile,
+	Use:         "remove [dir]",
+	Short:       "Remove every setting stored for a directory (defaults to --dir)",
+	Args:        cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := dirArgOrFlag(args)
 		if err != nil {

@@ -218,10 +218,9 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateConfigRequest decides a sandbox bash tool call that is a config
 // request (configrequest.Parse), or returns nil for any other command. When
 // this agent was installed to make config requests (--config-requests), it
-// scopes the request to the project (Request.Scope: always a --dir override —
-// for the main worktree when cwd is a linked git worktree — never the global
-// config), records a ticket for the exact scoped
-// request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
+// refuses --dir and --global (Request.CheckScope: the change is an override
+// for the working directory, never the global config), records a ticket for
+// the exact request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
 // internal/configrequest). Without the flag it returns nil: the call is
 // pre-approved like any other, and the sandbox's deny list refuses it.
 func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
@@ -255,17 +254,15 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	cwd := eventCWD(event)
-	scoped, err := req.Scope(cwd)
-	if err != nil {
+	if err := req.CheckScope(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	if err := configrequest.Issue(cwd, req); err != nil {
+	if err := configrequest.Issue(eventCWD(event), req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this project only (the global config is left alone): "+scoped.Command())
+		req.Command()+"\n"+req.Summary())
 }
 
 // evaluateAskCommand decides a sandbox bash tool call whose command runs

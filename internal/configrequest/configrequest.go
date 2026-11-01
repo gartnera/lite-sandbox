@@ -18,10 +18,9 @@ package configrequest
 
 import (
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -133,12 +132,7 @@ func (r Request) Validate() error {
 	if len(r.Args) == 0 {
 		return errors.New("`lite-sandbox config` needs a subcommand, e.g. `lite-sandbox config commands allow make`")
 	}
-	for i := 0; i < len(r.Args); i++ {
-		a := r.Args[i]
-		if a == "--dir" {
-			i++ // its value
-			continue
-		}
+	for _, a := range r.Args {
 		if strings.HasPrefix(a, "-") {
 			continue
 		}
@@ -151,120 +145,113 @@ func (r Request) Validate() error {
 	return nil
 }
 
-// RootEnv names the environment variable the server sets when it runs a
-// config request: the directories the request is confined to (Roots), joined
-// with os.PathListSeparator. The config subcommands refuse to run under it
-// unless --dir names one of those directories or one beneath it, which catches
-// whatever Scope's reading of the arguments missed (cobra, not Scope, decides
-// what --dir ends up as).
-const RootEnv = "LITE_SANDBOX_CONFIG_REQUEST_ROOT"
+// DirEnv names the environment variable the server sets when it runs a config
+// request: the directory the request is scoped to (DefaultDir of the working
+// directory it runs in). The config subcommands refuse to run under it unless
+// the directory they scope the change to is exactly that one, which catches
+// whatever CheckScope's reading of the arguments missed (cobra, not
+// CheckScope, decides what --dir ends up as).
+const DirEnv = "LITE_SANDBOX_CONFIG_REQUEST_DIR"
 
-// Roots returns the directories a config request made from cwd may change:
-// the project's root first — the main worktree when cwd is inside a linked git
-// worktree, cwd otherwise — then cwd itself when that differs.
-func Roots(cwd string) []string {
-	return roots(filepath.Clean(cwd), gitworktree.MainWorktree(cwd))
-}
-
-func roots(cwd, main string) []string {
-	if main == "" || main == cwd {
-		return []string{cwd}
+// DefaultDir is the directory a config command run from cwd is scoped to when
+// it has neither --dir nor --global: the root of the git repository cwd is in,
+// so a change made from a subdirectory applies to the whole repository —
+// inside a linked git worktree, the repository's main worktree, whose override
+// every one of its worktrees inherits (config.Config.ForDirectory), so a
+// change made from a throwaway worktree reaches the worktrees created later
+// too. Outside a git repository it is cwd.
+func DefaultDir(cwd string) string {
+	if main := gitworktree.MainWorktree(cwd); main != "" {
+		return filepath.Clean(main)
 	}
-	return []string{filepath.Clean(main), cwd}
+	if top := gitworktree.Toplevel(cwd); top != "" {
+		return top
+	}
+	return filepath.Clean(cwd)
 }
 
-// Scope confines the request to the project the agent works in. A config
-// request never edits the global config: the change is always a per-directory
-// override (--dir). A request that names no --dir gets one for the project's
-// root (Roots): cwd, or — in a linked git worktree — the main worktree, so a
-// change made from one worktree reaches every worktree of the repository (an
-// override for the main worktree applies to its linked worktrees, see
-// config.Config.ForDirectory) instead of only the throwaway checkout it was
-// asked from. One whose --dir points elsewhere — a parent, a sibling, $HOME,
-// / — is refused, since an override there would reach beyond the project the
-// user is approving changes for.
-//
-// Every --dir is rewritten as the absolute directory it names, so the
-// command the user approves says which directory it changes, and is exactly
-// what runs. The hook and the server both scope the request, so the user
-// approves the command the server runs.
-func (r Request) Scope(cwd string) (Request, error) {
-	return r.scope(cwd, Roots(cwd))
-}
-
-func (r Request) scope(cwd string, roots []string) (Request, error) {
-	cwd = filepath.Clean(cwd)
-	args := slices.Clone(r.Args)
-	found := false
-	for i := 0; i < len(args); i++ {
-		a := args[i]
+// CheckScope refuses --dir in a request: the config subcommands scope a change
+// to the agent's project (DefaultDir) by default, or to every directory with
+// --global, which the approval prompt marks (Summary). An arbitrary directory
+// is not offered, so the prompt can only ever say one of those two things.
+func (r Request) CheckScope() error {
+	for _, a := range r.Args {
 		if a == "--" {
 			break // the rest is positional
 		}
-		var dir string
-		switch {
-		case a == "--dir":
-			if i+1 >= len(args) {
-				return Request{}, errors.New("`--dir` needs a directory")
-			}
-			i++
-			dir = args[i]
-		case strings.HasPrefix(a, "--dir="):
-			dir = strings.TrimPrefix(a, "--dir=")
-		default:
-			continue
+		if a == "--dir" || strings.HasPrefix(a, "--dir=") {
+			return errors.New("`--dir` is not allowed: a config change the agent requests applies to this project, or to every directory with --global; leave out --dir")
 		}
-		// An empty --dir is no --dir at all to the config subcommands: global.
-		if dir == "" {
-			return Request{}, errors.New("`--dir` needs a directory")
+		// cobra reads --global=1, =t, =TRUE, ... as on; only the bare flag is
+		// accepted, so the prompt's reading of it (Global) is cobra's.
+		if strings.HasPrefix(a, "--global=") {
+			return errors.New("write `--global` without a value")
 		}
-		abs := ResolveDir(cwd, dir)
-		if !WithinAny(roots, abs) {
-			return Request{}, fmt.Errorf("`--dir %s` is outside the project %s: config changes the agent requests apply only to the project; leave out --dir and the change is scoped to it", dir, roots[0])
-		}
-		if a == "--dir" {
-			args[i] = abs
-		} else {
-			args[i] = "--dir=" + abs
-		}
-		found = true
 	}
-	if !found {
-		args = append([]string{"--dir", roots[0]}, args...)
-	}
-	return Request{Args: args}, nil
+	return nil
 }
 
-// ResolveDir resolves a --dir value the way the config subcommands do — a
-// leading ~ is the home directory, a relative path is taken from cwd — and
-// cleans it.
-func ResolveDir(cwd, dir string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if dir == "~" {
-			dir = home
-		} else if strings.HasPrefix(dir, "~/") {
-			dir = filepath.Join(home, dir[2:])
+// Global reports whether the request sets --global, editing the base config.
+// CheckScope has refused every other spelling of the flag. Where another flag
+// takes "--global" as its value, this overstates the scope, which errs on the
+// side of the prompt warning the user.
+func (r Request) Global() bool {
+	for _, a := range r.Args {
+		switch a {
+		case "--":
+			return false
+		case "--global":
+			return true
 		}
 	}
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(cwd, dir)
-	}
-	return filepath.Clean(dir)
+	return false
 }
 
-// Within reports whether dir is root or a directory beneath it. Both must be
-// absolute and clean. The comparison is lexical, as override matching is.
-func Within(root, dir string) bool {
-	if dir == "" {
+// Summary renders a status line for the approval prompt, a ✓ or ✗ per thing
+// the request grants: for `paths allow`, read, write and internal access, and
+// for every request its scope: this project, or every directory (--global).
+func (r Request) Summary() string {
+	mark := func(on bool, label string) string {
+		if on {
+			return "✓ " + label
+		}
+		return "✗ " + label
+	}
+	// boolFlag reads a bool flag the way pflag does (strconv.ParseBool), so
+	// --write=1 is marked as the write it is. A value pflag would reject
+	// fails the command, so marking it on is harmless.
+	boolFlag := func(a, name string, v *bool) bool {
+		if a == name {
+			*v = true
+			return true
+		}
+		if val, ok := strings.CutPrefix(a, name+"="); ok {
+			b, err := strconv.ParseBool(val)
+			*v = b || err != nil
+			return true
+		}
 		return false
 	}
-	rel, err := filepath.Rel(root, dir)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// WithinAny reports whether dir is within one of roots (see Within).
-func WithinAny(roots []string, dir string) bool {
-	return slices.ContainsFunc(roots, func(root string) bool { return Within(root, dir) })
+	var words []string
+	write, internal, commands := false, false, false
+	for _, a := range r.Args {
+		switch {
+		case a == "--":
+		case boolFlag(a, "--write", &write), boolFlag(a, "--internal", &internal):
+		case a == "--commands" || strings.HasPrefix(a, "--commands="):
+			commands = true
+		case !strings.HasPrefix(a, "-"):
+			words = append(words, a)
+		}
+	}
+	internal = internal || commands
+	var parts []string
+	if len(words) >= 2 && words[0] == "paths" && words[1] == "allow" {
+		parts = append(parts, mark(true, "read"), mark(write, "write"), mark(internal, "internal"))
+	}
+	global := r.Global()
+	parts = append(parts, mark(!global, "this project"), mark(global, "global"))
+	return strings.Join(parts, "  ")
 }
 
 // Command renders the request as the command line it runs.
