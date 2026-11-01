@@ -94,7 +94,8 @@ func boundaryFix(cfg *config.Config, e *boundaryError) string {
 	if filepath.Base(target) == "*" {
 		return ""
 	}
-	if protectedOverlap(cfg, e.abs) || protectedOverlap(cfg, e.resolved) || protectedOverlap(cfg, target) {
+	protected := protectedEntries(cfg)
+	if protectedOverlap(protected, e.abs) || protectedOverlap(protected, e.resolved) || protectedOverlap(protected, target) {
 		return ""
 	}
 	word, ok := configWord(target)
@@ -116,7 +117,7 @@ func boundaryFix(cfg *config.Config, e *boundaryError) string {
 // compared both as written and with symlinks followed, and on macOS without
 // regard to case, since its default filesystem ignores case (~/.SSH is
 // ~/.ssh).
-func protectedOverlap(cfg *config.Config, path string) bool {
+func protectedOverlap(protected []string, path string) bool {
 	if path == string(filepath.Separator) {
 		return true
 	}
@@ -129,7 +130,10 @@ func protectedOverlap(cfg *config.Config, path string) bool {
 			return true // the home directory itself, or above it
 		}
 	}
-	for _, d := range protectedEntries(cfg) {
+	for _, d := range protected {
+		if !filepath.IsAbs(d) {
+			continue
+		}
 		for _, p := range withResolved(filepath.Clean(d)) {
 			if pathWithin(path, p) || pathWithin(p, path) {
 				return true
@@ -153,17 +157,36 @@ func protectedOverlap(cfg *config.Config, path string) bool {
 
 // protectedEntries returns the paths a fix must neither name nor cover: both
 // deny lists, the credential masks inside the hidden home, the user's runtime
-// directory (agent sockets, the session bus), and the paths of internal
-// grants, which are meant for the programs a command starts (or, scoped, for
-// one CLI) and never for the agent's own reads and writes.
+// directory (agent sockets, the session bus), the paths of internal grants,
+// which are meant for the programs a command starts (or, scoped, for one CLI)
+// and never for the agent's own reads and writes, and what the OS sandbox
+// worker alone guards: the lite-sandbox binary and the PATH directories ahead
+// of it, the coding agents' control sockets and configuration directories
+// (installed or not), and docker's state (buildx builders, daemon sockets).
 func protectedEntries(cfg *config.Config) []string {
 	var out []string
 	if d := config.UserRuntimeDir(); d != "" {
 		out = append(out, d)
 	}
+	// What only the OS sandbox worker protects (workerOptions, guardHost):
+	// shell redirects and Python file operations run in the server process,
+	// past the worker, so a grant over these would expose them there.
+	out = append(out, config.ServerExecutable()...)
+	out = append(out, config.AgentSocketDirs()...)
+	out = append(out, config.AgentSocketPaths()...)
+	out = append(out, config.AgentConfigDirs()...)
+	if dir := config.BuildxConfigDir(); filepath.IsAbs(dir) {
+		out = append(out, dir)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		// The docker daemon sockets the proxy masks live in these.
+		out = append(out, filepath.Join(home, ".docker"), filepath.Join(home, ".orbstack"), filepath.Join(home, ".colima"))
+	}
 	if cfg == nil {
 		return out
 	}
+	out = append(out, cfg.HostProgramDirs(os.Getenv("PATH"))...)
+	out = append(out, cfg.Docker.UpstreamSocket()) // nil-safe: detects the daemon's socket
 	out = append(out, cfg.EffectiveDeniedReadPaths()...)
 	out = append(out, cfg.EffectiveDeniedWritePaths()...)
 	for _, d := range cfg.HiddenHomeDeniedReadEntries() {

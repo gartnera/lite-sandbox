@@ -62,10 +62,13 @@ Sandbox errors name the config change that would lift them, so the agent can
 ask for it. A path-boundary refusal names a `paths allow` entry, but never one
 that would reach what the sandbox refuses on purpose: the home directory or
 an ancestor of it; a deny-list entry, a hidden-home credential mask, the
-runtime directory, or an `internal` grant, whether the grant would be that
-path, a directory holding it, or a path under it (the deny lists bind only
-the OS sandbox in `denylist` mode, so a grant over one would open it to the
-path checks and to Python elsewhere); system directories and `/run` outside
+runtime directory, an `internal` grant, or what only the OS sandbox worker
+guards (the lite-sandbox binary and the `PATH` directories ahead of it, the
+agents' configuration directories and control sockets, docker's buildx
+builders and daemon socket), whether the grant would be that path, a
+directory holding it, or a path under it (those protections bind only the OS
+sandbox, and only in `denylist` mode for the deny lists, while redirects and
+Python run in the server process, so a grant over one would open it there); system directories and `/run` outside
 the home directory; `.git`; and agent configuration. Paths are compared as
 written and with symlinks followed, and without regard to case on macOS.
 Naming a fix grants nothing; the user still approves each request.

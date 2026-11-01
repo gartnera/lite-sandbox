@@ -416,8 +416,11 @@ The error names no entry where the sandbox refuses on purpose: when the
 grant would be the home directory or above it; would be, contain, or sit
 inside a deny-list entry (credentials, shell startup files, lite-sandbox's
 own config, audit log and approval tickets, agent settings), a credential the
-hidden home masks, the user's runtime directory, or an `internal` grant; or
-would be in a system directory or `/run` outside the home directory. So
+hidden home masks, the user's runtime directory, an `internal` grant, the
+lite-sandbox binary or a `PATH` directory ahead of it, a coding agent's
+configuration directory (installed or not) or control socket, or docker's
+state (buildx builders, the daemon socket); or would be in a system directory
+or `/run` outside the home directory. So
 `echo x > ~/.config/newfile` names nothing, since `~/.config` holds
 lite-sandbox's config. Nor does it name one for a path inside `.git` or a
 write to a coding agent's configuration, which no paths entry lifts.

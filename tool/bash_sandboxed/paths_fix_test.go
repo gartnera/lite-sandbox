@@ -57,6 +57,10 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		}
 	}
 	allow := "lite-sandbox config paths allow "
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name    string
@@ -89,6 +93,9 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		{"directory holding the approval tickets", "echo x > " + home + "/.cache/foo.log", ""},
 		{"hidden-home credential mask", "cat " + home + "/.git-credentials", ""},
 		{"internal grant", "cat " + home + "/internal-only/s", ""},
+		{"docker buildx builders", "echo x > " + home + "/.docker/buildx/current", ""},
+		{"agent not installed yet", "echo x > " + home + "/.config/opencode/plugin/x.js", ""},
+		{"the running lite-sandbox binary", "echo x > " + exe, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
