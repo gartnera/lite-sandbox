@@ -27,6 +27,16 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// Everything the protected paths are derived from must follow HOME: CI
+	// runners export XDG_CONFIG_HOME, which would move lite-sandbox's config
+	// and the agents' directories out of this test's home.
+	for _, v := range []string{
+		"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "LITE_SANDBOX_CONFIG", "LITE_SANDBOX_AUDIT_LOG",
+		"DOCKER_CONFIG", "BUILDX_CONFIG", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG_DIR",
+		"GROK_HOME", "PI_CODING_AGENT_DIR",
+	} {
+		t.Setenv(v, "")
+	}
 	workDir := filepath.Join(home, "project")
 	outside := filepath.Join(home, "outside")
 	for _, d := range []string{
