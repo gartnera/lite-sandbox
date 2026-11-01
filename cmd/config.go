@@ -109,6 +109,11 @@ const wholeFileAnnotation = "lite-sandbox/whole-file"
 // wholeFile is the Annotations value marking a command wholeFileAnnotation.
 var wholeFile = map[string]string{wholeFileAnnotation: "true"}
 
+// interactiveAnnotation marks a config subcommand that needs a terminal (such
+// as `edit`, which opens $EDITOR). A config request runs with none, so
+// parseConfigRequest refuses one.
+const interactiveAnnotation = "lite-sandbox/interactive"
+
 // readOnlyAnnotation marks a config subcommand for a single setting that only
 // prints it and changes nothing. An agent's config request for one runs
 // without the user's approval (parseConfigRequest), as the user would run it,

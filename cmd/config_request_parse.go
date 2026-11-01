@@ -63,9 +63,10 @@ func parseConfigRequest(req configrequest.Request) (configrequest.Scope, error) 
 	if cmd.Deprecated != "" {
 		return configrequest.Scope{}, fmt.Errorf("`%s` is deprecated and cannot be requested: %s", cmd.CommandPath(), cmd.Deprecated)
 	}
-	if cmd == configEditCmd {
-		// `config edit` opens $EDITOR; there is no terminal to open it on.
-		return configrequest.Scope{}, errors.New("`lite-sandbox config edit` is interactive and cannot be run here; request the individual change instead (e.g. `lite-sandbox config paths allow <path>`)")
+	if cmd.Annotations[interactiveAnnotation] != "" {
+		// Checked before wholeFileAnnotation, which an interactive command
+		// may also carry, for the more useful message.
+		return configrequest.Scope{}, fmt.Errorf("`%s` is interactive and cannot be run here; request the individual change instead (e.g. `lite-sandbox config paths allow <path>`)", cmd.CommandPath())
 	}
 	if cmd.Annotations[wholeFileAnnotation] != "" {
 		return configrequest.Scope{}, fmt.Errorf("`%s` works on the config file as a whole and cannot be requested; ask the user to run it", cmd.CommandPath())
