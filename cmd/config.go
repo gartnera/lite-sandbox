@@ -109,6 +109,21 @@ const wholeFileAnnotation = "lite-sandbox/whole-file"
 // wholeFile is the Annotations value marking a command wholeFileAnnotation.
 var wholeFile = map[string]string{wholeFileAnnotation: "true"}
 
+// interactiveAnnotation marks a config subcommand that needs a terminal (such
+// as `edit`, which opens $EDITOR). A config request runs with none, so
+// parseConfigRequest refuses one.
+const interactiveAnnotation = "lite-sandbox/interactive"
+
+// readOnlyAnnotation marks a config subcommand for a single setting that only
+// prints it and changes nothing. An agent's config request for one runs
+// without the user's approval (parseConfigRequest), as the user would run it,
+// so mark only a single-setting command whose every run leaves the config as
+// it was, never a wholeFileAnnotation or deprecated one (a test checks).
+const readOnlyAnnotation = "lite-sandbox/read-only"
+
+// readOnly is the Annotations value marking a command readOnlyAnnotation.
+var readOnly = map[string]string{readOnlyAnnotation: "true"}
+
 // applyDefaultConfigDir scopes a config subcommand to the project — the git
 // root, a linked worktree's main worktree, or the working directory outside a
 // repository (configrequest.DefaultDir) — when neither --dir nor --global is
@@ -176,8 +191,9 @@ var configPathCmd = &cobra.Command{
 }
 
 var configShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Print the current configuration as YAML (with --dir, as it resolves for that directory)",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Print the current configuration as YAML (with --dir, as it resolves for that directory)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

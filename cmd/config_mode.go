@@ -33,8 +33,9 @@ what the next stricter mode would block before switching to it.`,
 }
 
 var configModeShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show the effective mode, audit setting, and deny lists",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show the effective mode, audit setting, and deny lists",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -146,8 +147,9 @@ since commands can carry inline secrets.`,
 }
 
 var configAuditShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show whether audit logging is enabled and where the log lives",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show whether audit logging is enabled and where the log lives",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

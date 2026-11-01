@@ -51,8 +51,9 @@ entries included.`,
 var commandsAllowNoSandbox, commandsAllowAsk bool
 
 var configCommandsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List the configured command allows, asks and denials (built-in denials included)",
+	Annotations: readOnly,
+	Use:         "list",
+	Short:       "List the configured command allows, asks and denials (built-in denials included)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

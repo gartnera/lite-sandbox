@@ -51,10 +51,21 @@ PreToolUse hook, so the user approves it. The MCP server then runs it outside
 the sandbox. The server also requires a ticket that the hook records when it
 asks, single-use and matched to the exact arguments. A call the hook never saw
 (no hook registered, or a path that skips hooks) is refused, not run
-unapproved. The exception is a help request (`--help` or `-h` with only
-plain words around it, so no other flag can take it as its value), which
-cobra answers by printing usage before any command or hook runs; it needs
-neither the prompt nor a ticket. The tickets live in lite-sandbox's cache directory, which is as
+unapproved. The exception is a request that only reads: help, which cobra
+answers by printing usage before any command or hook runs, or a subcommand
+marked read-only in the code (a single setting's `show` or `list`, never a
+command that works on the config file as a whole), which prints the config.
+It needs neither the prompt nor a ticket. This lets the agent read the config
+as it resolves for any directory (`--dir`) or the base config (`--global`);
+the config holds policy (paths, commands, profile and host names), not
+credentials. A test runs every read-only subcommand, checks it leaves the
+config file byte for byte as it was, and checks none is a whole-file or
+deprecated command. The
+hook and the server decide every question about a request (whether it only
+reads, its scope, the grants shown in the prompt, whether it
+uses `--dir` or a whole-file command) by parsing it with the config command's
+own cobra tree, the same parser the config subprocess runs, rather than by
+scanning its words. The tickets live in lite-sandbox's cache directory, which is as
 protected as the config file: outside the path boundary, and read-only under
 the OS sandbox in `denylist` mode.
 

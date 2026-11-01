@@ -14,8 +14,9 @@ var configOSSandboxCmd = &cobra.Command{
 }
 
 var configOSSandboxShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show current OS sandbox configuration",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show current OS sandbox configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

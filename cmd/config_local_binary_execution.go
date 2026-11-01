@@ -13,8 +13,9 @@ var configLocalBinaryExecutionCmd = &cobra.Command{
 }
 
 var configLocalBinaryExecutionShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show current local binary execution configuration",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show current local binary execution configuration",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

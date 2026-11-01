@@ -14,8 +14,9 @@ var gitCmd = &cobra.Command{
 }
 
 var gitShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show current git permission settings",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show current git permission settings",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

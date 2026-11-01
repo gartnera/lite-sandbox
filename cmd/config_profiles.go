@@ -36,8 +36,9 @@ the first time it is loaded, and the file rewritten in the new form.`,
 }
 
 var configProfilesListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List the profiles, whether each is enabled, and their options",
+	Annotations: readOnly,
+	Use:         "list",
+	Short:       "List the profiles, whether each is enabled, and their options",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -62,9 +63,10 @@ var configProfilesListCmd = &cobra.Command{
 }
 
 var configProfilesShowCmd = &cobra.Command{
-	Use:   "show <profile>",
-	Short: "Show a profile: whether it is enabled, its commands, options, and detected paths",
-	Args:  cobra.ExactArgs(1),
+	Annotations: readOnly,
+	Use:         "show <profile>",
+	Short:       "Show a profile: whether it is enabled, its commands, options, and detected paths",
+	Args:        cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := lookupProfile(args[0])
 		if err != nil {
