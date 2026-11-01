@@ -434,19 +434,35 @@ func TestConfigRequestHintNotOnDenials(t *testing.T) {
 	}
 }
 
-// TestConfigRequestHelp checks a config request that only asks for help is
-// neither put to the user nor held for a ticket, and runs exactly as written:
-// no --dir is added, since help changes nothing.
-func TestConfigRequestHelp(t *testing.T) {
+// TestConfigRequestReadOnly checks a config request that changes nothing
+// (help, or a subcommand marked read-only) is neither put to the user nor
+// held for a ticket, and runs exactly as written: no --dir is added and no
+// approved scope is handed over, so --global and --dir only choose what it
+// shows.
+func TestConfigRequestReadOnly(t *testing.T) {
 	isolateConfig(t)
 	isolateConfigRequests(t)
-	runs := stubConfigCommand(t)
+	var runs [][]string
+	orig := runConfigCommand
+	runConfigCommand = func(_ context.Context, _, scopeDir string, args []string, global bool) (string, error) {
+		if scopeDir != "" || global {
+			t.Errorf("%q ran with approved scope %q (global %v), want none", args, scopeDir, global)
+		}
+		runs = append(runs, args)
+		return "ok\n", nil
+	}
+	t.Cleanup(func() { runConfigCommand = orig })
 	c := setupClientWith(t, serveOptions{configRequests: true})
 
-	for _, command := range []string{
+	commands := []string{
 		"lite-sandbox config --help",
 		"lite-sandbox config paths allow -h",
-	} {
+		"lite-sandbox config show",
+		"lite-sandbox config show --global",
+		"lite-sandbox config paths list --dir /elsewhere",
+		"lite-sandbox config path",
+	}
+	for _, command := range commands {
 		if d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAllow {
 			t.Errorf("%s: hook decision = %+v, want allow", command, d)
 		}
@@ -454,18 +470,22 @@ func TestConfigRequestHelp(t *testing.T) {
 			t.Errorf("%s: %s", command, text)
 		}
 	}
-	want := [][]string{{"--help"}, {"paths", "allow", "-h"}}
-	if !slices.EqualFunc(*runs, want, slices.Equal) {
-		t.Fatalf("runs = %q, want %q", *runs, want)
+	var want [][]string
+	for _, command := range commands {
+		want = append(want, strings.Fields(command)[2:])
 	}
+	if !slices.EqualFunc(runs, want, slices.Equal) {
+		t.Fatalf("runs = %q, want %q", runs, want)
+	}
+	runCount := len(runs)
 
 	// --help turned off by another flag is a change to approve.
 	const change = "lite-sandbox config mode set open --help=false"
 	if _, isErr := runBash(t, c, change); !isErr {
 		t.Errorf("%s: ran without approval", change)
 	}
-	if len(*runs) != 2 {
-		t.Fatalf("runs = %q, want no new run", *runs)
+	if len(runs) != runCount {
+		t.Fatalf("runs = %q, want no new run", runs)
 	}
 	if d := evaluate(bashEvent(t, change, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAsk {
 		t.Errorf("%s: hook decision = %+v, want ask", change, d)

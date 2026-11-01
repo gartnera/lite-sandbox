@@ -16,14 +16,21 @@ import (
 // concurrently.
 var configRequestParseMu sync.Mutex
 
-// parseConfigRequest reads a config request the way the config subprocess
-// will: it finds the subcommand and parses the arguments with cobra itself,
-// so the scope and grants the user approves are exactly those the command
-// acts on, however the arguments are spelled (a flag taking the next word as
-// its value, a `--` consumed as one, a root flag before the subcommand, ...).
-// It refuses what a request may not do: --dir (a request lands in the project
-// or, with --global, the base config) and the commands that edit the config
-// file as a whole rather than a setting for a directory.
+// parseConfigRequest is the one reading of a config request's arguments that
+// the hook and the server act on. It parses them the way the config
+// subprocess will, with cobra itself — rootCmd.Find and ParseFlags, the steps
+// Command.Execute takes before it runs anything — so what the user approves
+// is exactly what the command acts on, however the arguments are spelled (a
+// flag taking the next word as its value, a `--` consumed as one, a root flag
+// before the subcommand, ...).
+//
+// A request that changes nothing comes back as Scope.ReadOnly and is not
+// checked further: one whose help flag cobra parses as set, which only prints
+// usage (Execute returns ErrHelp before any hook or RunE), or one naming a
+// subcommand marked readOnlyAnnotation. Any other request must have displayable
+// arguments (Request.Validate) and may not use --dir (a request lands in the
+// project or, with --global, the base config) or a command that edits the
+// config file as a whole rather than a setting for a directory.
 //
 // The flag values are read and then reset, so parsing leaves no state behind
 // in the long-lived server or in tests.
@@ -44,11 +51,21 @@ func parseConfigRequest(req configrequest.Request) (configrequest.Scope, error) 
 	if err := cmd.ParseFlags(rest); err != nil {
 		return configrequest.Scope{}, err
 	}
+	if help, _ := cmd.Flags().GetBool("help"); help || cmd.Annotations[readOnlyAnnotation] != "" {
+		return configrequest.Scope{ReadOnly: true}, nil
+	}
+	if err := req.Validate(); err != nil {
+		return configrequest.Scope{}, err
+	}
 	if cmd == configCmd || !hasAncestor(cmd, configCmd) || cmd.RunE == nil && cmd.Run == nil {
 		return configrequest.Scope{}, fmt.Errorf("`%s` is not a config setting; request a subcommand, e.g. `lite-sandbox config commands allow make`", cmd.CommandPath())
 	}
 	if cmd.Deprecated != "" {
 		return configrequest.Scope{}, fmt.Errorf("`%s` is deprecated and cannot be requested: %s", cmd.CommandPath(), cmd.Deprecated)
+	}
+	if cmd == configEditCmd {
+		// `config edit` opens $EDITOR; there is no terminal to open it on.
+		return configrequest.Scope{}, errors.New("`lite-sandbox config edit` is interactive and cannot be run here; request the individual change instead (e.g. `lite-sandbox config paths allow <path>`)")
 	}
 	if cmd.Annotations[wholeFileAnnotation] != "" {
 		return configrequest.Scope{}, fmt.Errorf("`%s` works on the config file as a whole and cannot be requested; ask the user to run it", cmd.CommandPath())

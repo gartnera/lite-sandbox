@@ -168,12 +168,7 @@ func TestValidate(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{args: nil, wantErr: "needs a subcommand"},
-		{args: []string{"edit"}, wantErr: "interactive"},
-		{args: []string{"-v", "edit"}, wantErr: "interactive"},
 		{args: []string{"commands", "allow", "make"}},
-		// "edit" as a value, not the subcommand.
-		{args: []string{"commands", "allow", "edit"}},
 		// Control characters could fake or hide the prompt's status line.
 		{args: []string{"commands", "allow", "x\n✓ this project  ✗ global"}, wantErr: "control"},
 		{args: []string{"commands", "allow", "x\x1b[8m"}, wantErr: "control"},
@@ -267,33 +262,6 @@ func TestParse(t *testing.T) {
 		}
 		if !ok || !slices.Equal(req.Args, tc.want) {
 			t.Errorf("Parse(%q) = %q, %v; want %q", tc.command, req.Args, ok, tc.want)
-		}
-	}
-}
-
-func TestIsHelp(t *testing.T) {
-	for _, tc := range []struct {
-		args []string
-		want bool
-	}{
-		{[]string{"--help"}, true},
-		{[]string{"-h"}, true},
-		{[]string{"paths", "--help"}, true},
-		{[]string{"paths", "allow", "-h"}, true},
-		{[]string{"--help", "mode", "set", "open"}, true},
-
-		{[]string{}, false},
-		{[]string{"paths", "show"}, false},
-		{[]string{"mode", "set", "open", "--dir", "--help"}, false},
-		{[]string{"mode", "set", "open", "--help=false"}, false},
-		{[]string{"mode", "set", "open", "--dir=.", "--help"}, false},
-		{[]string{"paths", "allow", "/x", "--write", "-h"}, false},
-		{[]string{"mode", "set", "open", "-hx"}, false},
-		{[]string{"mode", "set", "open", "--", "--help"}, false},
-		{[]string{"mode", "set", "", "--help"}, false},
-	} {
-		if got := (Request{Args: tc.args}).IsHelp(); got != tc.want {
-			t.Errorf("IsHelp(%q) = %v, want %v", tc.args, got, tc.want)
 		}
 	}
 }

@@ -26,7 +26,8 @@ const configCommandTimeout = time.Minute
 // configrequest.DirEnv and GlobalEnv hand the subprocess the approved scope:
 // it scopes the change to scopeDir, the project directory the user saw,
 // rather than resolving its own, and refuses to run if what it parsed is not
-// that scope (or the base config when global).
+// that scope (or the base config when global). A read-only request has no
+// approved scope; its scopeDir is "" and neither variable is set.
 // A variable so tests can stand in for the binary.
 var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []string, global bool) (string, error) {
 	exe, err := os.Executable()
@@ -41,8 +42,10 @@ var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []st
 	if global {
 		globalEnv = "1"
 	}
-	c.Env = append(c.Environ(), configrequest.DirEnv+"="+scopeDir,
-		configrequest.GlobalEnv+"="+globalEnv, "PWD="+dir)
+	c.Env = append(c.Environ(), "PWD="+dir)
+	if scopeDir != "" {
+		c.Env = append(c.Env, configrequest.DirEnv+"="+scopeDir, configrequest.GlobalEnv+"="+globalEnv)
+	}
 	out, err := c.CombinedOutput()
 	return string(out), err
 }
@@ -56,27 +59,27 @@ var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []st
 // --dir and whole-file commands are refused. The approval is
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one
-// was never shown to the user and is refused. A help request
-// (Request.IsHelp) changes nothing, so it runs without one.
+// was never shown to the user and is refused. A read-only request
+// (Scope.ReadOnly: help, or a `show`, `list` or `path` subcommand) changes
+// nothing, so it runs without one.
 func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts serveOptions, cwd string, req configrequest.Request, background bool) *mcp.CallToolResult {
 	if background {
 		return mcp.NewToolResultError("`lite-sandbox config` cannot run in the background; run it with run_in_background false")
 	}
-	if req.IsHelp() {
-		// Help only prints, so it runs without the user's approval and
-		// leaves the config, and so the sandbox, as it was.
-		out, err := runConfigCommand(ctx, cwd, cwd, req.Args, false)
+	scope, err := parseConfigRequest(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	if scope.ReadOnly {
+		// A read runs without the user's approval and leaves the config, and
+		// so the sandbox, as it was. It runs as the user would run it, with
+		// no approved scope to hold it to: --global and --dir only choose
+		// what it shows.
+		out, err := runConfigCommand(ctx, cwd, "", req.Args, false)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("`%s` failed: %v\n%s", req.Command(), err, out))
 		}
 		return mcp.NewToolResultText(out)
-	}
-	if err := req.Validate(); err != nil {
-		return mcp.NewToolResultError(err.Error())
-	}
-	scope, err := parseConfigRequest(req)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error())
 	}
 	// Resolved once and bound to the ticket: the request runs only for the
 	// directory the hook showed, and the subprocess is handed this one

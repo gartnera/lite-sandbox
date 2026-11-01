@@ -109,6 +109,19 @@ const wholeFileAnnotation = "lite-sandbox/whole-file"
 // wholeFile is the Annotations value marking a command wholeFileAnnotation.
 var wholeFile = map[string]string{wholeFileAnnotation: "true"}
 
+// readOnlyAnnotation marks a config subcommand that only prints the config,
+// or where it lives, and changes nothing. An agent's config request for one
+// runs without the user's approval (parseConfigRequest), as the user would
+// run it, so mark only a command whose every run leaves the config as it was.
+const readOnlyAnnotation = "lite-sandbox/read-only"
+
+// readOnly is the Annotations value marking a command readOnlyAnnotation.
+var readOnly = map[string]string{readOnlyAnnotation: "true"}
+
+// readOnlyWholeFile marks a command both wholeFileAnnotation and
+// readOnlyAnnotation.
+var readOnlyWholeFile = map[string]string{wholeFileAnnotation: "true", readOnlyAnnotation: "true"}
+
 // applyDefaultConfigDir scopes a config subcommand to the project — the git
 // root, a linked worktree's main worktree, or the working directory outside a
 // repository (configrequest.DefaultDir) — when neither --dir nor --global is
@@ -159,7 +172,7 @@ func init() {
 }
 
 var configPathCmd = &cobra.Command{
-	Annotations: wholeFile,
+	Annotations: readOnlyWholeFile,
 	Use:         "path",
 	Short:       "Print the config file path",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -176,8 +189,9 @@ var configPathCmd = &cobra.Command{
 }
 
 var configShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Print the current configuration as YAML (with --dir, as it resolves for that directory)",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Print the current configuration as YAML (with --dir, as it resolves for that directory)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {
@@ -196,7 +210,7 @@ var configOverridesCmd = &cobra.Command{
 }
 
 var configOverridesListCmd = &cobra.Command{
-	Annotations: wholeFile,
+	Annotations: readOnlyWholeFile,
 	Use:         "list",
 	Short:       "List the configured per-directory overrides",
 	RunE: func(cmd *cobra.Command, args []string) error {

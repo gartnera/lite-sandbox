@@ -17,7 +17,6 @@
 package configrequest
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,34 +105,10 @@ func literal(w *syntax.Word) (string, bool) {
 	return b.String(), true
 }
 
-// IsHelp reports whether the request only prints help: `--help` or `-h`
-// together with nothing but plain words (the subcommand path, and arguments
-// cobra ignores once help is asked for), e.g. `lite-sandbox config paths
-// --help`. Such a request reads and changes nothing, so it needs no approval.
-//
-// Any other flag disqualifies it, because whether `--help` is the help flag
-// depends on how cobra parses what precedes it: in `--dir --help` it is
-// --dir's value, and `--help=false` turns help off, so the subcommand runs.
-// With only words around it, cobra parses `--help` as the help flag and
-// prints help before it runs any hook or the command itself.
-func (r Request) IsHelp() bool {
-	help := false
-	for _, a := range r.Args {
-		switch {
-		case a == "--help" || a == "-h":
-			help = true
-		case a == "" || strings.HasPrefix(a, "-"):
-			return false
-		}
-	}
-	return help
-}
-
-// Validate rejects a request the config tool will not run.
+// Validate rejects a request whose arguments the approval prompt cannot show
+// faithfully. What the arguments mean is decided by the config command's own
+// parser (the cmd package), not here.
 func (r Request) Validate() error {
-	if len(r.Args) == 0 {
-		return errors.New("`lite-sandbox config` needs a subcommand, e.g. `lite-sandbox config commands allow make`")
-	}
 	// The approval prompt shows the arguments; a newline, terminal escape,
 	// line separator, bidi override or zero-width character in one could fake,
 	// reorder or hide what the prompt says.
@@ -141,16 +116,6 @@ func (r Request) Validate() error {
 		if !Displayable(a) {
 			return fmt.Errorf("argument %q contains a control, format or separator character; config requests take printable arguments only", a)
 		}
-	}
-	for _, a := range r.Args {
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
-		if a == "edit" {
-			// `config edit` opens $EDITOR; there is no terminal to open it on.
-			return errors.New("`lite-sandbox config edit` is interactive and cannot be run here; request the individual change instead (e.g. `lite-sandbox config paths allow <path>`)")
-		}
-		break
 	}
 	return nil
 }
@@ -209,9 +174,15 @@ func DefaultDir(cwd string) string {
 }
 
 // Scope is what a config request does, as the config command itself parses
-// it (the cmd package fills it in with cobra): whether it edits the base
-// config, and, for `paths allow`, the access it grants.
+// it (the cmd package fills it in with cobra): whether it only reads, whether
+// it edits the base config, and, for `paths allow`, the access it grants.
 type Scope struct {
+	// ReadOnly is set when the request changes nothing: cobra parses its help
+	// flag as set (it prints usage before any hook or the command runs), or
+	// it names a subcommand marked read-only, such as `show`, `list` or
+	// `path`. It runs without the user's approval, as the user would run it.
+	// The other fields are then unset.
+	ReadOnly   bool
 	Global     bool
 	PathsAllow bool
 	Write      bool

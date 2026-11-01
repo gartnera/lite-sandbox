@@ -22,8 +22,9 @@ git's remote commands (fetch, pull, push, clone, ...) get.
 }
 
 var sshShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show the ssh configuration (with --dir, the one in effect there)",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show the ssh configuration (with --dir, the one in effect there)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

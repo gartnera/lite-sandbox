@@ -25,8 +25,9 @@ func findAWSOverride(cfg *config.Config, dir string) *config.AWSConfig {
 }
 
 var awsShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show current AWS configuration (with --dir, the one in effect there)",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show current AWS configuration (with --dir, the one in effect there)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

@@ -12,8 +12,9 @@ var configRedundantCdCmd = &cobra.Command{
 }
 
 var configRedundantCdShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show whether a redundant leading cd is rejected",
+	Annotations: readOnly,
+	Use:         "show",
+	Short:       "Show whether a redundant leading cd is rejected",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

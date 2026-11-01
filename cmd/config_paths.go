@@ -52,8 +52,9 @@ var (
 )
 
 var configPathsListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List the configured path grants and denials",
+	Annotations: readOnly,
+	Use:         "list",
+	Short:       "List the configured path grants and denials",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

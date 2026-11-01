@@ -250,12 +250,15 @@ server always runs its own binary, whatever path the command names.
 `lite-sandbox config edit` is refused, because it needs a terminal, and so is
 a config command run in the background.
 
-A request for help runs without a prompt: `--help` or `-h` with nothing
-else but plain words, such as `lite-sandbox config --help` or `lite-sandbox
-config paths allow -h`. It only prints usage, so the server runs it as
-written, with no ticket. Any other flag makes it an
-ordinary request that asks, because another flag can take `--help` as its
-value (`--log-level --help`) and the subcommand would then run.
+A request that only reads runs without a prompt: a request for help, such as
+`lite-sandbox config --help` or `lite-sandbox config paths allow -h`, and the
+subcommands that print the config, such as `lite-sandbox config show`,
+`config paths list`, `config mode show`, `config overrides list` and `config
+path`. The server runs it as written, with no ticket. `--global` and `--dir`
+are allowed here, since they only choose what it shows. Whether a request only
+reads is decided by the config command's own parser, the same one that runs
+it. So when another flag takes `--help` as its value (`--log-level --help`),
+or `--help=false` turns help off, the request is an ordinary one that asks.
 
 Like any config command, a config request lands in a
 [per-directory override](#writing-overrides-from-the-cli---dir) for the
