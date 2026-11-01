@@ -191,13 +191,13 @@ var configPathsRemoveCmd = &cobra.Command{
 var configPathsMigrateCmd = &cobra.Command{
 	Annotations: wholeFile,
 	Use:         "migrate",
-	Short:       "Rewrite the deprecated one-list-per-kind path keys as `paths` entries, in the base config and every override",
+	Short:       "Rewrite the deprecated one-list-per-kind path keys as `paths` entries, in the global config and every scope",
 	Long: `The deprecated keys (readable_paths, writable_paths, internal_readable_paths,
 internal_writable_paths, denied_read_paths, denied_write_paths) keep loading,
 so this is optional. It rewrites them once, everywhere in the file, keeping
-what every directory resolves to: an old-style override replaced only the list
-it set and inherited the rest, whereas a paths list replaces the whole section,
-so an override that set any path list receives the full set of entries in
+what every directory resolves to: an old-style key in a scope replaced only
+the list it set and inherited the rest, whereas a paths list replaces the whole
+section, so a scope that set any path list receives the full set of entries in
 effect for its directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := rejectConfigDir(cmd); err != nil {

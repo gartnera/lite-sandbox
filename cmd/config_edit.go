@@ -34,8 +34,8 @@ var configEditCmd = &cobra.Command{
 The edit is made on a temporary copy and written to the config file only once it
 parses and validates. Beyond the checks every load applies (an unknown mode, profile,
 or profile option; a malformed paths or commands entry), an edit is also rejected for
-keys the config does not define, which are almost always typos, and for overrides
-that could never apply (no path, a duplicate path, nested overrides). A rejected edit
+keys the config does not define, which are almost always typos, and for scopes
+that could never apply (no path, a duplicate path, nested scopes). A rejected edit
 can be reopened with the error at the top of the file, or abandoned; the config file
 is left untouched either way.`,
 	Args: cobra.NoArgs,

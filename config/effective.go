@@ -16,7 +16,7 @@ import "slices"
 //     PathEntry.Profile).
 //
 // Call it on a config already resolved for its directory (ForDirectory):
-// overrides are dropped, not applied. LoadForDirectory does both. The result is
+// scopes are dropped, not applied. LoadForDirectory does both. The result is
 // a new config (the receiver is not modified) and calling Effective on it again
 // returns it unchanged. It is never saved: the CLI edits the config as
 // written, and the entries Effective adds would otherwise be persisted.
@@ -28,7 +28,7 @@ func (c *Config) Effective() *Config {
 		return c
 	}
 	e := *c
-	e.Overrides = nil
+	e.Scopes = nil
 	e.Paths = slices.Clone(c.Paths)
 	e.Commands = slices.Clone(c.Commands)
 	e.Profiles = slices.Clone(c.Profiles)

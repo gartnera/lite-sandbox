@@ -56,7 +56,7 @@ answers by printing usage before any command or hook runs, or a subcommand
 marked read-only in the code (a single setting's `show` or `list`, never a
 command that works on the config file as a whole), which prints the config.
 It needs neither the prompt nor a ticket. This lets the agent read the config
-as it resolves for any directory (`--dir`) or the base config (`--global`);
+as it resolves for any directory (`--dir`) or the global config (`--global`);
 the config holds policy (paths, commands, profile and host names), not
 credentials. A test runs every read-only subcommand, checks it leaves the
 config file byte for byte as it was, and checks none is a whole-file or
@@ -96,10 +96,10 @@ and one under a wrapper (`find -exec`, `xargs`, `env`, `timeout`, `nice`,
 whose child the validators cannot tie to the approval, is refused always. See
 [Commands that ask first](configuration.md#commands-that-ask-first).
 
-A config request lands either in the agent's project or, with `--global`, in
-the base config. Config commands scope a change to the git root of the working
-directory (in a linked git worktree, the repository's main worktree, whose
-override the linked worktrees inherit; outside a repository, the working
+A config request lands either in the agent's project scope or, with
+`--global`, in the global config. Config commands write a change to the scope
+for the git root of the working directory (in a linked git worktree, the
+repository's main worktree, whose scope the linked worktrees inherit; outside a repository, the working
 directory itself) unless given `--dir` or `--global`. The hook and the server
 parse a request with the config command's own cobra parser, not a scan of
 the words, so the approval prompt's `✓ this project (<dir>)` / `✓ global`
@@ -107,7 +107,7 @@ line, and the read, write and internal access it marks for a `paths allow`,
 are what the command will do however its flags are spelled (a value-taking
 flag swallowing `--`, `--global=1`, a root flag before the subcommand). They
 refuse `--dir`, the commands that work on the config file as a whole
-(`edit`, `overrides remove`, `migrate`, ...), the deprecated path and command
+(`edit`, `scopes remove`, `migrate`, ...), the deprecated path and command
 list aliases, and arguments with control, format or separator characters (a
 newline, a terminal escape, U+2028, a bidi override or a zero-width character
 could fake, reorder or hide what the prompt says).
@@ -122,7 +122,7 @@ sandboxed agent can write, so it is pinned down three ways:
   only when the git dir in use is `<main>/.git/worktrees/<name>` and that
   entry's `gitdir` file names the `.git` file of an ancestor of the working
   directory, so a planted `commondir` file cannot name another repository.
-  This also governs override resolution and the `git.allow_worktree_parent`
+  This also governs scope resolution and the `git.allow_worktree_parent`
   grant, which use the same main worktree.
 - **Never home or `/`:** a repository rooted at `$HOME` or `/` (a dotfiles
   checkout) never counts as the project; the working directory is used instead.
@@ -132,10 +132,10 @@ sandboxed agent can write, so it is pinned down three ways:
   hands that same directory to the config subprocess rather than letting it
   resolve one of its own.
 
-A directory resolves through a single override, and one a request creates
-merges into the base, not into an override the directory was inheriting from
-a parent. So approving a request for a directory with no override of its own
-stops that inherited override's settings (a stricter `mode`, denials, ...)
+A directory resolves through a single scope, and one a request creates
+merges into the global config, not into a scope the directory was inheriting
+from a parent. So approving a request for a directory with no scope of its own
+stops that inherited scope's settings (a stricter `mode`, denials, ...)
 from applying to the directory. The server runs the config subprocess with
 `LITE_SANDBOX_CONFIG_REQUEST_DIR` set to the approved directory and
 `LITE_SANDBOX_CONFIG_REQUEST_GLOBAL` to whether `--global` was approved; the

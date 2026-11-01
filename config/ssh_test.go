@@ -47,8 +47,8 @@ func TestParseRejectsBadSSHHosts(t *testing.T) {
 	if !cfg.SSH.AllowsHost("10.0.0.12") || !cfg.SSH.AgentUnrestricted() {
 		t.Fatalf("parsed %+v", cfg.SSH)
 	}
-	if _, err := Parse([]byte("overrides:\n  - path: /x\n    ssh:\n      hosts: [a@b]\n")); err == nil {
-		t.Error("bad host in an override accepted")
+	if _, err := Parse([]byte("scopes:\n  - path: /x\n    ssh:\n      hosts: [a@b]\n")); err == nil {
+		t.Error("bad host in a scope accepted")
 	}
 }
 
@@ -131,7 +131,7 @@ func TestSSHHostEntryForms(t *testing.T) {
 		"listed twice": "ssh:\n  hosts: [box, {host: BOX, write: true}]\n",
 		"unknown key":  "ssh:\n  hosts:\n    - host: box\n      command: [ls]\n",
 		"bad command":  "ssh:\n  hosts:\n    - host: box\n      commands: ['rm;ls']\n",
-		"override key": "overrides:\n  - path: /x\n    ssh:\n      hosts:\n        - {host: box, writes: true}\n",
+		"override key": "scopes:\n  - path: /x\n    ssh:\n      hosts:\n        - {host: box, writes: true}\n",
 		"missing host": "ssh:\n  hosts:\n    - write: true\n",
 	} {
 		if _, err := ParseStrict([]byte(bad)); err == nil {
@@ -146,7 +146,7 @@ func TestSSHHostsMergePerEntry(t *testing.T) {
     - build-box
     - host: deploy-box
       commands: [systemctl restart]
-overrides:
+scopes:
   - path: /work
     merge: true
     ssh:
@@ -161,7 +161,7 @@ overrides:
 	}
 	s := cfg.ForDirectory("/work").SSH
 	if h := s.Host("build-box"); h == nil || !h.Writes() {
-		t.Errorf("build-box not restated by the override: %+v", s.Hosts)
+		t.Errorf("build-box not restated by the scope: %+v", s.Hosts)
 	}
 	if h := s.Host("deploy-box"); h == nil || len(h.Commands) != 1 {
 		t.Errorf("deploy-box dropped by the merge: %+v", s.Hosts)
@@ -170,7 +170,7 @@ overrides:
 		t.Errorf("extra-box not added: %+v", s.Hosts)
 	}
 	if h := cfg.ForDirectory("/elsewhere").SSH.Host("build-box"); h == nil || h.Writes() {
-		t.Errorf("the override applied outside its path: %+v", h)
+		t.Errorf("the scope applied outside its path: %+v", h)
 	}
 }
 

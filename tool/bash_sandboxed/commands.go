@@ -338,7 +338,7 @@ func validateGitCommand(s *Sandbox, args []*syntax.Word) error {
 
 func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
 	// s.cfg was already resolved for the working directory by the caller of
-	// UpdateConfig, so any per-directory override applies to command validation
+	// UpdateConfig, so any scope applies to command validation
 	// the same way it applies to the IMDS server and credential blocking.
 	awsCfg := s.getConfig().AWS
 	if awsCfg == nil || !awsCfg.AWSEnabled() {

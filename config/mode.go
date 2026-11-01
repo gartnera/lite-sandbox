@@ -73,7 +73,7 @@ func (c *Config) AuditEnabled() bool {
 	return *c.Audit
 }
 
-// validateModes rejects an unknown mode on the base config or any override, so
+// validateModes rejects an unknown mode on the global config or any scope, so
 // a typo cannot silently fall back to the default posture.
 func (c *Config) validateModes() error {
 	if c.Mode != "" {
@@ -81,10 +81,10 @@ func (c *Config) validateModes() error {
 			return err
 		}
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if o.Mode != "" {
 			if _, err := ParseMode(o.Mode); err != nil {
-				return fmt.Errorf("override %q: %w", o.Path, err)
+				return fmt.Errorf("scope %q: %w", o.Path, err)
 			}
 		}
 	}

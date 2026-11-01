@@ -8,6 +8,11 @@ prints it):
 
 Changes are picked up automatically; the server doesn't need a restart.
 
+Settings apply either everywhere (the **global config**) or to commands run
+at or under one directory (a **scope**). `lite-sandbox config` changes the
+scope for the current project by default; pass `--global` to change the
+global config instead. See [Scopes](#scopes).
+
 ## Mode and audit
 
 ```yaml
@@ -36,8 +41,8 @@ lite-sandbox audit clear
 ```
 
 `mode` and `audit` can be set per directory with
-[overrides](#per-directory-overrides), so one repo can run `allowlist` while
-everything else runs `denylist`. `mode set` without `--global` writes such an override, and
+[scopes](#scopes), so one repo can run `allowlist` while
+everything else runs `denylist`. `mode set` without `--global` writes to the project's scope, and
 `audit report --cwd` limits the report to sessions started in that directory.
 
 ## Commands
@@ -260,8 +265,8 @@ reads is decided by the config command's own parser, the same one that runs
 it. So when another flag takes `--help` as its value (`--log-level --help`),
 or `--help=false` turns help off, the request is an ordinary one that asks.
 
-Like any config command, a config request lands in a
-[per-directory override](#writing-overrides-from-the-cli---dir) for the
+Like any config command, a config request lands in
+[the scope](#writing-scopes-from-the-cli) for the
 agent's project unless it passes `--global`. `--dir` is refused, so a request
 can land in only two places, and the prompt's last line says which, along
 with what a `paths allow` grants:
@@ -274,7 +279,7 @@ lite-sandbox config paths allow ~/tmp/claude-home --write
 lite-sandbox reads the request with the config command's own argument parser,
 so that line matches what runs however the flags are spelled. The commands
 that work on the config file as a whole (`config edit`, `config path`,
-`config overrides list|remove`, `config paths migrate`, ...) and the
+`config scopes list|remove`, `config paths migrate`, ...) and the
 deprecated path and command list aliases (`writable-paths add`, ...) are refused; run those
 yourself.
 
@@ -303,11 +308,11 @@ approved request takes effect immediately, including starting or stopping the
 [AWS credential server](aws-and-docker.md) when it changes `aws`.
 
 `commands` can be set per directory with
-[overrides](#per-directory-overrides). The built-in entries still apply under
-an override, since they aren't part of the section it replaces. A
-`merge: true` override combines the list with the base's
-[entry by entry](#per-directory-overrides), so one directory can deny a
-command the base allows without restating the rest.
+[scopes](#scopes). The built-in entries still apply in
+a scope, since they aren't part of the section it replaces. A
+`merge: true` scope combines the list with the global one
+[entry by entry](#scopes), so one directory can deny a
+command the global config allows without restating the rest.
 
 ### Deprecated keys
 
@@ -319,12 +324,12 @@ entries as `allow: true`). The old CLI commands (`extra-commands`,
 write the new form.
 
 `lite-sandbox config commands migrate` rewrites the old keys everywhere in the
-file. The semantics differ under overrides: an old-style override replaced
+file. The semantics differ in scopes: an old key in a scope replaced
 only the one list it set and inherited the others, while a `commands` list
 replaces the whole section (or merges entry by entry under `merge: true`). So
-migrate gives each override that set any command list the full set of entries
-in effect for its directory; on a `merge: true` override it writes only that
-override's own entries. Two conversions aren't one-to-one: if a config both
+migrate gives each scope that set any command list the full set of entries
+in effect for its directory; on a `merge: true` scope it writes only that
+scope's own entries. Two conversions aren't one-to-one: if a config both
 allowed and denied the same command, the denial is kept (it won at every gate
 anyway), and a `-` lift becomes an allow, which lifts the same built-in and,
 in `allowlist` mode, also admits the command past the whitelist.
@@ -341,8 +346,8 @@ lite-sandbox config edit    # open the config file in $VISUAL / $EDITOR (default
 included — only if it is a valid config. On top of the checks every load applies
 (an unknown mode, profile, or profile option; a malformed `paths` or `commands`
 entry), it rejects keys the config does not define, which are almost always typos
-(`os_sandbx`, `git.remote_wirte`), a second YAML document, and overrides that could
-never apply (no `path`, two overrides for the same path, nested `overrides`). A
+(`os_sandbx`, `git.remote_wirte`), a second YAML document, and scopes that could
+never apply (no `path`, two scopes for the same path, nested `scopes`). A
 rejected edit reopens with the error at the top of the file; decline and the config
 is left untouched, with your edit kept in the temporary file it names. It also
 refuses to overwrite the config if something else changed it while the editor was
@@ -397,9 +402,9 @@ and `remove` deletes the entry. `~` is expanded. An entry that sets neither
 key, grants `write` while denying `read`, or marks a denial `internal` is
 rejected when the config loads. `read: true` with `write: false` is valid:
 readable, and kept read-only under the OS sandbox. `paths` can be set per
-directory with [`--dir`](#writing-overrides-from-the-cli---dir); on a
-`merge: true` [override](#per-directory-overrides) the list is combined with
-the base's entry by entry, so a directory lists only the paths it changes.
+directory with [`--dir`](#writing-scopes-from-the-cli); in a
+`merge: true` [scope](#scopes) the list is combined with
+the global one entry by entry, so a directory lists only the paths it changes.
 
 When the bash tool refuses a path for being outside the boundary (a command
 argument, a redirection target, or a file a sandboxed Python program opens),
@@ -684,7 +689,7 @@ os_sandbox_hide_home: false
 ```
 
 Or use `lite-sandbox config os-sandbox hide-home enable|disable`. It can be
-set per directory with the [overrides](#per-directory-overrides).
+set per directory with [scopes](#scopes).
 
 ### Credentials in the environment: `os_sandbox_env_passthrough`
 
@@ -702,7 +707,7 @@ os_sandbox_env_passthrough:
 ```
 
 The agent's own credentials should never be passed through. It can be set per
-directory with the [overrides](#per-directory-overrides).
+directory with [scopes](#scopes).
 
 ### Lifting a built-in denial
 
@@ -735,8 +740,8 @@ paths:
 `allow` prints the built-in entry it lifted, and `lite-sandbox config mode
 show` keeps listing lifted entries, marked with the grant that lifts them. A
 grant without `internal` also widens the agent-facing boundary to the path,
-like any grant. Lifting applies per directory like the rest of `paths`: an
-[override](#per-directory-overrides) that grants `~/.ssh` lifts the masks only
+like any grant. Lifting applies per directory like the rest of `paths`: a
+[scope](#scopes) that grants `~/.ssh` lifts the masks only
 for commands run under that directory.
 
 ### Deprecated: one list per kind
@@ -753,15 +758,15 @@ form when they touch it. To rewrite the whole file at once:
 lite-sandbox config paths migrate
 ```
 
-The two forms behave differently under [overrides](#per-directory-overrides):
-an old key on an override replaced only that one list and inherited the other
-five, while `paths` on an override replaces the whole section (or merges entry
+The two forms behave differently in [scopes](#scopes):
+an old key in a scope replaced only that one list and inherited the other
+five, while `paths` in a scope replaces the whole section (or merges entry
 by entry under `merge: true`). `migrate` preserves what every directory
-resolves to by giving such an override the full set of entries in effect for
+resolves to by giving such a scope the full set of entries in effect for
 its directory, so use it instead of renaming keys by hand. On a `merge: true`
-override it writes only that override's own entries, since the base's are
+scope it writes only that scope's own entries, since the global ones are
 inherited per path. That is the one case where the result is wider than
-before, because a deprecated list there replaced the base's outright.
+before, because a deprecated list there replaced the global one outright.
 
 ## Profiles
 
@@ -805,7 +810,7 @@ reject_redundant_cd: false
 ```
 
 Or use `lite-sandbox config redundant-cd enable|disable|show`. It can be set
-per directory with the overrides below.
+per directory with [scopes](#scopes).
 
 ## Local binary execution
 
@@ -830,12 +835,15 @@ without validating its contents. It matches the script by the path it
 resolves to, so `web/build.sh` and `./web/build.sh` are the same entry. A
 restricted one (`./gradlew build`) does not lift this gate.
 
-## Per-directory overrides
+## Scopes
 
-The top-level `overrides` list changes configuration for specific working
-directories. Each entry pairs a `path` with config sections that replace the
-base for commands run **at or under** that path. Any section can be
-overridden: `aws`, `docker`, `profiles`, `paths`, `os_sandbox`, and the rest.
+Most settings live in a **scope**: an entry of the top-level `scopes` list
+that pairs a `path` with config sections for commands run **at or under** that
+path. Everything outside `scopes` is the **global config**, which applies
+everywhere. A scope can set any section (`aws`, `docker`, `profiles`, `paths`,
+`os_sandbox`, and the rest), and `lite-sandbox config` writes to the scope for
+the current project unless you pass `--global` (see
+[Writing scopes from the CLI](#writing-scopes-from-the-cli)).
 
 ```yaml
 os_sandbox: true
@@ -843,67 +851,74 @@ paths:
   - path: ~/scratch
     write: true
 aws:
-  force_profile: "default"        # base mode for everything else
+  force_profile: "default"        # global: everything else uses this
 
-overrides:
+scopes:
+  - path: ~/work/trusted          # what `lite-sandbox config ... --dir ~/work/trusted` writes
+    merge: true                   # deep-merge into the global config (see below)
+    docker:
+      allow_privileged: true      # only this flag changes; docker.enabled etc. kept
+    paths:                        # merged entry by entry: the global grants still
+      - path: ~/work/trusted/out  # apply here, this one is added
+        write: true
+    commands:
+      - command: curl             # restates the global entry for curl, here only
+        allow: false
   - path: ~/work/acme             # ~ is expanded
     aws:
       force_profile: "acme-dev"   # broker a different AWS profile here
-    paths:                        # replaces (not extends) the base paths list here;
-      - path: ~/work/acme/artifacts   # add merge: true to keep the base's entries
+    paths:                        # no merge: replaces (not extends) the global
+      - path: ~/work/acme/artifacts   # paths list here
         write: true
   - path: ~/work/acme/prod
     aws:
       force_profile: "acme-prod"  # more specific path wins under prod/
   - path: ~/scratch
-    os_sandbox: false             # any section can be overridden
-  - path: ~/work/trusted
-    merge: true                   # deep-merge instead of replace (see below)
-    docker:
-      allow_privileged: true      # only this flag changes; docker.enabled etc. kept
-    paths:                        # merged entry by entry: the base's grants still
-      - path: ~/work/trusted/out  # apply here, this one is added
-        write: true
-    commands:
-      - command: curl             # restates the base's entry for curl, here only
-        allow: false
+    os_sandbox: false             # any section can be set in a scope
 ```
+
+The `scopes` key used to be called `overrides` (and `lite-sandbox config
+scopes` was `config overrides`). A config that still says `overrides` loads
+the same, and the next change `lite-sandbox config` writes saves it as
+`scopes`. The old command names still work.
 
 Resolution rules:
 
-- **Most specific wins.** When a directory is under more than one override
+- **Most specific wins.** When a directory is under more than one scope
   `path`, the longest matching path applies and the others are ignored
-  (overrides don't stack).
-- **Replace vs. merge.** By default an override **replaces** each section it
-  sets: an override with an `aws:` block defines the *entire* AWS config for
-  its directory, dropping base `aws:` fields it doesn't restate. With
-  `merge: true`, the override is **deep-merged** instead: only the fields it
-  sets change, and the rest are inherited (the `~/work/trusted` example above
-  changes only `docker.allow_privileged` and keeps the base
-  `docker.enabled`). Either way, sections the override doesn't mention are
-  inherited unchanged, and leaf values it does set (scalars, flags, and the
-  deprecated one-list-per-kind path and command keys) come from the override.
+  (scopes don't stack).
+- **Merge vs. replace.** With `merge: true`, which is what the CLI writes, a
+  scope is **deep-merged** into the global config: only the fields it sets
+  change, and the rest are inherited (the `~/work/trusted` example above
+  changes only `docker.allow_privileged` and keeps the global
+  `docker.enabled`). Without it, a scope **replaces** each section it sets: a
+  scope with an `aws:` block defines the *entire* AWS config for its
+  directory, dropping global `aws:` fields it doesn't restate. Either way,
+  sections the scope doesn't mention are inherited unchanged, and leaf values
+  it does set (scalars, flags, and the deprecated one-list-per-kind path and
+  command keys) come from the scope.
 - **`paths`, `commands`, and `ssh.hosts` merge entry by entry.** Under
   `merge: true` these lists are combined per path, command, or host rather
-  than taken whole: the base's entries carry over, an override entry for the
+  than taken whole: the global entries carry over, a scope entry for the
   same path, command, or host **replaces** that entry, and new ones are added.
   Paths and commands are matched the way the sandbox matches them (`~/x` and
   its expanded form are the same path; `uv  run` and `uv run` are the same
-  command). An override can restate an inherited entry (grant less, or deny
-  what the base allowed) but can't remove one; to drop an entry everywhere,
-  remove it from the base. In the default replace mode the whole list comes
-  from the override, which is how a directory starts from an empty list.
+  command). A scope can restate an inherited entry (grant less, or deny
+  what the global config allowed) but can't remove one; to drop an entry
+  everywhere, remove it from the global config. In replace mode the whole
+  list comes from the scope, which is how a directory starts from an empty
+  list.
 - **Paths support `~`** and are resolved to absolute paths, so relative inputs
   match the directory they refer to.
-- **Linked git worktrees inherit their repository's override.** A worktree
+- **Linked git worktrees inherit their repository's scope.** A worktree
   created with `git worktree add` usually lives away from its checkout, often
   in a shared directory like `~/.superconductor/worktrees/<repo>/`, so it
-  matches no override of its own. When nothing matches the working directory,
+  matches no scope of its own. When nothing matches the working directory,
   resolution retries from the repository's **main worktree**, so the repo's
-  override applies there too:
+  scope applies there too:
 
   ```yaml
-  overrides:
+  scopes:
     - path: ~/workspace/github.com/acme/haystack   # the checkout
       profiles:
         - go
@@ -916,23 +931,24 @@ Resolution rules:
   ```
 
   Commands run in `sc-vortex-d091` get the same `go` profile as the
-  checkout. An override matching the worktree itself (or a directory above it)
+  checkout. A scope matching the worktree itself (or a directory above it)
   still wins; inheritance only applies when nothing matches directly, so a
   worktree can always be configured separately. This shares *settings*, not
   path grants: a `paths` entry naming a directory inside the repo still points
   there, and access to the main worktree from a linked one is the separate
   [`git.allow_worktree_parent`](#git-support) flag.
 
-### Writing overrides from the CLI: `--dir`
+### Writing scopes from the CLI
 
-Every `lite-sandbox config` setting is scoped to one directory by default: the
-root of the git repository the working directory is in, so a change made from
-a subdirectory covers the whole repository — or, in a linked git worktree
-(`git worktree add`, or a tool that creates one per task), the repository's
-main worktree, whose override every one of its worktrees inherits. Outside a
-git repository it is the working directory. `--dir <path>` names another
-directory instead. Pass `--global` to change the base config, which applies everywhere
-(`--global` and `--dir` cannot be combined):
+Every `lite-sandbox config` setting is written to a scope by default: the one
+for the root of the git repository the working directory is in, so a change
+made from a subdirectory covers the whole repository — or, in a linked git
+worktree (`git worktree add`, or a tool that creates one per task), the
+repository's main worktree, whose scope every one of its worktrees inherits.
+Outside a git repository it is the scope for the working directory. `--dir
+<path>` writes to the scope for another directory instead. Pass `--global` to
+change the global config, which applies everywhere (`--global` and `--dir`
+cannot be combined):
 
 ```bash
 lite-sandbox config commands allow npm                    # only in this repo (its git root)
@@ -944,64 +960,67 @@ lite-sandbox config docker disable --dir ~/work/untrusted
 lite-sandbox config aws force-profile acme-dev --dir ~/work/acme
 ```
 
-A `--dir` edit starts from **what that directory currently resolves to** (the
-base config plus any override already stored for it) and records only the
+A scoped edit starts from **what that directory currently resolves to** (the
+global config plus anything already in its scope) and records only the
 sections the command changed. So an `add` extends the list the directory
 already has instead of replacing it, and settings the command didn't touch keep
-inheriting from the base. Setting a directory to the value it already resolves
-to writes no override.
+inheriting from the global config. Setting a directory to the value it
+already resolves to stores nothing, and a scope left setting nothing is
+removed.
 
-An override `--dir` creates has **`merge: true`**: it is deep-merged into the
-base, and its `paths` and `commands` hold only the entries the command added or
-changed, so later edits to the base still reach the directory. A deep merge
-cannot clear a setting (one the override leaves unset is inherited from the
-base), so when the change does clear one — `aws disable`, or `aws
-force-profile` dropping the base's `allow_raw_credentials` — the new override
-is written replace-style instead. An override that already exists for the
-directory keeps its `merge` setting; to make one replace-style, set `merge:
-false` (or drop the key) by editing the config file — its `paths` and
-`commands` then replace the base's, so restate the base entries (denials
-included) it should keep.
+A scope the CLI creates has **`merge: true`**: it is deep-merged into the
+global config, and its `paths` and `commands` hold only the entries the
+command added or changed, so later edits to the global config still reach the
+directory. A deep merge cannot clear a setting (one the scope leaves unset is
+inherited from the global config), so when the change does clear one — `aws
+disable`, or `aws force-profile` dropping the global `allow_raw_credentials`
+— the new scope is written replace-style instead. A scope that already exists
+for the directory keeps its `merge` setting; to make one replace-style, set
+`merge: false` (or drop the key) by editing the config file — its `paths` and
+`commands` then replace the global ones, so restate the global entries
+(denials included) it should keep.
 
-A directory resolves through a single override: its own, or else the nearest
-parent's (or, for a linked git worktree, its main worktree's). An override
-`--dir` creates merges into the base, not into the override the directory was
-inheriting, so the settings that parent override made (a stricter `mode`, a
+A directory resolves through a single scope: its own, or else the nearest
+parent's (or, for a linked git worktree, its main worktree's). A scope the CLI
+creates merges into the global config, not into the scope the directory was
+inheriting, so the settings that parent scope made (a stricter `mode`, a
 denial, ...) stop applying to the directory unless the command restated them.
-The same goes the other way: a subdirectory with an override of its own does
-not see a change made for the repository root, which is where a change made
-from that subdirectory lands unless `--dir` names the subdirectory.
+The same goes the other way: a subdirectory with a scope of its own does not
+see a change made for the repository root, which is where a change made from
+that subdirectory lands unless `--dir` names the subdirectory.
 
 Reads are scoped the same way: `lite-sandbox config show` prints the
 configuration in effect at the project root (`--dir <path>` for another
 directory), as does any section's `show`/`list` (`config docker show`, `config
-commands list`), and `--global` prints the base config.
+commands list`), and `--global` prints the global config.
 
-The commands that aren't per-directory settings (`config path`, `config edit`,
-`config os-sandbox check`, `config paths|commands migrate`, `config overrides
-list|remove`, `config aws remove-override`) work on the whole file without
-`--global`, and `config path`, `edit`, `migrate`, `os-sandbox check` and
-`overrides list` reject `--dir`.
+The commands that aren't settings of one scope (`config path`, `config edit`,
+`config os-sandbox check`, `config paths|commands migrate`, `config scopes
+list|remove`, `config aws unset`) work on the whole file without `--global`,
+and `config path`, `edit`, `migrate`, `os-sandbox check` and `scopes list`
+reject `--dir`.
 
-To see or undo what `--dir` wrote:
+To see or undo what was written to a scope:
 
 ```bash
-lite-sandbox config overrides list            # every directory with settings
-lite-sandbox config overrides remove <dir>    # drop all of that directory's settings
+lite-sandbox config scopes list               # every scope and its settings
+lite-sandbox config scopes remove <dir>       # drop everything in that directory's scope
+lite-sandbox config aws unset <dir>           # drop only its aws section (was `aws remove-override`)
 ```
 
-On a replace-style override (`merge` unset or false, written by hand), `--dir`
-stores each section the command changed whole, since it replaces the base's.
+On a replace-style scope (`merge` unset or false, written by hand), the CLI
+stores each section the command changed whole, since it replaces the global
+one.
 
 In both cases, a `remove` of an entry the directory would still inherit is
-reported as such rather than as a removal. On a `merge: true` override, the
-base's entry is inherited per path. On a replace-style override, a section
-emptied of its last entry isn't recorded at all, so the base's list applies
+reported as such rather than as a removal. On a `merge: true` scope, the
+global entry is inherited per path. On a replace-style scope, a section
+emptied of its last entry isn't recorded at all, so the global list applies
 again:
 
 ```console
 $ lite-sandbox config paths remove /base/data --dir ~/work/acme
-/base/data: "read" in the base config still applies to /home/you/work/acme — an override can restate an entry, not drop it
+/base/data: "read" in the global config still applies to /home/you/work/acme — a scope can restate an entry, not drop it
   remove it everywhere with `lite-sandbox config paths remove /base/data --global`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
 ```
 

@@ -394,7 +394,7 @@ func runServe(opts serveOptions) error {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Resolve per-directory overrides once, here at the entrypoint, so the sandbox
+	// Resolve scopes once, here at the entrypoint, so the sandbox
 	// and the startup lifecycle (IMDS, docker) are all handed the same effective
 	// config for cwd and none has to re-resolve.
 	cfg, err := config.LoadForDirectory(cwd)
@@ -410,7 +410,7 @@ func runServe(opts serveOptions) error {
 	defer sandbox.Close() // Clean up worker pool on exit
 
 	// Start IMDS server if AWS uses IMDS (force_profile is set). cfg is already
-	// resolved for cwd, so per-directory AWS overrides take effect. The lifecycle
+	// resolved for cwd, so per-directory AWS scopes take effect. The lifecycle
 	// also reacts to config reloads below, starting or stopping the server as AWS
 	// settings change.
 	var awsCfg *config.AWSConfig
@@ -425,7 +425,7 @@ func runServe(opts serveOptions) error {
 
 	// Start docker proxy if docker is enabled and usable (the docker command is
 	// only permitted under the OS sandbox, unless allow_unsandboxed is set). cfg is
-	// already resolved for cwd, so a per-directory docker/os_sandbox override is
+	// already resolved for cwd, so a per-directory docker/os_sandbox scope is
 	// honored here too.
 	if cfg != nil && cfg.Docker.DockerEnabled() && (cfg.OSSandboxEnabled() || cfg.Docker.AllowsUnsandboxed()) {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)

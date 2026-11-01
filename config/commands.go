@@ -138,20 +138,20 @@ func (e CommandEntry) SameCommand(c string) bool {
 
 // MergeKey makes the entry a keyedEntry: the subject it states something about
 // is its command text, normalized as SameCommand compares it. A merge: true
-// override therefore restates a base entry by naming the same command, and
+// scope therefore restates a base entry by naming the same command, and
 // `git` and `git push` stay separate subjects — the narrower entry is its own
 // statement, as it is everywhere else.
 func (e CommandEntry) MergeKey() string { return e.Text() }
 
-// validateCommands rejects a malformed commands entry on the base config or
-// any override, so a typo cannot silently allow or deny nothing.
+// validateCommands rejects a malformed commands entry on the global config or
+// any scope, so a typo cannot silently allow or deny nothing.
 func (c *Config) validateCommands() error {
 	if err := validateCommandEntries(c.Commands); err != nil {
 		return err
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if err := validateCommandEntries(o.Commands); err != nil {
-			return fmt.Errorf("override %q: %w", o.Path, err)
+			return fmt.Errorf("scope %q: %w", o.Path, err)
 		}
 	}
 	return nil
@@ -369,7 +369,7 @@ func (c *Config) AllCommandEntries() []CommandEntry {
 	return append(out, c.legacyRuntimeCommandEntries()...)
 }
 
-// UsesDeprecatedCommandKeys reports whether the base config or any override
+// UsesDeprecatedCommandKeys reports whether the global config or any scope
 // still spells a command list the old way, which MigrateCommands rewrites.
 func (c *Config) UsesDeprecatedCommandKeys() bool {
 	if c == nil {
@@ -378,7 +378,7 @@ func (c *Config) UsesDeprecatedCommandKeys() bool {
 	if c.usesLegacyCommandKeys() {
 		return true
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if o.usesLegacyCommandKeys() {
 			return true
 		}
@@ -387,22 +387,22 @@ func (c *Config) UsesDeprecatedCommandKeys() bool {
 }
 
 // MigrateCommands rewrites the three deprecated command lists — on the base
-// config and on every override — as commands entries and clears them, keeping
+// config and on every scope — as commands entries and clears them, keeping
 // what every directory resolves to. Returns the number of entries written.
 //
-// The two spellings are not one-to-one under overrides: an old-style override
+// The two spellings are not one-to-one under scopes: an old-style scope
 // replaced only the one list it set and inherited the other two, whereas a
-// commands list replaces the whole section. So an override that set any
+// commands list replaces the whole section. So a scope that set any
 // command list (or already had a commands list) gets the full set of entries
 // in effect for its directory — the base's for every list it did not set —
 // before its own lists are cleared; one that set none keeps inheriting the
 // migrated base.
 //
-// A merge: true override keeps only its own entries: `commands` merges entry
+// A merge: true scope keeps only its own entries: `commands` merges entry
 // by entry there, so what it does not restate it inherits from the migrated
 // base anyway. That inheritance is wider than the old keys were — a deprecated
-// list on such an override replaced the base's list outright, whereas the
-// migrated entries now join it — so a base entry the override meant to shadow
+// list on such a scope replaced the base's list outright, whereas the
+// migrated entries now join it — so a base entry the scope meant to shadow
 // needs an entry of its own for that command.
 //
 // A denied_commands "-" lift becomes an allow of the same text, which lifts the
@@ -414,12 +414,12 @@ func (c *Config) MigrateCommands() int {
 		return 0
 	}
 	n := 0
-	for i := range c.Overrides {
-		o := &c.Overrides[i]
+	for i := range c.Scopes {
+		o := &c.Scopes[i]
 		if o.Commands == nil && !o.usesLegacyCommandKeys() {
 			continue
 		}
-		// The lists in effect for the override's directory: its own where set,
+		// The lists in effect for the scope's directory: its own where set,
 		// the base's otherwise, exactly as ForDirectory combined them — except
 		// under merge: true, where the base's entries are inherited per command
 		// and restating them here would only freeze a copy.

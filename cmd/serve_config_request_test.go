@@ -271,7 +271,7 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 
 // TestCheckConfigRequestDir checks the config subcommands' own guard, which
 // holds whatever cobra ends up parsing: only the approved scope — the
-// request's project directory, or the base config when --global was approved
+// request's project directory, or the global config when --global was approved
 // — may be changed.
 func TestCheckConfigRequestDir(t *testing.T) {
 	root := t.TempDir()

@@ -193,7 +193,7 @@ like every rule, a match is only recorded to the audit log.`,
 				// is the whole change and keeps the file from restating it —
 				// as long as that leaves the directory saying nothing about
 				// the command. Where it inherits a lift it cannot drop (a
-				// merge: true override over a base that lifts it), the
+				// merge: true scope over a base that lifts it), the
 				// explicit denial below is what restates it.
 				cfg.RemoveCommand(c)
 				if !stillStatesCommand(cfg, e.Text()) {
@@ -241,12 +241,12 @@ var configCommandsRemoveCmd = &cobra.Command{
 var configCommandsMigrateCmd = &cobra.Command{
 	Annotations: wholeFile,
 	Use:         "migrate",
-	Short:       "Rewrite the deprecated one-list-per-kind command keys as `commands` entries, in the base config and every override",
+	Short:       "Rewrite the deprecated one-list-per-kind command keys as `commands` entries, in the global config and every scope",
 	Long: `The deprecated keys (extra_commands, unsandboxed_commands, denied_commands) keep
 loading, so this is optional. It rewrites them once, everywhere in the file,
-keeping what every directory resolves to: an old-style override replaced only
-the list it set and inherited the rest, whereas a commands list replaces the
-whole section, so an override that set any command list receives the full set
+keeping what every directory resolves to: an old-style key in a scope replaced
+only the list it set and inherited the rest, whereas a commands list replaces
+the whole section, so a scope that set any command list receives the full set
 of entries in effect for its directory. A denied_commands "-" entry becomes an
 allow of the same text, which lifts the built-in the same way.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
