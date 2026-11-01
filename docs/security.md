@@ -97,8 +97,9 @@ are what the command will do however its flags are spelled (a value-taking
 flag swallowing `--`, `--global=1`, a root flag before the subcommand). They
 refuse `--dir`, the commands that work on the config file as a whole
 (`edit`, `overrides remove`, `migrate`, ...), the deprecated path and command
-list aliases, and arguments with control characters (which could fake or hide
-the status line).
+list aliases, and arguments with control, format or separator characters (a
+newline, a terminal escape, U+2028, a bidi override or a zero-width character
+could fake, reorder or hide what the prompt says).
 
 The project directory is read from the host's git, which reads files the
 sandboxed agent can write, so it is pinned down three ways:
@@ -106,7 +107,12 @@ sandboxed agent can write, so it is pinned down three ways:
   the working directory whose `.git` directory is the git dir in use. A bare
   repository planted as plain files (`HEAD`, `objects/`, `refs/`, a `config`
   whose `core.worktree` names another directory) is ignored, since none of it
-  is under a `.git` the agent cannot write.
+  is under a `.git` the agent cannot write. Likewise a main worktree counts
+  only when the git dir in use is `<main>/.git/worktrees/<name>` and that
+  entry's `gitdir` file names the `.git` file of an ancestor of the working
+  directory, so a planted `commondir` file cannot name another repository.
+  This also governs override resolution and the `git.allow_worktree_parent`
+  grant, which use the same main worktree.
 - **Never home or `/`:** a repository rooted at `$HOME` or `/` (a dotfiles
   checkout) never counts as the project; the working directory is used instead.
 - **Bound to the approval:** the approval ticket records the directory the

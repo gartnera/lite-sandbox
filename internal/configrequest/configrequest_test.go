@@ -175,8 +175,13 @@ func TestValidate(t *testing.T) {
 		// "edit" as a value, not the subcommand.
 		{args: []string{"commands", "allow", "edit"}},
 		// Control characters could fake or hide the prompt's status line.
-		{args: []string{"commands", "allow", "x\n✓ this project  ✗ global"}, wantErr: "control character"},
-		{args: []string{"commands", "allow", "x\x1b[8m"}, wantErr: "control character"},
+		{args: []string{"commands", "allow", "x\n✓ this project  ✗ global"}, wantErr: "control"},
+		{args: []string{"commands", "allow", "x\x1b[8m"}, wantErr: "control"},
+		{args: []string{"commands", "allow", "x ✓ global"}, wantErr: "control"},
+		{args: []string{"commands", "allow", "x‮gol"}, wantErr: "control"},
+		{args: []string{"commands", "allow", "ma​ke"}, wantErr: "control"},
+		// Ordinary non-ASCII is fine.
+		{args: []string{"paths", "allow", "~/données"}},
 	} {
 		err := Request{Args: tc.args}.Validate()
 		if tc.wantErr == "" {

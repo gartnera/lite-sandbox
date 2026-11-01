@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
 
@@ -133,11 +134,12 @@ func (r Request) Validate() error {
 	if len(r.Args) == 0 {
 		return errors.New("`lite-sandbox config` needs a subcommand, e.g. `lite-sandbox config commands allow make`")
 	}
-	// The approval prompt shows the arguments; a newline or terminal escape in
-	// one could fake or hide the status line beneath them.
+	// The approval prompt shows the arguments; a newline, terminal escape,
+	// line separator, bidi override or zero-width character in one could fake,
+	// reorder or hide what the prompt says.
 	for _, a := range r.Args {
-		if strings.IndexFunc(a, func(c rune) bool { return c < 0x20 || c == 0x7f || c >= 0x80 && c < 0xa0 }) >= 0 {
-			return fmt.Errorf("argument %q contains a control character; config requests take printable arguments only", a)
+		if !Displayable(a) {
+			return fmt.Errorf("argument %q contains a control, format or separator character; config requests take printable arguments only", a)
 		}
 	}
 	for _, a := range r.Args {
@@ -151,6 +153,16 @@ func (r Request) Validate() error {
 		break
 	}
 	return nil
+}
+
+// Displayable reports whether s can be shown in the approval prompt as is: it
+// has no control characters (C0, DEL, C1), format characters (Unicode Cf:
+// bidi overrides and isolates, zero-width characters, U+FEFF) or line and
+// paragraph separators (Zl, Zp).
+func Displayable(s string) bool {
+	return strings.IndexFunc(s, func(c rune) bool {
+		return unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) < 0
 }
 
 // DirEnv names the environment variable the server sets when it runs a config

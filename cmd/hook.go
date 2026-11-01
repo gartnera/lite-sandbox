@@ -262,6 +262,10 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	// The ticket names the directory shown here, so the server runs the
 	// request only if it resolves the same one.
 	scopeDir := configrequest.DefaultDir(cwd)
+	if !configrequest.Displayable(scopeDir) {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: the project directory %q contains characters the approval prompt cannot show faithfully", scopeDir))
+	}
 	if err := configrequest.Issue(cwd, scopeDir, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
