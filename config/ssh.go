@@ -100,7 +100,7 @@ func (h SSHHost) MarshalYAML() (any, error) {
 	return sshHostFields(h), nil
 }
 
-// MergeKey makes the entry a keyedEntry: a merge: true override restates a
+// MergeKey makes the entry a keyedEntry: a merge: true scope restates a
 // base entry by naming the same host.
 func (h SSHHost) MergeKey() string { return normalizeSSHHost(h.Host) }
 
@@ -252,8 +252,8 @@ func ValidateSSHHost(h string) error {
 	return nil
 }
 
-// validateSSH rejects a malformed ssh section on the base config or any
-// override.
+// validateSSH rejects a malformed ssh section on the global config or any
+// scope.
 func (c *Config) validateSSH() error {
 	check := func(s *SSHConfig) error {
 		if s == nil {
@@ -274,9 +274,9 @@ func (c *Config) validateSSH() error {
 	if err := check(c.SSH); err != nil {
 		return err
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if err := check(o.SSH); err != nil {
-			return fmt.Errorf("override %q: %w", o.Path, err)
+			return fmt.Errorf("scope %q: %w", o.Path, err)
 		}
 	}
 	return nil

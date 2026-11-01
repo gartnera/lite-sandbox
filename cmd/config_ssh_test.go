@@ -90,7 +90,7 @@ func TestSSHConfigCommands(t *testing.T) {
 		t.Fatalf("saved %+v", cfg.SSH)
 	}
 
-	// A per-directory override.
+	// A scope.
 	configDir = "/work/acme"
 	captureStdout(t, func() {
 		if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"acme-box"}); err != nil {
@@ -100,7 +100,7 @@ func TestSSHConfigCommands(t *testing.T) {
 	configDir = ""
 	cfg, _ = config.Load()
 	if cfg.SSH.AllowsHost("acme-box") || !cfg.ForDirectory("/work/acme").SSH.AllowsHost("acme-box") {
-		t.Errorf("override not scoped: base %+v", cfg.SSH)
+		t.Errorf("scope not scoped: base %+v", cfg.SSH)
 	}
 
 	captureStdout(t, func() {

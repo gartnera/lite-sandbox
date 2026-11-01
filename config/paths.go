@@ -145,20 +145,20 @@ func (e PathEntry) SamePath(p string) bool {
 }
 
 // MergeKey makes the entry a keyedEntry: the subject it states something about
-// is its path, in the expanded form SamePath compares. A merge: true override
+// is its path, in the expanded form SamePath compares. A merge: true scope
 // therefore restates a base entry by naming the same path, however either side
 // spells it.
 func (e PathEntry) MergeKey() string { return expandPath(e.Path) }
 
-// validatePaths rejects a malformed paths entry on the base config or any
-// override, so a typo cannot silently grant or deny nothing.
+// validatePaths rejects a malformed paths entry on the global config or any
+// scope, so a typo cannot silently grant or deny nothing.
 func (c *Config) validatePaths() error {
 	if err := validatePathEntries(c.Paths); err != nil {
 		return err
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if err := validatePathEntries(o.Paths); err != nil {
-			return fmt.Errorf("override %q: %w", o.Path, err)
+			return fmt.Errorf("scope %q: %w", o.Path, err)
 		}
 	}
 	return nil
@@ -377,7 +377,7 @@ func (c *Config) AllPathEntries() []PathEntry {
 	return append(append([]PathEntry(nil), c.Paths...), c.LegacyPathEntries()...)
 }
 
-// UsesDeprecatedPathKeys reports whether the base config or any override still
+// UsesDeprecatedPathKeys reports whether the global config or any scope still
 // spells a path list the old way, which MigratePaths rewrites.
 func (c *Config) UsesDeprecatedPathKeys() bool {
 	if c == nil {
@@ -386,7 +386,7 @@ func (c *Config) UsesDeprecatedPathKeys() bool {
 	if c.usesLegacyPathKeys() {
 		return true
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if o.usesLegacyPathKeys() {
 			return true
 		}
@@ -394,34 +394,34 @@ func (c *Config) UsesDeprecatedPathKeys() bool {
 	return false
 }
 
-// MigratePaths rewrites the six deprecated path lists — on the base config and
-// on every override — as paths entries and clears them, keeping what every
+// MigratePaths rewrites the six deprecated path lists — on the global config and
+// on every scope — as paths entries and clears them, keeping what every
 // directory resolves to. Returns the number of entries written.
 //
-// The two spellings are not one-to-one under overrides: an old-style override
+// The two spellings are not one-to-one under scopes: an old-style scope
 // replaced only the one list it set and inherited the other five, whereas a
-// paths list replaces the whole section. So an override that set any path list
+// paths list replaces the whole section. So a scope that set any path list
 // (or already had a paths list) gets the full set of entries in effect for its
 // directory — the base's for every list it did not set — before its own lists
 // are cleared; one that set none keeps inheriting the migrated base.
 //
-// A merge: true override keeps only its own entries: `paths` merges entry by
+// A merge: true scope keeps only its own entries: `paths` merges entry by
 // entry there, so what it does not restate it inherits from the migrated base
 // anyway. That inheritance is wider than the old keys were — a deprecated list
-// on such an override replaced the base's list outright, whereas the migrated
-// entries now join it — so a base entry the override meant to shadow needs an
+// on such a scope replaced the base's list outright, whereas the migrated
+// entries now join it — so a base entry the scope meant to shadow needs an
 // entry of its own for that path.
 func (c *Config) MigratePaths() int {
 	if c == nil {
 		return 0
 	}
 	n := 0
-	for i := range c.Overrides {
-		o := &c.Overrides[i]
+	for i := range c.Scopes {
+		o := &c.Scopes[i]
 		if o.Paths == nil && !o.usesLegacyPathKeys() {
 			continue
 		}
-		// The lists in effect for the override's directory: its own where set,
+		// The lists in effect for the scope's directory: its own where set,
 		// the base's otherwise, exactly as ForDirectory combined them — except
 		// under merge: true, where the base's entries are inherited per path
 		// and restating them here would only freeze a copy.

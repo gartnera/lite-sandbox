@@ -41,14 +41,14 @@ func captureStdout(t *testing.T, fn func()) (out string) {
 	return
 }
 
-// TestAWSShowCmd_DirectoryOnlyOverride guards the regression where `aws show`
-// early-returned on a nil base aws section and hid a directory-only override —
+// TestAWSShowCmd_DirectoryOnlyScope guards the regression where `aws show`
+// early-returned on a nil base aws section and hid a directory-only scope —
 // which `config aws force-profile --dir` creates without touching the base.
-func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
+func TestAWSShowCmd_DirectoryOnlyScope(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	t.Cleanup(func() { configDir = "" })
 
-	// Create a directory override with no base aws section.
+	// Create a scope with no base aws section.
 	configDir = "/work/acme"
 	if err := awsForceProfileCmd.RunE(awsForceProfileCmd, []string{"acme-dev"}); err != nil {
 		t.Fatalf("dir force-profile: %v", err)
@@ -62,8 +62,8 @@ func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
 	if cfg.AWS != nil {
 		t.Fatalf("expected no base aws section, got %+v", cfg.AWS)
 	}
-	if findAWSOverride(cfg, "/work/acme") == nil {
-		t.Fatal("expected a directory override for /work/acme")
+	if findAWSScope(cfg, "/work/acme") == nil {
+		t.Fatal("expected a directory scope for /work/acme")
 	}
 
 	out := captureStdout(t, func() {
@@ -72,7 +72,7 @@ func TestAWSShowCmd_DirectoryOnlyOverride(t *testing.T) {
 		}
 	})
 	if !strings.Contains(out, "/work/acme") || !strings.Contains(out, "acme-dev") {
-		t.Errorf("aws show omitted the directory override; got:\n%s", out)
+		t.Errorf("aws show omitted the directory scope; got:\n%s", out)
 	}
 	if strings.Contains(out, "disabled (not configured)") {
 		t.Errorf("aws show wrongly reported disabled; got:\n%s", out)
@@ -138,7 +138,7 @@ func TestAWSAllowedProfilesCmd_Dir(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	t.Cleanup(func() { configDir = "" })
 
-	// --dir with no force_profile anywhere (base or override) is rejected.
+	// --dir with no force_profile anywhere (base or scope) is rejected.
 	configDir = "/work/acme"
 	if err := awsAllowedProfilesCmd.RunE(awsAllowedProfilesCmd, []string{"acme-dev"}); err == nil {
 		t.Fatal("expected error for --dir with no force_profile in effect")
@@ -163,12 +163,12 @@ func TestAWSAllowedProfilesCmd_Dir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := findAWSOverride(cfg, "/work/acme")
+	o := findAWSScope(cfg, "/work/acme")
 	if o == nil {
-		t.Fatal("expected an override for /work/acme")
+		t.Fatal("expected a scope for /work/acme")
 	}
 	if o.ForceProfile != "acme-ro" || !slices.Equal(o.AllowedProfiles, []string{"acme-dev", "acme-prod"}) {
-		t.Fatalf("override = {%q, %v}, want {acme-ro, [acme-dev acme-prod]}", o.ForceProfile, o.AllowedProfiles)
+		t.Fatalf("scope = {%q, %v}, want {acme-ro, [acme-dev acme-prod]}", o.ForceProfile, o.AllowedProfiles)
 	}
 	// Base config is untouched.
 	if cfg.AWS.ForceProfile != "ro" || len(cfg.AWS.AllowedProfiles) != 0 {
@@ -177,9 +177,9 @@ func TestAWSAllowedProfilesCmd_Dir(t *testing.T) {
 }
 
 // TestAWSAllowedProfilesCmd_DirInheritsBaseProfile pins the inheritance --dir
-// gives every setting: a directory with no aws override of its own resolves to
+// gives every setting: a directory with no aws scope of its own resolves to
 // the base's force_profile, so allowed_profiles can be set there without
-// restating it, and the stored override carries it.
+// restating it, and the stored scope carries it.
 func TestAWSAllowedProfilesCmd_DirInheritsBaseProfile(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	t.Cleanup(func() { configDir = "" })
@@ -198,12 +198,12 @@ func TestAWSAllowedProfilesCmd_DirInheritsBaseProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := findAWSOverride(cfg, "/work/acme")
+	o := findAWSScope(cfg, "/work/acme")
 	if o == nil {
-		t.Fatal("expected an override for /work/acme")
+		t.Fatal("expected a scope for /work/acme")
 	}
 	if o.ForceProfile != "ro" || !slices.Equal(o.AllowedProfiles, []string{"acme-dev"}) {
-		t.Fatalf("override = {%q, %v}, want {ro, [acme-dev]}", o.ForceProfile, o.AllowedProfiles)
+		t.Fatalf("scope = {%q, %v}, want {ro, [acme-dev]}", o.ForceProfile, o.AllowedProfiles)
 	}
 	if len(cfg.AWS.AllowedProfiles) != 0 {
 		t.Errorf("base AllowedProfiles should be empty, got %v", cfg.AWS.AllowedProfiles)

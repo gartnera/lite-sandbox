@@ -10,7 +10,7 @@ import (
 )
 
 // setCacheDir points the runtime cache at a file in a temp directory. The
-// explicit override is required for hermeticity: os.UserCacheDir ignores
+// explicit scope is required for hermeticity: os.UserCacheDir ignores
 // XDG_CACHE_HOME on macOS, so redirecting via env cache dirs is not portable.
 func setCacheDir(t *testing.T) string {
 	t.Helper()

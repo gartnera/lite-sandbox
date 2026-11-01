@@ -149,12 +149,12 @@ secrets. Its size is capped (oldest records are dropped), and
 
    Or set the mode per directory, keeping `allowlist` everywhere except a
    repo you're still learning. `lite-sandbox config mode set denylist --dir
-   ~/work/new-repo` writes the override, and `lite-sandbox audit report --cwd
+   ~/work/new-repo` writes it to that repo's scope, and `lite-sandbox audit report --cwd
    ~/work/new-repo` reads only that repo's findings:
 
    ```yaml
    mode: allowlist
-   overrides:
+   scopes:
      - path: ~/work/new-repo
        mode: denylist
      - path: ~/scratch/experiments

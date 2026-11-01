@@ -74,9 +74,9 @@ func (g *GitConfig) AllowsWorktreeParent() bool {
 //  2. force_profile: "name" - AWS CLI uses IMDS server with specified profile (blocks ~/.aws/)
 //
 // Like every config section, AWS settings can be changed per working directory
-// through the top-level directory overrides (see Config.Overrides and
-// Config.ForDirectory): an override that sets `aws:` replaces this whole section
-// for its directory, so a single config can broker a different profile (or switch
+// through the top-level scopes (see Config.Scopes and Config.ForDirectory): a
+// replace-style scope that sets `aws:` replaces this whole section for its
+// directory, so a single config can broker a different profile (or switch
 // modes) depending on where the sandbox is launched. Resolve the config for a
 // directory with Config.ForDirectory before reading the mode accessors.
 type AWSConfig struct {
@@ -510,12 +510,16 @@ type Config struct {
 	// whose target resolves exactly to the working directory is rejected; a cd into
 	// a subdirectory is legitimate and left alone. Set to false to allow it.
 	RejectRedundantCd *bool `yaml:"reject_redundant_cd,omitempty"`
-	// Overrides change parts of the configuration for specific working
+	// Scopes change parts of the configuration for specific working
 	// directories. Each entry pairs a path with a subset of config sections that
-	// replace the base for commands run at or under that path; the most specific
-	// match wins. Resolve the effective config for a directory with ForDirectory.
-	// Any section can be overridden, not just AWS.
-	Overrides []DirectoryOverride `yaml:"overrides,omitempty"`
+	// apply on top of the global config for commands run at or under that path;
+	// the most specific match wins. Resolve the effective config for a directory
+	// with ForDirectory. Any section can be set in a scope, not just AWS.
+	Scopes []Scope `yaml:"scopes,omitempty"`
+	// DeprecatedOverrides is the old name of Scopes (the `overrides` key). Parse
+	// moves its entries into Scopes (see foldDeprecatedOverrides), so nothing
+	// past parsing sees it set and the next save writes them under `scopes`.
+	DeprecatedOverrides []Scope `yaml:"overrides,omitempty"`
 
 	// effective marks a config returned by Effective, whose Paths and Commands
 	// already hold every statement (profiles and deprecated keys included).
@@ -634,12 +638,12 @@ func Load() (*Config, error) {
 }
 
 // LoadForDirectory loads the config and resolves it for dir, applying any
-// per-directory overrides (see Config.ForDirectory) and merging profiles and
+// scope matching it (see Config.ForDirectory) and merging profiles and
 // deprecated keys into the one paths and commands lists (see Config.Effective),
 // so the returned config is the effective one for commands run in dir. Callers that operate from a single
 // working directory should use this instead of Load()+ForDirectory, so the merge
 // happens once at load and every subsystem is handed an already-resolved config —
-// none has to know overrides exist. Returns a zero-value config (resolved) when
+// none has to know scopes exist. Returns a zero-value config (resolved) when
 // no file exists, matching Load.
 func LoadForDirectory(dir string) (*Config, error) {
 	cfg, err := Load()

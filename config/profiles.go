@@ -389,7 +389,7 @@ func (e ProfileEntry) MarshalYAML() (any, error) {
 // On reports whether the entry enables its profile (enabled unset or true).
 func (e ProfileEntry) On() bool { return e.Enabled == nil || *e.Enabled }
 
-// MergeKey makes the entry a keyedEntry: a merge: true override restates a
+// MergeKey makes the entry a keyedEntry: a merge: true scope restates a
 // base entry by naming the same profile.
 func (e ProfileEntry) MergeKey() string { return e.Name }
 
@@ -428,18 +428,18 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// validateProfiles rejects a malformed profiles entry on the base config or
-// any override, so a typo cannot silently enable nothing.
+// validateProfiles rejects a malformed profiles entry on the global config or
+// any scope, so a typo cannot silently enable nothing.
 func (c *Config) validateProfiles() error {
 	for _, e := range c.Profiles {
 		if err := e.Validate(); err != nil {
 			return err
 		}
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		for _, e := range o.Profiles {
 			if err := e.Validate(); err != nil {
-				return fmt.Errorf("override %q: %w", o.Path, err)
+				return fmt.Errorf("scope %q: %w", o.Path, err)
 			}
 		}
 	}
@@ -635,7 +635,7 @@ func (c *Config) legacyRuntimeAllowedCommands() []string {
 	return out
 }
 
-// UsesDeprecatedRuntimes reports whether the base config or any override still
+// UsesDeprecatedRuntimes reports whether the global config or any scope still
 // has a runtimes section, which MigrateRuntimes rewrites.
 func (c *Config) UsesDeprecatedRuntimes() bool {
 	if c == nil {
@@ -644,7 +644,7 @@ func (c *Config) UsesDeprecatedRuntimes() bool {
 	if c.Runtimes != nil {
 		return true
 	}
-	for _, o := range c.Overrides {
+	for _, o := range c.Scopes {
 		if o.Runtimes != nil {
 			return true
 		}
@@ -684,8 +684,8 @@ func hasCommandAllow(c *Config, text string) bool {
 	return false
 }
 
-// MigrateRuntimes rewrites the deprecated runtimes section — on the base config
-// and on every override — as profiles and commands entries and clears it,
+// MigrateRuntimes rewrites the deprecated runtimes section — on the global config
+// and on every scope — as profiles and commands entries and clears it,
 // keeping what every directory resolves to. Returns the number of entries
 // written.
 //
@@ -696,14 +696,14 @@ func hasCommandAllow(c *Config, text string) bool {
 //   - go.generate and the <x>.publish flags become commands entries allowing
 //     "go generate", "cargo publish", ....
 //
-// The two spellings do not combine the same way under overrides: an override's
+// The two spellings do not combine the same way under scopes: a scope's
 // runtimes section replaced (or, under merge: true, deep-merged into) the
 // base's runtimes, whereas its profiles and commands sections combine with the
 // base's profiles and commands. So rather than translating each section in
 // place, the migration computes what every directory resolved to before, then
-// writes into each override exactly the entries needed for it to resolve the
+// writes into each scope exactly the entries needed for it to resolve the
 // same way on top of the migrated base — restating an inherited entry where a
-// replace-mode override would otherwise drop it, and adding an explicit entry
+// replace-mode scope would otherwise drop it, and adding an explicit entry
 // where it would otherwise inherit one it did not have.
 func (c *Config) MigrateRuntimes() int {
 	if !c.UsesDeprecatedRuntimes() {
@@ -711,25 +711,25 @@ func (c *Config) MigrateRuntimes() int {
 	}
 	// What each directory resolves to today, before anything changes.
 	baseWant := stateOf(c)
-	want := make([]profileState, len(c.Overrides))
-	for i := range c.Overrides {
-		want[i] = stateOf(overlaid(c, &c.Overrides[i]))
+	want := make([]profileState, len(c.Scopes))
+	for i := range c.Scopes {
+		want[i] = stateOf(overlaid(c, &c.Scopes[i]))
 	}
 	c.Runtimes = nil
 	n := adoptProfileState(c, nil, false, func() *Config { return c }, baseWant)
-	for i := range c.Overrides {
-		o := &c.Overrides[i]
+	for i := range c.Scopes {
+		o := &c.Scopes[i]
 		o.Runtimes = nil
 		n += adoptProfileState(&o.Config, c, !o.Merge, func() *Config { return overlaid(c, o) }, want[i])
 	}
 	return n
 }
 
-// overlaid resolves override o on top of base, as ForDirectory would for a
+// overlaid resolves scope o on top of base, as ForDirectory would for a
 // directory o governs.
-func overlaid(base *Config, o *DirectoryOverride) *Config {
+func overlaid(base *Config, o *Scope) *Config {
 	r := *base
-	r.Overrides = nil
+	r.Scopes = nil
 	overlayConfig(&r, &o.Config, o.Merge)
 	return &r
 }
@@ -743,7 +743,7 @@ func overlaid(base *Config, o *DirectoryOverride) *Config {
 func adoptProfileState(target, base *Config, replace bool, resolve func() *Config, want profileState) int {
 	n := 0
 	written := slices.Clone(target.Profiles) // the entries the config already had
-	// Setting the first entry of a replace-mode override's profiles list stops
+	// Setting the first entry of a replace-mode scope's profiles list stops
 	// it inheriting the base's, which can flip a profile already checked; a
 	// second pass settles it.
 	for pass := 0; pass < 3; pass++ {
@@ -778,7 +778,7 @@ func adoptProfileState(target, base *Config, replace bool, resolve func() *Confi
 		}
 	}
 	// The passes above can leave entries that no longer matter — in a
-	// replace-mode override, an explicit enabled: false written before the
+	// replace-mode scope, an explicit enabled: false written before the
 	// list took over from the base's. Drop every such entry the directory
 	// resolves the same without; the entries the config itself had stay.
 	for i := len(target.Profiles) - 1; i >= 0 && n > 0; i-- {

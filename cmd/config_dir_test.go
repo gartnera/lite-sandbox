@@ -57,15 +57,15 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Nothing landed in the base config.
+	// Nothing landed in the global config.
 	if cfg.Git != nil || cfg.Profiles != nil || cfg.LocalBinaryExecution != nil ||
 		cfg.RejectRedundantCd != nil || cfg.Audit != nil {
 		t.Fatalf("base config changed: %+v", cfg)
 	}
 
-	// One override carries all five sections.
-	if len(cfg.Overrides) != 1 || cfg.Overrides[0].Path != dir {
-		t.Fatalf("overrides = %+v, want a single entry for %s", cfg.Overrides, dir)
+	// One scope carries all five sections.
+	if len(cfg.Scopes) != 1 || cfg.Scopes[0].Path != dir {
+		t.Fatalf("scopes = %+v, want a single entry for %s", cfg.Scopes, dir)
 	}
 
 	scoped := cfg.ForDirectory(filepath.Join(dir, "sub"))
@@ -88,15 +88,15 @@ func TestConfigDir_EveryCommand(t *testing.T) {
 	// Elsewhere the defaults still apply.
 	other := cfg.ForDirectory("/work/other")
 	if other.Git.GitRemoteWrite() || other.ProfileEnabled("go") || other.AuditEnabled() {
-		t.Errorf("override leaked outside %s: %+v", dir, other)
+		t.Errorf("scope leaked outside %s: %+v", dir, other)
 	}
 }
 
 // TestConfigDir_ListsInheritBase covers the list settings: a --dir edit starts
 // from what the directory resolves to today, so `add` is additive against the
-// base list instead of silently replacing it. The override --dir creates is
+// base list instead of silently replacing it. The scope --dir creates is
 // merge: true, so it stores only the added entry, and removing an entry the
-// base states is reported rather than applied (an override can restate an
+// base states is reported rather than applied (a scope can restate an
 // entry, not drop it).
 func TestConfigDir_ListsInheritBase(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
@@ -124,7 +124,7 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 			}
 		})
 	})
-	if !strings.Contains(removeOut, `ninja: "allow" in the base config still applies to /work/acme`) {
+	if !strings.Contains(removeOut, `ninja: "allow" in the global config still applies to /work/acme`) {
 		t.Errorf("remove output = %q, want the inherited entry reported", removeOut)
 	}
 
@@ -139,8 +139,8 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 	if !slices.Equal(got, []string{"make", "ninja", "npm"}) {
 		t.Errorf("extra_commands for %s = %v, want [make ninja npm]", dir, got)
 	}
-	if o := findOverride(cfg, dir); o == nil || !o.Merge || len(o.Commands) != 1 || o.Commands[0].Command != "npm" {
-		t.Errorf("override = %+v, want merge: true holding only npm", o)
+	if o := findScope(cfg, dir); o == nil || !o.Merge || len(o.Commands) != 1 || o.Commands[0].Command != "npm" {
+		t.Errorf("scope = %+v, want merge: true holding only npm", o)
 	}
 
 	// `list --dir` reports what that directory resolves to.
@@ -159,7 +159,7 @@ func TestConfigDir_ListsInheritBase(t *testing.T) {
 
 // TestConfigDir_UnchangedSectionsNotRecorded checks saveConfig records only what
 // the command touched: a directory edit must not freeze the rest of the base
-// config into the override.
+// config into the scope.
 func TestConfigDir_UnchangedSectionsNotRecorded(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	const dir = "/work/acme"
@@ -179,12 +179,12 @@ func TestConfigDir_UnchangedSectionsNotRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := findOverride(cfg, dir)
+	o := findScope(cfg, dir)
 	if o == nil {
-		t.Fatal("expected an override")
+		t.Fatal("expected a scope")
 	}
 	if o.Git != nil {
-		t.Errorf("untouched git section was copied into the override: %+v", o.Git)
+		t.Errorf("untouched git section was copied into the scope: %+v", o.Git)
 	}
 	// The base's git setting still reaches the directory.
 	if !cfg.ForDirectory(dir).Git.GitRemoteWrite() {
@@ -192,9 +192,9 @@ func TestConfigDir_UnchangedSectionsNotRecorded(t *testing.T) {
 	}
 }
 
-// TestConfigDir_NoChangeLeavesNoOverride guards against a stray empty override
+// TestConfigDir_NoChangeLeavesNoScope guards against a stray empty scope
 // entry: setting a directory to the value it already resolves to writes nothing.
-func TestConfigDir_NoChangeLeavesNoOverride(t *testing.T) {
+func TestConfigDir_NoChangeLeavesNoScope(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 
 	captureStdout(t, func() {
@@ -214,12 +214,12 @@ func TestConfigDir_NoChangeLeavesNoOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Overrides) != 0 {
-		t.Errorf("overrides = %+v, want none", cfg.Overrides)
+	if len(cfg.Scopes) != 0 {
+		t.Errorf("scopes = %+v, want none", cfg.Scopes)
 	}
 }
 
-// TestConfigDir_DisableUnderDir pins the one case an override cannot express by
+// TestConfigDir_DisableUnderDir pins the one case a scope cannot express by
 // clearing a section: `docker disable --dir` must store an explicitly disabled
 // section, since an unset one would just inherit the enabled base.
 func TestConfigDir_DisableUnderDir(t *testing.T) {
@@ -257,8 +257,8 @@ func TestConfigDir_DisableUnderDir(t *testing.T) {
 	}
 }
 
-// TestConfigDir_ClearingFallsBackToReplace: a merge: true override cannot
-// clear a field (unset inherits the base's), so a new override whose change
+// TestConfigDir_ClearingFallsBackToReplace: a merge: true scope cannot
+// clear a field (unset inherits the base's), so a new scope whose change
 // clears one is written replace-style. Otherwise `aws disable --dir` would
 // leave the base's AWS access on, and `aws force-profile --dir` would keep the
 // base's raw credentials readable.
@@ -304,19 +304,19 @@ func TestConfigDir_ClearingFallsBackToReplace(t *testing.T) {
 		t.Errorf("aws for /work/b = %+v, want force_profile ro without raw credentials", b)
 	}
 	for _, dir := range []string{"/work/a", "/work/b"} {
-		if o := findOverride(cfg, dir); o == nil || o.Merge {
-			t.Errorf("override for %s = %+v, want replace-style", dir, o)
+		if o := findScope(cfg, dir); o == nil || o.Merge {
+			t.Errorf("scope for %s = %+v, want replace-style", dir, o)
 		}
 	}
-	// A change that clears nothing keeps the merge: true override.
-	if o := findOverride(cfg, "/work/c"); o == nil || !o.Merge {
-		t.Errorf("override for /work/c = %+v, want merge: true", o)
+	// A change that clears nothing keeps the merge: true scope.
+	if o := findScope(cfg, "/work/c"); o == nil || !o.Merge {
+		t.Errorf("scope for /work/c = %+v, want merge: true", o)
 	}
 }
 
-// TestConfigDir_RemoveOverride covers `config overrides remove`, the way back
+// TestConfigDir_RemoveScope covers `config scopes remove`, the way back
 // out of a --dir edit.
-func TestConfigDir_RemoveOverride(t *testing.T) {
+func TestConfigDir_RemoveScope(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	const dir = "/work/acme"
 
@@ -328,7 +328,7 @@ func TestConfigDir_RemoveOverride(t *testing.T) {
 		})
 	})
 	out := captureStdout(t, func() {
-		if err := configOverridesRemoveCmd.RunE(configOverridesRemoveCmd, []string{dir}); err != nil {
+		if err := configScopesRemoveCmd.RunE(configScopesRemoveCmd, []string{dir}); err != nil {
 			t.Fatalf("remove: %v", err)
 		}
 	})
@@ -339,8 +339,23 @@ func TestConfigDir_RemoveOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Overrides) != 0 {
-		t.Errorf("overrides = %+v, want none", cfg.Overrides)
+	if len(cfg.Scopes) != 0 {
+		t.Errorf("scopes = %+v, want none", cfg.Scopes)
+	}
+}
+
+// TestConfigScopes_OldNamesStillResolve checks that the commands renamed from
+// "override" to "scope" still answer to their old names.
+func TestConfigScopes_OldNamesStillResolve(t *testing.T) {
+	for old, want := range map[string]*cobra.Command{
+		"config overrides list":      configScopesListCmd,
+		"config overrides remove":    configScopesRemoveCmd,
+		"config aws remove-override": awsUnsetCmd,
+	} {
+		got, _, err := rootCmd.Find(strings.Fields(old))
+		if err != nil || got != want {
+			t.Errorf("%s resolves to %v (%v), want %s", old, got.CommandPath(), err, want.CommandPath())
+		}
 	}
 }
 
@@ -400,7 +415,7 @@ func TestConfigDir_FlagRegisteredOnce(t *testing.T) {
 // TestConfigDir_DefaultsToProject checks a config change with neither --dir
 // nor --global is scoped to the project (configrequest.DefaultDir: here, the
 // repository root above the cmd package the test runs in), that --global
-// edits the base config, and that the two cannot be combined.
+// edits the global config, and that the two cannot be combined.
 func TestConfigDir_DefaultsToProject(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	reset := func() { configDir, configGlobal = "", false }
@@ -444,8 +459,8 @@ func TestConfigDir_DefaultsToProject(t *testing.T) {
 	if has(cfg, "npm") || !has(cfg, "make") || has(cfg, "go") {
 		t.Errorf("base commands = %+v, want make only", cfg.AllCommandEntries())
 	}
-	if len(cfg.Overrides) != 1 || cfg.Overrides[0].Path != wd {
-		t.Fatalf("overrides = %+v, want one for %s", cfg.Overrides, wd)
+	if len(cfg.Scopes) != 1 || cfg.Scopes[0].Path != wd {
+		t.Fatalf("scopes = %+v, want one for %s", cfg.Scopes, wd)
 	}
 	if !has(cfg.ForDirectory(wd), "npm") {
 		t.Errorf("npm is not allowed for %s", wd)
@@ -490,10 +505,10 @@ func findSubcommand(t *testing.T, parent *cobra.Command, name string) *cobra.Com
 	return nil
 }
 
-// TestConfigDir_MergeOverrideKeepsDelta: on a merge: true override the keyed
+// TestConfigDir_MergeScopeKeepsDelta: on a merge: true scope the keyed
 // sections inherit the base entry by entry, so a --dir edit records only what
 // it changed rather than freezing a copy of the base's entries.
-func TestConfigDir_MergeOverrideKeepsDelta(t *testing.T) {
+func TestConfigDir_MergeScopeKeepsDelta(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
@@ -503,7 +518,7 @@ paths:
 commands:
   - command: curl
     allow: true
-overrides:
+scopes:
   - path: /work/acme
     merge: true
 `), 0o644); err != nil {
@@ -526,15 +541,15 @@ overrides:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Overrides) != 1 {
-		t.Fatalf("overrides = %+v, want one", cfg.Overrides)
+	if len(cfg.Scopes) != 1 {
+		t.Fatalf("scopes = %+v, want one", cfg.Scopes)
 	}
-	o := cfg.Overrides[0]
+	o := cfg.Scopes[0]
 	if len(o.Paths) != 1 || o.Paths[0].Path != "/work/acme/out" {
-		t.Errorf("override paths = %+v, want only the added entry", o.Paths)
+		t.Errorf("scope paths = %+v, want only the added entry", o.Paths)
 	}
 	if len(o.Commands) != 1 || o.Commands[0].Command != "npm" {
-		t.Errorf("override commands = %+v, want only the added entry", o.Commands)
+		t.Errorf("scope commands = %+v, want only the added entry", o.Commands)
 	}
 	// The base's entries still reach the directory through the merge.
 	scoped := cfg.ForDirectory("/work/acme/sub")
@@ -552,17 +567,17 @@ overrides:
 	}
 }
 
-// TestConfigDir_MergeOverrideReportsInherited: a merge: true override can
+// TestConfigDir_MergeScopeReportsInherited: a merge: true scope can
 // restate a base entry but not drop one, so removing an inherited path under
 // --dir says so instead of reporting a removal that did not happen.
-func TestConfigDir_MergeOverrideReportsInherited(t *testing.T) {
+func TestConfigDir_MergeScopeReportsInherited(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
 paths:
   - path: /base/data
     read: true
-overrides:
+scopes:
   - path: /work/acme
     merge: true
     paths:
@@ -580,7 +595,7 @@ overrides:
 			}
 		})
 	})
-	if !strings.Contains(out, `/base/data: "read" in the base config still applies to /work/acme`) {
+	if !strings.Contains(out, `/base/data: "read" in the global config still applies to /work/acme`) {
 		t.Errorf("output = %q, want the inherited entry reported", out)
 	}
 	if !strings.Contains(out, "lite-sandbox config paths remove /base/data") {
@@ -597,22 +612,22 @@ overrides:
 	if got := cfg.ForDirectory("/work/acme").ReadablePathList(); !slices.Equal(got, []string{"/base/data"}) {
 		t.Errorf("readable = %v, want the base entry still in force", got)
 	}
-	// The override's own entry is untouched by the attempted removal.
-	if len(cfg.Overrides) != 1 || len(cfg.Overrides[0].Paths) != 1 {
-		t.Errorf("overrides = %+v, want the override's own entry kept", cfg.Overrides)
+	// The scope's own entry is untouched by the attempted removal.
+	if len(cfg.Scopes) != 1 || len(cfg.Scopes[0].Paths) != 1 {
+		t.Errorf("scopes = %+v, want the scope's own entry kept", cfg.Scopes)
 	}
 }
 
-// TestConfigDir_MergeOverrideInheritsDeprecatedKeys: a merge: true override
+// TestConfigDir_MergeScopeInheritsDeprecatedKeys: a merge: true scope
 // inherits the deprecated one-list-per-kind keys too (they are plain leaves
 // it simply does not set), so a removal it cannot carry out is reported the
 // same way.
-func TestConfigDir_MergeOverrideInheritsDeprecatedKeys(t *testing.T) {
+func TestConfigDir_MergeScopeInheritsDeprecatedKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
 extra_commands: [curl]
-overrides:
+scopes:
   - path: /work/acme
     merge: true
 `), 0o644); err != nil {
@@ -627,7 +642,7 @@ overrides:
 			}
 		})
 	})
-	if !strings.Contains(out, `curl: "allow" in the base config still applies to /work/acme`) {
+	if !strings.Contains(out, `curl: "allow" in the global config still applies to /work/acme`) {
 		t.Errorf("output = %q, want the inherited entry reported", out)
 	}
 	if strings.Contains(out, "curl removed") {
@@ -643,18 +658,18 @@ overrides:
 	}
 }
 
-// TestConfigDir_MergeOverrideDeniesLiftedBuiltin: when the base lifts a
-// built-in denial, a merge: true override cannot drop that lift — so denying
+// TestConfigDir_MergeScopeDeniesLiftedBuiltin: when the base lifts a
+// built-in denial, a merge: true scope cannot drop that lift — so denying
 // the command for one directory writes the explicit denial that restates it,
 // rather than the "the built-in is back" shortcut that works globally.
-func TestConfigDir_MergeOverrideDeniesLiftedBuiltin(t *testing.T) {
+func TestConfigDir_MergeScopeDeniesLiftedBuiltin(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
 commands:
   - command: lite-sandbox update
     allow: true
-overrides:
+scopes:
   - path: /work/acme
     merge: true
 `), 0o644); err != nil {
@@ -673,8 +688,8 @@ overrides:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := cfg.Overrides[0]; len(o.Commands) != 1 || !o.Commands[0].Denies() {
-		t.Fatalf("override commands = %+v, want an explicit denial", o.Commands)
+	if o := cfg.Scopes[0]; len(o.Commands) != 1 || !o.Commands[0].Denies() {
+		t.Fatalf("scope commands = %+v, want an explicit denial", o.Commands)
 	}
 	scoped := cfg.ForDirectory("/work/acme")
 	if got := scoped.LiftedDeniedCommands(); len(got) != 0 {
@@ -689,7 +704,7 @@ overrides:
 	}
 }
 
-// TestConfigDir_RemovingLastEntryIsReported: a replace-style override (one
+// TestConfigDir_RemovingLastEntryIsReported: a replace-style scope (one
 // written by hand; --dir creates merge: true ones) cannot record an emptied
 // section (an empty list is not written), so removing the last entry leaves
 // the base's list applying to the directory. That is reported, not claimed as
@@ -701,7 +716,7 @@ func TestConfigDir_RemovingLastEntryIsReported(t *testing.T) {
 commands:
   - command: curl
     allow: true
-overrides:
+scopes:
   - path: /work/acme
     commands:
       - command: curl
@@ -721,7 +736,7 @@ overrides:
 	if strings.Contains(out, "curl removed") {
 		t.Errorf("output = %q, must not report a removal that did not happen", out)
 	}
-	if !strings.Contains(out, `curl: "allow" in the base config still applies to /work/acme`) {
+	if !strings.Contains(out, `curl: "allow" in the global config still applies to /work/acme`) {
 		t.Errorf("output = %q, want the inherited entry reported", out)
 	}
 
@@ -734,11 +749,11 @@ overrides:
 	}
 }
 
-// TestConfigDir_NewOverrideMerges: an override --dir creates is merge: true
+// TestConfigDir_NewScopeMerges: a scope --dir creates is merge: true
 // and records only what the command changed. It deep-merges into the base, not
-// into the override the directory was inheriting from a parent, so settings
-// that parent override made and the command did not touch stop applying.
-func TestConfigDir_NewOverrideMerges(t *testing.T) {
+// into the scope the directory was inheriting from a parent, so settings
+// that parent scope made and the command did not touch stop applying.
+func TestConfigDir_NewScopeMerges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
@@ -746,7 +761,7 @@ mode: denylist
 commands:
   - command: curl
     allow: true
-overrides:
+scopes:
   - path: /work
     mode: allowlist
 `), 0o644); err != nil {
@@ -765,12 +780,12 @@ overrides:
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := findOverride(cfg, "/work/proj")
+	o := findScope(cfg, "/work/proj")
 	if o == nil || !o.Merge {
-		t.Fatalf("override = %+v, want merge: true", o)
+		t.Fatalf("scope = %+v, want merge: true", o)
 	}
 	if len(o.Commands) != 1 || o.Commands[0].Command != "make" || o.Mode != "" {
-		t.Errorf("override = %+v, want only the make entry", o)
+		t.Errorf("scope = %+v, want only the make entry", o)
 	}
 	scoped := cfg.ForDirectory("/work/proj")
 	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"curl", "make"}) {
@@ -779,19 +794,19 @@ overrides:
 	if got := scoped.EffectiveMode(); got != config.ModeDenylist {
 		t.Errorf("mode = %s, want the base's denylist", got)
 	}
-	// The parent's override and the rest of ~/work are untouched.
+	// The parent's scope and the rest of ~/work are untouched.
 	if got := cfg.ForDirectory("/work/other").EffectiveMode(); got != config.ModeAllowlist {
 		t.Errorf("/work/other mode = %s, want allowlist", got)
 	}
 }
 
-// TestConfigDir_InheritedValueLeavesNoOverride: setting a directory to what it
-// already resolves to through a parent's override writes nothing.
-func TestConfigDir_InheritedValueLeavesNoOverride(t *testing.T) {
+// TestConfigDir_InheritedValueLeavesNoScope: setting a directory to what it
+// already resolves to through a parent's scope writes nothing.
+func TestConfigDir_InheritedValueLeavesNoScope(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("LITE_SANDBOX_CONFIG", path)
 	if err := os.WriteFile(path, []byte(`
-overrides:
+scopes:
   - path: /work
     commands:
       - command: make
@@ -810,7 +825,7 @@ overrides:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Overrides) != 1 {
-		t.Fatalf("overrides = %+v, want only /work's", cfg.Overrides)
+	if len(cfg.Scopes) != 1 {
+		t.Fatalf("scopes = %+v, want only /work's", cfg.Scopes)
 	}
 }

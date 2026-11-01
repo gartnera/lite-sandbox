@@ -22,31 +22,31 @@ var configCmd = &cobra.Command{
 Every setting under ` + "`config`" + ` is scoped to the project by default: the root of
 the git repository the working directory is in (a linked worktree's main
 worktree), or the working directory itself outside one. The change applies to
-commands run at or under it, stored as a per-directory override (the
-` + "`overrides`" + ` list in the config file), and the base config is left alone.
---dir <path> scopes it to that directory instead, and --global edits the base
-config, which applies everywhere. Reads honour the same scope, so
+commands run at or under it, stored in that directory's scope (the
+` + "`scopes`" + ` list in the config file), and the global config is left alone.
+--dir <path> stores it in that directory's scope instead, and --global edits
+the global config, which applies everywhere. Reads honour the same scope, so
 ` + "`config <section> show`" + ` prints what the project resolves to and
-` + "`config <section> show --global`" + ` prints the base config.`,
+` + "`config <section> show --global`" + ` prints the global config.`,
 }
 
 // configDir is the value of the `--dir` flag, registered once as a persistent
 // flag on `config` so every subcommand under it inherits the same per-directory
 // scoping without wiring up a flag of its own. When it is set, loadConfig hands
 // the command the configuration in effect for that directory and saveConfig
-// records whatever the command changed as a directory override rather than
-// editing the base config.
+// records whatever the command changed as a scope rather than
+// editing the global config.
 var configDir string
 
 // configEdit links a loadConfig/saveConfig pair for a --dir edit: the full
-// config to write back, the override receiving the changes, and a snapshot of
+// config to write back, the scope receiving the changes, and a snapshot of
 // the view handed to the command, so saveConfig can tell which sections the
 // command actually touched.
 type configEdit struct {
 	root     *config.Config
-	override *config.DirectoryOverride
+	override *config.Scope
 	before   *config.Config
-	// created is set when the edit created the override (see loadConfig), so
+	// created is set when the edit created the scope (see loadConfig), so
 	// recordEdit may still pick how it combines with the base.
 	created bool
 }
@@ -58,7 +58,7 @@ var currentEdit *configEdit
 
 // checkConfigRequestDir refuses a config subcommand run for a config request
 // (configrequest.DirEnv set by the MCP server) unless what it parsed is the
-// scope the user approved: the base config when configrequest.GlobalEnv is
+// scope the user approved: the global config when configrequest.GlobalEnv is
 // "1", and otherwise exactly the request's project directory. The server
 // parsed the request the same way (parseConfigRequest); this holds even if
 // the two ever disagree.
@@ -81,7 +81,7 @@ func checkConfigRequestDir() error {
 }
 
 // configGlobal is the value of the `--global` flag: edit (and read) the base
-// config rather than the per-directory override --dir defaults to.
+// config rather than the scope --dir defaults to.
 var configGlobal bool
 
 // configDirExplicit records that --dir was given on the command line rather
@@ -102,7 +102,7 @@ func scopeFlags() string {
 }
 
 // wholeFileAnnotation marks a config subcommand that is not a per-directory
-// setting (the config file path, `edit`, `migrate`, the override listing):
+// setting (the config file path, `edit`, `migrate`, the scope listing):
 // --dir does not default to the working directory for it.
 const wholeFileAnnotation = "lite-sandbox/whole-file"
 
@@ -161,15 +161,15 @@ func init() {
 		return checkConfigRequestDir()
 	}
 	configCmd.PersistentFlags().StringVar(&configDir, "dir", "",
-		"apply the setting only to commands run at or under this directory (a per-directory override; default: the git root, else the working directory); reads resolve for it")
+		"apply the setting only to commands run at or under this directory (stored in its scope; default: the git root, else the working directory); reads resolve for it")
 	configCmd.PersistentFlags().BoolVar(&configGlobal, "global", false,
-		"apply the setting to every directory (the base config) instead of the project; reads show the base config")
+		"apply the setting to every directory (the global config) instead of the project; reads show the global config")
 
 	configCmd.AddCommand(configPathCmd)
 	configCmd.AddCommand(configShowCmd)
-	configCmd.AddCommand(configOverridesCmd)
-	configOverridesCmd.AddCommand(configOverridesListCmd)
-	configOverridesCmd.AddCommand(configOverridesRemoveCmd)
+	configCmd.AddCommand(configScopesCmd)
+	configScopesCmd.AddCommand(configScopesListCmd)
+	configScopesCmd.AddCommand(configScopesRemoveCmd)
 	rootCmd.AddCommand(configCmd)
 }
 
@@ -206,15 +206,16 @@ var configShowCmd = &cobra.Command{
 	},
 }
 
-var configOverridesCmd = &cobra.Command{
-	Use:   "overrides",
-	Short: "Inspect and remove the per-directory overrides written by --dir",
+var configScopesCmd = &cobra.Command{
+	Use:     "scopes",
+	Aliases: []string{"overrides"},
+	Short:   "Inspect and remove the per-directory scopes config changes are stored in",
 }
 
-var configOverridesListCmd = &cobra.Command{
+var configScopesListCmd = &cobra.Command{
 	Annotations: wholeFile,
 	Use:         "list",
-	Short:       "List the configured per-directory overrides",
+	Short:       "List every directory scope and the settings stored in it",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := rejectConfigDir(cmd); err != nil {
 			return err
@@ -223,12 +224,12 @@ var configOverridesListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if len(cfg.Overrides) == 0 {
-			fmt.Println("No per-directory overrides configured")
+		if len(cfg.Scopes) == 0 {
+			fmt.Println("No scopes configured")
 			return nil
 		}
-		for i := range cfg.Overrides {
-			o := &cfg.Overrides[i]
+		for i := range cfg.Scopes {
+			o := &cfg.Scopes[i]
 			fmt.Printf("%s:\n", o.Path)
 			body, err := yaml.Marshal(&o.Config)
 			if err != nil {
@@ -242,7 +243,7 @@ var configOverridesListCmd = &cobra.Command{
 	},
 }
 
-var configOverridesRemoveCmd = &cobra.Command{
+var configScopesRemoveCmd = &cobra.Command{
 	Annotations: wholeFile,
 	Use:         "remove [dir]",
 	Short:       "Remove every setting stored for a directory (defaults to --dir)",
@@ -256,21 +257,21 @@ var configOverridesRemoveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if !removeOverride(cfg, dir) {
-			fmt.Printf("No override configured for %s\n", dir)
+		if !removeScope(cfg, dir) {
+			fmt.Printf("No scope configured for %s\n", dir)
 			return nil
 		}
 		if err := config.Save(cfg); err != nil {
 			return err
 		}
-		fmt.Printf("Removed the override for %s\n", dir)
+		fmt.Printf("Removed the scope for %s\n", dir)
 		return nil
 	},
 }
 
 // loadConfig returns the configuration a config subcommand should read and
 // mutate. Without --dir that is the config file itself. With --dir it is the
-// configuration that directory resolves to today — the base with any override
+// configuration that directory resolves to today — the base with any scope
 // already stored for it applied — deep-copied so mutating it cannot reach the
 // shared base sections. Commands therefore need no per-directory code of their
 // own: they edit the values they would edit globally, and saveConfig works out
@@ -292,16 +293,16 @@ func loadConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// overridePtr appends an empty override when the directory has none yet;
-	// nothing is written unless the command goes on to call saveConfig, and an
-	// override still setting nothing by then is dropped again. A new override
+	// scopePtr appends an empty scope when the directory has none yet;
+	// nothing is written unless the command goes on to call saveConfig, and a
+	// scope still setting nothing by then is dropped again. A new scope
 	// deep-merges into the base, so it records only what the command changed
 	// in `paths` and `commands`, where later edits to the base keep reaching
 	// the directory (recordEdit falls back to replace-style when the change
 	// clears a setting, which a deep merge would inherit back from the base).
-	// An existing override keeps whichever merge setting it already has.
-	isNew := findOverride(cfg, configDir) == nil
-	o := overridePtr(cfg, configDir)
+	// An existing scope keeps whichever merge setting it already has.
+	isNew := findScope(cfg, configDir) == nil
+	o := scopePtr(cfg, configDir)
 	if isNew {
 		o.Merge = true
 	}
@@ -311,12 +312,12 @@ func loadConfig() (*config.Config, error) {
 
 // saveConfig persists the config a command edited. Without --dir it writes cfg
 // straight back. With --dir it copies the sections the command changed into the
-// directory override and writes the whole config, so unrelated sections keep
+// scope and writes the whole config, so unrelated sections keep
 // inheriting from the base. Sections the command left alone are not recorded,
-// and an override left setting nothing is removed.
+// and a scope left setting nothing is removed.
 //
-// On a merge: true override the keyed sections (`paths`, `commands`) are then
-// reduced to the delta against the base, since that override inherits them
+// On a merge: true scope the keyed sections (`paths`, `commands`) are then
+// reduced to the delta against the base, since that scope inherits them
 // entry by entry: it records what the command changed, not a frozen copy of
 // the base's entries. What such an edit cannot do is unstate an inherited
 // entry, so those are reported rather than silently ignored.
@@ -331,34 +332,34 @@ func saveConfig(cfg *config.Config) error {
 	recordEdit(ed.override, ed.root, ed.before, cfg, ed.created)
 	scoped := ed.override.SetsAnySection()
 	if !scoped {
-		removeOverride(ed.root, dir)
+		removeScope(ed.root, dir)
 	}
 	// What the directory will actually resolve to once this is written, which
-	// is not always what the command produced: an override inherits the
-	// sections it does not set, and a merge: true override inherits `paths`
+	// is not always what the command produced: a scope inherits the
+	// sections it does not set, and a merge: true scope inherits `paths`
 	// and `commands` entry by entry.
 	inherited := inheritedStatements(ed.root.ForDirectory(dir), cfg)
 	switch {
 	case scoped:
-		fmt.Printf("Scoped to %s (per-directory override)\n", dir)
+		fmt.Printf("Saved to the scope for %s\n", dir)
 	case len(inherited) == 0:
-		fmt.Printf("%s already resolves to that; no override needed\n", dir)
+		fmt.Printf("%s already resolves to that; nothing to store in its scope\n", dir)
 	}
 	reportInheritedEntries(dir, inherited)
 	return config.Save(ed.root)
 }
 
-// recordEdit copies what a command changed into the directory override: the
+// recordEdit copies what a command changed into the scope: the
 // sections whose value differs from the view it was handed, reduced on a
-// merge: true override to the delta against the base, since that override
+// merge: true scope to the delta against the base, since that scope
 // inherits `paths` and `commands` entry by entry.
 //
-// A deep merge cannot clear a setting: a field the override leaves unset
-// inherits the base's. So when the edit created the override (which then holds
+// A deep merge cannot clear a setting: a field the scope leaves unset
+// inherits the base's. So when the edit created the scope (which then holds
 // nothing but this change) and the change clears one — `aws disable`, or
-// `aws force-profile` dropping a base allow_raw_credentials — the override is
+// `aws force-profile` dropping a base allow_raw_credentials — the scope is
 // written replace-style instead, storing each changed section whole.
-func recordEdit(o *config.DirectoryOverride, base, before, after *config.Config, created bool) {
+func recordEdit(o *config.Scope, base, before, after *config.Config, created bool) {
 	applyChangedSections(&o.Config, before, after)
 	if created && o.Merge && !mergeResolvesTo(o, base, before, after) {
 		o.Merge = false
@@ -368,14 +369,14 @@ func recordEdit(o *config.DirectoryOverride, base, before, after *config.Config,
 	config.PruneRestatedEntries(o, base)
 }
 
-// mergeResolvesTo reports whether the directory of override o, combined with
+// mergeResolvesTo reports whether the directory of scope o, combined with
 // base, resolves to after in every non-list section the command changed. List
 // sections are left out: the leaf lists combine the same way in either merge
-// mode, and an entry of a keyed list (`paths`, `commands`) that the override
+// mode, and an entry of a keyed list (`paths`, `commands`) that the scope
 // cannot drop is reported by inheritedStatements instead.
-func mergeResolvesTo(o *config.DirectoryOverride, base, before, after *config.Config) bool {
+func mergeResolvesTo(o *config.Scope, base, before, after *config.Config) bool {
 	probe := *base
-	probe.Overrides = []config.DirectoryOverride{*o}
+	probe.Scopes = []config.Scope{*o}
 	resolved := probe.ForDirectory(o.Path)
 	rv := reflect.ValueOf(resolved).Elem()
 	bv := reflect.ValueOf(before).Elem()
@@ -383,7 +384,7 @@ func mergeResolvesTo(o *config.DirectoryOverride, base, before, after *config.Co
 	t := av.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Name == "Overrides" || !f.IsExported() || f.Type.Kind() == reflect.Slice {
+		if config.IsScopeListField(f.Name) || !f.IsExported() || f.Type.Kind() == reflect.Slice {
 			continue
 		}
 		if reflect.DeepEqual(bv.Field(i).Interface(), av.Field(i).Interface()) {
@@ -398,9 +399,9 @@ func mergeResolvesTo(o *config.DirectoryOverride, base, before, after *config.Co
 
 // inheritedStatement is one `paths` or `commands` entry a --dir edit could not
 // drop: the directory goes on resolving to it however the command edited its
-// view, because an override inherits what it does not state — a section it
-// never sets, and, on a merge: true override, every entry it does not restate.
-// An override can say something else about a subject; it cannot say nothing.
+// view, because a scope inherits what it does not state — a section it
+// never sets, and, on a merge: true scope, every entry it does not restate.
+// A scope can say something else about a subject; it cannot say nothing.
 type inheritedStatement struct{ section, subject, effect string }
 
 // inheritedStatements returns the statements resolved still makes that view —
@@ -427,7 +428,7 @@ func inheritedStatements(resolved, view *config.Config) []inheritedStatement {
 // stillStated reports whether the directory of the in-flight --dir edit will
 // go on resolving to a statement about a subject once the edit is written, so
 // a command can tell that the removal it just made to its view will not take
-// effect there. It answers by building the override exactly as saveConfig
+// effect there. It answers by building the scope exactly as saveConfig
 // will and resolving the directory against a copy of the config, which is
 // cheap and keeps the two answers from drifting apart.
 func stillStated(view *config.Config, states func(*config.Config) bool) bool {
@@ -437,17 +438,17 @@ func stillStated(view *config.Config, states func(*config.Config) bool) bool {
 	}
 	dir := resolveDirArg(configDir)
 	probe := *ed.root
-	probe.Overrides = slices.Clone(ed.root.Overrides)
-	i := slices.IndexFunc(probe.Overrides, func(o config.DirectoryOverride) bool { return o.Path == ed.override.Path })
+	probe.Scopes = slices.Clone(ed.root.Scopes)
+	i := slices.IndexFunc(probe.Scopes, func(o config.Scope) bool { return o.Path == ed.override.Path })
 	if i < 0 {
 		return false
 	}
-	o := probe.Overrides[i]
+	o := probe.Scopes[i]
 	recordEdit(&o, &probe, ed.before, view, ed.created)
 	if o.SetsAnySection() {
-		probe.Overrides[i] = o
+		probe.Scopes[i] = o
 	} else {
-		probe.Overrides = slices.Delete(probe.Overrides, i, i+1)
+		probe.Scopes = slices.Delete(probe.Scopes, i, i+1)
 	}
 	return states(probe.ForDirectory(dir))
 }
@@ -473,7 +474,7 @@ func stillStatesCommand(view *config.Config, text string) bool {
 // one (see inheritedStatement).
 func reportInheritedEntries(dir string, inherited []inheritedStatement) {
 	for _, e := range inherited {
-		fmt.Printf("%s: %q in the base config still applies to %s — an override can restate an entry, not drop it\n",
+		fmt.Printf("%s: %q in the global config still applies to %s — a scope can restate an entry, not drop it\n",
 			e.subject, e.effect, dir)
 		fmt.Printf("  remove it everywhere with `lite-sandbox config %s remove %s --global`, or state something else here with `lite-sandbox config %s allow|deny %s --dir %s`\n",
 			e.section, e.subject, e.section, e.subject, dir)
@@ -482,7 +483,7 @@ func reportInheritedEntries(dir string, inherited []inheritedStatement) {
 
 // configBase returns the base (unscoped) configuration behind the view
 // loadConfig handed out, for the few commands that report what the base still
-// says while editing a directory override. It must be called before saveConfig,
+// says while editing a scope. It must be called before saveConfig,
 // which ends the edit.
 func configBase(view *config.Config) *config.Config {
 	if currentEdit != nil {
@@ -494,7 +495,7 @@ func configBase(view *config.Config) *config.Config {
 // applyChangedSections copies into dst every top-level section whose value in
 // after differs from before — that is, exactly what the command changed.
 // Walking the struct reflectively keeps this complete as new config sections are
-// added. Overrides itself is skipped: an override cannot nest overrides.
+// added. Scopes itself is skipped: a scope cannot nest scopes.
 func applyChangedSections(dst, before, after *config.Config) {
 	dv := reflect.ValueOf(dst).Elem()
 	bv := reflect.ValueOf(before).Elem()
@@ -502,7 +503,7 @@ func applyChangedSections(dst, before, after *config.Config) {
 	t := dv.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Name == "Overrides" || !f.IsExported() {
+		if config.IsScopeListField(f.Name) || !f.IsExported() {
 			continue
 		}
 		if reflect.DeepEqual(bv.Field(i).Interface(), av.Field(i).Interface()) {
@@ -512,7 +513,7 @@ func applyChangedSections(dst, before, after *config.Config) {
 	}
 }
 
-// copyConfig returns a deep copy of cfg (minus any overrides, which a resolved
+// copyConfig returns a deep copy of cfg (minus any scopes, which a resolved
 // view does not carry anyway) by round-tripping it through YAML — the same
 // representation the config file uses, so every field survives.
 func copyConfig(cfg *config.Config) (*config.Config, error) {
@@ -527,7 +528,7 @@ func copyConfig(cfg *config.Config) (*config.Config, error) {
 	if err := yaml.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("copying config: %w", err)
 	}
-	out.Overrides = nil
+	out.Scopes = nil
 	return &out, nil
 }
 

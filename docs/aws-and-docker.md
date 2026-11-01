@@ -55,20 +55,20 @@ The SDK never reads the masked `~/.aws`. Notes:
 - Selecting a profile applies that profile's region, unless the same command sets `AWS_REGION`/`AWS_DEFAULT_REGION` or passes `--region`.
 - Routing only applies to validated commands. Bare allowed commands (`commands` entries, with or without `no_sandbox`, which run via raw `bash -c`) always use the default profile.
 
-### Per-directory overrides
+### Per-directory AWS settings
 
 AWS settings can be changed per working directory with the top-level
-[`overrides`](configuration.md#per-directory-overrides) list, like any other
-section. An override that sets `aws:` fully defines the AWS config for its
-directory and everything below it: its fields replace the base AWS settings
-instead of merging, so the two modes never mix. The most specific (longest)
-matching `path` wins.
+[`scopes`](configuration.md#scopes) list, like any other section. A
+replace-style scope (no `merge: true`) that sets `aws:` fully defines the AWS
+config for its directory and everything below it: its fields replace the
+global AWS settings instead of merging, so the two modes never mix. The most
+specific (longest) matching `path` wins.
 
 ```yaml
 aws:
-  force_profile: "default"          # base mode for everything else
+  force_profile: "default"          # global: everything else uses this
 
-overrides:
+scopes:
   - path: ~/work/acme               # ~ is expanded
     aws:
       force_profile: "acme-dev"     # broker a different profile here
@@ -83,19 +83,20 @@ overrides:
 ### CLI
 
 ```bash
-lite-sandbox config aws show                            # Show current AWS mode and overrides
+lite-sandbox config aws show                            # Show current AWS mode and scopes
 lite-sandbox config aws allow-raw-credentials           # Enable raw-credentials mode
 lite-sandbox config aws force-profile <profile>         # Enable brokered IMDS mode for <profile>
 lite-sandbox config aws force-profile <profile> --dir <path>   # ...only for commands run under <path>
 lite-sandbox config aws allowed-profiles <name...>      # Set profiles selectable via AWS_PROFILE (no args clears)
-lite-sandbox config aws allowed-profiles <name...> --dir <path>  # ...for a per-directory override
+lite-sandbox config aws allowed-profiles <name...> --dir <path>  # ...for that directory's scope
 lite-sandbox config aws allow-raw-credentials --dir <path>     # ...only for commands run under <path>
-lite-sandbox config aws remove-override <path>          # Remove a per-directory override
+lite-sandbox config aws unset <path>                    # Drop the aws section from <path>'s scope
 lite-sandbox config aws disable                         # Disable AWS access entirely
 ```
 
-Every `lite-sandbox config` command takes `--dir`; see
-[Per-directory overrides](configuration.md#per-directory-overrides).
+Every `lite-sandbox config` command writes to the current project's scope
+unless given `--global` (everywhere) or `--dir` (another directory); see
+[Scopes](configuration.md#scopes).
 
 ## Docker access
 

@@ -11,7 +11,7 @@ lite-sandbox shell -c 'ls | wc -l'  # run one command, exit with its status
 lite-sandbox shell < script.sh      # run commands from a pipe or file, without prompts
 ```
 
-The shell resolves the config, including per-directory overrides, for the
+The shell resolves the config, including any matching scope, for the
 directory it starts in. That directory is the shell's read and write boundary,
 plus any read grants in the config. You can `cd` freely within the boundary.
 A `cd` that would leave it is refused, and so is a bare `cd` when `$HOME` is

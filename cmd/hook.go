@@ -810,7 +810,7 @@ func eventCWD(event *hook.Event) string {
 // matching how the MCP server constructs it. The caller owns Close().
 func configuredSandbox(cwd string) *bash_sandboxed.Sandbox {
 	sb := bash_sandboxed.NewSandbox()
-	// Resolve per-directory overrides for cwd so the hook confines file tools to
+	// Resolve scopes for cwd so the hook confines file tools to
 	// the same effective path boundary the MCP server would for this directory.
 	if cfg, err := config.LoadForDirectory(cwd); err == nil && cfg != nil {
 		sb.UpdateConfig(cfg, cwd)

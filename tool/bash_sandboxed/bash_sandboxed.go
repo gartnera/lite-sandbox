@@ -174,7 +174,7 @@ func NewSandbox() *Sandbox {
 // UpdateConfig replaces the sandbox configuration with the provided config.
 //
 // cfg must be the effective config for workDir (config.LoadForDirectory, or
-// Config.ForDirectory followed by Config.Effective): per-directory overrides,
+// Config.ForDirectory followed by Config.Effective): scopes,
 // profiles, and the deprecated keys are all merged by the caller into the one
 // Paths and one Commands list, and the sandbox — like every other subsystem —
 // applies those lists verbatim, never having to know where an entry came
