@@ -42,8 +42,9 @@ func TestClaudeCodeConfigRequest(t *testing.T) {
 		if len(results) != len(calls) {
 			t.Fatalf("results = %q, want one per call", results)
 		}
-		// The model reads lite-sandbox's reason for asking: the scoped command.
-		assertResult(t, results, 0, "lite-sandbox config --dir ")
+		// The model reads lite-sandbox's reason for asking: the command and
+		// the scope it lands in.
+		assertResult(t, results, 0, configRequest+"\n✓ this project (")
 		if strings.Contains(results[0], "Scoped to") {
 			t.Errorf("the config request ran without approval: %q", results[0])
 		}

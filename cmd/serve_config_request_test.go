@@ -33,7 +33,7 @@ func stubConfigCommand(t *testing.T) *[][]string {
 	t.Helper()
 	var runs [][]string
 	orig := runConfigCommand
-	runConfigCommand = func(_ context.Context, _ string, args []string) (string, error) {
+	runConfigCommand = func(_ context.Context, _, _ string, args []string, _ bool) (string, error) {
 		runs = append(runs, args)
 		return "Allowed make\n", nil
 	}
@@ -125,15 +125,13 @@ func TestConfigRequestRequiresHook(t *testing.T) {
 
 	// The hook asks the user, naming the command scoped to the working
 	// directory: a config request never edits the global config.
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true})
 	if decisionOf(d) != hook.DecisionAsk {
 		t.Fatalf("hook decision = %+v, want ask", d)
 	}
-	scoped := "lite-sandbox config --dir " + cwd + " commands allow make"
+	// The config subcommands scope to the working directory by default, so
+	// the command needs no --dir.
+	scoped := "lite-sandbox config commands allow make\n✓ this project ("
 	if reason := d.HookSpecificOutput.PermissionDecisionReason; !strings.Contains(reason, scoped) {
 		t.Errorf("ask reason %q does not name the scoped command %q", reason, scoped)
 	}
@@ -148,7 +146,7 @@ func TestConfigRequestRequiresHook(t *testing.T) {
 	if isErr {
 		t.Fatalf("approved call failed: %s", text)
 	}
-	if want := []string{"--dir", cwd, "commands", "allow", "make"}; len(*runs) != 1 || !slices.Equal((*runs)[0], want) {
+	if want := []string{"commands", "allow", "make"}; len(*runs) != 1 || !slices.Equal((*runs)[0], want) {
 		t.Fatalf("runs = %v, want one run of %v", *runs, want)
 	}
 
@@ -259,12 +257,12 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := configrequest.Issue(cwd, req); err != nil {
+	if err := configrequest.Issue(cwd, cwd, req); err != nil {
 		t.Fatal(err)
 	}
 	text, isErr := runBash(t, c, "lite-sandbox config mode set open --dir /")
-	if !isErr || !strings.Contains(text, "outside the project") {
-		t.Fatalf("got %q (error %v), want the out-of-directory refusal", text, isErr)
+	if !isErr || !strings.Contains(text, "`--dir` is not allowed") {
+		t.Fatalf("got %q (error %v), want the --dir refusal", text, isErr)
 	}
 	if len(*runs) != 0 {
 		t.Fatalf("runs = %v, want none", *runs)
@@ -272,32 +270,40 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 }
 
 // TestCheckConfigRequestDir checks the config subcommands' own guard, which
-// holds whatever --dir cobra ends up parsing.
+// holds whatever cobra ends up parsing: only the approved scope — the
+// request's project directory, or the base config when --global was approved
+// — may be changed.
 func TestCheckConfigRequestDir(t *testing.T) {
 	root := t.TempDir()
-	main := t.TempDir()
-	orig := configDir
-	t.Cleanup(func() { configDir = orig })
+	origDir, origGlobal := configDir, configGlobal
+	t.Cleanup(func() { configDir, configGlobal = origDir, origGlobal })
 
 	for _, tc := range []struct {
-		env, dir string
-		ok       bool
+		env, dir         string
+		global, approved bool
+		ok               bool
 	}{
 		{env: "", dir: "", ok: true}, // not a config request
 		{env: root, dir: root, ok: true},
-		{env: root, dir: filepath.Join(root, "sub"), ok: true},
-		{env: root, dir: "", ok: false},
+		{env: root, dir: root + "/", ok: true},
+		{env: root, global: true, approved: true, ok: true},
+		// --global the server did not read, or one it read that cobra did not.
+		{env: root, global: true, ok: false},
+		{env: root, dir: root, approved: true, ok: false},
+		{env: root, dir: filepath.Join(root, "sub"), ok: false},
+		{env: root, dir: "", ok: false}, // a whole-file command
 		{env: root, dir: "/", ok: false},
 		{env: root, dir: filepath.Dir(root), ok: false},
-		// A linked worktree's request: the main worktree or the worktree.
-		{env: main + string(filepath.ListSeparator) + root, dir: main, ok: true},
-		{env: main + string(filepath.ListSeparator) + root, dir: filepath.Join(root, "sub"), ok: true},
-		{env: main + string(filepath.ListSeparator) + root, dir: filepath.Dir(main), ok: false},
 	} {
-		t.Setenv(configrequest.RootEnv, tc.env)
-		configDir = tc.dir
+		t.Setenv(configrequest.DirEnv, tc.env)
+		approved := "0"
+		if tc.approved {
+			approved = "1"
+		}
+		t.Setenv(configrequest.GlobalEnv, approved)
+		configDir, configGlobal = tc.dir, tc.global
 		if err := checkConfigRequestDir(); (err == nil) != tc.ok {
-			t.Errorf("root %q, --dir %q: err = %v, want ok %v", tc.env, tc.dir, err, tc.ok)
+			t.Errorf("dir %q, --dir %q, global %v (approved %v): err = %v, want ok %v", tc.env, tc.dir, tc.global, tc.approved, err, tc.ok)
 		}
 	}
 }
@@ -453,8 +459,8 @@ func TestConfigRequestHelp(t *testing.T) {
 		t.Fatalf("runs = %q, want %q", *runs, want)
 	}
 
-	// --help that another flag could consume is a change to approve.
-	const change = "lite-sandbox config mode set open --dir --help"
+	// --help turned off by another flag is a change to approve.
+	const change = "lite-sandbox config mode set open --help=false"
 	if _, isErr := runBash(t, c, change); !isErr {
 		t.Errorf("%s: ran without approval", change)
 	}

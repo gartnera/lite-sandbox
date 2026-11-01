@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
 
@@ -133,12 +134,15 @@ func (r Request) Validate() error {
 	if len(r.Args) == 0 {
 		return errors.New("`lite-sandbox config` needs a subcommand, e.g. `lite-sandbox config commands allow make`")
 	}
-	for i := 0; i < len(r.Args); i++ {
-		a := r.Args[i]
-		if a == "--dir" {
-			i++ // its value
-			continue
+	// The approval prompt shows the arguments; a newline, terminal escape,
+	// line separator, bidi override or zero-width character in one could fake,
+	// reorder or hide what the prompt says.
+	for _, a := range r.Args {
+		if !Displayable(a) {
+			return fmt.Errorf("argument %q contains a control, format or separator character; config requests take printable arguments only", a)
 		}
+	}
+	for _, a := range r.Args {
 		if strings.HasPrefix(a, "-") {
 			continue
 		}
@@ -151,120 +155,85 @@ func (r Request) Validate() error {
 	return nil
 }
 
-// RootEnv names the environment variable the server sets when it runs a
-// config request: the directories the request is confined to (Roots), joined
-// with os.PathListSeparator. The config subcommands refuse to run under it
-// unless --dir names one of those directories or one beneath it, which catches
-// whatever Scope's reading of the arguments missed (cobra, not Scope, decides
-// what --dir ends up as).
-const RootEnv = "LITE_SANDBOX_CONFIG_REQUEST_ROOT"
-
-// Roots returns the directories a config request made from cwd may change:
-// the project's root first — the main worktree when cwd is inside a linked git
-// worktree, cwd otherwise — then cwd itself when that differs.
-func Roots(cwd string) []string {
-	return roots(filepath.Clean(cwd), gitworktree.MainWorktree(cwd))
+// Displayable reports whether s can be shown in the approval prompt as is: it
+// has no control characters (C0, DEL, C1), format characters (Unicode Cf:
+// bidi overrides and isolates, zero-width characters, U+FEFF) or line and
+// paragraph separators (Zl, Zp).
+func Displayable(s string) bool {
+	return strings.IndexFunc(s, func(c rune) bool {
+		return unicode.IsControl(c) || unicode.In(c, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) < 0
 }
 
-func roots(cwd, main string) []string {
-	if main == "" || main == cwd {
-		return []string{cwd}
-	}
-	return []string{filepath.Clean(main), cwd}
-}
+// DirEnv names the environment variable the server sets when it runs a config
+// request: the directory the request is scoped to (DefaultDir of the working
+// directory it runs in). Under it the config subcommands refuse to run unless
+// the scope they parsed is the one the user approved: exactly that directory,
+// or the base config when GlobalEnv is "1".
+const DirEnv = "LITE_SANDBOX_CONFIG_REQUEST_DIR"
 
-// Scope confines the request to the project the agent works in. A config
-// request never edits the global config: the change is always a per-directory
-// override (--dir). A request that names no --dir gets one for the project's
-// root (Roots): cwd, or — in a linked git worktree — the main worktree, so a
-// change made from one worktree reaches every worktree of the repository (an
-// override for the main worktree applies to its linked worktrees, see
-// config.Config.ForDirectory) instead of only the throwaway checkout it was
-// asked from. One whose --dir points elsewhere — a parent, a sibling, $HOME,
-// / — is refused, since an override there would reach beyond the project the
-// user is approving changes for.
-//
-// Every --dir is rewritten as the absolute directory it names, so the
-// command the user approves says which directory it changes, and is exactly
-// what runs. The hook and the server both scope the request, so the user
-// approves the command the server runs.
-func (r Request) Scope(cwd string) (Request, error) {
-	return r.scope(cwd, Roots(cwd))
-}
+// GlobalEnv names the environment variable that accompanies DirEnv: "1" when
+// the approved request edits the base config (--global), "0" otherwise.
+const GlobalEnv = "LITE_SANDBOX_CONFIG_REQUEST_GLOBAL"
 
-func (r Request) scope(cwd string, roots []string) (Request, error) {
+// DefaultDir is the directory a config command run from cwd is scoped to when
+// it has neither --dir nor --global: the root of the git repository cwd is in,
+// so a change made from a subdirectory applies to the whole repository —
+// inside a linked git worktree, the repository's main worktree, whose override
+// every one of its worktrees inherits (config.Config.ForDirectory), so a
+// change made from a throwaway worktree reaches the worktrees created later
+// too. Outside a git repository it is cwd. A repository rooted at the home
+// directory or / (a dotfiles checkout) does not count: every project under it
+// would share one override that reaches nearly everything.
+func DefaultDir(cwd string) string {
 	cwd = filepath.Clean(cwd)
-	args := slices.Clone(r.Args)
-	found := false
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			break // the rest is positional
+	broad := func(dir string) bool {
+		if dir == string(filepath.Separator) {
+			return true
 		}
-		var dir string
-		switch {
-		case a == "--dir":
-			if i+1 >= len(args) {
-				return Request{}, errors.New("`--dir` needs a directory")
-			}
-			i++
-			dir = args[i]
-		case strings.HasPrefix(a, "--dir="):
-			dir = strings.TrimPrefix(a, "--dir=")
-		default:
-			continue
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return false
 		}
-		// An empty --dir is no --dir at all to the config subcommands: global.
-		if dir == "" {
-			return Request{}, errors.New("`--dir` needs a directory")
-		}
-		abs := ResolveDir(cwd, dir)
-		if !WithinAny(roots, abs) {
-			return Request{}, fmt.Errorf("`--dir %s` is outside the project %s: config changes the agent requests apply only to the project; leave out --dir and the change is scoped to it", dir, roots[0])
-		}
-		if a == "--dir" {
-			args[i] = abs
-		} else {
-			args[i] = "--dir=" + abs
-		}
-		found = true
+		a, errA := filepath.EvalSymlinks(dir)
+		b, errB := filepath.EvalSymlinks(home)
+		return dir == filepath.Clean(home) || errA == nil && errB == nil && a == b
 	}
-	if !found {
-		args = append([]string{"--dir", roots[0]}, args...)
+	if main := gitworktree.MainWorktree(cwd); main != "" && !broad(main) {
+		return filepath.Clean(main)
 	}
-	return Request{Args: args}, nil
+	if top := gitworktree.Toplevel(cwd); top != "" && !broad(top) {
+		return top
+	}
+	return cwd
 }
 
-// ResolveDir resolves a --dir value the way the config subcommands do — a
-// leading ~ is the home directory, a relative path is taken from cwd — and
-// cleans it.
-func ResolveDir(cwd, dir string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if dir == "~" {
-			dir = home
-		} else if strings.HasPrefix(dir, "~/") {
-			dir = filepath.Join(home, dir[2:])
+// Scope is what a config request does, as the config command itself parses
+// it (the cmd package fills it in with cobra): whether it edits the base
+// config, and, for `paths allow`, the access it grants.
+type Scope struct {
+	Global     bool
+	PathsAllow bool
+	Write      bool
+	Internal   bool
+}
+
+// Summary renders a status line for the approval prompt, a ✓ or ✗ per thing
+// the request grants: for `paths allow`, read, write and internal access, and
+// for every request its scope, naming the project directory dir.
+func (s Scope) Summary(dir string) string {
+	mark := func(on bool, label string) string {
+		if on {
+			return "✓ " + label
 		}
+		return "✗ " + label
 	}
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(cwd, dir)
+	var parts []string
+	if s.PathsAllow {
+		parts = append(parts, mark(true, "read"), mark(s.Write, "write"), mark(s.Internal, "internal"))
 	}
-	return filepath.Clean(dir)
-}
-
-// Within reports whether dir is root or a directory beneath it. Both must be
-// absolute and clean. The comparison is lexical, as override matching is.
-func Within(root, dir string) bool {
-	if dir == "" {
-		return false
-	}
-	rel, err := filepath.Rel(root, dir)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// WithinAny reports whether dir is within one of roots (see Within).
-func WithinAny(roots []string, dir string) bool {
-	return slices.ContainsFunc(roots, func(root string) bool { return Within(root, dir) })
+	parts = append(parts, mark(!s.Global, "this project ("+dir+")"), mark(s.Global, "global"))
+	return strings.Join(parts, "  ")
 }
 
 // Command renders the request as the command line it runs.
@@ -287,27 +256,34 @@ func shellQuote(s string) string {
 }
 
 // subject is the approval subject of request r: its arguments as the agent
-// wrote them, before Scope. Those are what the hook and the server both read
-// from the same command, whereas the scoped arguments carry cwd, which the two
-// may spell differently; the ticket is keyed on the working directory itself
-// (see approval.Issue).
-func (r Request) subject() approval.Subject {
-	return append(approval.Subject{"config"}, r.Args...)
+// wrote them, and the project directory the prompt showed (scopeDir, with
+// symlinks resolved, since the hook and the server may spell it differently).
+// Binding the directory means a request is run only for the directory the
+// user saw: if what DefaultDir resolves to changes between the prompt and the
+// run (files the agent planted meanwhile), the server finds no ticket. The
+// ticket is also keyed on the working directory itself (see approval.Issue).
+func (r Request) subject(scopeDir string) approval.Subject {
+	if resolved, err := filepath.EvalSymlinks(scopeDir); err == nil {
+		scopeDir = resolved
+	}
+	return append(approval.Subject{"config", "scope=" + scopeDir}, r.Args...)
 }
 
-// Issue records a ticket for request r made from cwd. The hook calls it as it
-// asks the user to approve the call.
-func Issue(cwd string, r Request) error {
-	return approval.Issue(cwd, r.subject(), r.Command())
+// Issue records a ticket for request r made from cwd, whose project directory
+// the prompt showed as scopeDir. The hook calls it as it asks the user to
+// approve the call.
+func Issue(cwd, scopeDir string, r Request) error {
+	return approval.Issue(cwd, r.subject(scopeDir), r.Command())
 }
 
 // ErrNoTicket is returned by Consume when no live ticket matches the request:
 // the PreToolUse hook did not run for it, so the user was never asked.
 var ErrNoTicket = approval.ErrNoTicket
 
-// Consume takes the ticket for request r made from cwd, so each approval runs
-// exactly one request. It returns ErrNoTicket when there is none, or only an
-// expired one.
-func Consume(cwd string, r Request) error {
-	return approval.Consume(cwd, r.subject())
+// Consume takes the ticket for request r made from cwd for the project
+// directory scopeDir, so each approval runs exactly one request, in the scope
+// the user saw. It returns ErrNoTicket when there is none, or only an expired
+// one.
+func Consume(cwd, scopeDir string, r Request) error {
+	return approval.Consume(cwd, r.subject(scopeDir))
 }

@@ -27,8 +27,9 @@ the modes that would block it, to `lite-sandbox audit path` for
 
 ```bash
 lite-sandbox config mode show                 # effective mode, audit, deny lists
-lite-sandbox config mode set denylist
-lite-sandbox config mode set denylist --dir ~/work/new-repo   # one directory only
+lite-sandbox config mode set denylist --global              # every directory
+lite-sandbox config mode set denylist                       # this repo only (its git root)
+lite-sandbox config mode set denylist --dir ~/work/new-repo # that directory only
 lite-sandbox config audit enable|disable|show
 lite-sandbox audit report [--since 7d] [--cwd ~/work/new-repo] [--json]
 lite-sandbox audit clear
@@ -36,7 +37,7 @@ lite-sandbox audit clear
 
 `mode` and `audit` can be set per directory with
 [overrides](#per-directory-overrides), so one repo can run `allowlist` while
-everything else runs `denylist`. `mode set --dir` writes such an override, and
+everything else runs `denylist`. `mode set` without `--global` writes such an override, and
 `audit report --cwd` limits the report to sessions started in that directory.
 
 ## Commands
@@ -252,29 +253,27 @@ a config command run in the background.
 A request for help runs without a prompt: `--help` or `-h` with nothing
 else but plain words, such as `lite-sandbox config --help` or `lite-sandbox
 config paths allow -h`. It only prints usage, so the server runs it as
-written, with no `--dir` added and no ticket. Any other flag makes it an
+written, with no ticket. Any other flag makes it an
 ordinary request that asks, because another flag can take `--help` as its
-value (`--dir --help`) and the subcommand would then run.
+value (`--log-level --help`) and the subcommand would then run.
 
-A config request **never changes the global config**: it always lands in a
+Like any config command, a config request lands in a
 [per-directory override](#writing-overrides-from-the-cli---dir) for the
-agent's project. The agent never has to choose: when the command has no
-`--dir`, lite-sandbox adds one itself, so `lite-sandbox config commands allow
-make` becomes `lite-sandbox config --dir /path/to/project commands allow make`,
-and that scoped command is what the prompt asks you to approve and what runs.
-The project is the working directory, except in a linked git worktree
-(`git worktree add`, or a tool that creates one per task): there it is the
-repository's main worktree, whose override every one of its worktrees
-inherits, so a change you approve once applies to the worktrees you create
-later too, instead of only to the throwaway checkout it was asked from.
-A `--dir` the agent writes is kept only when it names the project, the working
-directory, or a directory beneath either, and it is shown as the absolute directory it names
-(`--dir .` becomes `--dir /path/to/project`). `--dir /`, `--dir ~`, `--dir ..` or a sibling project
-is refused, since an override there reaches beyond the project. So are the
-commands that have no per-directory form (`config path`, `config overrides
-list`, `config paths migrate`, ...), and `config overrides remove` or `config
-aws remove-override` naming another directory. Global changes stay yours to
-make in your own terminal.
+agent's project unless it passes `--global`. `--dir` is refused, so a request
+can land in only two places, and the prompt's last line says which, along
+with what a `paths allow` grants:
+
+```
+lite-sandbox config paths allow ~/tmp/claude-home --write
+✓ read  ✓ write  ✗ internal  ✓ this project (~/src/app)  ✗ global
+```
+
+lite-sandbox reads the request with the config command's own argument parser,
+so that line matches what runs however the flags are spelled. The commands
+that work on the config file as a whole (`config edit`, `config path`,
+`config overrides list|remove`, `config paths migrate`, ...) and the
+deprecated path and command list aliases (`writable-paths add`, ...) are refused; run those
+yourself.
 
 The server runs a config request only if the hook asked you about that exact
 command. When the hook asks, it records a ticket in lite-sandbox's cache
@@ -923,11 +922,18 @@ Resolution rules:
 
 ### Writing overrides from the CLI: `--dir`
 
-Every `lite-sandbox config` command takes a `--dir <path>` flag, so any setting
-can be scoped to one directory without editing the file:
+Every `lite-sandbox config` setting is scoped to one directory by default: the
+root of the git repository the working directory is in, so a change made from
+a subdirectory covers the whole repository — or, in a linked git worktree
+(`git worktree add`, or a tool that creates one per task), the repository's
+main worktree, whose override every one of its worktrees inherits. Outside a
+git repository it is the working directory. `--dir <path>` names another
+directory instead. Pass `--global` to change the base config, which applies everywhere
+(`--global` and `--dir` cannot be combined):
 
 ```bash
-lite-sandbox config commands allow npm --dir .            # only in this repo
+lite-sandbox config commands allow npm                    # only in this repo (its git root)
+lite-sandbox config commands allow npm --global           # everywhere
 lite-sandbox config paths allow ~/work/acme/out --write --dir ~/work/acme
 lite-sandbox config mode set denylist --dir ~/work/new    # only under that path
 lite-sandbox config profiles enable go --dir ~/work/acme
@@ -959,13 +965,20 @@ parent's (or, for a linked git worktree, its main worktree's). An override
 `--dir` creates merges into the base, not into the override the directory was
 inheriting, so the settings that parent override made (a stricter `mode`, a
 denial, ...) stop applying to the directory unless the command restated them.
+The same goes the other way: a subdirectory with an override of its own does
+not see a change made for the repository root, which is where a change made
+from that subdirectory lands unless `--dir` names the subdirectory.
 
-Reads accept the flag too: `lite-sandbox config show --dir <path>` prints the
-configuration in effect there, as does any section's `show`/`list`
-(`config docker show --dir .`, `config commands list --dir .`).
+Reads are scoped the same way: `lite-sandbox config show` prints the
+configuration in effect at the project root (`--dir <path>` for another
+directory), as does any section's `show`/`list` (`config docker show`, `config
+commands list`), and `--global` prints the base config.
 
-`config path` and `config os-sandbox check` reject `--dir`, since they aren't
-per-directory settings.
+The commands that aren't per-directory settings (`config path`, `config edit`,
+`config os-sandbox check`, `config paths|commands migrate`, `config overrides
+list|remove`, `config aws remove-override`) work on the whole file without
+`--global`, and `config path`, `edit`, `migrate`, `os-sandbox check` and
+`overrides list` reject `--dir`.
 
 To see or undo what `--dir` wrote:
 
@@ -986,7 +999,7 @@ again:
 ```console
 $ lite-sandbox config paths remove /base/data --dir ~/work/acme
 /base/data: "read" in the base config still applies to /home/you/work/acme — an override can restate an entry, not drop it
-  remove it everywhere with `lite-sandbox config paths remove /base/data`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
+  remove it everywhere with `lite-sandbox config paths remove /base/data --global`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
 ```
 
 ## SSH

@@ -85,8 +85,9 @@ var configOSSandboxDisableCmd = &cobra.Command{
 }
 
 var configOSSandboxCheckCmd = &cobra.Command{
-	Use:   "check",
-	Short: "Check whether the OS sandbox can run on this host",
+	Annotations: wholeFile,
+	Use:         "check",
+	Short:       "Check whether the OS sandbox can run on this host",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := rejectConfigDir(cmd); err != nil {
 			return err

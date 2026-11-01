@@ -26,8 +26,9 @@ const editNewConfigTemplate = `# lite-sandbox configuration. Invalid edits are r
 `
 
 var configEditCmd = &cobra.Command{
-	Use:   "edit",
-	Short: "Open the config file in your editor, saving the edit only if it is a valid config",
+	Annotations: wholeFile,
+	Use:         "edit",
+	Short:       "Open the config file in your editor, saving the edit only if it is a valid config",
 	Long: `Open the config file in $VISUAL, else $EDITOR, else vi.
 
 The edit is made on a temporary copy and written to the config file only once it

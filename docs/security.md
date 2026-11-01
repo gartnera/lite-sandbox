@@ -85,22 +85,51 @@ and one under a wrapper (`find -exec`, `xargs`, `env`, `timeout`, `nice`,
 whose child the validators cannot tie to the approval, is refused always. See
 [Commands that ask first](configuration.md#commands-that-ask-first).
 
-A config request is always confined to the agent's project: the hook and the
-server add a `--dir` for it when the command has none, and refuse a `--dir`
-outside it, so the change is a per-directory override for the project and
-never edits the global config. The project is the working directory, or, in a
-linked git worktree, the repository's main worktree (whose override the linked
-worktrees inherit); a `--dir` inside the worktree itself is allowed too. A
-directory resolves through a single override, and one a request creates
+A config request lands either in the agent's project or, with `--global`, in
+the base config. Config commands scope a change to the git root of the working
+directory (in a linked git worktree, the repository's main worktree, whose
+override the linked worktrees inherit; outside a repository, the working
+directory itself) unless given `--dir` or `--global`. The hook and the server
+parse a request with the config command's own cobra parser, not a scan of
+the words, so the approval prompt's `✓ this project (<dir>)` / `✓ global`
+line, and the read, write and internal access it marks for a `paths allow`,
+are what the command will do however its flags are spelled (a value-taking
+flag swallowing `--`, `--global=1`, a root flag before the subcommand). They
+refuse `--dir`, the commands that work on the config file as a whole
+(`edit`, `overrides remove`, `migrate`, ...), the deprecated path and command
+list aliases, and arguments with control, format or separator characters (a
+newline, a terminal escape, U+2028, a bidi override or a zero-width character
+could fake, reorder or hide what the prompt says).
+
+The project directory is read from the host's git, which reads files the
+sandboxed agent can write, so it is pinned down three ways:
+- **Real repositories only:** a git root counts only when it is an ancestor of
+  the working directory whose `.git` directory is the git dir in use. A bare
+  repository planted as plain files (`HEAD`, `objects/`, `refs/`, a `config`
+  whose `core.worktree` names another directory) is ignored, since none of it
+  is under a `.git` the agent cannot write. Likewise a main worktree counts
+  only when the git dir in use is `<main>/.git/worktrees/<name>` and that
+  entry's `gitdir` file names the `.git` file of an ancestor of the working
+  directory, so a planted `commondir` file cannot name another repository.
+  This also governs override resolution and the `git.allow_worktree_parent`
+  grant, which use the same main worktree.
+- **Never home or `/`:** a repository rooted at `$HOME` or `/` (a dotfiles
+  checkout) never counts as the project; the working directory is used instead.
+- **Bound to the approval:** the approval ticket records the directory the
+  prompt showed. The server resolves the directory once, finds no ticket if
+  it differs (the agent changed files between the prompt and the run), and
+  hands that same directory to the config subprocess rather than letting it
+  resolve one of its own.
+
+A directory resolves through a single override, and one a request creates
 merges into the base, not into an override the directory was inheriting from
 a parent. So approving a request for a directory with no override of its own
 stops that inherited override's settings (a stricter `mode`, denials, ...)
-from applying to the directory. The server also runs the config subprocess
-with `LITE_SANDBOX_CONFIG_REQUEST_ROOT` set to those directories, under which the
-config subcommands refuse to run unless the `--dir` they actually parsed is
-inside one of them. That catches an argument list that reads differently to cobra than
-to the server's own scan (for example `--socket --dir /`, where `--dir` is the
-socket's value).
+from applying to the directory. The server runs the config subprocess with
+`LITE_SANDBOX_CONFIG_REQUEST_DIR` set to the approved directory and
+`LITE_SANDBOX_CONFIG_REQUEST_GLOBAL` to whether `--global` was approved; the
+subprocess uses that directory as its default and refuses to run unless the
+scope it parsed is the approved one, as a second check on the server's parse.
 
 ## Static preflight (AST-level, before execution)
 

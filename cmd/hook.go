@@ -218,9 +218,8 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 // evaluateConfigRequest decides a sandbox bash tool call that is a config
 // request (configrequest.Parse), or returns nil for any other command. When
 // this agent was installed to make config requests (--config-requests), it
-// scopes the request to the project (Request.Scope: always a --dir override —
-// for the main worktree when cwd is a linked git worktree — never the global
-// config), records a ticket for the exact scoped
+// parses the request as the config command will (parseConfigRequest, which
+// refuses --dir and whole-file commands), records a ticket for the exact
 // request and answers "ask", so the agent prompts the user; the server runs the request only on that ticket (see
 // internal/configrequest). Without the flag it returns nil: the call is
 // pre-approved like any other, and the sandbox's deny list refuses it.
@@ -255,17 +254,39 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := req.Validate(); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	cwd := eventCWD(event)
-	scoped, err := req.Scope(cwd)
+	scope, err := parseConfigRequest(req)
 	if err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
-	if err := configrequest.Issue(cwd, req); err != nil {
+	cwd := eventCWD(event)
+	// The ticket names the directory shown here, so the server runs the
+	// request only if it resolves the same one.
+	scopeDir := configrequest.DefaultDir(cwd)
+	if !configrequest.Displayable(scopeDir) {
+		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+			"Blocked by lite-sandbox: the project directory %q contains characters the approval prompt cannot show faithfully", scopeDir))
+	}
+	if err := configrequest.Issue(cwd, scopeDir, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		"lite-sandbox: the agent asks to change the sandbox's own configuration, for this project only (the global config is left alone): "+scoped.Command())
+		req.Command()+"\n"+scope.Summary(tildePath(scopeDir)))
+}
+
+// tildePath abbreviates the home directory in p as ~, for display.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(p, home+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rest
+	}
+	return p
 }
 
 // evaluateAskCommand decides a sandbox bash tool call whose command runs

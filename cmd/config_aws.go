@@ -210,12 +210,7 @@ from that directory's override. Set it first with
 		}
 
 		if cfg.AWS == nil || cfg.AWS.ForceProfile == "" {
-			where, dirFlag := "", ""
-			if configDir != "" {
-				where = " for " + resolveDirArg(configDir)
-				dirFlag = " --dir " + configDir
-			}
-			return fmt.Errorf("allowed_profiles requires force_profile%s; run `lite-sandbox config aws force-profile <profile>%s` first", where, dirFlag)
+			return fmt.Errorf("allowed_profiles requires force_profile%s; run `lite-sandbox config aws force-profile <profile>%s` first", configScope(), scopeFlags())
 		}
 		cfg.AWS.AllowedProfiles = profiles
 		if err := saveConfig(cfg); err != nil {
@@ -239,9 +234,10 @@ func printAllowedProfilesResult(forceProfile string, profiles []string) {
 }
 
 var awsRemoveOverrideCmd = &cobra.Command{
-	Use:   "remove-override [dir]",
-	Short: "Remove the AWS directory override for the given path (defaults to --dir)",
-	Args:  cobra.MaximumNArgs(1),
+	Annotations: wholeFile,
+	Use:         "remove-override [dir]",
+	Short:       "Remove the AWS directory override for the given path (defaults to --dir)",
+	Args:        cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := dirArgOrFlag(args)
 		if err != nil {

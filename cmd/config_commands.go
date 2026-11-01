@@ -238,8 +238,9 @@ var configCommandsRemoveCmd = &cobra.Command{
 }
 
 var configCommandsMigrateCmd = &cobra.Command{
-	Use:   "migrate",
-	Short: "Rewrite the deprecated one-list-per-kind command keys as `commands` entries, in the base config and every override",
+	Annotations: wholeFile,
+	Use:         "migrate",
+	Short:       "Rewrite the deprecated one-list-per-kind command keys as `commands` entries, in the base config and every override",
 	Long: `The deprecated keys (extra_commands, unsandboxed_commands, denied_commands) keep
 loading, so this is optional. It rewrites them once, everywhere in the file,
 keeping what every directory resolves to: an old-style override replaced only
