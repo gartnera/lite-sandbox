@@ -61,6 +61,21 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Where lite-sandbox keeps its config and approval tickets: ~/.config and
+	// ~/.cache on Linux, under ~/Library on macOS.
+	userConfig, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userCache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{userConfig, userCache} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	tests := []struct {
 		name    string
@@ -89,8 +104,8 @@ func TestPathBoundaryErrorNamesFix(t *testing.T) {
 		{".git write outside the boundary", "echo x > " + outside + "/repo/.git/hooks/pre-commit", ""},
 		{"python .git outside the boundary", `python3 -c "open('` + outside + `/repo/.git/config').read()"`, ""},
 		{"agent configuration outside the deny lists", "echo x > " + outside + "/.mcp.json", ""},
-		{"directory holding the sandbox's own config", "echo x > " + home + "/.config/newfile", ""},
-		{"directory holding the approval tickets", "echo x > " + home + "/.cache/foo.log", ""},
+		{"directory holding the sandbox's own config", "echo x > '" + userConfig + "/newfile'", ""},
+		{"directory holding the approval tickets", "echo x > '" + userCache + "/foo.log'", ""},
 		{"hidden-home credential mask", "cat " + home + "/.git-credentials", ""},
 		{"internal grant", "cat " + home + "/internal-only/s", ""},
 		{"docker buildx builders", "echo x > " + home + "/.docker/buildx/current", ""},
