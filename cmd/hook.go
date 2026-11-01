@@ -259,12 +259,15 @@ func evaluateConfigRequest(event *hook.Event, opts hookOptions) *hook.Decision {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: "+err.Error())
 	}
 	cwd := eventCWD(event)
-	if err := configrequest.Issue(cwd, req); err != nil {
+	// The ticket names the directory shown here, so the server runs the
+	// request only if it resolves the same one.
+	scopeDir := configrequest.DefaultDir(cwd)
+	if err := configrequest.Issue(cwd, scopeDir, req); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the request for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk,
-		req.Command()+"\n"+scope.Summary(tildePath(configrequest.DefaultDir(cwd))))
+		req.Command()+"\n"+scope.Summary(tildePath(scopeDir)))
 }
 
 // tildePath abbreviates the home directory in p as ~, for display.

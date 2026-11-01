@@ -96,16 +96,34 @@ line, and the read, write and internal access it marks for a `paths allow`,
 are what the command will do however its flags are spelled (a value-taking
 flag swallowing `--`, `--global=1`, a root flag before the subcommand). They
 refuse `--dir`, the commands that work on the config file as a whole
-(`edit`, `overrides remove`, `migrate`, ...), and the deprecated aliases. A
-directory resolves through a single override, and one a request creates
+(`edit`, `overrides remove`, `migrate`, ...), the deprecated path and command
+list aliases, and arguments with control characters (which could fake or hide
+the status line).
+
+The project directory is read from the host's git, which reads files the
+sandboxed agent can write, so it is pinned down three ways:
+- **Real repositories only:** a git root counts only when it is an ancestor of
+  the working directory whose `.git` directory is the git dir in use. A bare
+  repository planted as plain files (`HEAD`, `objects/`, `refs/`, a `config`
+  whose `core.worktree` names another directory) is ignored, since none of it
+  is under a `.git` the agent cannot write.
+- **Never home or `/`:** a repository rooted at `$HOME` or `/` (a dotfiles
+  checkout) never counts as the project; the working directory is used instead.
+- **Bound to the approval:** the approval ticket records the directory the
+  prompt showed. The server resolves the directory once, finds no ticket if
+  it differs (the agent changed files between the prompt and the run), and
+  hands that same directory to the config subprocess rather than letting it
+  resolve one of its own.
+
+A directory resolves through a single override, and one a request creates
 merges into the base, not into an override the directory was inheriting from
 a parent. So approving a request for a directory with no override of its own
 stops that inherited override's settings (a stricter `mode`, denials, ...)
-from applying to the directory. The server also runs the config subprocess
-with `LITE_SANDBOX_CONFIG_REQUEST_DIR` set to that directory and
-`LITE_SANDBOX_CONFIG_REQUEST_GLOBAL` to whether `--global` was approved, under
-which the config subcommands refuse to run unless the scope they parsed is
-the approved one, as a second check on the server's parse.
+from applying to the directory. The server runs the config subprocess with
+`LITE_SANDBOX_CONFIG_REQUEST_DIR` set to the approved directory and
+`LITE_SANDBOX_CONFIG_REQUEST_GLOBAL` to whether `--global` was approved; the
+subprocess uses that directory as its default and refuses to run unless the
+scope it parsed is the approved one, as a second check on the server's parse.
 
 ## Static preflight (AST-level, before execution)
 

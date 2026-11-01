@@ -23,11 +23,12 @@ const configCommandTimeout = time.Minute
 // runConfigCommand runs `lite-sandbox config <args>` in dir and returns its
 // combined output. It runs as a separate process because the config
 // subcommands print to stdout, which in this process is the MCP transport.
-// configrequest.DirEnv and GlobalEnv make the subprocess itself refuse any
-// scope but the approved one: dir's project (configrequest.DefaultDir), or the
-// base config when global.
+// configrequest.DirEnv and GlobalEnv hand the subprocess the approved scope:
+// it scopes the change to scopeDir, the project directory the user saw,
+// rather than resolving its own, and refuses to run if what it parsed is not
+// that scope (or the base config when global).
 // A variable so tests can stand in for the binary.
-var runConfigCommand = func(ctx context.Context, dir string, args []string, global bool) (string, error) {
+var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []string, global bool) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locating the lite-sandbox binary: %w", err)
@@ -36,14 +37,11 @@ var runConfigCommand = func(ctx context.Context, dir string, args []string, glob
 	defer cancel()
 	c := exec.CommandContext(ctx, exe, append([]string{"config"}, args...)...)
 	c.Dir = dir
-	// PWD makes the subcommand's default scope (os.Getwd) the directory as
-	// spelled here, rather than its resolved form when it goes through a
-	// symlink, so it matches DirEnv.
 	globalEnv := "0"
 	if global {
 		globalEnv = "1"
 	}
-	c.Env = append(c.Environ(), configrequest.DirEnv+"="+configrequest.DefaultDir(dir),
+	c.Env = append(c.Environ(), configrequest.DirEnv+"="+scopeDir,
 		configrequest.GlobalEnv+"="+globalEnv, "PWD="+dir)
 	out, err := c.CombinedOutput()
 	return string(out), err
@@ -67,7 +65,7 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if req.IsHelp() {
 		// Help only prints, so it runs without the user's approval and
 		// leaves the config, and so the sandbox, as it was.
-		out, err := runConfigCommand(ctx, cwd, req.Args, false)
+		out, err := runConfigCommand(ctx, cwd, cwd, req.Args, false)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("`%s` failed: %v\n%s", req.Command(), err, out))
 		}
@@ -80,18 +78,23 @@ func runConfigRequest(ctx context.Context, sandbox *bash_sandboxed.Sandbox, opts
 	if err != nil {
 		return mcp.NewToolResultError(err.Error())
 	}
-	if err := configrequest.Consume(cwd, req); err != nil {
+	// Resolved once and bound to the ticket: the request runs only for the
+	// directory the hook showed, and the subprocess is handed this one
+	// rather than resolving it again.
+	scopeDir := configrequest.DefaultDir(cwd)
+	if err := configrequest.Consume(cwd, scopeDir, req); err != nil {
 		if errors.Is(err, configrequest.ErrNoTicket) {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"Refused: `%s` was not approved. lite-sandbox runs config changes only after its PreToolUse hook "+
-					"asks the user to approve them, and the hook did not run for this call (or the approval expired). "+
+					"asks the user to approve them, and the hook did not run for this call, the approval expired, "+
+					"or the project directory changed since the user was asked. "+
 					"Ask the user to run the command themselves, or to re-run `lite-sandbox install` so the hook is registered.",
 				req.Command()))
 		}
 		return mcp.NewToolResultError("checking the approval: " + err.Error())
 	}
 
-	out, err := runConfigCommand(ctx, cwd, req.Args, scope.Global)
+	out, err := runConfigCommand(ctx, cwd, scopeDir, req.Args, scope.Global)
 	out = strings.TrimRight(out, "\n")
 	if err != nil {
 		msg := fmt.Sprintf("`%s` failed: %v", req.Command(), err)

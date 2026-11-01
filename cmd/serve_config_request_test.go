@@ -33,7 +33,7 @@ func stubConfigCommand(t *testing.T) *[][]string {
 	t.Helper()
 	var runs [][]string
 	orig := runConfigCommand
-	runConfigCommand = func(_ context.Context, _ string, args []string, _ bool) (string, error) {
+	runConfigCommand = func(_ context.Context, _, _ string, args []string, _ bool) (string, error) {
 		runs = append(runs, args)
 		return "Allowed make\n", nil
 	}
@@ -257,7 +257,7 @@ func TestConfigRequestOutsideDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := configrequest.Issue(cwd, req); err != nil {
+	if err := configrequest.Issue(cwd, cwd, req); err != nil {
 		t.Fatal(err)
 	}
 	text, isErr := runBash(t, c, "lite-sandbox config mode set open --dir /")

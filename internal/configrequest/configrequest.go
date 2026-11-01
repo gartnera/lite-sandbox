@@ -18,6 +18,8 @@ package configrequest
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -131,6 +133,13 @@ func (r Request) Validate() error {
 	if len(r.Args) == 0 {
 		return errors.New("`lite-sandbox config` needs a subcommand, e.g. `lite-sandbox config commands allow make`")
 	}
+	// The approval prompt shows the arguments; a newline or terminal escape in
+	// one could fake or hide the status line beneath them.
+	for _, a := range r.Args {
+		if strings.IndexFunc(a, func(c rune) bool { return c < 0x20 || c == 0x7f || c >= 0x80 && c < 0xa0 }) >= 0 {
+			return fmt.Errorf("argument %q contains a control character; config requests take printable arguments only", a)
+		}
+	}
 	for _, a := range r.Args {
 		if strings.HasPrefix(a, "-") {
 			continue
@@ -161,15 +170,30 @@ const GlobalEnv = "LITE_SANDBOX_CONFIG_REQUEST_GLOBAL"
 // inside a linked git worktree, the repository's main worktree, whose override
 // every one of its worktrees inherits (config.Config.ForDirectory), so a
 // change made from a throwaway worktree reaches the worktrees created later
-// too. Outside a git repository it is cwd.
+// too. Outside a git repository it is cwd. A repository rooted at the home
+// directory or / (a dotfiles checkout) does not count: every project under it
+// would share one override that reaches nearly everything.
 func DefaultDir(cwd string) string {
-	if main := gitworktree.MainWorktree(cwd); main != "" {
+	cwd = filepath.Clean(cwd)
+	broad := func(dir string) bool {
+		if dir == string(filepath.Separator) {
+			return true
+		}
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return false
+		}
+		a, errA := filepath.EvalSymlinks(dir)
+		b, errB := filepath.EvalSymlinks(home)
+		return dir == filepath.Clean(home) || errA == nil && errB == nil && a == b
+	}
+	if main := gitworktree.MainWorktree(cwd); main != "" && !broad(main) {
 		return filepath.Clean(main)
 	}
-	if top := gitworktree.Toplevel(cwd); top != "" {
+	if top := gitworktree.Toplevel(cwd); top != "" && !broad(top) {
 		return top
 	}
-	return filepath.Clean(cwd)
+	return cwd
 }
 
 // Scope is what a config request does, as the config command itself parses
@@ -220,27 +244,34 @@ func shellQuote(s string) string {
 }
 
 // subject is the approval subject of request r: its arguments as the agent
-// wrote them, before Scope. Those are what the hook and the server both read
-// from the same command, whereas the scoped arguments carry cwd, which the two
-// may spell differently; the ticket is keyed on the working directory itself
-// (see approval.Issue).
-func (r Request) subject() approval.Subject {
-	return append(approval.Subject{"config"}, r.Args...)
+// wrote them, and the project directory the prompt showed (scopeDir, with
+// symlinks resolved, since the hook and the server may spell it differently).
+// Binding the directory means a request is run only for the directory the
+// user saw: if what DefaultDir resolves to changes between the prompt and the
+// run (files the agent planted meanwhile), the server finds no ticket. The
+// ticket is also keyed on the working directory itself (see approval.Issue).
+func (r Request) subject(scopeDir string) approval.Subject {
+	if resolved, err := filepath.EvalSymlinks(scopeDir); err == nil {
+		scopeDir = resolved
+	}
+	return append(approval.Subject{"config", "scope=" + scopeDir}, r.Args...)
 }
 
-// Issue records a ticket for request r made from cwd. The hook calls it as it
-// asks the user to approve the call.
-func Issue(cwd string, r Request) error {
-	return approval.Issue(cwd, r.subject(), r.Command())
+// Issue records a ticket for request r made from cwd, whose project directory
+// the prompt showed as scopeDir. The hook calls it as it asks the user to
+// approve the call.
+func Issue(cwd, scopeDir string, r Request) error {
+	return approval.Issue(cwd, r.subject(scopeDir), r.Command())
 }
 
 // ErrNoTicket is returned by Consume when no live ticket matches the request:
 // the PreToolUse hook did not run for it, so the user was never asked.
 var ErrNoTicket = approval.ErrNoTicket
 
-// Consume takes the ticket for request r made from cwd, so each approval runs
-// exactly one request. It returns ErrNoTicket when there is none, or only an
-// expired one.
-func Consume(cwd string, r Request) error {
-	return approval.Consume(cwd, r.subject())
+// Consume takes the ticket for request r made from cwd for the project
+// directory scopeDir, so each approval runs exactly one request, in the scope
+// the user saw. It returns ErrNoTicket when there is none, or only an expired
+// one.
+func Consume(cwd, scopeDir string, r Request) error {
+	return approval.Consume(cwd, r.subject(scopeDir))
 }

@@ -255,7 +255,7 @@ else but plain words, such as `lite-sandbox config --help` or `lite-sandbox
 config paths allow -h`. It only prints usage, so the server runs it as
 written, with no ticket. Any other flag makes it an
 ordinary request that asks, because another flag can take `--help` as its
-value (`--dir --help`) and the subcommand would then run.
+value (`--log-level --help`) and the subcommand would then run.
 
 Like any config command, a config request lands in a
 [per-directory override](#writing-overrides-from-the-cli---dir) for the
@@ -272,7 +272,7 @@ lite-sandbox reads the request with the config command's own argument parser,
 so that line matches what runs however the flags are spelled. The commands
 that work on the config file as a whole (`config edit`, `config path`,
 `config overrides list|remove`, `config paths migrate`, ...) and the
-deprecated aliases (`writable-paths add`, ...) are refused; run those
+deprecated path and command list aliases (`writable-paths add`, ...) are refused; run those
 yourself.
 
 The server runs a config request only if the hook asked you about that exact
@@ -999,7 +999,7 @@ again:
 ```console
 $ lite-sandbox config paths remove /base/data --dir ~/work/acme
 /base/data: "read" in the base config still applies to /home/you/work/acme — an override can restate an entry, not drop it
-  remove it everywhere with `lite-sandbox config paths remove /base/data`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
+  remove it everywhere with `lite-sandbox config paths remove /base/data --global`, or state something else here with `lite-sandbox config paths allow|deny /base/data --dir /home/you/work/acme`
 ```
 
 ## SSH

@@ -210,12 +210,7 @@ from that directory's override. Set it first with
 		}
 
 		if cfg.AWS == nil || cfg.AWS.ForceProfile == "" {
-			where, dirFlag := "", ""
-			if configDir != "" {
-				where = " for " + resolveDirArg(configDir)
-				dirFlag = " --dir " + configDir
-			}
-			return fmt.Errorf("allowed_profiles requires force_profile%s; run `lite-sandbox config aws force-profile <profile>%s` first", where, dirFlag)
+			return fmt.Errorf("allowed_profiles requires force_profile%s; run `lite-sandbox config aws force-profile <profile>%s` first", configScope(), scopeFlags())
 		}
 		cfg.AWS.AllowedProfiles = profiles
 		if err := saveConfig(cfg); err != nil {

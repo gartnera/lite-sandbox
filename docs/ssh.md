@@ -39,7 +39,7 @@ lite-sandbox config ssh disable            # remove the section
 ```
 
 Like every section it can be set [per directory](configuration.md#per-directory-overrides)
-(`lite-sandbox config --dir . ssh hosts add deploy-box`). `ssh: {}` (or just
+(`lite-sandbox config ssh hosts add deploy-box`). `ssh: {}` (or just
 `lite-sandbox config ssh agent enable`) gives git's remote commands the agent
 without allowing `ssh` itself.
 

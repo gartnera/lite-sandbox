@@ -9,6 +9,7 @@ package gitworktree
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -43,37 +44,55 @@ func MainWorktree(dir string) string {
 	return parent
 }
 
-// Toplevel returns the root of the git working tree dir is in, spelled as an
-// ancestor of dir (or dir itself) rather than with symlinks resolved as git
-// reports it, so it matches paths derived from dir lexically. Returns "" when
-// dir is not in a git working tree or detection fails.
+// Toplevel returns the root of the ordinary git repository dir is in: an
+// ancestor of dir (or dir itself) holding a `.git` directory that git uses as
+// the repository's git dir. It is spelled as that ancestor of dir rather than
+// with symlinks resolved as git reports it, so it matches paths derived from
+// dir lexically. Returns "" when dir is not in such a repository or detection
+// fails.
+//
+// What git reports is only trusted that far because a sandboxed command can
+// write files git reads as a repository without any `.git` in their path: a
+// bare repository's HEAD, objects/, refs/ and config, whose core.worktree
+// then names any directory as the toplevel. Requiring the toplevel to be an
+// ancestor of dir whose `.git` directory is the git dir in use rules those
+// out; `.git` itself is outside what sandboxed commands may write.
 func Toplevel(dir string) string {
 	if dir == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse",
+		"--path-format=absolute", "--show-toplevel", "--git-dir").Output()
 	if err != nil {
 		return ""
 	}
-	top := filepath.Clean(strings.TrimSpace(string(out)))
-	if top == "." || top == "" {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		return ""
+	}
+	top, gitDir := filepath.Clean(strings.TrimSpace(lines[0])), filepath.Clean(strings.TrimSpace(lines[1]))
+	if !filepath.IsAbs(top) || !filepath.IsAbs(gitDir) {
 		return ""
 	}
 	resolvedTop, err := filepath.EvalSymlinks(top)
 	if err != nil {
 		return ""
 	}
+	resolvedGitDir, err := filepath.EvalSymlinks(gitDir)
+	if err != nil || resolvedGitDir != filepath.Join(resolvedTop, ".git") {
+		return ""
+	}
+	if fi, err := os.Lstat(resolvedGitDir); err != nil || !fi.IsDir() {
+		return ""
+	}
 	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
-		if d == top {
-			return d
-		}
 		if r, err := filepath.EvalSymlinks(d); err == nil && r == resolvedTop {
 			return d
 		}
 		if parent := filepath.Dir(d); parent == d {
-			return top
+			return "" // not an ancestor of dir
 		}
 	}
 }

@@ -53,24 +53,81 @@ func TestIssueConsume(t *testing.T) {
 	cwd := isolate(t)
 	req := Request{Args: []string{"commands", "allow", "make"}}
 
-	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(cwd, cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("Consume before Issue = %v, want ErrNoTicket", err)
 	}
-	if err := Issue(cwd, req); err != nil {
+	if err := Issue(cwd, cwd, req); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if err := Consume(cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
+	if err := Consume(cwd, cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
 		t.Fatalf("Consume after Issue: %v", err)
 	}
 	// Single use.
-	if err := Consume(cwd, req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(cwd, cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("second Consume = %v, want ErrNoTicket", err)
+	}
+}
+
+// TestConsumeOtherScope checks a ticket is bound to the project directory the
+// prompt showed: if the server resolves another one by the time it runs the
+// request, there is no ticket.
+func TestConsumeOtherScope(t *testing.T) {
+	cwd := isolate(t)
+	req := Request{Args: []string{"commands", "allow", "make"}}
+	if err := Issue(cwd, cwd, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := Consume(cwd, filepath.Dir(cwd), req); !errors.Is(err, ErrNoTicket) {
+		t.Fatalf("Consume for another scope = %v, want ErrNoTicket", err)
+	}
+	if err := Consume(cwd, cwd, req); err != nil {
+		t.Fatalf("Consume for the approved scope: %v", err)
+	}
+}
+
+// TestDefaultDirIgnoresPlantedRepo checks files a sandboxed command can write
+// — a bare repository's HEAD, objects/, refs/ and a config whose
+// core.worktree names another directory — do not move the default scope.
+func TestDefaultDirIgnoresPlantedRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	parent := t.TempDir()
+	proj := filepath.Join(parent, "proj")
+	for _, d := range []string{"objects", "refs/heads"} {
+		if err := os.MkdirAll(filepath.Join(proj, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		"HEAD":   "ref: refs/heads/main\n",
+		"config": "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = " + parent + "\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(proj, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := DefaultDir(proj); got != proj {
+		t.Errorf("DefaultDir with a planted bare repo = %q, want the working directory %q", got, proj)
+	}
+}
+
+// TestDefaultDirHomeRepo checks a repository rooted at the home directory (a
+// dotfiles checkout) is not taken as the project of directories under it.
+func TestDefaultDirHomeRepo(t *testing.T) {
+	home := gitworktreetest.InitRepo(t)
+	t.Setenv("HOME", home)
+	sub := filepath.Join(home, "notes")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultDir(sub); got != sub {
+		t.Errorf("DefaultDir under a home repo = %q, want the working directory %q", got, sub)
 	}
 }
 
 func TestConsumeOtherArgs(t *testing.T) {
 	cwd := isolate(t)
-	if err := Issue(cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
+	if err := Issue(cwd, cwd, Request{Args: []string{"commands", "allow", "make"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
@@ -79,8 +136,8 @@ func TestConsumeOtherArgs(t *testing.T) {
 		{"commands allow make"},
 		{"mode", "set", "open"},
 	} {
-		if err := Consume(cwd, Request{Args: args}); !errors.Is(err, ErrNoTicket) {
-			t.Errorf("Consume(cwd, %q) = %v, want ErrNoTicket", args, err)
+		if err := Consume(cwd, cwd, Request{Args: args}); !errors.Is(err, ErrNoTicket) {
+			t.Errorf("Consume(cwd, cwd, %q) = %v, want ErrNoTicket", args, err)
 		}
 	}
 }
@@ -95,13 +152,13 @@ func TestTicketWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := Request{Args: []string{"commands", "allow", "make", "--dir", "."}}
-	if err := Issue(cwd, req); err != nil {
+	if err := Issue(cwd, cwd, req); err != nil {
 		t.Fatal(err)
 	}
-	if err := Consume(t.TempDir(), req); !errors.Is(err, ErrNoTicket) {
+	if err := Consume(t.TempDir(), cwd, req); !errors.Is(err, ErrNoTicket) {
 		t.Fatalf("Consume from another project = %v, want ErrNoTicket", err)
 	}
-	if err := Consume(link, req); err != nil {
+	if err := Consume(link, cwd, req); err != nil {
 		t.Fatalf("Consume through a symlink to the same directory: %v", err)
 	}
 }
@@ -117,6 +174,9 @@ func TestValidate(t *testing.T) {
 		{args: []string{"commands", "allow", "make"}},
 		// "edit" as a value, not the subcommand.
 		{args: []string{"commands", "allow", "edit"}},
+		// Control characters could fake or hide the prompt's status line.
+		{args: []string{"commands", "allow", "x\n✓ this project  ✗ global"}, wantErr: "control character"},
+		{args: []string{"commands", "allow", "x\x1b[8m"}, wantErr: "control character"},
 	} {
 		err := Request{Args: tc.args}.Validate()
 		if tc.wantErr == "" {

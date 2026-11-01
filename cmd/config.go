@@ -84,6 +84,23 @@ func checkConfigRequestDir() error {
 // config rather than the per-directory override --dir defaults to.
 var configGlobal bool
 
+// configDirExplicit records that --dir was given on the command line rather
+// than defaulted, so hints can repeat it only when the user typed it.
+var configDirExplicit bool
+
+// scopeFlags returns the scope flag the user gave, as it would be repeated in a
+// suggested follow-up command: " --global", " --dir <dir>", or "" for the
+// default (the project).
+func scopeFlags() string {
+	switch {
+	case configGlobal:
+		return " --global"
+	case configDirExplicit:
+		return " --dir " + configDir
+	}
+	return ""
+}
+
 // wholeFileAnnotation marks a config subcommand that is not a per-directory
 // setting (the config file path, `edit`, `migrate`, the override listing):
 // --dir does not default to the working directory for it.
@@ -95,13 +112,20 @@ var wholeFile = map[string]string{wholeFileAnnotation: "true"}
 // applyDefaultConfigDir scopes a config subcommand to the project — the git
 // root, a linked worktree's main worktree, or the working directory outside a
 // repository (configrequest.DefaultDir) — when neither --dir nor --global is
-// given, so a
-// change reaches beyond the current project only when asked to with --global.
+// given, so a change reaches beyond the current project only when asked to
+// with --global. Under a config request it is the directory the server hands
+// over (configrequest.DirEnv), which the user approved, rather than one
+// resolved again here.
 func applyDefaultConfigDir(cmd *cobra.Command) error {
+	configDirExplicit = configDir != ""
 	if configGlobal && configDir != "" {
 		return fmt.Errorf("--dir and --global cannot be used together")
 	}
 	if configGlobal || configDir != "" || cmd.Annotations[wholeFileAnnotation] != "" {
+		return nil
+	}
+	if approved := os.Getenv(configrequest.DirEnv); approved != "" {
+		configDir = approved
 		return nil
 	}
 	wd, err := os.Getwd()
@@ -435,7 +459,7 @@ func reportInheritedEntries(dir string, inherited []inheritedStatement) {
 	for _, e := range inherited {
 		fmt.Printf("%s: %q in the base config still applies to %s — an override can restate an entry, not drop it\n",
 			e.subject, e.effect, dir)
-		fmt.Printf("  remove it everywhere with `lite-sandbox config %s remove %s`, or state something else here with `lite-sandbox config %s allow|deny %s --dir %s`\n",
+		fmt.Printf("  remove it everywhere with `lite-sandbox config %s remove %s --global`, or state something else here with `lite-sandbox config %s allow|deny %s --dir %s`\n",
 			e.section, e.subject, e.section, e.subject, dir)
 	}
 }

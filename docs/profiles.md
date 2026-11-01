@@ -495,7 +495,7 @@ stays open: a filter, merge, or diff driver defined in `.git/config` and
 attached to a path in `.git/info/attributes` or `.gitattributes` runs on
 checkout or pull, and a credential helper can be scoped to any URL. Turn
 `allow_git` on only for projects where nothing untrusted runs, ideally per
-directory (`lite-sandbox config --dir . profiles set gh allow_git true`).
+directory (`lite-sandbox config profiles set gh allow_git true`).
 
 `gh codespace ssh`/`cp`/`code`/`jupyter`/`ports`/`logs`, which start ssh or
 forward ports on this machine, are refused either way.
