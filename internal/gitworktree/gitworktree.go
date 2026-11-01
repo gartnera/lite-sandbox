@@ -124,5 +124,49 @@ func detect(dir string) string {
 	if filepath.Base(commonDir) != ".git" {
 		return ""
 	}
+	if !linkedWorktreeOf(dir, gitDir, commonDir) {
+		return ""
+	}
 	return filepath.Dir(commonDir)
+}
+
+// linkedWorktreeOf reports whether dir is in a genuine linked worktree of the
+// repository whose common git dir is commonDir: the git dir in use is
+// <commonDir>/worktrees/<name>, and that entry's gitdir file names the `.git`
+// file of an ancestor of dir (or dir itself). git takes the git-dir /
+// common-dir pair from files a sandboxed command can write without touching a
+// `.git` path — a bare repository planted as HEAD, objects/, refs/ and a
+// commondir file, or a git dir moved out of `.git` — so the pair alone would
+// let it name any repository on the host as "the main worktree". Both ends of
+// the check here live under `.git` paths, which sandboxed commands cannot
+// write.
+func linkedWorktreeOf(dir, gitDir, commonDir string) bool {
+	rGitDir, err1 := filepath.EvalSymlinks(gitDir)
+	rCommon, err2 := filepath.EvalSymlinks(commonDir)
+	if err1 != nil || err2 != nil || filepath.Dir(rGitDir) != filepath.Join(rCommon, "worktrees") {
+		return false
+	}
+	back, err := os.ReadFile(filepath.Join(rGitDir, "gitdir"))
+	if err != nil {
+		return false
+	}
+	dotGit := filepath.Clean(strings.TrimSpace(string(back)))
+	if !filepath.IsAbs(dotGit) || filepath.Base(dotGit) != ".git" {
+		return false
+	}
+	if fi, err := os.Lstat(dotGit); err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	wt, err := filepath.EvalSymlinks(filepath.Dir(dotGit))
+	if err != nil {
+		return false
+	}
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if r, err := filepath.EvalSymlinks(d); err == nil && r == wt {
+			return true
+		}
+		if filepath.Dir(d) == d {
+			return false
+		}
+	}
 }
