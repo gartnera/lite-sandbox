@@ -252,9 +252,9 @@ a config command run in the background.
 
 A request that only reads runs without a prompt: a request for help, such as
 `lite-sandbox config --help` or `lite-sandbox config paths allow -h`, and the
-subcommands that print the config, such as `lite-sandbox config show`,
-`config paths list`, `config mode show`, `config overrides list` and `config
-path`. The server runs it as written, with no ticket. `--global` and `--dir`
+subcommands that print a setting, such as `lite-sandbox config show`,
+`config paths list` and `config mode show`. The server runs it as written,
+with no ticket. `--global` and `--dir`
 are allowed here, since they only choose what it shows. Whether a request only
 reads is decided by the config command's own parser, the same one that runs
 it. So when another flag takes `--help` as its value (`--log-level --help`),

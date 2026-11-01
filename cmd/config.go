@@ -109,18 +109,15 @@ const wholeFileAnnotation = "lite-sandbox/whole-file"
 // wholeFile is the Annotations value marking a command wholeFileAnnotation.
 var wholeFile = map[string]string{wholeFileAnnotation: "true"}
 
-// readOnlyAnnotation marks a config subcommand that only prints the config,
-// or where it lives, and changes nothing. An agent's config request for one
-// runs without the user's approval (parseConfigRequest), as the user would
-// run it, so mark only a command whose every run leaves the config as it was.
+// readOnlyAnnotation marks a config subcommand for a single setting that only
+// prints it and changes nothing. An agent's config request for one runs
+// without the user's approval (parseConfigRequest), as the user would run it,
+// so mark only a single-setting command whose every run leaves the config as
+// it was, never a wholeFileAnnotation or deprecated one (a test checks).
 const readOnlyAnnotation = "lite-sandbox/read-only"
 
 // readOnly is the Annotations value marking a command readOnlyAnnotation.
 var readOnly = map[string]string{readOnlyAnnotation: "true"}
-
-// readOnlyWholeFile marks a command both wholeFileAnnotation and
-// readOnlyAnnotation.
-var readOnlyWholeFile = map[string]string{wholeFileAnnotation: "true", readOnlyAnnotation: "true"}
 
 // applyDefaultConfigDir scopes a config subcommand to the project — the git
 // root, a linked worktree's main worktree, or the working directory outside a
@@ -172,7 +169,7 @@ func init() {
 }
 
 var configPathCmd = &cobra.Command{
-	Annotations: readOnlyWholeFile,
+	Annotations: wholeFile,
 	Use:         "path",
 	Short:       "Print the config file path",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -210,7 +207,7 @@ var configOverridesCmd = &cobra.Command{
 }
 
 var configOverridesListCmd = &cobra.Command{
-	Annotations: readOnlyWholeFile,
+	Annotations: wholeFile,
 	Use:         "list",
 	Short:       "List the configured per-directory overrides",
 	RunE: func(cmd *cobra.Command, args []string) error {

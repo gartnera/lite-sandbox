@@ -68,8 +68,9 @@ func TestParseConfigRequest(t *testing.T) {
 		{args: []string{"show", "--global"}, want: configrequest.Scope{ReadOnly: true}},
 		{args: []string{"paths", "list", "--dir", "/elsewhere"}, want: configrequest.Scope{ReadOnly: true}},
 		{args: []string{"--log-level", "debug", "mode", "show"}, want: configrequest.Scope{ReadOnly: true}},
-		{args: []string{"path"}, want: configrequest.Scope{ReadOnly: true}},
-		{args: []string{"overrides", "list"}, want: configrequest.Scope{ReadOnly: true}},
+		// Whole-file reads are not requestable.
+		{args: []string{"path"}, wantErr: "as a whole"},
+		{args: []string{"overrides", "list"}, wantErr: "as a whole"},
 		{args: []string{"overrides", "remove", "/x"}, wantErr: "as a whole"},
 		// `show` as a value, not the subcommand.
 		{args: []string{"commands", "allow", "show"}},
@@ -142,6 +143,11 @@ func TestReadOnlyConfigCommandsLeaveConfig(t *testing.T) {
 		}
 	}
 	walk(configCmd)
+	for _, c := range readOnlyCmds {
+		if c.Annotations[wholeFileAnnotation] != "" || c.Deprecated != "" {
+			t.Errorf("%s is marked read-only but is not a single-setting command; whole-file and deprecated commands are never requestable", c.CommandPath())
+		}
+	}
 	if len(readOnlyCmds) < 10 {
 		t.Fatalf("found %d read-only commands, want the show/list/path commands", len(readOnlyCmds))
 	}
@@ -151,9 +157,6 @@ func TestReadOnlyConfigCommandsLeaveConfig(t *testing.T) {
 			args = append(args, config.Profiles()[0].Name)
 		}
 		for _, scope := range [][]string{nil, {"--global"}} {
-			if c.Annotations[wholeFileAnnotation] != "" && scope != nil {
-				continue
-			}
 			err := runRootCmd(t, append(args, scope...)...)
 			// The pre-run defaults configDir itself, not through the flag.
 			resetFlags(c)

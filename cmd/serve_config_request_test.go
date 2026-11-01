@@ -460,7 +460,7 @@ func TestConfigRequestReadOnly(t *testing.T) {
 		"lite-sandbox config show",
 		"lite-sandbox config show --global",
 		"lite-sandbox config paths list --dir /elsewhere",
-		"lite-sandbox config path",
+		"lite-sandbox config mode show",
 	}
 	for _, command := range commands {
 		if d := evaluate(bashEvent(t, command, false), hookOptions{configRequests: true}); decisionOf(d) != hook.DecisionAllow {
