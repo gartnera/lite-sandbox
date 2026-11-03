@@ -12,8 +12,8 @@ import (
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
-// isolateAWSConfig keeps the IMDS servers these tests start (which pre-warm
-// credentials) off the developer's real ~/.aws profiles of the same names.
+// isolateAWSConfig keeps the IMDS servers these tests start off the
+// developer's real ~/.aws profiles of the same names.
 func isolateAWSConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -118,22 +118,10 @@ func TestIMDSLifecycle_CredentialNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Each server pre-warms on start; wait for both (failing) warm fetches so
-	// they land before the "command" below starts.
-	deadline := time.Now().Add(10 * time.Second)
-	for _, p := range []string{"dev", "ro"} {
-		for lc.servers[p].CredentialErrorSince(time.Time{}) == nil {
-			if time.Now().After(deadline) {
-				t.Fatalf("pre-warm for %q did not finish", p)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
 	before := time.Now()
 	notes := credentialNotes(lc.servers)
 	if got := notes(before); len(got) != 0 {
-		t.Fatalf("pre-warm failures predate the command, got %v", got)
+		t.Fatalf("no credential request yet, got %v", got)
 	}
 
 	// A credential request through the default profile's server, as an AWS

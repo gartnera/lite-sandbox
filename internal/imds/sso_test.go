@@ -18,9 +18,9 @@ import (
 	"time"
 )
 
-// TestMain keeps every test in the package off the host's AWS config: Start
-// pre-warms credentials, so a server for "default" would otherwise fetch the
-// developer's real credentials.
+// TestMain keeps every test in the package off the host's AWS config, so a
+// server for "default" never loads (or fetches credentials for) the
+// developer's real profile.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "imds-test-")
 	if err != nil {
@@ -35,8 +35,8 @@ func TestMain(m *testing.M) {
 }
 
 // isolateAWSConfig points the AWS SDK at an empty config and credentials file
-// so a test never reads (or, through the pre-warm in Start, fetches
-// credentials for) a same-named profile on the developer's machine.
+// so a test never reads (or fetches credentials for) a same-named profile on
+// the developer's machine.
 func isolateAWSConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -268,36 +268,141 @@ func TestNonSSOFailure_GenericHint(t *testing.T) {
 	}
 }
 
-// TestStart_PrewarmsCredentials covers the "fails on the first run" report: a
-// cold fetch waits on the host's network round trip, longer than botocore's 1s
-// IMDS timeout or the Go SDK's 500ms. Start fetches once in the background, so
-// the first command's request is served from the cache.
-func TestStart_PrewarmsCredentials(t *testing.T) {
-	portal := &fakeSSO{delay: 300 * time.Millisecond}
-	ts := httptest.NewServer(portal)
-	defer ts.Close()
-	ssoProfile(t, ts.URL)(time.Now().Add(time.Hour))
+// fakeSTS is an STS stand-in reached through AWS_ENDPOINT_URL_STS. AssumeRole
+// succeeds only when signed with an access key in valid; anything else gets
+// the InvalidClientTokenId AWS returns for a deactivated or deleted key.
+type fakeSTS struct {
+	valid map[string]bool
+}
 
-	_, fetch := startServer(t, "dev")
-	deadline := time.Now().Add(5 * time.Second)
-	for portal.calls.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("Start did not pre-warm credentials")
+func (f *fakeSTS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	key := ""
+	if _, rest, ok := strings.Cut(auth, "Credential="); ok {
+		key, _, _ = strings.Cut(rest, "/")
+	}
+	w.Header().Set("Content-Type", "text/xml")
+	if !f.valid[key] {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `<ErrorResponse><Error><Type>Sender</Type><Code>InvalidClientTokenId</Code><Message>The security token included in the request is invalid.</Message></Error><RequestId>r</RequestId></ErrorResponse>`)
+		return
+	}
+	fmt.Fprintf(w, `<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>ASIAROLE</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken><Expiration>%s</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::111111111111:assumed-role/R/s</Arn><AssumedRoleId>AROA:s</AssumedRoleId></AssumedRoleUser></AssumeRoleResult><ResponseMetadata><RequestId>r</RequestId></ResponseMetadata></AssumeRoleResponse>`,
+		time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+}
+
+// keyProfiles writes an IAM-user profile "static" and an assume-role profile
+// "role" sourcing it, and returns a function that writes the user's access
+// key to the host's credentials file (as rotating it would).
+func keyProfiles(t *testing.T, sts string) (writeKey func(id string)) {
+	t.Helper()
+	isolateAWSConfig(t)
+	t.Setenv("AWS_ENDPOINT_URL_STS", sts)
+	config := `[profile static]
+region = us-west-2
+
+[profile role]
+role_arn = arn:aws:iam::111111111111:role/R
+source_profile = static
+region = us-west-2
+`
+	if err := os.WriteFile(os.Getenv("AWS_CONFIG_FILE"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func(id string) {
+		t.Helper()
+		creds := fmt.Sprintf("[static]\naws_access_key_id = %s\naws_secret_access_key = secret\n", id)
+		if err := os.WriteFile(os.Getenv("AWS_SHARED_CREDENTIALS_FILE"), []byte(creds), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRevokedSourceKeys_ReportedAndRecoverAfterRotation covers non-SSO
+// credentials: an assume-role profile whose source keys were revoked. The
+// failure is reported with the generic hint and the STS cause, and once the
+// user rotates the keys in the host's credentials file the next request
+// succeeds, since a failed fetch makes the server reload the profile.
+func TestRevokedSourceKeys_ReportedAndRecoverAfterRotation(t *testing.T) {
+	sts := &fakeSTS{valid: map[string]bool{"AKIANEW": true}}
+	ts := httptest.NewServer(sts)
+	defer ts.Close()
+	writeKey := keyProfiles(t, ts.URL)
+	writeKey("AKIAREVOKED")
+
+	start := time.Now()
+	srv, fetch := startServer(t, "role")
+	if doc := fetch(); doc["Code"] != "CredentialsUnavailable" {
+		t.Fatalf("Code = %q, want CredentialsUnavailable (doc %v)", doc["Code"], doc)
+	}
+	err := srv.CredentialErrorSince(start)
+	if err == nil || IsSSOLoginError(err) {
+		t.Fatalf("want a non-SSO error, got %v", err)
+	}
+	hint := Hint("role", err)
+	for _, want := range []string{`profile "role"`, "InvalidClientTokenId", "no restart is needed"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, hint)
+		}
+	}
+	if strings.Contains(hint, "sso login") {
+		t.Errorf("non-SSO failure should not suggest sso login:\n%s", hint)
+	}
+
+	writeKey("AKIANEW")
+	if doc := fetch(); doc["Code"] != "Success" || doc["AccessKeyId"] != "ASIAROLE" {
+		t.Fatalf("after rotating the source keys: doc = %v", doc)
+	}
+}
+
+// TestStaticKeys_ExpiryAndRotation: an IAM user's keys never expire, but IMDS
+// clients need an Expiration they can parse (botocore overflowed on Go's zero
+// time, so these profiles did not work at all), and keys rotated in the host's
+// credentials file are served on the next request.
+func TestStaticKeys_ExpiryAndRotation(t *testing.T) {
+	writeKey := keyProfiles(t, "http://127.0.0.1:1") // STS unused
+	writeKey("AKIAOLD")
+
+	_, fetch := startServer(t, "static")
+	doc := fetch()
+	if doc["Code"] != "Success" || doc["AccessKeyId"] != "AKIAOLD" {
+		t.Fatalf("doc = %v", doc)
+	}
+	exp, err := time.Parse(time.RFC3339, doc["Expiration"])
+	if err != nil {
+		t.Fatalf("Expiration %q: %v", doc["Expiration"], err)
+	}
+	if d := time.Until(exp); d < staticCredsLifetime-time.Minute || d > staticCredsLifetime+time.Minute {
+		t.Errorf("Expiration %v is %v away, want about %v", exp, d, staticCredsLifetime)
+	}
+
+	writeKey("AKIAROTATED")
+	if doc := fetch(); doc["AccessKeyId"] != "AKIAROTATED" {
+		t.Errorf("rotated key not served: AccessKeyId = %q", doc["AccessKeyId"])
+	}
+}
+
+// TestTokenTTLHeader: the Go SDK rejects a token response without the TTL
+// header, falls back to IMDSv1, and gets 401, so Go-based tools could not use
+// the broker at all.
+func TestTokenTTLHeader(t *testing.T) {
+	srv, _ := startServer(t, "default")
+	req, _ := http.NewRequest(http.MethodPut, srv.Endpoint()+"latest/api/token", nil)
+	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "120")
+	var resp *http.Response
+	var err error
+	for i := 0; i < 50; i++ {
+		if resp, err = http.DefaultClient.Do(req); err == nil {
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(portal.delay + 100*time.Millisecond) // let the warm fetch land
-
-	t0 := time.Now()
-	doc := fetch()
-	if d := time.Since(t0); d > 200*time.Millisecond {
-		t.Errorf("first request took %v; expected the pre-warmed cache to serve it", d)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if doc["Code"] != "Success" {
-		t.Fatalf("doc = %v", doc)
-	}
-	if n := portal.calls.Load(); n != 1 {
-		t.Errorf("portal calls = %d, want 1 (the pre-warm)", n)
+	resp.Body.Close()
+	if got := resp.Header.Get("X-Aws-Ec2-Metadata-Token-Ttl-Seconds"); got != "120" {
+		t.Errorf("TTL header = %q, want 120", got)
 	}
 }
 

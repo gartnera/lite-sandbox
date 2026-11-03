@@ -128,13 +128,12 @@ func (s *Server) Start() error {
 	// from memory rather than accumulating until shutdown.
 	go s.sessions.Start()
 
-	// Pre-warm the credential cache in the background. The first fetch for a
-	// profile can need a network round trip (SSO GetRoleCredentials, an SSO
-	// token refresh, an STS AssumeRole), and IMDS clients give up quickly:
-	// botocore after 1s by default, the Go SDK after a 500ms response-header
-	// timeout. A cold first request then times out and the command reports "no
-	// credentials" even though the host's credentials are fine.
-	go s.warm()
+	// Credentials are fetched lazily on the first request and then cached by the
+	// SDK CredentialsCache, so there's no pre-warm here (a session that never
+	// runs an AWS command makes no AWS calls). A cold first fetch can take
+	// seconds; the sandbox raises botocore's IMDS timeout to cover it
+	// (AWS_METADATA_SERVICE_TIMEOUT), and the Go SDK retries while the fetch,
+	// which is not tied to the request's context, completes.
 
 	slog.Info("starting IMDS server", "addr", s.addr, "profile", s.profile)
 	return s.server.Serve(s.listener)
@@ -180,6 +179,9 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("generated IMDSv2 session token", "ttl", ttl)
 
+	// EC2 echoes the granted TTL. The Go SDK requires it: without the header it
+	// fails the token request, falls back to IMDSv1, and gets 401 from us.
+	w.Header().Set("X-Aws-Ec2-Metadata-Token-Ttl-Seconds", strconv.Itoa(ttl))
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(token))
 }
@@ -244,7 +246,7 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 		"AccessKeyId":     creds.AccessKeyID,
 		"SecretAccessKey": creds.SecretAccessKey,
 		"Token":           creds.SessionToken,
-		"Expiration":      creds.Expires.Format(time.RFC3339),
+		"Expiration":      vendedExpiry(creds, time.Now()).UTC().Format(time.RFC3339),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -357,21 +359,44 @@ func (s *Server) retrieve(ctx context.Context) (aws.Credentials, error) {
 
 	creds, err := p.Retrieve(ctx)
 	if err != nil {
+		s.dropProvider(p)
 		return aws.Credentials{}, fmt.Errorf("failed to retrieve credentials: %w", err)
+	}
+	if !creds.CanExpire {
+		// An IAM user's static keys, which the SDK would cache forever: reread
+		// them from the host's files on every request (a local file read), so
+		// keys rotated after a revocation take effect without a restart.
+		s.dropProvider(p)
 	}
 	return creds, nil
 }
 
-// warm fetches credentials once so the SDK cache is populated before the first
-// sandboxed command asks. A failure here is only logged (with the fix, when
-// it is an SSO login problem); it is retried on the next request.
-func (s *Server) warm() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, err := s.getCredentials(ctx); err != nil {
-		return // logged by recordResult
+// dropProvider discards the cached provider p after a failed fetch, so the
+// next request reloads the profile from the host's ~/.aws/config and
+// ~/.aws/credentials. The load captures key material (an IAM user's keys, an
+// assume-role profile's source keys), so without this, fixing or rotating
+// them on the host would not take effect until lite-sandbox restarted. A
+// provider that a concurrent reload already replaced is left alone.
+func (s *Server) dropProvider(p aws.CredentialsProvider) {
+	s.credsMu.Lock()
+	defer s.credsMu.Unlock()
+	if s.creds == p {
+		s.creds = nil
 	}
-	slog.Info("AWS credentials ready", "profile", s.profile)
+}
+
+// staticCredsLifetime is the Expiration advertised for credentials that do not
+// expire (an IAM user's access keys). IMDS clients require an expiry (botocore
+// overflows on Go's zero time), and a finite one makes a long-running client
+// come back, so keys rotated on the host reach it within this long.
+const staticCredsLifetime = time.Hour
+
+// vendedExpiry is the Expiration to advertise for creds at now.
+func vendedExpiry(creds aws.Credentials, now time.Time) time.Time {
+	if !creds.CanExpire || creds.Expires.IsZero() {
+		return now.Add(staticCredsLifetime)
+	}
+	return creds.Expires
 }
 
 // recordResult notes the outcome of a credential fetch for CredentialErrorSince
@@ -441,8 +466,9 @@ func IsSSOLoginError(err error) bool {
 }
 
 // Hint describes a credential failure for profile to the agent: what went
-// wrong and what the user has to do on the host. Fetches are retried on every
-// request, so no restart is needed once the host's credentials are fixed.
+// wrong and what the user has to do on the host. After a failure the profile is
+// reloaded from the host's AWS config on the next request (dropProvider), so
+// no restart is needed once the host's credentials are fixed.
 func Hint(profile string, err error) string {
 	if IsSSOLoginError(err) {
 		return fmt.Sprintf("lite-sandbox: AWS credentials for profile %q are unavailable because the host's AWS SSO session has expired or is not logged in. "+
@@ -450,6 +476,6 @@ func Hint(profile string, err error) string {
 			"  cause: %v", profile, profile, err)
 	}
 	return fmt.Sprintf("lite-sandbox: AWS credentials for profile %q could not be obtained on the host, so the command saw no credentials. "+
-		"Ask the user to check that profile's credentials on the host (outside the sandbox).\n"+
+		"This is not a sandbox restriction: ask the user to fix that profile's credentials on the host (outside the sandbox; e.g. expired, revoked, or rotated keys, or a role it can no longer assume), then retry; no restart is needed.\n"+
 		"  cause: %v", profile, err)
 }
