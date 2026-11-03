@@ -27,6 +27,29 @@ aws:
 
 > **Region.** In brokered IMDS mode `~/.aws/config` is masked, so commands can't see the profile's `region`. lite-sandbox resolves the region on the host and sets both `AWS_REGION` and `AWS_DEFAULT_REGION` (tools differ on which they read), so regional commands work without `--region`, as they do outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag takes precedence. If the profile has no region, nothing is set.
 
+### When credentials can't be fetched
+
+The broker resolves credentials on the host. When that fails, a sandboxed
+command finds no credentials. Common causes are an expired AWS SSO session,
+revoked or rotated source keys behind an assume-role profile, a role that can
+no longer be assumed, or a failing `credential_process`. AWS clients report all
+of these only as `Unable to locate credentials`, so lite-sandbox adds a note
+after the output of any command during which a credential fetch failed. The
+note names the profile, the cause, and the fix. An SSO problem gets the `aws sso
+login` command; anything else gets a general message with the underlying error:
+
+```
+Unable to locate credentials. You can configure credentials by running "aws configure".
+
+lite-sandbox: AWS credentials for profile "dev" are unavailable because the host's AWS SSO session has expired or is not logged in. This is not a sandbox restriction and retrying will not help: ask the user to run `aws sso login --profile dev` on the host (outside the sandbox), then retry; no restart is needed.
+  cause: failed to retrieve credentials: failed to refresh cached credentials, refresh cached SSO token failed, cached SSO token is expired, or not present, and cannot be refreshed
+```
+
+- No restart is needed after fixing credentials on the host. A failed fetch makes the broker reread the profile from `~/.aws/config` and `~/.aws/credentials` on the next request, so a new SSO login or rotated keys take effect right away. An IAM user's static keys are reread on every request.
+- The metadata response itself carries an EC2-style error (`Code: SSOSessionExpired` or `CredentialsUnavailable`), which tools built on the Go SDK print. The raw host error goes only into the agent-facing note and the server log, not to sandboxed code.
+- The broker can only report failures it sees while getting credentials. If AWS rejects credentials the broker already handed out, the command shows AWS's own error (for example `InvalidClientTokenId` or `ExpiredToken`) and gets no note. This happens with an IAM user's keys after they are deactivated, or a session revoked mid-way.
+- Credentials are fetched on first use, and that first fetch can take seconds (an SSO or STS round trip). botocore (AWS CLI, boto3) gives up on the metadata service after 1 second by default, so lite-sandbox sets `AWS_METADATA_SERVICE_TIMEOUT=30` in brokered mode. A value already in the environment is kept. The Go SDK retries on its own while the fetch completes.
+
 ### Multiple profiles
 
 `allowed_profiles` lets a command pick one of several brokered profiles with

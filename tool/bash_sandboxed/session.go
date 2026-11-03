@@ -112,6 +112,9 @@ func (ss *Session) Functions() []string {
 func (ss *Session) Run(ctx context.Context, command string) (status int, exited bool, err error) {
 	s := ss.s
 	ctx = withAuditScope(ctx, command, ss.dir, "shell")
+	// Explain a brokered AWS credential failure the command hit (see
+	// aws_credentials.go); a line refused before it ran fetched nothing.
+	defer s.writeAWSCredentialNote(time.Now(), ss.stderr)
 
 	// A bare allow runs in real bash, as Execute runs it; nothing it does
 	// carries over to the session's state.

@@ -474,6 +474,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		// (mvdan.cc/sh pipelines can block on non-context-aware io.Pipe copies
 		// that SIGKILL cannot unblock) does not pin the process in "running"
 		// forever — mirroring the foreground executeWithInterp grace period.
+		start := time.Now()
 		runDone := make(chan error, 1)
 		go func() {
 			if isExtra {
@@ -487,6 +488,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 
 		select {
 		case err := <-runDone:
+			s.writeAWSCredentialNote(start, proc.output)
 			s.bg.finish(proc, err)
 		case <-ctx.Done():
 			// Killed: give the runner a short grace period to return cleanly,
