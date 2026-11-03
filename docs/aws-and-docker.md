@@ -27,6 +27,25 @@ aws:
 
 > **Region.** In brokered IMDS mode `~/.aws/config` is masked, so commands can't see the profile's `region`. lite-sandbox resolves the region on the host and sets both `AWS_REGION` and `AWS_DEFAULT_REGION` (tools differ on which they read), so regional commands work without `--region`, as they do outside the sandbox. An `AWS_REGION`/`AWS_DEFAULT_REGION` already in the environment, a per-command `AWS_REGION=… aws …`, or an explicit `--region` flag takes precedence. If the profile has no region, nothing is set.
 
+### When credentials can't be fetched
+
+The broker resolves credentials on the host, so a host-side problem (most often
+an expired AWS SSO session) means a sandboxed command finds no credentials. AWS
+clients report this only as `Unable to locate credentials`. lite-sandbox
+therefore adds a note after the output of any command during which a
+credential fetch failed. The note names the profile, the cause, and the fix:
+
+```
+Unable to locate credentials. You can configure credentials by running "aws configure".
+
+lite-sandbox: AWS credentials for profile "dev" are unavailable because the host's AWS SSO session has expired or is not logged in. This is not a sandbox restriction and retrying will not help: ask the user to run `aws sso login --profile dev` on the host (outside the sandbox), then retry; no restart is needed.
+  cause: failed to retrieve credentials: failed to refresh cached credentials, refresh cached SSO token failed, cached SSO token is expired, or not present, and cannot be refreshed
+```
+
+- Run `aws sso login --profile <profile>` on the host. The broker retries on every request, so the next command picks up the new session without a restart.
+- The metadata response itself carries an EC2-style error (`Code: SSOSessionExpired` or `CredentialsUnavailable`), which tools built on the Go SDK print. The raw host error goes only into the agent-facing note and the server log, not to sandboxed code.
+- Each broker fetches credentials once when it starts, so the first command doesn't wait on a cold SSO/STS round trip. IMDS clients give up quickly: botocore (AWS CLI, boto3) after 1 second, the Go SDK after 500 ms. lite-sandbox also sets `AWS_METADATA_SERVICE_TIMEOUT=30` in brokered mode, so the AWS CLI and boto3 wait for a slow refresh. A value already in the environment is kept.
+
 ### Multiple profiles
 
 `allowed_profiles` lets a command pick one of several brokered profiles with

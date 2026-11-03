@@ -5,16 +5,20 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/ssocreds"
+	"github.com/aws/smithy-go"
 	"github.com/jellydator/ttlcache/v3"
 )
 
@@ -43,6 +47,17 @@ type Server struct {
 	// not require valid credentials — so it is available even for an expired SSO
 	// session. Empty when the profile configures no region.
 	region string
+
+	// failMu guards the record of the most recent credential fetch outcome, which
+	// the sandbox reads (CredentialErrorSince) to tell the agent why an AWS
+	// command found no credentials. botocore discards the IMDS error body and
+	// reports only "Unable to locate credentials", so without this the real cause
+	// (typically an expired SSO session on the host) is only in the server log.
+	failMu sync.Mutex
+	// lastFailAt is when the most recent fetch failed; zero once a later fetch
+	// succeeds.
+	lastFailAt time.Time
+	lastErr    error
 }
 
 // credExpiryWindow tells the SDK CredentialsCache to refresh this far ahead of
@@ -113,8 +128,13 @@ func (s *Server) Start() error {
 	// from memory rather than accumulating until shutdown.
 	go s.sessions.Start()
 
-	// Credentials are fetched lazily on the first request and then cached by the
-	// SDK CredentialsCache, so there's no pre-warm here.
+	// Pre-warm the credential cache in the background. The first fetch for a
+	// profile can need a network round trip (SSO GetRoleCredentials, an SSO
+	// token refresh, an STS AssumeRole), and IMDS clients give up quickly:
+	// botocore after 1s by default, the Go SDK after a 500ms response-header
+	// timeout. A cold first request then times out and the command reports "no
+	// credentials" even though the host's credentials are fine.
+	go s.warm()
 
 	slog.Info("starting IMDS server", "addr", s.addr, "profile", s.profile)
 	return s.server.Serve(s.listener)
@@ -197,10 +217,22 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	creds, err := s.getCredentials(credCtx)
 	if err != nil {
-		// Surface the underlying error: an expired SSO session shows up here and
-		// the operator needs to know to run `aws sso login` rather than guess.
-		slog.Error("failed to get credentials", "profile", s.profile, "error", err)
-		http.Error(w, "Failed to get credentials", http.StatusInternalServerError)
+		// Answer like EC2 IMDS does when it cannot vend role credentials: 200
+		// with a non-Success Code and a Message. The Go SDK reports Code and
+		// Message to the caller; botocore logs it and finds no credentials. The
+		// raw error stays on the host (log, and the sandbox's note to the agent)
+		// rather than being handed to sandboxed code.
+		code, msg := "CredentialsUnavailable", fmt.Sprintf("lite-sandbox could not get AWS credentials for profile %q on the host", s.profile)
+		if IsSSOLoginError(err) {
+			code = "SSOSessionExpired"
+			msg = fmt.Sprintf("the host's AWS SSO session for profile %q has expired or is not logged in; run `aws sso login --profile %s` on the host", s.profile, s.profile)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"Code":        code,
+			"Message":     msg,
+			"LastUpdated": time.Now().UTC().Format(time.RFC3339),
+		})
 		return
 	}
 
@@ -308,7 +340,16 @@ func (s *Server) Region(ctx context.Context) string {
 // auto-refresh are all delegated to the SDK's aws.CredentialsCache, so this
 // call is cheap when credentials are valid and triggers exactly one refresh
 // (shared across concurrent callers) when they are not.
+//
+// Every outcome, including a config load failure, is recorded for
+// CredentialErrorSince.
 func (s *Server) getCredentials(ctx context.Context) (aws.Credentials, error) {
+	creds, err := s.retrieve(ctx)
+	s.recordResult(err)
+	return creds, err
+}
+
+func (s *Server) retrieve(ctx context.Context) (aws.Credentials, error) {
 	p, err := s.provider(ctx)
 	if err != nil {
 		return aws.Credentials{}, err
@@ -319,4 +360,96 @@ func (s *Server) getCredentials(ctx context.Context) (aws.Credentials, error) {
 		return aws.Credentials{}, fmt.Errorf("failed to retrieve credentials: %w", err)
 	}
 	return creds, nil
+}
+
+// warm fetches credentials once so the SDK cache is populated before the first
+// sandboxed command asks. A failure here is only logged (with the fix, when
+// it is an SSO login problem); it is retried on the next request.
+func (s *Server) warm() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := s.getCredentials(ctx); err != nil {
+		return // logged by recordResult
+	}
+	slog.Info("AWS credentials ready", "profile", s.profile)
+}
+
+// recordResult notes the outcome of a credential fetch for CredentialErrorSince
+// and logs failures with the remedy.
+func (s *Server) recordResult(err error) {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if err == nil {
+		s.lastFailAt, s.lastErr = time.Time{}, nil
+		return
+	}
+	s.lastFailAt, s.lastErr = time.Now(), err
+	if IsSSOLoginError(err) {
+		slog.Error("AWS SSO session expired or not logged in; run `aws sso login --profile "+s.profile+"` on the host", "profile", s.profile, "error", err)
+		return
+	}
+	slog.Error("failed to get AWS credentials", "profile", s.profile, "error", err)
+}
+
+// CredentialErrorSince returns the error of the most recent failed credential
+// fetch if it happened at or after since and no fetch has succeeded since it,
+// and nil otherwise. The sandbox calls it after a command to explain a
+// credential failure the AWS client itself reports only as missing
+// credentials.
+func (s *Server) CredentialErrorSince(since time.Time) error {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	if s.lastErr == nil || s.lastFailAt.Before(since) {
+		return nil
+	}
+	return s.lastErr
+}
+
+// ssoLoginErrorCodes are the AWS API error codes that mean the SSO session
+// behind a profile is no longer usable, so `aws sso login` is the fix: the
+// portal rejecting the access token (SSO GetRoleCredentials), and the OIDC
+// service rejecting a token refresh (expired refresh token or client
+// registration).
+var ssoLoginErrorCodes = map[string]bool{
+	"UnauthorizedException":       true,
+	"InvalidGrantException":       true,
+	"ExpiredTokenException":       true,
+	"InvalidClientException":      true,
+	"UnauthorizedClientException": true,
+}
+
+// IsSSOLoginError reports whether err from a credential fetch means the
+// profile's AWS SSO session has expired or was never logged in, so that
+// running `aws sso login` on the host fixes it.
+func IsSSOLoginError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var invalid *ssocreds.InvalidTokenError
+	if errors.As(err, &invalid) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && ssoLoginErrorCodes[apiErr.ErrorCode()] {
+		return true
+	}
+	// The sso_session token provider returns plain errors for a missing or
+	// expired cached token (ssocreds.SSOTokenProvider), with no type to match.
+	msg := err.Error()
+	return strings.Contains(msg, "cached SSO token is expired") ||
+		strings.Contains(msg, "failed to read cached SSO token file")
+}
+
+// Hint describes a credential failure for profile to the agent: what went
+// wrong and what the user has to do on the host. Fetches are retried on every
+// request, so no restart is needed once the host's credentials are fixed.
+func Hint(profile string, err error) string {
+	if IsSSOLoginError(err) {
+		return fmt.Sprintf("lite-sandbox: AWS credentials for profile %q are unavailable because the host's AWS SSO session has expired or is not logged in. "+
+			"This is not a sandbox restriction and retrying will not help: ask the user to run `aws sso login --profile %s` on the host (outside the sandbox), then retry; no restart is needed.\n"+
+			"  cause: %v", profile, profile, err)
+	}
+	return fmt.Sprintf("lite-sandbox: AWS credentials for profile %q could not be obtained on the host, so the command saw no credentials. "+
+		"Ask the user to check that profile's credentials on the host (outside the sandbox).\n"+
+		"  cause: %v", profile, err)
 }

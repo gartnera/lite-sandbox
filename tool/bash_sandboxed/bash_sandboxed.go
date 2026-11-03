@@ -100,6 +100,10 @@ type Sandbox struct {
 	// absent from the map is denied. Empty (nil) when multi-profile routing is not
 	// configured, in which case the exec handlers leave AWS_PROFILE untouched.
 	imdsProfiles map[string]IMDSTarget
+	// awsCredNotes reports brokered AWS credential failures recorded at or
+	// after a time, as agent-facing notes (see aws_credentials.go). nil when no
+	// IMDS server is running.
+	awsCredNotes func(since time.Time) []string
 	// dockerHost is the DOCKER_HOST value (unix://… proxy socket) injected into
 	// sandboxed commands when the docker proxy is running. dockerSocketDir is the
 	// directory holding that socket, bind-mounted into the OS sandbox worker so
@@ -493,7 +497,9 @@ func awsRegionToInject(region string) string {
 // commands that never meant to select a profile), then injects the default
 // profile's IMDS endpoint and region. Per-command AWS_PROFILE selection (routed
 // in the exec handlers) still works because it is set on the command itself, not
-// inherited here. A no-op when IMDS is not active (endpoint == "").
+// inherited here. It also raises botocore's IMDS timeout so a slow first
+// credential fetch is waited for. A no-op when IMDS is not active (endpoint ==
+// "").
 func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
 	if imdsEndpoint == "" {
 		return base
@@ -506,6 +512,12 @@ func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
 		env = append(env, kv)
 	}
 	env = append(env, "AWS_EC2_METADATA_SERVICE_ENDPOINT="+imdsEndpoint)
+	// botocore's 1s default IMDS timeout is shorter than a cold credential fetch
+	// on the host can take (see awsMetadataTimeoutSeconds). A value already in
+	// the environment is an explicit choice and is kept.
+	if _, ok := os.LookupEnv("AWS_METADATA_SERVICE_TIMEOUT"); !ok {
+		env = append(env, "AWS_METADATA_SERVICE_TIMEOUT="+awsMetadataTimeoutSeconds)
+	}
 	if r := awsRegionToInject(imdsRegion); r != "" {
 		env = append(env, "AWS_REGION="+r, "AWS_DEFAULT_REGION="+r)
 	}
@@ -1603,7 +1615,9 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 		if err := s.checkRawAsk(withAuditScope(ctx, command, workDir, "bash"), command); err != nil {
 			return "", fmt.Errorf("validation failed: %w", err)
 		}
-		return s.executeRaw(ctx, command, workDir, s.isUnsandboxedInvocation(command))
+		start := time.Now()
+		output, err := s.executeRaw(ctx, command, workDir, s.isUnsandboxedInvocation(command))
+		return s.withAWSCredentialNote(start, output, err)
 	}
 
 	// Parse and validate
@@ -1628,7 +1642,9 @@ func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, r
 
 	// Always execute using interp
 	// If OS sandbox is enabled, ExecHandler will send commands to worker
-	return s.executeWithInterp(ctx, f, workDir, readAllowedPaths, writeAllowedPaths)
+	start := time.Now()
+	output, err := s.executeWithInterp(ctx, f, workDir, readAllowedPaths, writeAllowedPaths)
+	return s.withAWSCredentialNote(start, output, err)
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing interpreter output.
