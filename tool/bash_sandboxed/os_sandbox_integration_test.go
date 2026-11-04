@@ -680,3 +680,80 @@ func TestOSSandboxScrubsCredentialEnv(t *testing.T) {
 		t.Errorf("passed-through variable missing:\n%s", output)
 	}
 }
+
+// TestOSSandboxTrustedScriptCannotEditConfig: the deny list does not apply
+// inside a script a bare allow names, so the script can run the sandbox's own
+// `lite-sandbox config` — but under the OS sandbox that cannot change the
+// policy: the config is read-only in the worker (hidden in allowlist mode),
+// and the script's own redirect to it is refused by the path boundary, which
+// stays enforced inside trusted scripts.
+func TestOSSandboxTrustedScriptCannotEditConfig(t *testing.T) {
+	requireOSSandbox(t)
+	bin, err := filepath.Abs(filepath.Join("..", "..", "lite-sandbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Skip("lite-sandbox binary not built at the repository root")
+	}
+	// The config under the real home: outside /tmp, which the Linux worker
+	// overlays, and outside the working directory.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, "ls-selfprot-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	cfgPath := filepath.Join(root, "config.yaml")
+	const original = "mode: allowlist\n"
+	if err := os.WriteFile(cfgPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
+	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, mode := range []string{string(config.ModeAllowlist), string(config.ModeDenylist)} {
+		t.Run(mode, func(t *testing.T) {
+			work := t.TempDir()
+			scripts := map[string]string{
+				"./subcommand.sh": "lite-sandbox config mode set open --global\n",
+				"./redirect.sh":   "printf 'mode: open\\n' > " + cfgPath + "\n",
+			}
+			yes := true
+			var cmds []config.CommandEntry
+			for name, body := range scripts {
+				if err := os.WriteFile(filepath.Join(work, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cmds = append(cmds, config.CommandEntry{Command: name, Allow: &yes})
+			}
+			s := NewSandbox()
+			s.updateConfig(&config.Config{OSSandbox: &yes, Mode: mode, Commands: cmds}, work)
+			defer s.Close()
+			for name := range scripts {
+				out, err := s.Execute(context.Background(), name, work, []string{work}, []string{work})
+				if data, _ := os.ReadFile(cfgPath); string(data) != original {
+					t.Fatalf("%s changed the config to %q (err %v, output %q)", name, data, err, out)
+				}
+			}
+		})
+	}
+
+	// Control: without the OS sandbox the same script does reach the config,
+	// so the checks above are not passing because nothing ran.
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "subcommand.sh"), []byte("#!/bin/bash\nlite-sandbox config mode set open --global\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{OSSandbox: &no, Commands: []config.CommandEntry{{Command: "./subcommand.sh", Allow: &yes}}}, work)
+	defer s.Close()
+	out, err := s.Execute(context.Background(), "./subcommand.sh", work, []string{work}, []string{work})
+	if data, _ := os.ReadFile(cfgPath); string(data) == original {
+		t.Errorf("control: without the OS sandbox the script should have changed the config (err %v, output %q)", err, out)
+	}
+}

@@ -131,10 +131,14 @@ instead, since the sandbox has nothing of theirs to interpret. The interpreter
 implements most of bash but isn't GNU bash; see
 [interpreter differences](security.md#general-limitations).
 
-Allow only scripts whose contents you control. The agent can edit a script
-in the working directory, and with the deny list lifted inside it, an edited
-script can run any command, the sandbox's own `lite-sandbox config` included.
-The OS sandbox still confines what those commands touch.
+Allow only scripts whose contents you control: the agent can edit a script
+in the working directory, and an edited script can run any command. With the
+OS sandbox on, those commands are still confined: the sandbox's own config is
+read-only in the worker (hidden, in `allowlist` mode), so even a
+`lite-sandbox config` the script runs fails, and the path boundary refuses the
+script's own redirects to it. Without the OS sandbox nothing stops a program
+the script runs from rewriting the config, as with any native program (see
+[security](security.md#general-limitations)).
 
 ### Unsandboxed commands
 
