@@ -97,7 +97,7 @@ func testOSSandboxSSHAgent(t *testing.T, mode config.Mode) {
 		Mode:      string(mode),
 		OSSandbox: &yes,
 		SSH:       &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box"}}},
-		Commands:  []config.CommandEntry{{Command: "bash", Allow: &yes}}, // stands in for a program the agent runs
+		Commands:  []config.CommandEntry{{Command: nativeShell(t, work), Allow: &yes}}, // stands in for a program the agent runs
 		// The stand-ins' directory, which the worker's own /tmp would hide.
 		Paths: []config.PathEntry{{Path: bin, Read: &yes, Internal: true}},
 	}, work)
@@ -122,10 +122,10 @@ func testOSSandboxSSHAgent(t *testing.T, mode config.Mode) {
 	}
 	for _, cmd := range []string{
 		"git status",
-		"bash -c 'ssh-add -l'",
-		"bash -c 'SSH_AUTH_SOCK=" + proxy.Socket() + " ssh-add -l'",
-		"bash -c 'SSH_AUTH_SOCK=" + agentSock + " ssh-add -l'",
-		"bash -c 'ssh box'", // not a direct invocation: runs in the shared worker
+		"./nativesh -c 'ssh-add -l'",
+		"./nativesh -c 'SSH_AUTH_SOCK=" + proxy.Socket() + " ssh-add -l'",
+		"./nativesh -c 'SSH_AUTH_SOCK=" + agentSock + " ssh-add -l'",
+		"./nativesh -c 'ssh box'", // not a direct invocation: runs in the shared worker
 	} {
 		if out := run(cmd); strings.Contains(out, "sandbox-test-key") || strings.Contains(out, "EMPTIED") {
 			t.Errorf("%s reached the agent from the shared worker: %q", cmd, out)
@@ -326,7 +326,7 @@ exec sh -c "$*"
 		Mode:      string(config.ModeAllowlist),
 		OSSandbox: &yes,
 		SSH:       &config.SSHConfig{Hosts: []config.SSHHost{{Host: "box", Write: &yes}}},
-		Commands:  []config.CommandEntry{{Command: "bash", Allow: &yes}},
+		Commands:  []config.CommandEntry{{Command: nativeShell(t, work), Allow: &yes}}, // stands in for a program the agent runs
 		Paths:     []config.PathEntry{{Path: bin, Read: &yes, Internal: true}},
 	}, work)
 	defer s.Close()
@@ -360,7 +360,7 @@ exec sh -c "$*"
 	if out := run(cmd); !strings.Contains(out, "home=.") || strings.Contains(out, "sandbox-test-key") {
 		t.Errorf("%s ran with $HOME set or reached the agent: %q", cmd, out)
 	}
-	if out := run("bash -c 'rsync -a ./src/ box:" + work + "/viabash/'"); strings.Contains(out, "sandbox-test-key") {
-		t.Errorf("rsync run by bash reached the agent: %q", out)
+	if out := run("./nativesh -c 'rsync -a ./src/ box:" + work + "/viabash/'"); strings.Contains(out, "sandbox-test-key") {
+		t.Errorf("rsync run by a native program reached the agent: %q", out)
 	}
 }

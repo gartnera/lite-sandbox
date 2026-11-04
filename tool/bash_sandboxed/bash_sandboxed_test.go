@@ -1138,17 +1138,17 @@ func TestUnsandboxedCommand_PreservesHostDockerHost(t *testing.T) {
 	t.Setenv("DOCKER_HOST", hostDocker)
 	tmpDir := t.TempDir()
 
-	// Raw path: a bare unsandboxed entry should see the host's own DOCKER_HOST,
-	// not the proxy socket.
+	// The interpreter's own variables are the host's: the proxy socket is set
+	// only for the commands it dispatches to the sandbox.
 	raw := NewSandbox()
 	raw.updateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
 	raw.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, err := raw.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
-		t.Fatalf("raw unsandboxed bash failed: %v", err)
+		t.Fatalf("bash -c failed: %v", err)
 	}
 	if !strings.Contains(out, "["+hostDocker+"]") {
-		t.Errorf("raw path: expected host DOCKER_HOST %q, got %q", hostDocker, out)
+		t.Errorf("interpreter variables: expected host DOCKER_HOST %q, got %q", hostDocker, out)
 	}
 
 	// Interp path: printenv run on the host should likewise report the host
