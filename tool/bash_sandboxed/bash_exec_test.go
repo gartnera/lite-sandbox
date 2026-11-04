@@ -1330,3 +1330,204 @@ func TestExecuteScript_SlashPathWithoutDotIsAScript(t *testing.T) {
 		})
 	}
 }
+
+// TestExecuteScript_BareScriptRunsThroughInterpreter verifies that a script a
+// bare allow names runs through the sandbox's own interpreter, not a native
+// bash: the interpreter's `$!` is a goroutine id ("g1"), where bash's is a pid.
+func TestExecuteScript_BareScriptRunsThroughInterpreter(t *testing.T) {
+	dir := t.TempDir()
+	body := "#!/bin/bash\ntrue &\necho bg=$!\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./run.sh"}}, dir)
+	for _, cmd := range []string{"./run.sh", "bash run.sh", "true && ./run.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if !strings.Contains(out, "bg=g") {
+			t.Errorf("%s: output %q, want the interpreter's job id (bg=g...)", cmd, out)
+		}
+	}
+}
+
+// TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
+// script lifts for the commands the script runs: the whitelist, argument
+// validators, structural rules (setting PATH) and the deny list — statically
+// and at runtime, at any depth — while the path boundary and ask entries still
+// apply.
+func TestExecuteScript_BareScriptLiftsChecks(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// protoc: not whitelisted; curl: denied; PATH: a structural refusal;
+	// git push: refused by git's argument validator. None of them runs.
+	write("lifted.sh", "PATH=\"$PWD:$PATH\"\nif false; then protoc --version; curl https://example.com; git push; fi\n./nested.sh\necho lifted-$1\n")
+	write("nested.sh", "if false; then curl https://example.com; fi\necho nested\n")
+	outside := t.TempDir()
+	write("escape.sh", "echo x > "+filepath.Join(outside, "f")+"\n")
+	write("asks.sh", "rm -f nothing\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./lifted.sh", Allow: &yes},
+		{Command: "./escape.sh", Allow: &yes},
+		{Command: "./asks.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+		{Command: "rm", Ask: true},
+	}}, dir)
+
+	for _, cmd := range []string{"./lifted.sh a", "bash lifted.sh a", "true && ./lifted.sh a"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: a bare allow of the script should lift its checks: %v", cmd, err)
+		}
+		if !strings.Contains(out, "nested") || !strings.Contains(out, "lifted-a") {
+			t.Errorf("%s: output %q", cmd, out)
+		}
+	}
+	// The deny list still applies to the command line around the script.
+	if _, err := executeInDirWithSandbox(t, s, dir, "./lifted.sh && curl https://example.com"); err == nil {
+		t.Error("the deny list must still apply outside the script")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./escape.sh"); err == nil {
+		t.Error("the path boundary must still confine a bare-allowed script's redirects")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f")); err == nil {
+		t.Error("the script wrote outside the boundary")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./asks.sh"); err == nil || !strings.Contains(err.Error(), "approval") {
+		t.Errorf("an ask entry must still apply inside a bare-allowed script: %v", err)
+	}
+}
+
+// TestTrustedScript_MatchesByResolvedPathOnly verifies that only the file a
+// bare allow of a script path resolves to is trusted: not a file named like a
+// bare-allowed command (`bash make`), and not another file the same literal
+// path names after a `cd`.
+func TestTrustedScript_MatchesByResolvedPathOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Each body runs a denied command by a dynamic name, which only the
+	// runtime layer sees.
+	body := "#!/bin/bash\nc=printf; $c ran\n"
+	for _, f := range []string{"make", "build.sh", "sub/build.sh"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "make", Allow: &yes},
+		{Command: "./build.sh", Allow: &yes},
+		{Command: "printf", Allow: &no},
+	}}, dir)
+
+	if out, err := executeInDirWithSandbox(t, s, dir, "./build.sh"); err != nil || !strings.Contains(out, "ran") {
+		t.Fatalf("the allowed script itself should be trusted: %v %q", err, out)
+	}
+	for _, cmd := range []string{"bash make", "cd sub && ./build.sh", "cd sub && bash ./build.sh", "cd sub && bash build.sh"} {
+		if out, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil {
+			t.Errorf("%s: should not be trusted, ran: %q", cmd, out)
+		}
+	}
+}
+
+// TestBashScript_PositionalParams verifies `bash <script> args` passes args
+// as $1, $2, ... without shifting the script's line numbers.
+func TestBashScript_PositionalParams(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.sh"), []byte("echo \"line=$LINENO args=$1,$2 n=$#\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	out, err := executeInDirWithSandbox(t, s, dir, "bash a.sh 'x y' z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "line=1 args=x y,z n=2"; !strings.Contains(out, want) {
+		t.Errorf("output %q, want %q", out, want)
+	}
+}
+
+// TestScopedCommand_BareAllowKeepsValidators verifies that a bare allow of a
+// command a scoped grant names admits it but keeps its argument validators
+// where it would run in the scope's worker, with the grant's credential — the
+// static pass and, for a dynamic name, the runtime one. An allow naming the
+// subcommand still opens it; a bare allow lifts them as usual without a scoped
+// grant, without the OS sandbox (no worker holds the credential), or with
+// no_sandbox (the command runs on the host).
+func TestScopedCommand_BareAllowKeepsValidators(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	yes, no := true, false
+	scoped := []config.PathEntry{{Path: filepath.Join(dir, "..", "ghcreds"), Read: &yes, Internal: true, Commands: []string{"gh"}}}
+	bareGh := []config.CommandEntry{{Command: "gh", Allow: &yes}}
+
+	s := NewSandbox()
+	defer s.Close()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: bareGh, Paths: scoped}, dir)
+	for _, cmd := range []string{"gh auth token", "true && gh auth token"} {
+		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil {
+			t.Errorf("%s: a bare allow of a scoped command must keep its validators", cmd)
+		}
+	}
+	// Refused by the runtime validator, before anything is dispatched.
+	if _, err := s.Execute(context.Background(), "c=gh; $c auth token", dir, paths, paths); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Errorf("a dynamic name must be refused at runtime too: %v", err)
+	}
+	if err := s.ValidateCommand("gh pr list", dir, paths, paths); err != nil {
+		t.Errorf("gh pr list: %v", err)
+	}
+
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh auth token", Allow: &yes}}, Paths: scoped}, dir)
+	if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
+		t.Errorf("an allow naming the subcommand should open it: %v", err)
+	}
+
+	for name, cfg := range map[string]*config.Config{
+		"no scoped grant": {OSSandbox: &yes, Commands: bareGh},
+		"no OS sandbox":   {OSSandbox: &no, Commands: bareGh, Paths: scoped},
+		"no_sandbox":      {OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh", Allow: &yes, NoSandbox: true}}, Paths: scoped},
+	} {
+		s.updateConfig(cfg, dir)
+		if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
+			t.Errorf("%s: a bare allow should lift the validators: %v", name, err)
+		}
+	}
+}
+
+// TestTrustedScript_AbsoluteEntryAndSource verifies that an absolute script
+// entry is trusted whatever the working directory the config was loaded for,
+// and that a sourced script is never trusted: it runs in the caller's shell,
+// where what it sets (PATH) carries on to the rest of the line.
+func TestTrustedScript_AbsoluteEntryAndSource(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "b.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nPATH=\"$PWD:$PATH\"\necho trusted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: script, Allow: &yes}}}, "")
+	if out, err := executeInDirWithSandbox(t, s, dir, script); err != nil || !strings.Contains(out, "trusted") {
+		t.Errorf("absolute entry: %v %q", err, out)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "./b.sh", Allow: &yes}}}, dir)
+	for _, cmd := range []string{"source ./b.sh", ". ./b.sh"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err == nil {
+			t.Errorf("%s: a sourced script must not be trusted", cmd)
+		}
+	}
+}

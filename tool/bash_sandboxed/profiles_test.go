@@ -106,9 +106,6 @@ func TestProfiles_EntriesMeanWhatTheyMeanInConfig(t *testing.T) {
 	if !s.execIsUnsandboxed(context.Background(), []string{"cargo", "build"}) {
 		t.Error("no_sandbox on a profile's entry should route the command to the host")
 	}
-	if s.isExtraCommandInvocation("cargo build") {
-		t.Error("a whitelisting entry must never take the raw-bash path")
-	}
 	if err := s.ValidateCommand("pnpx prettier --check .", dir, paths, paths); err != nil {
 		t.Errorf("restricted allow from a profile: %v", err)
 	}

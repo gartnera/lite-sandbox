@@ -245,7 +245,7 @@ func TestConfigPathsCmd_DeprecatedAliasesAndMigrate(t *testing.T) {
 func TestConfigPathsAllowCommands(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	yes := true
-	cfg := &config.Config{Commands: []config.CommandEntry{{Command: "gh", Allow: &yes}}}
+	cfg := &config.Config{Commands: []config.CommandEntry{{Command: "gh", Allow: &yes, NoSandbox: true}}}
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}

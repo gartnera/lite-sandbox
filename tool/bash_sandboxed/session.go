@@ -116,16 +116,6 @@ func (ss *Session) Run(ctx context.Context, command string) (status int, exited 
 	// aws_credentials.go); a line refused before it ran fetched nothing.
 	defer s.writeAWSCredentialNote(time.Now(), ss.stderr)
 
-	// A bare allow runs in real bash, as Execute runs it; nothing it does
-	// carries over to the session's state.
-	if s.isExtraCommandInvocation(command) {
-		if err := s.checkRawAsk(ctx, command); err != nil {
-			return 1, false, fmt.Errorf("validation failed: %w", err)
-		}
-		status, err := exitStatus(s.runRawToWriter(ctx, command, ss.dir, ss.stdout, false, s.isUnsandboxedInvocation(command)))
-		return status, false, err
-	}
-
 	f, err := ParseBash(command)
 	if err != nil {
 		return 2, false, err

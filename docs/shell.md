@@ -76,8 +76,6 @@ terminal. Commands read from a pipe can't be approved, so they are refused.
   aliases.
 - After Ctrl-C, `$?` holds the interrupted command's own exit status, not
   bash's 130.
-- A bare `commands` allow runs in real `bash -c`. That bash is a separate
-  process, so variables it sets and `cd`s it does don't carry over.
 - Under the OS sandbox, keys you type while a command runs go to that command,
   even if it never reads them. In bash they would be kept for the next
   prompt.

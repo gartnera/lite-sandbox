@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"mvdan.cc/sh/v3/interp"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // maxBackgroundOutputBytes caps the size of each background process's output
@@ -414,37 +413,38 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	return s.ExecuteBackgroundContext(context.Background(), command, workDir, readAllowedPaths, writeAllowedPaths)
 }
 
+// backgroundRunKey marks the context of a background run. A command it runs
+// on the host leads its own process group, so stopping the run reaps what the
+// command forked (a dev server's workers, a daemon) too (see execOnHost).
+type backgroundRunKey struct{}
+
+// isBackgroundRun reports whether ctx belongs to a background run.
+func isBackgroundRun(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundRunKey{}).(bool)
+	return v
+}
+
 // ExecuteBackgroundContext is ExecuteBackground with the approval (see
 // WithApproval) read from ctx. Only ctx's approval carries over to the
 // process, which outlives the call: it is cancelled by KillBackground and
 // shutdown, never by ctx.
 func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
-	isExtra := s.isExtraCommandInvocation(command)
-	forceHost := s.isUnsandboxedInvocation(command)
 	isApproved := approved(callCtx)
 	validateCtx := withAuditScope(context.Background(), command, workDir, "bash")
 	if isApproved {
 		validateCtx = WithApproval(validateCtx)
 	}
 
-	var f *syntax.File
-	if isExtra {
-		if err := s.checkRawAsk(validateCtx, command); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-	} else {
-		var err error
-		f, err = ParseBash(command)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-		// The scripts it runs, before any of it runs (as Execute does).
-		if err := s.validateScriptContents(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
+	f, err := ParseBash(command)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+	// The scripts it runs, before any of it runs (as Execute does).
+	if err := s.validateScriptContents(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// create derives the run context from the manager's shared parent (so
@@ -455,6 +455,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		return nil, err
 	}
 	ctx = withAuditScope(ctx, command, workDir, "bash")
+	ctx = context.WithValue(ctx, backgroundRunKey{}, true)
 	if isApproved {
 		ctx = WithApproval(ctx)
 	}
@@ -477,13 +478,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		start := time.Now()
 		runDone := make(chan error, 1)
 		go func() {
-			if isExtra {
-				// newProcessGroup=true: background bare commands often start
-				// servers/daemons that fork, so kill the whole group on stop.
-				runDone <- s.runRawToWriter(ctx, command, workDir, proc.output, true, forceHost)
-			} else {
-				runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
-			}
+			runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
 		}()
 
 		select {

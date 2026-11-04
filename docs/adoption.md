@@ -113,7 +113,7 @@ decides what ranks highest. Review them before applying. The report never
 suggests `commands allow` for privilege, network, or shell commands, never
 suggests widening the boundary to your home directory, a deny-listed path, or
 a system directory, and never suggests lifting a denied command. It notes
-that a bare allow entry skips validation entirely.
+that a bare allow entry skips the command's own argument checks.
 
 Only the MCP server and the PreToolUse hook write the log; sandboxed commands
 can't. The file is created `0600` because command strings can contain inline

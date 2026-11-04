@@ -132,10 +132,10 @@ func TestOSSandboxWorkerPool(t *testing.T) {
 }
 
 // TestOSSandboxBareExtraCommandConfined verifies that a bare extra_commands
-// entry — which bypasses AST parsing and validation entirely — still executes
-// inside the OS sandbox worker when the OS sandbox is enabled: the real bash
-// runs (accepting syntax the AST validator would reject), writes inside the
-// working directory succeed, and writes outside it are blocked.
+// entry for a native program (a copy of bash, whose script the sandbox never
+// sees) still executes inside the OS sandbox worker when the OS sandbox is
+// enabled: writes inside the working directory succeed, and writes outside it
+// are blocked.
 func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 	requireOSSandbox(t)
 	tmpDir := t.TempDir()
@@ -144,14 +144,13 @@ func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{
 		OSSandbox:     &enabled,
-		ExtraCommands: []string{"bash"},
+		ExtraCommands: []string{nativeShell(t, tmpDir)},
 	}
 	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
 
-	// Process substitution would be rejected by the AST validator; it only
-	// works because the bare entry routes the whole string to the real bash.
-	output, err := s.Execute(context.Background(), `bash -c 'cat <(echo raw-ok)'`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	// The native bash runs its own script, process substitution included.
+	output, err := s.Execute(context.Background(), `./nativesh -c 'cat <(echo raw-ok)'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
 		t.Fatalf("bare extra command failed: %v, output: %s", err, output)
 	}
@@ -161,7 +160,7 @@ func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 
 	// Writes inside the working directory succeed and are visible on the host.
 	insideFile := filepath.Join(tmpDir, "inside.txt")
-	if _, err := s.Execute(context.Background(), "bash -c 'touch "+insideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
+	if _, err := s.Execute(context.Background(), "./nativesh -c 'touch "+insideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
 		t.Errorf("expected write inside workdir to succeed, got error: %v", err)
 	}
 	if _, err := os.Stat(insideFile); os.IsNotExist(err) {
@@ -174,7 +173,7 @@ func TestOSSandboxBareExtraCommandConfined(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		restrictedPath = "/usr/testfile"
 	}
-	output, err = s.Execute(context.Background(), "bash -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
+	output, err = s.Execute(context.Background(), "./nativesh -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err == nil {
 		t.Errorf("expected error when writing to %s, got success. output: %s", restrictedPath, output)
 	}
@@ -207,9 +206,9 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 
 	// Control: as a bare extra_commands entry the write is confined and fails.
 	confined := NewSandbox()
-	confined.updateConfig(&config.Config{OSSandbox: &enabled, ExtraCommands: []string{"bash"}}, tmpDir)
+	confined.updateConfig(&config.Config{OSSandbox: &enabled, ExtraCommands: []string{nativeShell(t, tmpDir)}}, tmpDir)
 	defer confined.Close()
-	if output, err := confined.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err == nil {
+	if output, err := confined.Execute(context.Background(), "./nativesh -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err == nil {
 		t.Errorf("expected confined write outside workdir to fail, got success. output: %s", output)
 	}
 	if _, err := os.Stat(outsideFile); err == nil {
@@ -218,9 +217,9 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 
 	// Unsandboxed: the same command runs on the host and the write succeeds.
 	s := NewSandbox()
-	s.updateConfig(&config.Config{OSSandbox: &enabled, UnsandboxedCommands: []string{"bash"}}, tmpDir)
+	s.updateConfig(&config.Config{OSSandbox: &enabled, UnsandboxedCommands: []string{nativeShell(t, tmpDir)}}, tmpDir)
 	defer s.Close()
-	if output, err := s.Execute(context.Background(), "bash -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
+	if output, err := s.Execute(context.Background(), "./nativesh -c 'touch "+outsideFile+"'", tmpDir, []string{tmpDir}, []string{tmpDir}); err != nil {
 		t.Fatalf("expected unsandboxed write outside workdir to succeed, got error: %v, output: %s", err, output)
 	}
 	if _, err := os.Stat(outsideFile); err != nil {
@@ -230,8 +229,8 @@ func TestOSSandboxUnsandboxedCommandEscapes(t *testing.T) {
 
 // TestOSSandboxInternalWritablePaths verifies the two halves of
 // internal_writable_paths: the OS sandbox worker permits writes there (so a
-// spawned program can reach its own data, simulated by a bare extra_commands
-// bash whose write skips AST validation), while the AST/interpreter layer —
+// spawned program can reach its own data, simulated by a bare-allowed native
+// bash whose write the AST layer never sees), while the AST/interpreter layer —
 // whose write set deliberately excludes internal paths — still denies the agent
 // writing there directly.
 func TestOSSandboxInternalWritablePaths(t *testing.T) {
@@ -254,7 +253,7 @@ func TestOSSandboxInternalWritablePaths(t *testing.T) {
 	s := NewSandbox()
 	s.updateConfig(&config.Config{
 		OSSandbox:             &enabled,
-		ExtraCommands:         []string{"bash"},
+		ExtraCommands:         []string{nativeShell(t, tmpDir)},
 		InternalWritablePaths: []string{internalDir},
 	}, tmpDir)
 	defer s.Close()
@@ -263,10 +262,10 @@ func TestOSSandboxInternalWritablePaths(t *testing.T) {
 	readPaths := []string{tmpDir}
 	writePaths := []string{tmpDir}
 
-	// A spawned program (raw bash in the worker, no AST validation) can write
-	// its data directory.
+	// A spawned program (a native bash in the worker, its script unvalidated)
+	// can write its data directory.
 	programFile := filepath.Join(internalDir, "program-data.txt")
-	if output, err := s.Execute(context.Background(), "bash -c 'touch "+programFile+"'", tmpDir, readPaths, writePaths); err != nil {
+	if output, err := s.Execute(context.Background(), "./nativesh -c 'touch "+programFile+"'", tmpDir, readPaths, writePaths); err != nil {
 		t.Fatalf("expected program write to internal path to succeed, got error: %v, output: %s", err, output)
 	}
 	if _, err := os.Stat(programFile); err != nil {
@@ -287,8 +286,8 @@ func TestOSSandboxInternalWritablePaths(t *testing.T) {
 	}
 }
 
-// TestOSSandboxBackgroundBareExtraCommandConfined verifies the background raw
-// path for bare extra_commands is likewise confined by the OS sandbox.
+// TestOSSandboxBackgroundBareExtraCommandConfined verifies a bare-allowed
+// native program run in the background is likewise confined by the OS sandbox.
 func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
 	requireOSSandbox(t)
 	tmpDir := t.TempDir()
@@ -297,7 +296,7 @@ func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{
 		OSSandbox:     &enabled,
-		ExtraCommands: []string{"bash"},
+		ExtraCommands: []string{nativeShell(t, tmpDir)},
 	}
 	s.updateConfig(cfg, tmpDir)
 	defer s.Close()
@@ -307,7 +306,7 @@ func TestOSSandboxBackgroundBareExtraCommandConfined(t *testing.T) {
 		restrictedPath = "/usr/testfile"
 	}
 
-	proc, err := s.ExecuteBackground("bash -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
+	proc, err := s.ExecuteBackground("./nativesh -c 'touch "+restrictedPath+"'", tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)
 	}
@@ -679,5 +678,143 @@ func TestOSSandboxScrubsCredentialEnv(t *testing.T) {
 	}
 	if !strings.Contains(output, "LSB_TEST_TOKEN=kept") {
 		t.Errorf("passed-through variable missing:\n%s", output)
+	}
+}
+
+// TestOSSandboxTrustedScriptCannotEditConfig: the deny list does not apply
+// inside a script a bare allow names, so the script can run the sandbox's own
+// `lite-sandbox config` — but under the OS sandbox that cannot change the
+// policy: the config is read-only in the worker (hidden in allowlist mode),
+// and the script's own redirect to it is refused by the path boundary, which
+// stays enforced inside trusted scripts.
+func TestOSSandboxTrustedScriptCannotEditConfig(t *testing.T) {
+	requireOSSandbox(t)
+	bin, err := filepath.Abs(filepath.Join("..", "..", "lite-sandbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Skip("lite-sandbox binary not built at the repository root")
+	}
+	// The config under the real home: outside /tmp, which the Linux worker
+	// overlays, and outside the working directory.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, "ls-selfprot-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	cfgPath := filepath.Join(root, "config.yaml")
+	const original = "mode: allowlist\n"
+	if err := os.WriteFile(cfgPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
+	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	for _, mode := range []string{string(config.ModeAllowlist), string(config.ModeDenylist)} {
+		t.Run(mode, func(t *testing.T) {
+			work := t.TempDir()
+			scripts := map[string]string{
+				"./subcommand.sh": "lite-sandbox config mode set open --global\n",
+				"./redirect.sh":   "printf 'mode: open\\n' > " + cfgPath + "\n",
+			}
+			yes := true
+			var cmds []config.CommandEntry
+			for name, body := range scripts {
+				if err := os.WriteFile(filepath.Join(work, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cmds = append(cmds, config.CommandEntry{Command: name, Allow: &yes})
+			}
+			s := NewSandbox()
+			s.updateConfig(&config.Config{OSSandbox: &yes, Mode: mode, Commands: cmds}, work)
+			defer s.Close()
+			for name := range scripts {
+				out, err := s.Execute(context.Background(), name, work, []string{work}, []string{work})
+				if data, _ := os.ReadFile(cfgPath); string(data) != original {
+					t.Fatalf("%s changed the config to %q (err %v, output %q)", name, data, err, out)
+				}
+			}
+		})
+	}
+
+	// Control: without the OS sandbox the same script does reach the config,
+	// so the checks above are not passing because nothing ran.
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "subcommand.sh"), []byte("#!/bin/bash\nlite-sandbox config mode set open --global\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{OSSandbox: &no, Commands: []config.CommandEntry{{Command: "./subcommand.sh", Allow: &yes}}}, work)
+	defer s.Close()
+	out, err := s.Execute(context.Background(), "./subcommand.sh", work, []string{work}, []string{work})
+	if data, _ := os.ReadFile(cfgPath); string(data) == original {
+		t.Errorf("control: without the OS sandbox the script should have changed the config (err %v, output %q)", err, out)
+	}
+}
+
+// TestOSSandboxTrustedScriptRouting: everything a trusted script runs is
+// routed the way the script is. In a sandboxed script, a command allowed with
+// no_sandbox still runs in the shared worker, so the script cannot reach the
+// host by pointing PATH at a binary it wrote and running that command. A
+// script allowed with no_sandbox runs everything on the host, its own
+// redirects included.
+func TestOSSandboxTrustedScriptRouting(t *testing.T) {
+	requireOSSandbox(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside, err := os.MkdirTemp(home, "ls-trusted-routing-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(outside) })
+	work := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(work, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hijacked := filepath.Join(outside, "hijacked")
+	deployed := filepath.Join(outside, "deployed")
+	write("evil/hostname", "#!/bin/sh\ntouch "+hijacked+"\n")
+	write("build.sh", "#!/bin/bash\nPATH=\"$PWD/evil:$PATH\" hostname\n")
+	write("deploy.sh", "#!/bin/bash\necho x > "+deployed+"\n")
+
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{
+		{Command: "./build.sh", Allow: &yes},
+		{Command: "./deploy.sh", Allow: &yes, NoSandbox: true},
+		{Command: "hostname", Allow: &yes, NoSandbox: true},
+	}}, work)
+	defer s.Close()
+	paths := []string{work}
+
+	out, err := s.Execute(context.Background(), "./build.sh", work, paths, paths)
+	if _, statErr := os.Stat(hijacked); statErr == nil {
+		t.Fatalf("a sandboxed trusted script ran its own binary on the host (err %v, output %q)", err, out)
+	}
+	// Control: at top level the same no_sandbox command does run on the host.
+	if out, err := s.Execute(context.Background(), "hostname", work, paths, paths); err != nil {
+		t.Fatalf("hostname: %v %q", err, out)
+	}
+
+	if out, err := s.Execute(context.Background(), "./deploy.sh", work, paths, paths); err != nil {
+		t.Fatalf("a no_sandbox trusted script should run on the host: %v %q", err, out)
+	}
+	if _, err := os.Stat(deployed); err != nil {
+		t.Errorf("a no_sandbox trusted script's redirect should reach the host: %v", err)
 	}
 }

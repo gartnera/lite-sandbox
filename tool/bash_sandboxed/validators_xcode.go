@@ -383,7 +383,7 @@ func xcodeDisableNestedSandbox(args []string) []string {
 // sandbox-exec of its own, which macOS refuses inside the worker's, so turn
 // it off where the worker's sandbox confines them instead.
 func xcodePrepareExec(ctx context.Context, s *Sandbox, args []string, x execEnv) []string {
-	if x.useOSSandbox && !s.execIsUnsandboxed(ctx, args) {
+	if x.useOSSandbox && !s.runsOnHost(ctx, args) {
 		return xcodeDisableNestedSandbox(args)
 	}
 	return args
