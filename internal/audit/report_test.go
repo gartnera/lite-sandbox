@@ -71,7 +71,7 @@ func TestBuildReport(t *testing.T) {
 		if strings.Contains(s.Command, "profiles enable") && (s.Reason != `"cargo": its profile is not enabled`) {
 			t.Errorf("profile suggestion reason = %q", s.Reason)
 		}
-		if strings.Contains(s.Command, "commands allow") && !strings.Contains(s.Reason, "skips validation") {
+		if strings.Contains(s.Command, "commands allow") && !strings.Contains(s.Reason, "skips the command's own argument checks") {
 			t.Errorf("commands-allow suggestion lacks the caveat: %+v", s)
 		}
 	}

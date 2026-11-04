@@ -120,7 +120,7 @@ func BuildReport(recs []Record, opts Options) *Report {
 }
 
 // dangerousCommands are never proposed for `commands allow`: a bare entry
-// runs through real bash with no validation at all, and these are the
+// lifts the command's own argument checks for every invocation, and these are the
 // commands whose whole point is to escape (privilege, network, shells, mounts,
 // scheduled execution). The agent chooses what it attempts, and therefore what
 // ranks highest in the report, so this list is the floor under that ranking.
@@ -182,7 +182,7 @@ func suggestions(agg map[string]map[string]*subjectAgg, protected []string) []Su
 				// its validators, so there is no bare-allow caveat to add.
 				reason = fmt.Sprintf("%q: its profile is not enabled", subj)
 			case rule == "command_whitelist":
-				reason += " (a bare commands entry skips validation; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
+				reason += " (a bare commands entry skips the command's own argument checks; prefer a subcommand-restricted entry such as `" + subj + " <subcommand>`)"
 			}
 			add(a.fix, reason, a.count)
 		}

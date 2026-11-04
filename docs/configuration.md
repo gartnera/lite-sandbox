@@ -89,22 +89,57 @@ lite-sandbox config commands remove curl
 
 ### Allowed commands
 
-`allow: true` admits a command the whitelist doesn't list. This matters in
-`allowlist` mode; in `denylist` and `open` mode every command can already run,
-so there it mostly just selects the raw-bash path described next. A **bare**
-entry (a single token) allows the command with any arguments. When it is the
-leading command of an invocation, bash AST parsing is skipped and the whole
-command string runs in real bash. An entry with arguments (e.g.
+`allow: true` admits a command the whitelist doesn't list, and lifts the
+command's own argument checks (`git push`, `find -delete`, ...) for the
+invocations it admits. The whitelist matters in `allowlist` mode; in
+`denylist` and `open` mode every command can already run, so there an allow
+mostly lifts those argument checks. A **bare** entry (a single token) allows
+the command with any arguments. An entry with arguments (e.g.
 `uv run pyright`) allows only invocations whose leading non-flag arguments
-match, and those still go through normal parsing and validation. When the
-[OS sandbox](security.md#os-level-sandboxing-optional) is enabled, bare
-entries run inside it like every other command, so filesystem confinement
-still applies even though validation is skipped.
+match; the command's other invocations keep its argument checks.
+
+Either way the command line is still parsed and validated as usual. The allow
+covers that command's invocations, not the rest of the line: with `fvm`
+allowed, `fvm flutter test && curl example.com` is still refused for `curl`,
+and redirects and the paths the line names are still held to the boundary.
+The command runs where any other would: in the
+[OS sandbox](security.md#os-level-sandboxing-optional) worker when that is
+enabled, or the worker of a [grant scoped to it](#grants-for-one-command-commands).
+
+#### Allowed scripts
+
+A bare entry that names a script by path (any word with a `/`:
+`./scripts/build.sh`, `scripts/build.sh`) also **trusts the script**. It runs
+through the sandbox's interpreter like any other script, whether it's called
+directly, as `bash scripts/build.sh`, or after a `cd`, and the commands it
+runs are routed the same way (the OS sandbox worker, a scoped grant's worker,
+the host for `no_sandbox`). The difference is what those commands, at any
+depth, are held to:
+
+- **Not checked:** the command whitelist, the local-binary gate, each
+  command's argument checks, the shell-construct rules (the script may set
+  `PATH`), and the [deny list](#denied-commands).
+- **Still checked:** [`ask` entries](#commands-that-ask-first), and the
+  path boundary, which is what confines the interpreter's own redirects and
+  file opens. Those are made by lite-sandbox itself, on the host, outside
+  the OS sandbox.
+
+The command line that runs the script is validated as usual, the deny list
+included. A script whose shebang names another interpreter
+(`#!/usr/bin/env python3`), and a compiled binary, run as the native program
+instead, since the sandbox has nothing of theirs to interpret. The interpreter
+implements most of bash but isn't GNU bash; see
+[interpreter differences](security.md#general-limitations).
+
+Allow only scripts whose contents you control. The agent can edit a script
+in the working directory, and with the deny list lifted inside it, an edited
+script can run any command, the sandbox's own `lite-sandbox config` included.
+The OS sandbox still confines what those commands touch.
 
 ### Unsandboxed commands
 
 `no_sandbox: true` on an allow works the same way (same bare and restricted
-forms, same validation bypass), except matching invocations always run
+forms, same checks lifted), except matching invocations always run
 **directly on the host**, outside the
 [OS sandbox](security.md#os-level-sandboxing-optional) worker
 (bwrap/sandbox-exec) even when it is enabled. It's an escape hatch for trusted
@@ -124,7 +159,9 @@ These commands also bypass the docker filtering proxy: the proxy's
 `DOCKER_HOST` override isn't applied, so `docker` reaches the real daemon (or
 whatever `DOCKER_HOST` the host environment sets). A restricted entry
 unsandboxes only matching invocations; e.g. `git push` leaves other `git`
-subcommands confined.
+subcommands confined. They start from the same environment as every other
+command: with the OS sandbox on, variables named like credentials are left
+out unless [`os_sandbox_env_passthrough`](#credentials-in-the-environment-os_sandbox_env_passthrough) names them.
 
 ### Commands that ask first
 
@@ -138,8 +175,8 @@ rather than allow or refuse outright.
   (`rm`) now asks first; either way its argument validators and path checks
   still apply, so an approved `rm` outside the project is still refused.
 - **With `allow: true`**, the allow takes effect once you approve: the
-  invocation gets everything the allow gives (a bare one's raw-bash path, a
-  restricted one's validator bypass, `no_sandbox`). `git push` with
+  invocation gets everything the allow gives (the lifted argument checks, a
+  bare script's trust, `no_sandbox`). `git push` with
   `allow: true` and `ask: true` asks before every push, which `git`'s
   argument validator would otherwise refuse. An asking allow of a built-in
   denial's text (`lite-sandbox update`) lifts it the same way, asking each
@@ -188,7 +225,10 @@ Claude Code denies the call.
 checked before every command gate (static, runtime, and wrapped: `env`,
 `xargs`, `timeout`, `nice`, `nohup`, `setsid`, `stdbuf`, `find -exec`). In `denylist` and `allowlist` mode a match
 is refused regardless of any allow, `no_sandbox` entries included: with
-`git push` denied and `git` allowed, only pushes are refused. In `open` mode a
+`git push` denied and `git` allowed, only pushes are refused. The one place
+it doesn't apply is inside a script a bare allow names (see
+[allowed scripts](#allowed-scripts)); the command line that runs the script is
+still checked. In `open` mode a
 match is only recorded to the audit log, like every rule.
 
 Denials use the same entry format as allows, with three differences:
@@ -200,9 +240,6 @@ Denials use the same entry format as allows, with three differences:
   value: `lite-sandbox --log-level debug config mode set open` matches
   `lite-sandbox config`. Tokens that appear later as data don't match: with
   `git push` denied, `git log --grep push` still runs.
-- **A denied command never takes the raw-bash path.** A command in the deny
-  list is always parsed, even if a bare allow also names it, so the invocation
-  can be matched against the entry.
 
 ### Built-in entries
 
@@ -522,12 +559,14 @@ What gets routed to the command's worker, and how:
 - It runs with the server's environment. `PATH` keeps only the directories
   sandboxed commands can't write, so the programs it starts can't be ones the
   agent planted.
-- It still has to be allowed and pass validation like any command. Allow its
-  subcommands (`lite-sandbox config commands allow "gh pr view" "gh api"`),
-  not the bare name: a bare allow runs the whole command line through `bash -c`, which
-  always goes to the shared worker, and `no_sandbox` runs it on the host,
-  where nothing is hidden. `paths allow --commands` and `config mode show`
-  warn about both.
+- It still has to be allowed and pass validation like any command. An allow
+  lifts its argument checks for the invocations it admits, and those run here,
+  with the grant. So allow the subcommands that never run code
+  (`lite-sandbox config commands allow "gh pr view" "gh api"`) rather than the
+  bare name: with `gh` bare-allowed, `gh extension exec` would run an
+  extension with the token. `no_sandbox` runs the command on the host, where
+  nothing is hidden; `paths allow --commands` and `config mode show` warn
+  about it.
 
 The path should lie outside what the agent may read itself (the working
 directory and the agent-facing grants). The OS sandbox only covers the

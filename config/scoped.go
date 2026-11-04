@@ -164,19 +164,14 @@ func pathExists(p string) bool {
 }
 
 // ScopeBypass explains why a command a scoped grant names would not run in
-// its scope's worker, or returns "" when it would. Two allows route around
-// the worker: a bare allow runs the whole command line through `bash -c`,
-// which never goes to a scoped worker (it could run anything), and no_sandbox
-// runs the command on the host, outside every worker.
+// its scope's worker, or returns "" when it would. One allow routes around
+// the worker: no_sandbox runs the command on the host, outside every worker.
+// (An allow without it, bare or restricted, leaves the command line parsed,
+// so the command still runs in its scope's worker.)
 func (c *Config) ScopeBypass(name string) string {
 	for _, cmd := range c.UnsandboxedCommandList() {
 		if f := strings.Fields(cmd); len(f) > 0 && f[0] == name {
 			return fmt.Sprintf("%q is allowed with no_sandbox, so it runs on the host, outside the OS sandbox, where nothing is hidden", cmd)
-		}
-	}
-	for _, cmd := range c.ExtraCommandList() {
-		if strings.TrimSpace(cmd) == name {
-			return fmt.Sprintf("the bare allow of %s runs a command line starting with it through bash -c in the shared worker, without the grant; allow its subcommands instead (\"%s <subcommand>\")", name, name)
 		}
 	}
 	return ""

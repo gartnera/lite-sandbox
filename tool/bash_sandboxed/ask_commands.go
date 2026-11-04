@@ -14,7 +14,7 @@ import (
 // and the MCP server marks the call's context with WithApproval once it holds
 // the hook's ticket). What the sandbox does is refuse a prompted invocation
 // whose call was not approved, at every command gate the deny list checks —
-// static, runtime, and the raw-bash path — so a command the hook could not see
+// static and runtime — so a command the hook could not see
 // coming (a dynamic name, a script) is refused rather than run unasked.
 //
 // An approved invocation of a ask-only entry is treated as whitelisted
@@ -125,27 +125,6 @@ func (s *Sandbox) AskCommands(command string) []string {
 	}
 	_, entries := s.askCalls(f)
 	return entries
-}
-
-// checkRawAsk is the ask gate for a command string taking the raw-bash
-// path (a bare allow leading it), which no other gate sees: the whole string
-// is handed to the real bash. Any prompted invocation in it, wherever it sits,
-// needs the call approved. A string that does not parse cannot be checked, so
-// it is refused when there are ask entries to check it against.
-func (s *Sandbox) checkRawAsk(ctx context.Context, command string) error {
-	if len(s.getAskCommands()) == 0 || approved(ctx) {
-		return nil
-	}
-	f, err := ParseBash(command)
-	if err != nil {
-		return s.report(ctx, layerStatic, ruleCommandAsk, tagRule(ruleCommandAsk, "", fmt.Errorf(
-			"the command could not be parsed to check it for commands that need the user's approval: %w", err)))
-	}
-	names, entries := s.askCalls(f)
-	if len(entries) == 0 {
-		return nil
-	}
-	return s.report(ctx, layerStatic, ruleCommandAsk, askRequiredError(names[0], entries[0]))
 }
 
 // askRequiredError builds the tagged error for a prompted invocation of

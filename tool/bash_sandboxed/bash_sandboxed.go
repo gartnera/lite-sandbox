@@ -54,20 +54,22 @@ type Sandbox struct {
 	// non-flag arguments; an invocation matches when its leading non-flag
 	// args start with any of those sequences.
 	extraSubCommands map[string][][]string
-	// bareExtraCommands tracks commands that have a bare entry in extra_commands
-	// (i.e., the entry has no subcommand restriction). These commands bypass
-	// bash AST parsing and are executed directly with the real bash.
+	// bareExtraCommands tracks commands that have a bare allow (i.e., the
+	// entry has no subcommand restriction): they are admitted with any
+	// arguments. The command line is still parsed and validated like any
+	// other; only a bare allow of a script path skips anything more — the
+	// validation of the script's contents (see bareAllowsScript).
 	bareExtraCommands map[string]bool
 	// bareExtraScriptPaths is the set of absolute paths corresponding to
-	// path-like bare entries in extra_commands (e.g., "./scripts/foo.sh"
-	// resolved against workDir at config-update time). The ExecHandler uses
-	// this so that invoking the same script from a different cwd (after a
-	// `cd`) still hits the bare-extra bypass — interp tracks cwd in
-	// HandlerContext, so the lookup is done with the post-`cd` directory.
+	// path-like bare allows (e.g., "./scripts/foo.sh" resolved against
+	// workDir at config-update time). The ExecHandler uses this so that
+	// invoking the same script from a different cwd (after a `cd`) still
+	// matches the entry — interp tracks cwd in HandlerContext, so the lookup
+	// is done with the post-`cd` directory.
 	bareExtraScriptPaths map[string]bool
 	// unsandboxed_commands entries are treated exactly like extra_commands for
-	// validation (merged into the maps above so they are allowed and bare entries
-	// skip AST parsing); the only difference is that matching invocations execute
+	// validation (merged into the maps above so they are allowed); the only
+	// difference is that matching invocations execute
 	// directly on the host, bypassing the OS sandbox worker even when it is
 	// enabled. The maps below mirror bareExtraCommands / bareExtraScriptPaths /
 	// extraSubCommands but only for the unsandboxed subset, so routing is decided
@@ -527,8 +529,9 @@ func awsBaseEnv(base []string, imdsEndpoint, imdsRegion string) []string {
 // commandBaseEnv is the environment commands start from: the server's, less
 // the variables named like credentials when the OS sandbox is on
 // (config.Config.SandboxEnv) — the agent's own token among them — so the code
-// a command runs cannot read them. Commands that run on the host bypassing the
-// worker by a bare no_sandbox allow (runRawToWriter) keep the full one.
+// a command runs cannot read them. A command a no_sandbox allow runs on the
+// host starts from the same environment; os_sandbox_env_passthrough names the
+// variables it should keep.
 func (s *Sandbox) commandBaseEnv() []string {
 	cfg := s.getConfig()
 	if cfg.ScrubsEnv() {
@@ -1084,11 +1087,6 @@ func (s *Sandbox) ValidateCommandContext(ctx context.Context, command string, wo
 	// ValidateCommand backs the PreToolUse hook, so its findings are
 	// attributed to the hook in the audit log.
 	ctx = withAuditScope(ctx, command, workDir, "hook")
-	// Bare extra_commands entries bypass AST parsing; treat as valid, once
-	// any command needing approval in them has it.
-	if s.isExtraCommandInvocation(command) {
-		return s.checkRawAsk(ctx, command)
-	}
 	f, err := ParseBash(command)
 	if err != nil {
 		return err
@@ -1149,14 +1147,15 @@ func (s *Sandbox) validateScriptContents(ctx context.Context, f *syntax.File, wo
 // validateScriptFile reads a script file path, parses and validates its contents.
 func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
 	path := absPath(scriptPath, workDir)
-	// Bare extra_commands script entries are an explicit trust opt-in; skip
-	// body validation regardless of how the script is reached (directly,
+	// A bare allow of a script path trusts the script: its body is still
+	// validated, with the checks a bare allow lifts not enforced
+	// (withTrustedScript), however the script is reached (directly,
 	// `bash <script>`, or `source <script>`). This mirrors the runtime
-	// ExecHandler bypass so static preflight does not reject a script the user
-	// deliberately opted out of validation for; like executeBash, it matches
-	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
+	// handlers, so static preflight does not reject a script the user
+	// allowed; like executeBash, it matches `bash build.sh` to an entry
+	// registered as ./build.sh by resolved path.
 	if s.bareAllowsScript(scriptPath, workDir) || s.getBareExtraScriptPaths()[path] {
-		return nil
+		ctx = withTrustedScript(ctx)
 	}
 	if isBinaryExecutable(path) {
 		return nil
@@ -1213,20 +1212,6 @@ func scriptOperand(args []*syntax.Word) (script string, inline bool) {
 	return script, inline
 }
 
-// firstCommandWord extracts the first word from a command string, stopping at
-// the first whitespace or shell metacharacter. Returns empty string if the
-// command starts with a metacharacter or is empty.
-func firstCommandWord(s string) string {
-	s = strings.TrimLeft(s, " \t\n")
-	for i, ch := range s {
-		switch ch {
-		case ' ', '\t', '\n', '|', '&', ';', '(', ')', '<', '>', '`', '$', '#', '!':
-			return s[:i]
-		}
-	}
-	return s
-}
-
 // getBareExtraCommands returns a snapshot of the bare (unrestricted) extra commands.
 func (s *Sandbox) getBareExtraCommands() map[string]bool {
 	s.mu.RLock()
@@ -1256,38 +1241,6 @@ func (s *Sandbox) bareAllowsScript(cmdName, dir string) bool {
 		return true
 	}
 	return isScriptPath(cmdName) && dir != "" && s.getBareExtraScriptPaths()[absPath(cmdName, dir)]
-}
-
-// isExtraCommandInvocation reports whether the command string should bypass
-// bash AST parsing because its leading command is a bare extra_commands entry
-// (i.e., added without a subcommand restriction).
-//
-// A command whose name appears anywhere in the deny list never takes the
-// bypass, even with a bare extra_commands entry: the raw path has no parsed
-// argv to match entries against, so the invocation is routed through normal
-// parsing instead, where deniedCommandWords decides it precisely. An
-// invocation that turns out not to match an entry still runs — just parsed and
-// validated rather than handed to the real bash.
-func (s *Sandbox) isExtraCommandInvocation(command string) bool {
-	word := firstCommandWord(command)
-	if word == "" {
-		return false
-	}
-	return s.getBareExtraCommands()[word] && !s.deniedCommandName(word)
-}
-
-// isUnsandboxedInvocation reports whether the command string's leading command
-// is a bare unsandboxed_commands entry, meaning it must run directly on the host
-// (bypassing the OS sandbox worker). Used by the top-level raw-execution path,
-// which only ever handles bare entries.
-func (s *Sandbox) isUnsandboxedInvocation(command string) bool {
-	word := firstCommandWord(command)
-	if word == "" {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.unsandboxedBare[word]
 }
 
 // execIsUnsandboxed reports whether an exec invocation (from the interpreter's
@@ -1439,24 +1392,48 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		Stdout: hc.Stdout,
 		Stderr: hc.Stderr,
 	}
+	// A background run's command leads its own process group, and stopping
+	// the run signals the whole group: background commands often start
+	// servers and daemons that fork, and killing only the direct process
+	// would leave those running. (The OS sandbox worker kills a command's
+	// whole subtree already.) A foreground command stays in the caller's
+	// group, where an interactive one can read the terminal.
+	group := isBackgroundRun(ctx) && runtime.GOOS != "windows"
+	if group {
+		setProcessGroup(cmd)
+		// A forked child that inherited stdout would otherwise keep Wait
+		// blocked on the pipe after the command itself exited.
+		cmd.WaitDelay = runnerKillGracePeriod
+	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(hc.Stderr, "%v\n", err)
 		return interp.ExitStatus(127)
 	}
+	var finished atomic.Bool
 	// Cancellation mirrors interp.DefaultExecHandler(gracefulKillTimeout):
-	// SIGINT, then SIGKILL after the grace period.
+	// SIGINT, then SIGKILL after the grace period — for a background run's
+	// process group, SIGTERM then SIGKILL to the group, unless the command
+	// has returned by then (its group id may have been reused).
 	stopf := context.AfterFunc(ctx, func() {
-		if runtime.GOOS == "windows" {
+		switch {
+		case runtime.GOOS == "windows":
 			_ = cmd.Process.Signal(os.Kill)
-			return
+		case group:
+			terminateProcessGroup(cmd)
+			time.Sleep(gracefulKillTimeout)
+			if !finished.Load() {
+				killProcessGroup(cmd)
+			}
+		default:
+			_ = cmd.Process.Signal(os.Interrupt)
+			time.Sleep(gracefulKillTimeout)
+			_ = cmd.Process.Signal(os.Kill)
 		}
-		_ = cmd.Process.Signal(os.Interrupt)
-		time.Sleep(gracefulKillTimeout)
-		_ = cmd.Process.Signal(os.Kill)
 	})
 	defer stopf()
 
 	err = cmd.Wait()
+	finished.Store(true)
 	if err == nil {
 		return nil
 	}
@@ -1469,135 +1446,6 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	return err
 }
 
-// executeRaw executes a command string directly using the system bash without
-// going through AST parsing or validation. Used for bare extra_commands entries.
-// When forceHost is true (bare unsandboxed_commands entries) the command runs on
-// the host even if the OS sandbox is enabled.
-func (s *Sandbox) executeRaw(ctx context.Context, command string, workDir string, forceHost bool) (string, error) {
-	var out bytes.Buffer
-	if err := s.runRawToWriter(ctx, command, workDir, &out, false, forceHost); err != nil {
-		output := out.String()
-		return output, &CommandFailedError{Err: err, Output: output}
-	}
-	return out.String(), nil
-}
-
-// runRawToWriter executes a command string directly with the system bash,
-// streaming combined stdout/stderr to out. It performs no AST parsing or
-// validation and is used both by executeRaw (bare extra_commands) and by
-// background execution of those commands.
-//
-// When newProcessGroup is true the bash process leads its own process group and
-// cancellation SIGKILLs the whole group, so children the command forked (a dev
-// server, a daemon, `something &`) are reaped too — not just bash itself. This
-// is used for background runs; foreground runs keep the default behavior where
-// CommandContext kills only the direct process.
-//
-// When forceHost is true the command always runs on the host even if the OS
-// sandbox is enabled — used for bare unsandboxed_commands entries.
-func (s *Sandbox) runRawToWriter(ctx context.Context, command string, workDir string, out io.Writer, newProcessGroup, forceHost bool) error {
-	s.mu.RLock()
-	useOSSandbox := s.cfg.OSSandboxEnabled() && !forceHost
-	imdsEndpoint := s.imdsEndpoint
-	imdsRegion := s.imdsRegion
-	dockerHost := s.dockerHost
-	s.mu.RUnlock()
-
-	// The AST bypass skips validation, not confinement: when the OS sandbox is
-	// enabled the raw bash still runs inside the worker, so filesystem
-	// restrictions apply to extra_commands like any other command. The worker
-	// runs each command in its own process group and kills the whole subtree on
-	// cancellation, so newProcessGroup is only needed for the host path below.
-	if useOSSandbox {
-		return s.runRawInWorker(ctx, command, workDir, imdsEndpoint, imdsRegion, dockerHost, out)
-	}
-
-	env := awsBaseEnv(os.Environ(), imdsEndpoint, imdsRegion)
-	// Skip the docker filtering proxy for unsandboxed commands (forceHost) so
-	// they reach the real docker daemon rather than the proxy socket.
-	if dockerHost != "" && !forceHost {
-		env = append(env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
-	}
-
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	cmd.Dir = workDir
-	cmd.Stdout = out
-	cmd.Stderr = out
-	cmd.Env = env
-
-	var finished atomic.Bool
-	if newProcessGroup {
-		setProcessGroup(cmd)
-		// Override CommandContext's default Cancel (which kills only bash) so
-		// cancellation tears down the whole group. Escalate gracefully: SIGTERM
-		// first, then SIGKILL the group after a grace period if it has not
-		// exited. The finished guard avoids signaling a recycled pid/group once
-		// the command has returned.
-		cmd.Cancel = func() error {
-			terminateProcessGroup(cmd)
-			time.AfterFunc(gracefulKillTimeout, func() {
-				if !finished.Load() {
-					killProcessGroup(cmd)
-				}
-			})
-			return nil
-		}
-	}
-
-	// Bound how long Wait blocks on I/O after the context is cancelled. Without
-	// this, a backgrounded grandchild (e.g. `npm run dev &`) inherits the stdout
-	// pipe's write end and keeps it open after bash exits, so cmd.Run would block
-	// until that child exits — pinning the calling MCP worker indefinitely and
-	// ignoring the timeout entirely. WaitDelay makes the runtime close the pipes
-	// and return once the delay elapses after cancellation. CommandContext has
-	// already installed a Cancel func that kills bash on ctx.Done(). It must
-	// exceed gracefulKillTimeout so the graceful SIGKILL lands before WaitDelay's
-	// force-kill of the direct process.
-	cmd.WaitDelay = runnerKillGracePeriod
-
-	err := cmd.Run()
-	finished.Store(true)
-	return err
-}
-
-// runRawInWorker executes a bare extra_commands string with `bash -c` inside
-// the OS sandbox worker, streaming combined stdout/stderr to out. No AST
-// parsing or validation is performed — trust comes from the user's explicit
-// opt-in plus the worker's bwrap/sandbox-exec confinement.
-func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndpoint, imdsRegion, dockerHost string, out io.Writer) error {
-	w, err := s.getOrCreateWorker()
-	if err != nil {
-		return fmt.Errorf("failed to get worker: %w", err)
-	}
-
-	// Same base environment the host raw path uses (ambient profile selectors
-	// stripped, default brokered endpoint/region injected), as a map for the
-	// worker protocol. Converting after awsBaseEnv is equivalent to deleting and
-	// re-setting the keys by hand: awsBaseEnv appends its injections last and
-	// later entries win in a map, matching os/exec's own duplicate handling.
-	env := envSliceToMap(awsBaseEnv(s.commandBaseEnv(), imdsEndpoint, imdsRegion))
-	// awsBaseEnv only injects the region alongside an IMDS endpoint; this path has
-	// always injected it whenever a region is configured, so re-apply it here to
-	// keep the worker environment unchanged. (The two agree in practice: the IMDS
-	// lifecycle only ever publishes a region together with an endpoint.)
-	if r := awsRegionToInject(imdsRegion); r != "" {
-		env["AWS_REGION"] = r
-		env["AWS_DEFAULT_REGION"] = r
-	}
-	if dockerHost != "" {
-		env["DOCKER_HOST"] = dockerHost
-	}
-
-	exitCode, err := w.Exec(ctx, []string{"bash", "-c", command}, workDir, env, nil, out, out)
-	if err != nil {
-		return fmt.Errorf("worker communication failed: %w", err)
-	}
-	if exitCode != 0 {
-		return interp.ExitStatus(exitCode)
-	}
-	return nil
-}
-
 // Execute parses, validates, and executes a bash command.
 // workDir is the working directory for the command and for resolving relative paths.
 // readAllowedPaths are absolute directories that read-only commands may access.
@@ -1605,20 +1453,6 @@ func (s *Sandbox) runRawInWorker(ctx context.Context, command, workDir, imdsEndp
 // It returns the combined stdout and stderr output.
 func (s *Sandbox) Execute(ctx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (string, error) {
 	slog.InfoContext(ctx, "executing sandboxed bash", "command", command)
-
-	// Bare extra_commands entries bypass bash AST parsing entirely and are
-	// executed directly with the real bash for maximum compatibility. When the
-	// OS sandbox is enabled the raw bash runs inside the worker, so filesystem
-	// confinement still applies — unless the entry came from unsandboxed_commands,
-	// which runs on the host regardless.
-	if s.isExtraCommandInvocation(command) {
-		if err := s.checkRawAsk(withAuditScope(ctx, command, workDir, "bash"), command); err != nil {
-			return "", fmt.Errorf("validation failed: %w", err)
-		}
-		start := time.Now()
-		output, err := s.executeRaw(ctx, command, workDir, s.isUnsandboxedInvocation(command))
-		return s.withAWSCredentialNote(start, output, err)
-	}
 
 	// Parse and validate
 	f, err := ParseBash(command)

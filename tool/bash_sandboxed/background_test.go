@@ -3,6 +3,7 @@ package bash_sandboxed
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -265,9 +266,27 @@ func TestListBackground(t *testing.T) {
 	}
 }
 
-// TestBackgroundKillReapsForkedChildren verifies that killing a background bare
-// extra_commands invocation tears down the whole process group, including a
-// grandchild the command forked — not just the direct process.
+// forkingScript writes a bare-allowed python3 script into dir and returns
+// its invocation. A script a bare allow names whose shebang is not a shell
+// runs as the native program, on the host here (no OS sandbox), so it is what
+// exercises a background run's process group: the interpreter's own `&` runs
+// a goroutine, not a process.
+func forkingScript(t *testing.T, s *Sandbox, dir, body string) string {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	path := filepath.Join(dir, "fork.py")
+	if err := os.WriteFile(path, []byte("#!/usr/bin/env python3\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./fork.py"}}, dir)
+	return "./fork.py"
+}
+
+// TestBackgroundKillReapsForkedChildren verifies that killing a background
+// run tears down the whole process group of a command it ran on the host,
+// including a grandchild the command forked — not just the direct process.
 func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -275,14 +294,14 @@ func TestBackgroundKillReapsForkedChildren(t *testing.T) {
 	}
 	s := NewSandbox()
 	cwd := t.TempDir()
-	// "bash" as a bare extra command routes through the executeRaw path, which
-	// runs the background command in its own process group.
-	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
-
 	pidFile := filepath.Join(cwd, "child.pid")
 	// Fork a long-lived grandchild, record its pid, then wait so the command
 	// stays running until we kill it.
-	command := "bash -c 'sleep 300 & echo $! > " + pidFile + "; wait'"
+	command := forkingScript(t, s, cwd, `import subprocess, sys
+p = subprocess.Popen(["sleep", "300"])
+open(sys.argv[1], "w").write(str(p.pid))
+p.wait()
+`) + " " + pidFile
 	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)
@@ -339,10 +358,12 @@ func TestCloseShutsDownBackgroundProcesses(t *testing.T) {
 	}
 	s := NewSandbox()
 	cwd := t.TempDir()
-	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
-
 	pidFile := filepath.Join(cwd, "child.pid")
-	command := "bash -c 'sleep 300 & echo $! > " + pidFile + "; wait'"
+	command := forkingScript(t, s, cwd, `import subprocess, sys
+p = subprocess.Popen(["sleep", "300"])
+open(sys.argv[1], "w").write(str(p.pid))
+p.wait()
+`) + " " + pidFile
 	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)
@@ -412,11 +433,17 @@ func TestBackgroundKillIsGraceful(t *testing.T) {
 	}
 	s := NewSandbox()
 	cwd := t.TempDir()
-	s.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, cwd)
-
 	marker := filepath.Join(cwd, "termed")
 	ready := filepath.Join(cwd, "ready")
-	command := "bash -c 'trap \"echo yes > " + marker + "; exit 0\" TERM; touch " + ready + "; while true; do sleep 0.05; done'"
+	command := forkingScript(t, s, cwd, `import signal, sys, time
+def term(*_):
+    open(sys.argv[1], "w").write("yes")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, term)
+open(sys.argv[2], "w").close()
+while True:
+    time.sleep(0.05)
+`) + " " + marker + " " + ready
 	proc, err := s.ExecuteBackground(command, cwd, []string{cwd}, []string{cwd})
 	if err != nil {
 		t.Fatalf("ExecuteBackground failed: %v", err)

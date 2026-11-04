@@ -345,7 +345,7 @@ func TestOSSandboxGhProfile(t *testing.T) {
 	s.updateConfig(&config.Config{
 		OSSandbox: &yes,
 		Profiles:  []config.ProfileEntry{{Name: "gh"}},
-		Commands:  []config.CommandEntry{{Command: "bash", Allow: &yes}}, // stands in for a program the agent runs
+		Commands:  []config.CommandEntry{{Command: nativeShell(t, work), Allow: &yes}}, // stands in for a program the agent runs
 	}, work)
 	defer s.Close()
 	paths := []string{work}
@@ -361,9 +361,9 @@ func TestOSSandboxGhProfile(t *testing.T) {
 		t.Errorf("gh did not reach its token and the keyring: %q", out)
 	}
 	for _, cmd := range []string{
-		"bash -c 'cat " + hosts + "'",
-		`bash -c "` + busRead + ` ` + bus + `"`,
-		"bash -c 'gh pr list'",
+		"./nativesh -c 'cat " + hosts + "'",
+		`./nativesh -c "` + busRead + ` ` + bus + `"`,
+		"./nativesh -c 'gh pr list'",
 	} {
 		if out, _ := run(cmd); strings.Contains(out, "gho_s3cret") || strings.Contains(out, "keyring-ok") {
 			t.Errorf("%s: the shared worker reached gh's credentials: %q", cmd, out)

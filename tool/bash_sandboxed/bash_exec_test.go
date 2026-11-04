@@ -1330,3 +1330,81 @@ func TestExecuteScript_SlashPathWithoutDotIsAScript(t *testing.T) {
 		})
 	}
 }
+
+// TestExecuteScript_BareScriptRunsThroughInterpreter verifies that a script a
+// bare allow names runs through the sandbox's own interpreter, not a native
+// bash: the interpreter's `$!` is a goroutine id ("g1"), where bash's is a pid.
+func TestExecuteScript_BareScriptRunsThroughInterpreter(t *testing.T) {
+	dir := t.TempDir()
+	body := "#!/bin/bash\ntrue &\necho bg=$!\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./run.sh"}}, dir)
+	for _, cmd := range []string{"./run.sh", "bash run.sh", "true && ./run.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if !strings.Contains(out, "bg=g") {
+			t.Errorf("%s: output %q, want the interpreter's job id (bg=g...)", cmd, out)
+		}
+	}
+}
+
+// TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
+// script lifts for the commands the script runs: the whitelist, argument
+// validators, structural rules (setting PATH) and the deny list — statically
+// and at runtime, at any depth — while the path boundary and ask entries still
+// apply.
+func TestExecuteScript_BareScriptLiftsChecks(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// protoc: not whitelisted; curl: denied; PATH: a structural refusal;
+	// git push: refused by git's argument validator. None of them runs.
+	write("lifted.sh", "PATH=\"$PWD:$PATH\"\nif false; then protoc --version; curl https://example.com; git push; fi\n./nested.sh\necho lifted-$1\n")
+	write("nested.sh", "if false; then curl https://example.com; fi\necho nested\n")
+	outside := t.TempDir()
+	write("escape.sh", "echo x > "+filepath.Join(outside, "f")+"\n")
+	write("asks.sh", "rm -f nothing\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./lifted.sh", Allow: &yes},
+		{Command: "./escape.sh", Allow: &yes},
+		{Command: "./asks.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+		{Command: "rm", Ask: true},
+	}}, dir)
+
+	for _, cmd := range []string{"./lifted.sh a", "bash lifted.sh a", "true && ./lifted.sh a"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: a bare allow of the script should lift its checks: %v", cmd, err)
+		}
+		if !strings.Contains(out, "nested") || !strings.Contains(out, "lifted-a") {
+			t.Errorf("%s: output %q", cmd, out)
+		}
+	}
+	// The deny list still applies to the command line around the script.
+	if _, err := executeInDirWithSandbox(t, s, dir, "./lifted.sh && curl https://example.com"); err == nil {
+		t.Error("the deny list must still apply outside the script")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./escape.sh"); err == nil {
+		t.Error("the path boundary must still confine a bare-allowed script's redirects")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f")); err == nil {
+		t.Error("the script wrote outside the boundary")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./asks.sh"); err == nil || !strings.Contains(err.Error(), "approval") {
+		t.Errorf("an ask entry must still apply inside a bare-allowed script: %v", err)
+	}
+}
