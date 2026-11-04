@@ -98,7 +98,10 @@ the command with any arguments. An entry with arguments (e.g.
 `uv run pyright`) allows only invocations whose leading non-flag arguments
 match; the command's other invocations keep its argument checks.
 
-Either way the command line is still parsed and validated as usual. The allow
+Either way the command line is still parsed and validated as usual. `bash`
+and `sh` always run in the sandbox's interpreter, which checks the commands of
+their `-c` string or script, so an allow of them (`no_sandbox` included) adds
+nothing; allow the script instead. The allow
 covers that command's invocations, not the rest of the line: with `fvm`
 allowed, `fvm flutter test && curl example.com` is still refused for `curl`,
 and redirects and the paths the line names are still held to the boundary.
@@ -109,9 +112,11 @@ enabled, or the worker of a [grant scoped to it](#grants-for-one-command-command
 #### Allowed scripts
 
 A bare entry that names a script by path (any word with a `/`:
-`./scripts/build.sh`, `scripts/build.sh`) also **trusts the script**. It runs
-through the sandbox's interpreter like any other script, whether it's called
-directly, as `bash scripts/build.sh`, or after a `cd`. The entry matches the
+`./scripts/build.sh`, `scripts/build.sh`, or an absolute path) also **trusts
+the script**. It runs through the sandbox's interpreter like any other script,
+whether it's called directly, as `bash scripts/build.sh`, or after a `cd`. A
+script that is sourced (`source scripts/build.sh`) isn't trusted: it runs in
+the caller's shell, and is checked like the rest of the command line. The entry matches the
 file it names, wherever the invocation is written from: `cd sub && ./build.sh`
 runs `sub/build.sh`, which the entry for `./build.sh` doesn't trust. What
 changes is what the commands it runs, at any depth, are held to:
@@ -130,15 +135,22 @@ Everything the script runs is routed the way the script is, not the way each
 command would be: to the OS sandbox's shared worker, since only `no_sandbox`
 takes anything out of the sandbox. Another command's `no_sandbox` entry
 doesn't apply inside the script, and neither does a
-[grant scoped to a command](#grants-for-one-command-commands), so a script
+[grant scoped to a command](#grants-for-one-command-commands) (nor the
+[ssh agent](ssh.md), so a `git push` over ssh inside it fails), so a script
 can't reach the host or a credential by running, with its checks lifted, a
-command that would. A script allowed with `no_sandbox` runs everything on the
-host instead, and since nothing it does is then confined by the OS sandbox,
-its own redirects aren't held to the path boundary either.
+command that would. It can still write what the working directory holds, as
+any program in the worker can, including files that programs on the host act
+on later: `.git/config` (whose `core.fsmonitor` or hooks your own `git` would
+run) or a build file. A script allowed with `no_sandbox` runs everything on
+the host instead, and since nothing it does is then confined by the OS
+sandbox, its own redirects aren't held to the path boundary either; it also
+gets the variables the agent exported earlier on the command line
+(`GIT_CONFIG_*`, ...), so it should not trust its environment.
 
 The command line that runs the script is validated as usual, the deny list
 included. Under a wrapper (`timeout`, `env`, `xargs`, `find -exec`) the script
-runs as a native program in the worker, as any wrapped command does. A script whose shebang names another interpreter
+runs as a native program, routed as its own entry says (the worker, or the
+host for `no_sandbox`), as any wrapped command is. A script whose shebang names another interpreter
 (`#!/usr/bin/env python3`), and a compiled binary, run as the native program
 instead, since the sandbox has nothing of theirs to interpret. The interpreter
 implements most of bash but isn't GNU bash; see
@@ -576,9 +588,11 @@ What gets routed to the command's worker, and how:
 - It runs with the server's environment. `PATH` keeps only the directories
   sandboxed commands can't write, so the programs it starts can't be ones the
   agent planted.
-- It still has to be allowed and pass validation like any command, and it
-  keeps its argument checks even under a bare allow, since it runs with the
-  grant: with `gh` bare-allowed, `gh auth token` and `gh extension exec` are
+- It still has to be allowed and pass validation like any command, and when
+  it runs here it keeps its argument checks even under a bare allow, since it
+  runs with the grant (a `no_sandbox` allow runs it on the host instead, and
+  under the [ssh agent's grant](ssh.md) only a `git` that contacts a remote
+  runs here): with `gh` bare-allowed, `gh auth token` and `gh extension exec` are
   still refused. An allow naming a subcommand
   (`lite-sandbox config commands allow "gh pr merge"`) opens exactly that
   subcommand here, with the grant, so open only subcommands that never run

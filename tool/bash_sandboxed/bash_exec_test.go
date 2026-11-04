@@ -1462,33 +1462,72 @@ func TestBashScript_PositionalParams(t *testing.T) {
 }
 
 // TestScopedCommand_BareAllowKeepsValidators verifies that a bare allow of a
-// command a scoped grant names admits it but keeps its argument validators,
-// since it runs with the grant's credential; an allow naming the subcommand
-// still opens it, and without a scoped grant a bare allow lifts them as usual.
+// command a scoped grant names admits it but keeps its argument validators
+// where it would run in the scope's worker, with the grant's credential — the
+// static pass and, for a dynamic name, the runtime one. An allow naming the
+// subcommand still opens it; a bare allow lifts them as usual without a scoped
+// grant, without the OS sandbox (no worker holds the credential), or with
+// no_sandbox (the command runs on the host).
 func TestScopedCommand_BareAllowKeepsValidators(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{dir}
-	yes := true
+	yes, no := true, false
 	scoped := []config.PathEntry{{Path: filepath.Join(dir, "..", "ghcreds"), Read: &yes, Internal: true, Commands: []string{"gh"}}}
+	bareGh := []config.CommandEntry{{Command: "gh", Allow: &yes}}
 
 	s := NewSandbox()
-	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "gh", Allow: &yes}}, Paths: scoped}, dir)
+	defer s.Close()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: bareGh, Paths: scoped}, dir)
 	for _, cmd := range []string{"gh auth token", "true && gh auth token"} {
 		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil {
 			t.Errorf("%s: a bare allow of a scoped command must keep its validators", cmd)
 		}
 	}
+	// Refused by the runtime validator, before anything is dispatched.
+	if _, err := s.Execute(context.Background(), "c=gh; $c auth token", dir, paths, paths); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Errorf("a dynamic name must be refused at runtime too: %v", err)
+	}
 	if err := s.ValidateCommand("gh pr list", dir, paths, paths); err != nil {
 		t.Errorf("gh pr list: %v", err)
 	}
 
-	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "gh auth token", Allow: &yes}}, Paths: scoped}, dir)
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh auth token", Allow: &yes}}, Paths: scoped}, dir)
 	if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
 		t.Errorf("an allow naming the subcommand should open it: %v", err)
 	}
 
-	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "gh", Allow: &yes}}}, dir)
-	if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
-		t.Errorf("without a scoped grant a bare allow lifts the validators: %v", err)
+	for name, cfg := range map[string]*config.Config{
+		"no scoped grant": {OSSandbox: &yes, Commands: bareGh},
+		"no OS sandbox":   {OSSandbox: &no, Commands: bareGh, Paths: scoped},
+		"no_sandbox":      {OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh", Allow: &yes, NoSandbox: true}}, Paths: scoped},
+	} {
+		s.updateConfig(cfg, dir)
+		if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
+			t.Errorf("%s: a bare allow should lift the validators: %v", name, err)
+		}
+	}
+}
+
+// TestTrustedScript_AbsoluteEntryAndSource verifies that an absolute script
+// entry is trusted whatever the working directory the config was loaded for,
+// and that a sourced script is never trusted: it runs in the caller's shell,
+// where what it sets (PATH) carries on to the rest of the line.
+func TestTrustedScript_AbsoluteEntryAndSource(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "b.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nPATH=\"$PWD:$PATH\"\necho trusted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: script, Allow: &yes}}}, "")
+	if out, err := executeInDirWithSandbox(t, s, dir, script); err != nil || !strings.Contains(out, "trusted") {
+		t.Errorf("absolute entry: %v %q", err, out)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "./b.sh", Allow: &yes}}}, dir)
+	for _, cmd := range []string{"source ./b.sh", ". ./b.sh"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err == nil {
+			t.Errorf("%s: a sourced script must not be trusted", cmd)
+		}
 	}
 }

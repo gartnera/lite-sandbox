@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -60,13 +61,13 @@ func (s *Sandbox) extraAllowsArgs(cmdName string, args []string) bool {
 // allowLiftsValidator reports whether the config's allows lift cmdName's own
 // argument validator for an invocation with arguments args (argv[1:], "" for
 // a word only known after expansion). An allow lifts it for the invocations it
-// admits, with one exception: a bare allow of a command a scoped grant names
-// does not, because that command runs in its scope's worker, with the grant's
-// credential, and a bare allow would lift its checks on every subcommand
-// there (gh auth token, gh extension exec). An allow naming the subcommand
-// ("gh pr merge") still opens exactly what it names.
+// admits, with one exception: a bare allow does not for an invocation that
+// runs in a scoped grant's worker, with the grant's credential, where it
+// would lift the command's checks on every subcommand (gh auth token, gh
+// extension exec). An allow naming the subcommand ("gh pr merge") still opens
+// exactly what it names.
 func (s *Sandbox) allowLiftsValidator(cmdName string, args []string) bool {
-	if !s.isScopedCommand(cmdName) {
+	if !s.runsInScopedWorker(append([]string{cmdName}, args...)) {
 		return s.extraAllowsArgs(cmdName, args)
 	}
 	if !s.getExtraCommands()[cmdName] {
@@ -74,6 +75,18 @@ func (s *Sandbox) allowLiftsValidator(cmdName string, args []string) bool {
 	}
 	restrictions, ok := s.getExtraSubCommands()[cmdName]
 	return ok && argsMatchSubCommand(restrictions, args)
+}
+
+// runsInScopedWorker reports whether a top-level invocation of argv would run
+// in a scoped grant's worker (see dispatchExec): the OS sandbox is on, no
+// no_sandbox entry takes it to the host, and a scope claims it — for git
+// under the ssh agent's grant, only an invocation that contacts a remote.
+func (s *Sandbox) runsInScopedWorker(argv []string) bool {
+	if !s.osSandboxEnabled() || isScriptPath(argv[0]) || s.execIsUnsandboxed(context.Background(), argv) {
+		return false
+	}
+	_, _, ok := s.workerScope(argv)
+	return ok
 }
 
 // agentBrowserSocketEnv points an agent-browser the sandbox runs — on the host,

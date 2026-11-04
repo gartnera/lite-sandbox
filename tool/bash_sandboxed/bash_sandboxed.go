@@ -216,13 +216,17 @@ func (s *Sandbox) UpdateConfig(cfg *config.Config, workDir string) {
 		m[cmd] = true
 		if len(fields) == 1 {
 			bare[cmd] = true
-			if isScriptPath(cmd) && workDir != "" {
-				bareScripts[absPath(cmd, workDir)] = true
+			// A script path is matched by where it resolves (bareAllowsScript):
+			// an absolute one anywhere, a relative one against workDir.
+			scriptAt := ""
+			if isScriptPath(cmd) && (workDir != "" || filepath.IsAbs(cmd)) {
+				scriptAt = filepath.Clean(absPath(cmd, workDir))
+				bareScripts[scriptAt] = true
 			}
 			if fromUnsandboxed {
 				unsandboxedBare[cmd] = true
-				if isScriptPath(cmd) && workDir != "" {
-					unsandboxedBareScripts[absPath(cmd, workDir)] = true
+				if scriptAt != "" {
+					unsandboxedBareScripts[scriptAt] = true
 				}
 			}
 		} else {
@@ -1138,7 +1142,12 @@ func (s *Sandbox) validateScriptContents(ctx context.Context, f *syntax.File, wo
 		case inline:
 			validationErr = s.validateScriptText(ctx, cmdName, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
 		case script != "":
-			validationErr = s.validateScriptFile(ctx, script, workDir, readAllowedPaths, writeAllowedPaths, depth)
+			// A sourced script runs in the caller's shell, which the
+			// runtime never marks trusted (its assignments, PATH included,
+			// carry on to the rest of the line), so only a script run as its
+			// own process may be.
+			sourced := cmdName == "source" || cmdName == "."
+			validationErr = s.validateScriptFile(ctx, script, workDir, readAllowedPaths, writeAllowedPaths, depth, !sourced)
 		}
 
 		return validationErr == nil
@@ -1147,7 +1156,8 @@ func (s *Sandbox) validateScriptContents(ctx context.Context, f *syntax.File, wo
 }
 
 // validateScriptFile reads a script file path, parses and validates its contents.
-func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int) error {
+// mayTrust is false for a script that is sourced (see validateScriptContents).
+func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir string, readAllowedPaths, writeAllowedPaths []string, depth int, mayTrust bool) error {
 	path := absPath(scriptPath, workDir)
 	// A bare allow of a script path trusts the script: its body is still
 	// validated, with the checks a bare allow lifts not enforced
@@ -1155,7 +1165,7 @@ func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir st
 	// `bash <script>`. This mirrors the runtime handlers, so static preflight
 	// does not reject a script the user allowed; like executeBash, it matches
 	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
-	if s.trustsScript(path) {
+	if mayTrust && s.trustsScript(path) {
 		ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 	}
 	if isBinaryExecutable(path) {
@@ -1242,7 +1252,10 @@ func (s *Sandbox) bareAllowsScript(cmdName, dir string) bool {
 	if !isScriptPath(cmdName) {
 		return s.getBareExtraCommands()[cmdName]
 	}
-	return dir != "" && s.getBareExtraScriptPaths()[absPath(cmdName, dir)]
+	if dir == "" && !filepath.IsAbs(cmdName) {
+		return false
+	}
+	return s.getBareExtraScriptPaths()[filepath.Clean(absPath(cmdName, dir))]
 }
 
 // trustsScript reports whether the script file at the absolute path is one a
@@ -1252,7 +1265,7 @@ func (s *Sandbox) bareAllowsScript(cmdName, dir string) bool {
 // allow of the command make, and `cd sub && ./build.sh` is not for one of
 // ./build.sh.
 func (s *Sandbox) trustsScript(path string) bool {
-	return s.getBareExtraScriptPaths()[path]
+	return s.getBareExtraScriptPaths()[filepath.Clean(path)]
 }
 
 // scriptUnsandboxed reports whether the script at the absolute path is allowed
@@ -1260,7 +1273,18 @@ func (s *Sandbox) trustsScript(path string) bool {
 func (s *Sandbox) scriptUnsandboxed(path string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.unsandboxedBareScriptPaths[path]
+	return s.unsandboxedBareScriptPaths[filepath.Clean(path)]
+}
+
+// runsOnHost reports whether an exec of args runs on the host rather than in
+// an OS sandbox worker by the config's no_sandbox entries: inside a trusted
+// script, whether the script does (see dispatchExec); otherwise whether a
+// no_sandbox entry matches it.
+func (s *Sandbox) runsOnHost(ctx context.Context, args []string) bool {
+	if ts, ok := trustedScriptFrom(ctx); ok {
+		return ts.host
+	}
+	return s.execIsUnsandboxed(ctx, args)
 }
 
 // execIsUnsandboxed reports whether an exec invocation (from the interpreter's
@@ -1289,7 +1313,7 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 	if isScriptPath(cmdName) {
 		// A script path matches by where it resolves, never by the literal
 		// string, which names another file after a `cd`.
-		if s.unsandboxedBareScriptPaths[absPath(cmdName, interp.HandlerCtx(ctx).Dir)] {
+		if s.unsandboxedBareScriptPaths[filepath.Clean(absPath(cmdName, interp.HandlerCtx(ctx).Dir))] {
 			return true
 		}
 	} else if s.unsandboxedBare[cmdName] {
