@@ -71,17 +71,20 @@ func (r rule) blockedIn(m config.Mode) bool {
 }
 
 // liftedInTrustedScript reports whether a bare allow of a script lifts r for
-// the commands the script runs (see withTrustedScript): every rule but two.
-// The user allowed the script as written, so what it may run, how, and with
-// which shell constructs (setting PATH, the deny list's commands) is not
-// checked. Still enforced are ask entries, which only the user lifts, and the
-// path boundary, which is what confines the interpreter's own redirects and
-// file opens: those are made by lite-sandbox itself, on the host, outside the
-// OS sandbox.
-func (r rule) liftedInTrustedScript() bool {
+// the commands the script runs (see withTrustedScript). The user allowed the
+// script as written, so what it may run, how, and with which shell constructs
+// (setting PATH, the deny list's commands) is not checked. Ask entries, which
+// only the user lifts, are still enforced, and so is the path boundary, which
+// is what confines the interpreter's own redirects and file opens (those are
+// made by lite-sandbox itself, on the host, outside the OS sandbox) — unless
+// the script is allowed with no_sandbox, which runs everything it does on the
+// host anyway.
+func (r rule) liftedInTrustedScript(ts trustedScript) bool {
 	switch r {
-	case ruleCommandAsk, rulePathBoundary:
+	case ruleCommandAsk:
 		return false
+	case rulePathBoundary:
+		return ts.host
 	}
 	return true
 }
@@ -172,26 +175,42 @@ func auditScopeFrom(ctx context.Context) *auditScope {
 	return nil
 }
 
-// trustedScriptKey marks the context of a shell script a bare allow names
+// trustedScript marks the context of a shell script a bare allow names
 // ("./scripts/build.sh"). The script runs through the sandbox's interpreter
-// like any other, its commands routed the same way (OS sandbox worker, scoped
-// worker, host); what changes is that report does not enforce the rules
-// liftedInTrustedScript names for anything it runs, at any depth: the user
-// allowed the script, not each command in it.
-type trustedScriptKey struct{}
-
-// withTrustedScript returns ctx marked as running a script a bare allow names.
-func withTrustedScript(ctx context.Context) context.Context {
-	return context.WithValue(ctx, trustedScriptKey{}, true)
+// like any other; what changes is that report does not enforce the rules
+// liftedInTrustedScript names for anything it runs, at any depth (the user
+// allowed the script, not each command in it), and that where its commands run
+// is the script's own routing, not theirs (dispatchExec): the OS sandbox's
+// shared worker, or the host when the script is allowed with no_sandbox. So
+// neither another command's no_sandbox entry nor a grant scoped to a command
+// applies inside it, and the script cannot reach the host or a credential by
+// running, with its checks lifted, a command that would.
+type trustedScript struct {
+	// host: the script is allowed with no_sandbox, so it and everything it
+	// runs run on the host.
+	host bool
 }
 
-// inTrustedScript reports whether ctx runs a script a bare allow names.
-func inTrustedScript(ctx context.Context) bool {
-	if ctx == nil {
-		return false
+type trustedScriptKey struct{}
+
+// withTrustedScript returns ctx marked as running a script a bare allow
+// names, routed to the host when host is set. Inside a trusted script the
+// outer script's routing holds: a no_sandbox script it runs stays where the
+// outer one runs.
+func withTrustedScript(ctx context.Context, host bool) context.Context {
+	if outer, ok := trustedScriptFrom(ctx); ok {
+		host = outer.host
 	}
-	v, _ := ctx.Value(trustedScriptKey{}).(bool)
-	return v
+	return context.WithValue(ctx, trustedScriptKey{}, trustedScript{host: host})
+}
+
+// trustedScriptFrom returns the trusted script ctx runs, if any.
+func trustedScriptFrom(ctx context.Context) (trustedScript, bool) {
+	if ctx == nil {
+		return trustedScript{}, false
+	}
+	ts, ok := ctx.Value(trustedScriptKey{}).(trustedScript)
+	return ts, ok
 }
 
 // report is the single decision point for every validation finding. Given an
@@ -209,7 +228,10 @@ func (s *Sandbox) report(ctx context.Context, layer string, fallback rule, err e
 	}
 	mode := s.getConfig().EffectiveMode()
 	r, subject, fix := ruleOf(err, fallback)
-	blocked := r.blockedIn(mode) && !(inTrustedScript(ctx) && r.liftedInTrustedScript())
+	blocked := r.blockedIn(mode)
+	if ts, ok := trustedScriptFrom(ctx); ok && r.liftedInTrustedScript(ts) {
+		blocked = false
+	}
 
 	if logger := s.auditLogger(); logger != nil {
 		rec := audit.Record{

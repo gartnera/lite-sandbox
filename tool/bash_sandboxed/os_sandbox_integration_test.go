@@ -757,3 +757,64 @@ func TestOSSandboxTrustedScriptCannotEditConfig(t *testing.T) {
 		t.Errorf("control: without the OS sandbox the script should have changed the config (err %v, output %q)", err, out)
 	}
 }
+
+// TestOSSandboxTrustedScriptRouting: everything a trusted script runs is
+// routed the way the script is. In a sandboxed script, a command allowed with
+// no_sandbox still runs in the shared worker, so the script cannot reach the
+// host by pointing PATH at a binary it wrote and running that command. A
+// script allowed with no_sandbox runs everything on the host, its own
+// redirects included.
+func TestOSSandboxTrustedScriptRouting(t *testing.T) {
+	requireOSSandbox(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside, err := os.MkdirTemp(home, "ls-trusted-routing-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(outside) })
+	work := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(work, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hijacked := filepath.Join(outside, "hijacked")
+	deployed := filepath.Join(outside, "deployed")
+	write("evil/hostname", "#!/bin/sh\ntouch "+hijacked+"\n")
+	write("build.sh", "#!/bin/bash\nPATH=\"$PWD/evil:$PATH\" hostname\n")
+	write("deploy.sh", "#!/bin/bash\necho x > "+deployed+"\n")
+
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{
+		{Command: "./build.sh", Allow: &yes},
+		{Command: "./deploy.sh", Allow: &yes, NoSandbox: true},
+		{Command: "hostname", Allow: &yes, NoSandbox: true},
+	}}, work)
+	defer s.Close()
+	paths := []string{work}
+
+	out, err := s.Execute(context.Background(), "./build.sh", work, paths, paths)
+	if _, statErr := os.Stat(hijacked); statErr == nil {
+		t.Fatalf("a sandboxed trusted script ran its own binary on the host (err %v, output %q)", err, out)
+	}
+	// Control: at top level the same no_sandbox command does run on the host.
+	if out, err := s.Execute(context.Background(), "hostname", work, paths, paths); err != nil {
+		t.Fatalf("hostname: %v %q", err, out)
+	}
+
+	if out, err := s.Execute(context.Background(), "./deploy.sh", work, paths, paths); err != nil {
+		t.Fatalf("a no_sandbox trusted script should run on the host: %v %q", err, out)
+	}
+	if _, err := os.Stat(deployed); err != nil {
+		t.Errorf("a no_sandbox trusted script's redirect should reach the host: %v", err)
+	}
+}

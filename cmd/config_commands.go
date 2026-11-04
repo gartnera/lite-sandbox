@@ -105,7 +105,12 @@ A bare script path ("./scripts/build.sh") trusts the script: it runs through
 the sandbox's interpreter like any other script, but the commands it runs are
 not held to the whitelist, their argument checks, the shell-construct rules
 (it may set PATH) or the deny list. Commands entries with ask: true and the
-path boundary still apply to it.
+path boundary still apply to it. Everything it runs stays in the OS sandbox's
+shared worker, unless the script itself is allowed with --no-sandbox, which
+runs all of it on the host.
+
+A bare name that a command-scoped path grant names (paths allow --commands)
+keeps its argument checks, since it runs with that grant.
 
 --no-sandbox makes matching invocations run directly on the host, bypassing the
 OS sandbox worker (and the docker filtering proxy) even when it is enabled. It

@@ -111,10 +111,10 @@ enabled, or the worker of a [grant scoped to it](#grants-for-one-command-command
 A bare entry that names a script by path (any word with a `/`:
 `./scripts/build.sh`, `scripts/build.sh`) also **trusts the script**. It runs
 through the sandbox's interpreter like any other script, whether it's called
-directly, as `bash scripts/build.sh`, or after a `cd`, and the commands it
-runs are routed the same way (the OS sandbox worker, a scoped grant's worker,
-the host for `no_sandbox`). The difference is what those commands, at any
-depth, are held to:
+directly, as `bash scripts/build.sh`, or after a `cd`. The entry matches the
+file it names, wherever the invocation is written from: `cd sub && ./build.sh`
+runs `sub/build.sh`, which the entry for `./build.sh` doesn't trust. What
+changes is what the commands it runs, at any depth, are held to:
 
 - **Not checked:** the command whitelist, the local-binary gate, each
   command's argument checks, the shell-construct rules (the script may set
@@ -122,10 +122,23 @@ depth, are held to:
 - **Still checked:** [`ask` entries](#commands-that-ask-first), and the
   path boundary, which is what confines the interpreter's own redirects and
   file opens. Those are made by lite-sandbox itself, on the host, outside
-  the OS sandbox.
+  the OS sandbox. An `ask` entry is only seen for commands the interpreter
+  runs: a native program the script starts (`/bin/sh -c ...`) runs its own
+  children unseen.
+
+Everything the script runs is routed the way the script is, not the way each
+command would be: to the OS sandbox's shared worker, since only `no_sandbox`
+takes anything out of the sandbox. Another command's `no_sandbox` entry
+doesn't apply inside the script, and neither does a
+[grant scoped to a command](#grants-for-one-command-commands), so a script
+can't reach the host or a credential by running, with its checks lifted, a
+command that would. A script allowed with `no_sandbox` runs everything on the
+host instead, and since nothing it does is then confined by the OS sandbox,
+its own redirects aren't held to the path boundary either.
 
 The command line that runs the script is validated as usual, the deny list
-included. A script whose shebang names another interpreter
+included. Under a wrapper (`timeout`, `env`, `xargs`, `find -exec`) the script
+runs as a native program in the worker, as any wrapped command does. A script whose shebang names another interpreter
 (`#!/usr/bin/env python3`), and a compiled binary, run as the native program
 instead, since the sandbox has nothing of theirs to interpret. The interpreter
 implements most of bash but isn't GNU bash; see
@@ -563,14 +576,15 @@ What gets routed to the command's worker, and how:
 - It runs with the server's environment. `PATH` keeps only the directories
   sandboxed commands can't write, so the programs it starts can't be ones the
   agent planted.
-- It still has to be allowed and pass validation like any command. An allow
-  lifts its argument checks for the invocations it admits, and those run here,
-  with the grant. So allow the subcommands that never run code
-  (`lite-sandbox config commands allow "gh pr view" "gh api"`) rather than the
-  bare name: with `gh` bare-allowed, `gh extension exec` would run an
-  extension with the token. `no_sandbox` runs the command on the host, where
-  nothing is hidden; `paths allow --commands` and `config mode show` warn
-  about it.
+- It still has to be allowed and pass validation like any command, and it
+  keeps its argument checks even under a bare allow, since it runs with the
+  grant: with `gh` bare-allowed, `gh auth token` and `gh extension exec` are
+  still refused. An allow naming a subcommand
+  (`lite-sandbox config commands allow "gh pr merge"`) opens exactly that
+  subcommand here, with the grant, so open only subcommands that never run
+  code. `no_sandbox` runs the command on the host, where nothing is hidden;
+  `paths allow --commands` and `config mode show` warn about it. A
+  [trusted script](#allowed-scripts) never runs it here.
 
 The path should lie outside what the agent may read itself (the working
 directory and the agent-facing grants). The OS sandbox only covers the

@@ -242,10 +242,21 @@ func TestOSSandboxScopedGrant(t *testing.T) {
 	bare := NewSandbox()
 	bare.updateConfig(&config.Config{
 		OSSandbox: &yes,
-		Commands:  []config.CommandEntry{{Command: "credtool", Allow: &yes}},
-		Paths:     []config.PathEntry{{Path: creds, Read: &yes, Internal: true, Commands: []string{"credtool"}}},
+		Commands: []config.CommandEntry{
+			{Command: "credtool", Allow: &yes},
+			{Command: "./uses.sh", Allow: &yes},
+		},
+		Paths: []config.PathEntry{{Path: creds, Read: &yes, Internal: true, Commands: []string{"credtool"}}},
 	}, work)
 	defer bare.Close()
+	// A trusted script runs what it runs in the shared worker, so the CLI it
+	// runs, with its checks lifted, does not get the grant.
+	if err := os.WriteFile(filepath.Join(work, "uses.sh"), []byte("#!/bin/bash\ncredtool show\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := bare.Execute(context.Background(), "./uses.sh", work, paths, paths); strings.Contains(out, "s3cret") {
+		t.Errorf("a trusted script reached the scoped credential: %q", out)
+	}
 	for _, cmd := range []string{"credtool show", "true && credtool show | head -1"} {
 		out, err := bare.Execute(context.Background(), cmd, work, paths, paths)
 		if err != nil || !strings.Contains(out, "s3cret") {

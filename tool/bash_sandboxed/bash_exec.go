@@ -209,8 +209,9 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	}
 	hc := interp.HandlerCtx(ctx)
 
-	// Determine the script content
+	// Determine the script content, and the positional parameters it gets
 	var script, scriptFile string
+	var params []string
 	switch {
 	case inv.command >= 0:
 		script = args[inv.command]
@@ -235,8 +236,8 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		// enforced (withTrustedScript). Match either by the literal token or
 		// by the resolved absolute path so `bash web/foo/build.sh` matches an
 		// entry registered as `./web/foo/build.sh`.
-		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
-			ctx = withTrustedScript(ctx)
+		if s.trustsScript(path) {
+			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -244,17 +245,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		}
 		script = string(data)
 		// The words after the script are its $1, $2, ...
-		if rest := args[inv.script+1:]; len(rest) > 0 {
-			quoted := make([]string, len(rest))
-			for i, a := range rest {
-				q, err := syntax.Quote(a, syntax.LangBash)
-				if err != nil {
-					return fmt.Errorf("%s: argument %q: %w", cmdName, a, err)
-				}
-				quoted[i] = q
-			}
-			script = "set -- " + strings.Join(quoted, " ") + "\n" + script
-		}
+		params = args[inv.script+1:]
 	default:
 		return fmt.Errorf("%s: no command or script file specified", cmdName)
 	}
@@ -293,7 +284,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
 	// Build and run nested interpreter
-	return s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile)
+	return s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile, params...)
 }
 
 // executeScript runs a script file (e.g., ./script.sh) by reading it,
@@ -361,8 +352,9 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 // runNestedInterp creates and runs a nested interpreter with the same
 // security handlers as the parent. scriptName is the script path as invoked,
 // empty for `bash -c`; it becomes $0 and BASH_SOURCE, which scripts use to
-// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`).
-func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string) error {
+// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`). params, when
+// given, are the script's positional parameters ($1, $2, ...).
+func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string, params ...string) error {
 	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context: a nested script is a child
@@ -388,6 +380,9 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		interp.Dir(hc.Dir),
 		interp.StdIO(hc.Stdin, hc.Stdout, hc.Stderr),
 		interp.Env(environ),
+	}
+	if len(params) > 0 {
+		opts = append(opts, interp.Params(append([]string{"--"}, params...)...))
 	}
 
 	opts = append(opts, s.buildSecurityHandlers(paths.readAllowedPaths, paths.writeAllowedPaths, useOSSandbox)...)
@@ -522,7 +517,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			// how an invocation matches): a shell script runs through the
 			// interpreter below like any other, with the checks a bare allow
 			// lifts not enforced for what it runs (withTrustedScript).
-			ctx = withTrustedScript(ctx)
+			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 		} else if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
 			// A subcommand-restricted extra_commands entry (e.g. "./gradlew
 			// build") allows the invocation but, unlike a bare entry, is not
@@ -570,7 +565,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 // themselves (commandSpec.revalidatesItself) are dispatched to dedicated executors that re-validate their contents
 // instead. args is the full argv.
 func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
-	if s.extraAllowsArgs(name, args[1:]) || lookupCommand(name).revalidatesItself {
+	if s.allowLiftsValidator(name, args[1:]) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
 	validator, ok := s.validator(name)

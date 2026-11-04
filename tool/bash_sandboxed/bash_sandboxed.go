@@ -1022,8 +1022,10 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 						}
 					}
 					// Skip per-command validators for commands allowed via extra_commands —
-					// the user has explicitly opted in to those commands.
-					if !inExtra {
+					// the user has explicitly opted in to those commands — except a
+					// command a scoped grant names, which keeps them under a bare allow
+					// (see allowLiftsValidator).
+					if !inExtra || (s.isScopedCommand(cmdName) && !s.allowLiftsValidator(cmdName, wordLits(n.Args[1:]))) {
 						// The command's own argument validator applies in every
 						// enforcing mode.
 						if validator, ok := s.validator(cmdName); ok {
@@ -1149,13 +1151,12 @@ func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir st
 	path := absPath(scriptPath, workDir)
 	// A bare allow of a script path trusts the script: its body is still
 	// validated, with the checks a bare allow lifts not enforced
-	// (withTrustedScript), however the script is reached (directly,
-	// `bash <script>`, or `source <script>`). This mirrors the runtime
-	// handlers, so static preflight does not reject a script the user
-	// allowed; like executeBash, it matches `bash build.sh` to an entry
-	// registered as ./build.sh by resolved path.
-	if s.bareAllowsScript(scriptPath, workDir) || s.getBareExtraScriptPaths()[path] {
-		ctx = withTrustedScript(ctx)
+	// (withTrustedScript), whether it is run directly or as
+	// `bash <script>`. This mirrors the runtime handlers, so static preflight
+	// does not reject a script the user allowed; like executeBash, it matches
+	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
+	if s.trustsScript(path) {
+		ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 	}
 	if isBinaryExecutable(path) {
 		return nil
@@ -1230,17 +1231,36 @@ func (s *Sandbox) getBareExtraScriptPaths() map[string]bool {
 	return s.bareExtraScriptPaths
 }
 
-// bareAllowsScript reports whether cmdName, invoked from dir, runs a script a
-// bare extra_commands entry names: by the literal invocation string, or — for
-// a path — by the absolute path it resolves to. The latter is what lets
-// `./web/foo/build.sh`, `web/foo/build.sh` and `./build.sh` run from inside
-// `web/foo` all match an entry written as any one of them. A plain name never
-// matches by path: it runs whatever PATH resolves, not the file beside it.
+// bareAllowsScript reports whether cmdName, invoked from dir, is one a bare
+// allow admits: a plain name by the name, a path by the absolute path it
+// resolves to — never by the literal string, which names another file after a
+// `cd`. That is what lets `./web/foo/build.sh`, `web/foo/build.sh` and
+// `./build.sh` run from inside `web/foo` all match an entry written as any
+// one of them. A plain name never matches by path: it runs whatever PATH
+// resolves, not the file beside it.
 func (s *Sandbox) bareAllowsScript(cmdName, dir string) bool {
-	if s.getBareExtraCommands()[cmdName] {
-		return true
+	if !isScriptPath(cmdName) {
+		return s.getBareExtraCommands()[cmdName]
 	}
-	return isScriptPath(cmdName) && dir != "" && s.getBareExtraScriptPaths()[absPath(cmdName, dir)]
+	return dir != "" && s.getBareExtraScriptPaths()[absPath(cmdName, dir)]
+}
+
+// trustsScript reports whether the script file at the absolute path is one a
+// bare allow trusts (see withTrustedScript): a bare allow of a script path
+// that resolves to it. Only where the file is counts — never the word that
+// named it — so `bash make` reading a file ./make is not trusted for a bare
+// allow of the command make, and `cd sub && ./build.sh` is not for one of
+// ./build.sh.
+func (s *Sandbox) trustsScript(path string) bool {
+	return s.getBareExtraScriptPaths()[path]
+}
+
+// scriptUnsandboxed reports whether the script at the absolute path is allowed
+// with no_sandbox (a bare no_sandbox allow of its path).
+func (s *Sandbox) scriptUnsandboxed(path string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.unsandboxedBareScriptPaths[path]
 }
 
 // execIsUnsandboxed reports whether an exec invocation (from the interpreter's
@@ -1266,14 +1286,14 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 	cmdName := args[0]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.unsandboxedBare[cmdName] {
-		return true
-	}
-	if len(s.unsandboxedBareScriptPaths) > 0 && isScriptPath(cmdName) {
-		hc := interp.HandlerCtx(ctx)
-		if s.unsandboxedBareScriptPaths[absPath(cmdName, hc.Dir)] {
+	if isScriptPath(cmdName) {
+		// A script path matches by where it resolves, never by the literal
+		// string, which names another file after a `cd`.
+		if s.unsandboxedBareScriptPaths[absPath(cmdName, interp.HandlerCtx(ctx).Dir)] {
 			return true
 		}
+	} else if s.unsandboxedBare[cmdName] {
+		return true
 	}
 	if restrictions, ok := s.unsandboxedSub[cmdName]; ok {
 		return argsMatchSubCommand(restrictions, args[1:])
@@ -1306,7 +1326,17 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 // otherwise. Host execution injects the
 // docker filtering proxy's DOCKER_HOST only for non-unsandboxed commands, so
 // unsandboxed ones reach the real docker daemon (or the host's own DOCKER_HOST).
+//
+// Inside a script a bare allow names (withTrustedScript), the script's routing
+// applies instead: everything it runs goes to the shared worker, or to the
+// host when the script itself is allowed with no_sandbox.
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
+	if ts, ok := trustedScriptFrom(ctx); ok {
+		if useOSSandbox && !ts.host {
+			return s.execInWorker(ctx, args)
+		}
+		return s.execOnHost(ctx, args, !ts.host)
+	}
 	unsandboxed := s.execIsUnsandboxed(ctx, args)
 	if useOSSandbox && !unsandboxed {
 		if scope, cfg, ok := s.workerScope(args); ok {
@@ -1401,10 +1431,10 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	group := isBackgroundRun(ctx) && runtime.GOOS != "windows"
 	if group {
 		setProcessGroup(cmd)
-		// A forked child that inherited stdout would otherwise keep Wait
-		// blocked on the pipe after the command itself exited.
-		cmd.WaitDelay = runnerKillGracePeriod
 	}
+	// A forked child that inherited stdout would otherwise keep Wait blocked
+	// on the pipe after the command itself exited.
+	cmd.WaitDelay = runnerKillGracePeriod
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(hc.Stderr, "%v\n", err)
 		return interp.ExitStatus(127)

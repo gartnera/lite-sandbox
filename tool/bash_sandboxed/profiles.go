@@ -57,6 +57,25 @@ func (s *Sandbox) extraAllowsArgs(cmdName string, args []string) bool {
 	return ok && argsMatchSubCommand(restrictions, args)
 }
 
+// allowLiftsValidator reports whether the config's allows lift cmdName's own
+// argument validator for an invocation with arguments args (argv[1:], "" for
+// a word only known after expansion). An allow lifts it for the invocations it
+// admits, with one exception: a bare allow of a command a scoped grant names
+// does not, because that command runs in its scope's worker, with the grant's
+// credential, and a bare allow would lift its checks on every subcommand
+// there (gh auth token, gh extension exec). An allow naming the subcommand
+// ("gh pr merge") still opens exactly what it names.
+func (s *Sandbox) allowLiftsValidator(cmdName string, args []string) bool {
+	if !s.isScopedCommand(cmdName) {
+		return s.extraAllowsArgs(cmdName, args)
+	}
+	if !s.getExtraCommands()[cmdName] {
+		return false
+	}
+	restrictions, ok := s.getExtraSubCommands()[cmdName]
+	return ok && argsMatchSubCommand(restrictions, args)
+}
+
 // agentBrowserSocketEnv points an agent-browser the sandbox runs — on the host,
 // in the shared worker, or in the worker of a grant scoped to it — at the
 // socket directory of lite-sandbox's own agent-browser daemons
