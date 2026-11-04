@@ -1601,3 +1601,16 @@ func TestPythonStdinPathIsReadOnly(t *testing.T) {
 		}
 	})
 }
+
+// The decimal module arrived in monty 1.4.0.
+func TestPythonDecimal(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	out, err := runPython(t, s, t.TempDir(), `python3 -c "from decimal import Decimal; print(Decimal('0.1') + Decimal('0.2'))"`)
+	if err != nil {
+		t.Fatalf("decimal: %v", err)
+	}
+	if strings.TrimSpace(out) != "0.3" {
+		t.Errorf("got %q, want 0.3", out)
+	}
+}
