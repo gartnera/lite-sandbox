@@ -32,6 +32,12 @@ func TestExecute_BlockedEnvVarsRuntime(t *testing.T) {
 		`set -a; for GIT_TEMPLATE_DIR in "$PWD/evil"; do ls; done`,
 		`n=LESSOPEN; export "$n=|evil %s"; ls`,
 		`export "PATH=$PWD/evil:$PATH"; bash -c ls`,
+		// An empty or unset PATH makes the lookup search the current
+		// directory.
+		`cd evil; unset PATH; ls`,
+		`cd evil; n=PATH; unset "$n"; ls`,
+		`cd evil; bash -c 'unset PATH; ls'`,
+		`cd evil; read -r PATH < /dev/null; ls`,
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			out, err := NewSandbox().Execute(context.Background(), cmd, workDir, paths, paths)
@@ -51,6 +57,7 @@ func TestExecute_BlockedEnvVarsRuntime(t *testing.T) {
 		`for ENV in dev prod; do ls; done`,
 		`read -r ZIP <<< x; ls`,
 		`unset CDPATH; ls`,
+		`n=LD_PRELOAD; unset "$n"; ls`,
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			if out, err := NewSandbox().Execute(context.Background(), cmd, workDir, paths, paths); err != nil {

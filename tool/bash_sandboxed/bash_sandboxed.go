@@ -824,24 +824,29 @@ func blockedEnvVarError(name string) error {
 // set -a). Before an external command runs, every blocked variable a child
 // would inherit from env — exported, set, plain string — must hold the value
 // it has in the environment commands start from (commandBaseEnv), or be
-// absent from both. PATH is held to its starting value whether exported or
-// not, since the command lookup (interp.LookPathDir, the worker's) reads it
-// either way. Unsetting a blocked variable is allowed: a command then runs
-// without it, as the static check permits with unset or env -u.
+// absent from both. Unsetting one is allowed: a command then runs without
+// it, as the static check permits with unset or env -u. PATH is the
+// exception: it is held to its starting value whether exported or not, and
+// unsetting it is refused too, since the host's command lookup
+// (interp.LookPathDir in execOnHost) reads it either way and searches the
+// current directory when it is empty or unset, which would run a planted
+// ./ls for ls.
 func (s *Sandbox) checkBlockedEnv(env expand.Environ) error {
-	var base map[string]string
+	base := envSliceToMap(s.commandBaseEnv())
 	for _, name := range blockedEnvVarNames {
 		vr := env.Get(name)
-		if !vr.IsSet() || (!isExportedEnvVar(vr) && name != "PATH") {
+		want, inBase := base[name]
+		if name == "PATH" {
+			if !vr.IsSet() && !inBase {
+				continue
+			}
+		} else if !isExportedEnvVar(vr) {
 			continue
 		}
-		if base == nil {
-			base = envSliceToMap(s.commandBaseEnv())
-		}
-		if want, ok := base[name]; ok && vr.Kind == expand.String && vr.String() == want {
+		if vr.IsSet() && inBase && vr.Kind == expand.String && vr.String() == want {
 			continue
 		}
-		return blockedEnvVarError(name)
+		return fmt.Errorf("%s differs from its starting value (a new shell starts with it): %w", name, blockedEnvVarError(name))
 	}
 	return nil
 }
