@@ -669,7 +669,29 @@ func ParseBash(command string) (*syntax.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse bash: %w", err)
 	}
+	normalizeDupOutToFile(f)
 	return f, nil
+}
+
+// normalizeDupOutToFile rewrites `>&word`, with no fd number and a literal word
+// that is not a file descriptor, to `&>word`: bash runs it as that (stdout and
+// stderr both to the file; see "Duplicating File Descriptors" in bash(1)), but
+// the interpreter only duplicates to a descriptor, and the validators hold an
+// output fd duplication to one. `n>&file` stays as it is (bash's "ambiguous
+// redirect"), and so does a word only known after expansion.
+func normalizeDupOutToFile(f *syntax.File) {
+	syntax.Walk(f, func(node syntax.Node) bool {
+		r, ok := node.(*syntax.Redirect)
+		if !ok || r.Op != syntax.DplOut || r.N != nil {
+			return true
+		}
+		word, ok := wordLiteral(r.Word)
+		if !ok || word == "" || word == "-" || strings.Trim(word, "0123456789") == "" {
+			return true
+		}
+		r.Op = syntax.RdrAll
+		return true
+	})
 }
 
 // stripShebang removes a leading "#!" interpreter line from a script's source,

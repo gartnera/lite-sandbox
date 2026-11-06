@@ -1,6 +1,8 @@
 package bash_sandboxed
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,6 +53,9 @@ func TestValidate_AllowedOutputRedirections(t *testing.T) {
 		{"clobber to file", "echo hello >| file.txt"},
 		{"all to file", "echo hello &> file.txt"},
 		{"append all to file", "echo hello &>> file.txt"},
+		// `>&word` with no fd number is bash's other spelling of `&>word`.
+		{"fd dup form of all to file", "echo hello >& file.txt"},
+		{"fd dup form of all to /dev/null", "ls >&/dev/null"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -65,6 +70,34 @@ func TestValidate_AllowedOutputRedirections(t *testing.T) {
 	}
 }
 
+// TestExecute_DupOutToFile runs `>&file`, which bash treats as `&>file`: both
+// streams go to the file, and the file is held to the path boundary like any
+// other output redirect.
+func TestExecute_DupOutToFile(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSandbox()
+	if _, err := executeInDirWithSandbox(t, s, dir, `ls >&/dev/null`); err != nil {
+		t.Fatalf("ls >&/dev/null: %v", err)
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, `{ echo out; echo err >&2; } >&out.txt`); err != nil {
+		t.Fatalf("redirect to file: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "out\nerr\n" {
+		t.Fatalf("out.txt = %q, want both streams", got)
+	}
+	outside := filepath.Join(t.TempDir(), "x.txt")
+	if _, err := executeInDirWithSandbox(t, s, dir, `echo hi >&`+outside); err == nil {
+		t.Fatal("expected a >& target outside the boundary to be refused")
+	}
+	if _, err := os.Stat(outside); err == nil {
+		t.Fatal("file outside the boundary was written")
+	}
+}
+
 func TestValidate_BlockedRedirections(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -72,7 +105,9 @@ func TestValidate_BlockedRedirections(t *testing.T) {
 		errMsg  string
 	}{
 		{"read-write redirect", "echo hello <> file.txt", "read-write redirection"},
-		{"fd dup to filename", "echo hello >& file.txt", "output fd duplication"},
+		// With a fd number, bash refuses a file target ("ambiguous redirect").
+		{"numbered fd dup to filename", "echo hello 2>& file.txt", "output fd duplication"},
+		{"dynamic fd dup target", "echo hello >& $F", "dynamic targets"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
