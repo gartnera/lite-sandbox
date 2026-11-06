@@ -1472,8 +1472,8 @@ func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox 
 // per-command AWS_PROFILE routing, and — when injectDockerProxy is set and the
 // docker filtering proxy is running — points DOCKER_HOST at the proxy socket.
 // execInWorker always injects (worker commands are never unsandboxed_commands);
-// execOnHost passes false for unsandboxed_commands so they inherit whatever
-// DOCKER_HOST the interpreter environment already carries (the host's, or none).
+// execOnHost passes false for unsandboxed_commands so they keep the server's
+// own DOCKER_HOST (or none), which checkHostEnv holds them to.
 func (s *Sandbox) commandEnv(hc interp.HandlerContext, injectDockerProxy bool) (map[string]string, error) {
 	envMap := make(map[string]string)
 	hc.Env.Each(func(name string, vr expand.Variable) bool {
@@ -1515,14 +1515,28 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	if err != nil {
 		return err
 	}
-	restrictCommandEnv(args, envMap)
-	// The environment the command is looked up in: the interpreter's, or for
-	// a script run natively, the server's PATH (see nativeScriptEnv).
+	// The environment the command is looked up in: the interpreter's, or the
+	// server's PATH for a command allowed with no_sandbox.
 	var lookupEnv expand.Environ = hc.Env
 	if !injectDockerProxy {
-		// Allowed with no_sandbox: a native shell it is or starts would act
-		// on these before running anything, so they are the server's own,
-		// whatever the agent set (see shellStartupEnv and nativeScriptEnv).
+		// Allowed with no_sandbox: the variables that make a program load
+		// code must be the server's, not the agent's (see serverOnlyHostEnv).
+		// A script allowed with no_sandbox is a trusted script, whose rules
+		// are lifted for what it runs; its own start is not one of those.
+		if err := s.report(withoutTrustedScript(ctx), layerRuntime, ruleStructural, checkNoSandboxEnv(args, envMap)); err != nil {
+			return err
+		}
+		// The lookup uses the server's PATH whatever the interpreter's is.
+		// An empty one would look the command up in the working directory.
+		path := serverPath()
+		if path == "" {
+			return fmt.Errorf("%s: a command allowed with no_sandbox is looked up in the server's PATH, which has no absolute directory", args[0])
+		}
+		lookupEnv = expand.ListEnviron("PATH=" + path)
+		// A native shell it is or starts would act on these before running
+		// anything, so they are the server's own, whatever the agent set
+		// (see shellStartupEnv and nativeScriptEnv): a backstop for open
+		// mode, where the check above only audits.
 		base := envSliceToMap(s.commandBaseEnv())
 		fromServer := func(name string) {
 			if v, ok := base[name]; ok {
@@ -1543,9 +1557,11 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 			for _, name := range nativeScriptEnv {
 				fromServer(name)
 			}
-			lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
 		}
 	}
+	// After the check, which must see what the agent set: this drops some of
+	// the variables it holds to the server's (HOME for rsync).
+	restrictCommandEnv(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)

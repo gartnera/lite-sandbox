@@ -153,15 +153,19 @@ on later: `.git/config` (whose `core.fsmonitor` or hooks your own `git` would
 run) or a build file. A script allowed with `no_sandbox` doesn't go through
 the interpreter at all: it runs natively on the host, as the program its
 shebang names (`bash` for a script without one), so nothing it runs is
-checked, `ask` entries and the path boundary included. It gets the variables
-the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
-should not trust its environment. Every `no_sandbox` command gets your own
-values (the server's environment's) for the variables a native shell acts on
-before the script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
-`PS4`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions) and for
-`CDPATH`, whatever the agent set, and assigning them is refused. Run directly
-or as `bash <script>`, the script also gets the server's `PATH` and `HOME`,
-and runs as the file the entry names by its resolved path. Run by a script allowed without
+checked, `ask` entries and the path boundary included. Like any `no_sandbox`
+command, it is refused if the agent changed one of the
+[variables that make a program load code](#the-agents-environment) (`PATH`,
+`HOME`, `GIT_*`, ...), and gets the agent's values for the rest (exported
+earlier on the command line), so it should not trust the rest of its
+environment. As a backstop for open mode, where that check only audits, every
+`no_sandbox` command gets your own values (the server's environment's) for
+the variables a native shell acts on before the script's first line
+(`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `BASH_XTRACEFD`,
+`ZDOTDIR`, exported `BASH_FUNC_*` functions) and for `CDPATH`, whatever the
+agent set, and assigning them is refused. Run directly or as `bash <script>`,
+the script also gets the server's `PATH` and `HOME`, and runs as the file the
+entry names by its resolved path. Run by a script allowed without
 `no_sandbox`, it stays where that script runs: in the interpreter, in the
 shared worker.
 
@@ -211,6 +215,54 @@ unsandboxes only matching invocations; e.g. `git push` leaves other `git`
 subcommands confined. They start from the same environment as every other
 command: with the OS sandbox on, variables named like credentials are left
 out unless [`os_sandbox_env_passthrough`](#credentials-in-the-environment-os_sandbox_env_passthrough) names them.
+
+#### The agent's environment
+
+A `no_sandbox` entry trusts the program, not what the agent points it at, so
+a matching invocation (under a wrapper too) is refused when the agent has
+changed, set, or unset any variable that makes a program, or a shell, loader
+or runtime it starts, load code or config: it must run with the server's own
+values. Unsetting a credential-named one, which the OS sandbox may leave out
+anyway, is allowed. Otherwise `HOME=$PWD/h git status` would run a
+`core.fsmonitor` from `h/.gitconfig` on the host, and refusing, rather than
+substituting the server's value, keeps `GIT_DIR=../other git reset` from
+quietly running against another repository. The error names the variables;
+unset or restore them (an `export` lasts for the session). In `open` mode the
+check only audits. These are `HOME`,
+`PATH` (the server's, which the command is also looked up in),
+`SHELL`, `EDITOR`, `VISUAL`, `PAGER`, `BROWSER`, `SSH_ASKPASS`,
+`SUDO_ASKPASS`; shell startup (`BASH_ENV`, `ENV`, `ZDOTDIR`, `SHELLOPTS`,
+`BASHOPTS`, `PS4`, `BASH_XTRACEFD`, `BASH_FUNC_*`); `LD_*`, `DYLD_*`,
+`GCONV_PATH`, `OPENSSL_CONF`, `OPENSSL_ENGINES`, `OPENSSL_MODULES`; `XDG_*`;
+`GIT_*`; `NODE_OPTIONS`, `NODE_PATH`, `npm_config_*`, `YARN_*`; `PYTHON*`,
+`PERL*`, `RUBY*`, `GEM_*`, `BUNDLE_*`; `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+`JDK_JAVA_OPTIONS`, `CLASSPATH`, `MAVEN_OPTS`, `MAVEN_ARGS`, `GRADLE_OPTS`,
+`GRADLE_USER_HOME`; `GOFLAGS`, `GOENV`, `GOROOT`, `GOTOOLCHAIN`, `CC`, `CXX`,
+`CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CGO_*FLAGS`; `RUSTC`,
+`RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTDOC`, `RUSTFLAGS`,
+`RUSTDOCFLAGS`, `CARGO_*`, `RUSTUP_*`; `DOCKER_CONFIG`, `DOCKER_HOST`,
+`KUBECONFIG`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `CLOUDSDK_*`,
+`TF_CLI_CONFIG_FILE`, `TERRAFORM_CONFIG`, `GH_BROWSER`, `GH_PAGER`,
+`GH_EDITOR`, `GH_CONFIG_DIR`, `KUBE_EDITOR`, `KUBECTL_EXTERNAL_DIFF`,
+`AWS_PAGER`, `MANPAGER`, `GNUPGHOME`, `HELM_PLUGINS`, `JAVA_HOME`;
+`GOCACHEPROG`, `GOAUTH`, `PKG_CONFIG`, `AR`, `FC`, `GCCGO`; macOS's
+`DEVELOPER_DIR`, `SDKROOT`, `TOOLCHAINS`; and every variable the sandbox
+refuses to assign (`TAR_OPTIONS`, `LESSOPEN`, ...), since a name known only at
+runtime (`export "$n=..."`) gets past that check. `env NAME=...` setting one
+of them for such a command is refused, as are `env -u` of one, `env -i`, and
+`env` under `xargs` (whose `-I` can build the variable's name). The `PATH` lookup skips empty and
+relative entries. The agent may still set git's identity and dates
+(`GIT_AUTHOR_NAME`, `GIT_COMMITTER_DATE`, ...), `GIT_TERMINAL_PROMPT`,
+`CARGO_TERM_*`, and `CARGO_INCREMENTAL`. To skip a pager, use the program's
+own option (`git --no-pager`) or pipe its output, since `GIT_PAGER=cat` is
+refused. A script allowed with `no_sandbox` is checked when it starts; it
+runs natively, so nothing checks what it then sets for the commands it runs.
+
+Other variables (`FOO=bar docker compose up`, `GOOS`, `AWS_PROFILE`) are still
+the agent's to set. The list is best-effort: a program can act on a variable
+it doesn't name, so allow with `no_sandbox` only programs that don't load code
+from the rest of their environment, and remember that the agent still controls
+their arguments (within the checks an allow leaves) and the working directory.
 
 ### Commands that ask first
 

@@ -375,7 +375,6 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		env = append(env, name+"="+vr.String())
 		return true
 	})
-
 	environ := expand.ListEnviron(env...)
 	if scriptName != "" {
 		// The interpreter takes $0 from the file name and has no BASH_SOURCE
