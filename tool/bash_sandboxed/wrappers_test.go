@@ -221,3 +221,74 @@ func TestEnvRefusesRelocatingOptions(t *testing.T) {
 		t.Error("env -C evil ./host.sh must not route to the host")
 	}
 }
+
+// TestXargsReplaceStringsInOptions: xargs puts its input where a replace
+// string is after the wrapped command was validated, so a command with an
+// argument validator may not hold one in its words (#154): with input
+// "delete", `xargs -I% find . -%` would run find . -delete.
+func TestXargsReplaceStringsInOptions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestSandbox()
+	paths := []string{dir}
+	for _, cmd := range []string{
+		`printf 'delete\n' | xargs -I% find . -%`,
+		`printf 'delete\n' | xargs -I% find . -% -print`,
+		`printf -- '-delete\n' | xargs -I% find . %`,
+		`printf -- '-delete\n' | xargs -I% find %`,
+		`printf -- '-delete\n' | xargs -I% find -- %`,
+		`printf -- '-delete\n' | xargs -i find . {}`,
+		`printf -- '-delete\n' | xargs --replace find . {}`,
+		`printf -- '-delete\n' | xargs -J% find . %`,
+		`printf 'delete\n' | xargs -I%% find . -%%`,
+		`printf 'delete\n' | xargs -I% timeout 5 find . -%`,
+		`printf 'delete\n' | xargs -I% env FOO=1 nice find . -%`,
+		`printf -- '-delete\n' | xargs -I% find . -name x -o %`,
+		`printf -- '-delete\n' | xargs -I% find . \( % \)`,
+		`printf -- '-delete\n' | xargs -I% find . ! %`,
+		`printf 'x\n' | xargs -I% find . '(%'`,
+		`printf -- '-e1e id\n' | xargs -I% sed -n p %`,
+		`printf -- '-e1e id\n' | xargs -I% sed -n p file %`,
+		`printf 'a/id/e;#\n' | xargs -I% sed -n 's/%/x/p' file`,
+		`printf 'x/s/a/id/e;#\n' | xargs -I% sed -n '/%/p' file`,
+		`printf 'a/id/e;#\n' | xargs -I% sed -n -- 's/%/x/p' file`,
+		`printf 'I\n' | xargs -I% tar c%f out.tar file`,
+		`printf -- '-rf\n' | xargs -I% rm %`,
+		`printf -- '-rf\n' | xargs -I% rm -- %`,
+		`printf -- '--output=x\n' | xargs -I% git log %`,
+		`printf 'x\n' | xargs -I% git log --grep=%`,
+		`printf -- '-e\n' | xargs -I% rg -e -- %`,
+		`printf -- '-delete\n' | xargs -I% find . -maxdepth 0 -exec find . % \;`,
+		`printf -- '-e1e id\n' | xargs -I% find . -maxdepth 0 -exec sed -n p % {} \;`,
+	} {
+		err := s.ValidateCommand(cmd, dir, paths, paths)
+		if err == nil || !strings.Contains(err.Error(), "replace string") {
+			t.Errorf("%s: want a replace-string refusal, got %v", cmd, err)
+		}
+	}
+	// The input stays a value or a start path of find, or goes to a command
+	// whose options are not checked anyway.
+	for _, cmd := range []string{
+		`printf 'x\n' | xargs -I% find ./%`,
+		`printf 'x\n' | xargs -I% find . -name %`,
+		`printf 'x\n' | xargs -I% find . -name % -o -iname %.go`,
+		`printf 'x\n' | xargs -I% find . -maxdepth 1 -name % -exec cat {} \;`,
+		`printf 'x\n' | xargs -I% find . -maxdepth 0 -exec grep -e % {} \;`,
+		`printf 'x\n' | xargs -I% grep -r foo %`,
+		`printf 'x\n' | xargs -I% cat %`,
+		`printf 'x\n' | xargs -I% echo -%`,
+		`printf 'x\n' | xargs -I% timeout 5 cat -- %`,
+		`printf 'x\n' | xargs -I% rm`,
+		`find . -maxdepth 1 -name file -exec sed -n p {} \;`,
+	} {
+		if err := s.ValidateCommand(cmd, dir, paths, paths); err != nil {
+			t.Errorf("%s should be allowed: %v", cmd, err)
+		}
+	}
+	// A replace string xargs's non-literal options could set is unknown.
+	if err := s.ValidateCommand(`printf 'x\n' | xargs -I "$R" find . -name x`, dir, paths, paths); err == nil || !strings.Contains(err.Error(), "not literal") {
+		t.Errorf("xargs -I $R find: want a refusal, got %v", err)
+	}
+}
