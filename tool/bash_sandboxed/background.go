@@ -187,6 +187,8 @@ type BackgroundProcess struct {
 
 	output *outputFile
 	cancel context.CancelFunc
+	// finished is closed once the terminal state is recorded (see Done).
+	finished chan struct{}
 
 	mu       sync.Mutex
 	done     bool
@@ -201,6 +203,57 @@ func (p *BackgroundProcess) Status() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.statusLocked()
+}
+
+// Done returns a channel that is closed once the process has exited and its
+// terminal state (Summary) is recorded.
+func (p *BackgroundProcess) Done() <-chan struct{} {
+	return p.finished
+}
+
+// Summary returns the process's current state as listed by ListBackground.
+func (p *BackgroundProcess) Summary() BackgroundStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.summaryLocked()
+}
+
+func (p *BackgroundProcess) summaryLocked() BackgroundStatus {
+	return BackgroundStatus{
+		ID:         p.ID,
+		Command:    p.Command,
+		Status:     p.statusLocked(),
+		ExitCode:   p.exitCode,
+		OutputPath: p.OutputPath,
+	}
+}
+
+// OutputTail returns up to the last maxBytes of the process's output file,
+// starting at a line boundary when the file is longer. It reads the file the
+// process writes to, so it is "" once the server has removed it.
+func (p *BackgroundProcess) OutputTail(maxBytes int64) string {
+	f, err := os.Open(p.OutputPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	start := max(fi.Size()-maxBytes, 0)
+	buf := make([]byte, fi.Size()-start)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	buf = buf[:n]
+	if start > 0 {
+		if i := strings.IndexByte(string(buf), '\n'); i >= 0 {
+			buf = buf[i+1:]
+		}
+	}
+	return string(buf)
 }
 
 func (p *BackgroundProcess) statusLocked() string {
@@ -317,6 +370,7 @@ func (m *backgroundManager) create(command string) (*BackgroundProcess, context.
 		OutputPath: path,
 		output:     out,
 		cancel:     cancel,
+		finished:   make(chan struct{}),
 	}
 	m.procs[id] = p
 	return p, ctx, nil
@@ -349,6 +403,7 @@ func (m *backgroundManager) finish(p *BackgroundProcess, err error) {
 	p.done = true
 	p.runErr = err
 	p.exitCode = exitCodeFromErr(err, p.killed)
+	close(p.finished)
 }
 
 // shutdownGracePeriod bounds how long killAll waits for the runner goroutines to
@@ -528,15 +583,7 @@ func (s *Sandbox) ListBackground() []BackgroundStatus {
 	procs := s.bg.list()
 	out := make([]BackgroundStatus, 0, len(procs))
 	for _, p := range procs {
-		p.mu.Lock()
-		out = append(out, BackgroundStatus{
-			ID:         p.ID,
-			Command:    p.Command,
-			Status:     p.statusLocked(),
-			ExitCode:   p.exitCode,
-			OutputPath: p.OutputPath,
-		})
-		p.mu.Unlock()
+		out = append(out, p.Summary())
 	}
 	return out
 }

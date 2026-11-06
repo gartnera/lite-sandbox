@@ -64,15 +64,79 @@ func NewMCPServer() *server.MCPServer {
 	return newMCPServer(sandbox, serveOptions{})
 }
 
+// backgroundControlTools are the tools that follow and stop background
+// commands. A client that runs background commands as MCP tasks does both
+// through the task itself, so they are hidden from it (hideBackgroundControls).
+var backgroundControlTools = map[string]bool{"kill_shell": true, "list_shells": true}
+
+// taskOutputTailBytes bounds how much of a background command's output the
+// result of its MCP task carries; the rest stays in its output file.
+const taskOutputTailBytes = 8 << 10
+
+// clientRunsTasks reports whether the request comes from a client that
+// declared the MCP tasks extension (io.modelcontextprotocol/tasks) in this
+// request's capabilities. Such a client gets background commands as MCP
+// tasks: it follows them, is told when they finish, and stops them itself.
+func clientRunsTasks(ctx context.Context) bool {
+	info := server.RequestProtocolInfoFromContext(ctx)
+	return info != nil && info.Modern && info.ClientCapabilities.HasExtension(mcp.ExtensionTasks)
+}
+
+// backgroundAsTask reports whether a bash call runs as an MCP task: a
+// run_in_background call from a client that runs tasks. It is the server's
+// per-request task decision (server.WithTaskDecision) and how the handler
+// tells a task run from a plain call, so the two cannot disagree. Config
+// requests never run in the background, so they stay plain calls and are
+// refused at once.
+func (o serveOptions) backgroundAsTask(ctx context.Context, request mcp.CallToolRequest) bool {
+	if request.Params.Name != "bash" || !clientRunsTasks(ctx) {
+		return false
+	}
+	args, _ := request.Params.Arguments.(map[string]any)
+	command, background, ok := bashToolArgs(args)
+	if !ok || !background {
+		return false
+	}
+	if o.configRequests {
+		if _, isConfig := configrequest.Parse(command); isConfig {
+			return false
+		}
+	}
+	return true
+}
+
+// hideBackgroundControls drops kill_shell and list_shells for a client that
+// runs background commands as MCP tasks. The filter also applies to
+// tools/call, so such a client cannot call them either.
+func hideBackgroundControls(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	if !clientRunsTasks(ctx) {
+		return tools
+	}
+	out := tools[:0:0]
+	for _, t := range tools {
+		if !backgroundControlTools[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MCPServer {
 	s := server.NewMCPServer(
 		"lite-sandbox",
 		"0.1.0",
+		// Background commands run as MCP tasks for clients that declare the
+		// tasks extension; every other call is answered directly.
+		server.WithTaskCapabilities(false, true, true),
+		server.WithTasksExtension(),
+		server.WithTaskDecision(opts.backgroundAsTask),
+		server.WithToolFilter(hideBackgroundControls),
 	)
 
 	bashTool := mcp.NewTool(
 		"bash",
-		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking; it returns a shell id and the path of a file its output is written to. Read that file with this tool (e.g. `tail -n 50 <file>`), check whether the command has finished with the list_shells tool, and stop it with the kill_shell tool."),
+		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking. If your client runs it as a background task, you are notified with its exit code, output file, and the end of its output when it finishes. Otherwise the call returns a shell id and the path of a file its output is written to: read that file with this tool (e.g. `tail -n 50 <file>`), check whether the command has finished with the list_shells tool, and stop it with the kill_shell tool."),
+		mcp.WithTaskSupport(mcp.TaskSupportOptional),
 		mcp.WithString("command",
 			mcp.Description("The bash command to execute"),
 			mcp.Required(),
@@ -123,9 +187,13 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 		ctx = opts.approveCall(ctx, sandbox, cwd, command)
 
 		if runInBackground {
+			asTask := opts.backgroundAsTask(ctx, request)
 			proc, err := sandbox.ExecuteBackgroundContext(ctx, command, cwd, readPaths, writePaths)
 			if err != nil {
 				return mcp.NewToolResultError(opts.errorText(err)), nil
+			}
+			if asTask {
+				return awaitBackgroundTask(ctx, sandbox, proc)
 			}
 			msg := fmt.Sprintf(
 				"Started background process with shell id %q.\nIts output is being written to %s; read it with this tool (e.g. `tail -n 50 %s`). Use the list_shells tool to see whether it has finished and its exit code, and the kill_shell tool (shell_id=%q) to stop it.",
@@ -188,6 +256,39 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 	})
 
 	return s
+}
+
+// awaitBackgroundTask is the body of a background command run as an MCP task:
+// it waits for proc to exit and returns what the client hands the agent when
+// the task ends — the exit status, the output file, and the end of the output.
+// The task's context ends when the client cancels the task (tasks/cancel),
+// which stops the command.
+func awaitBackgroundTask(ctx context.Context, sandbox *bash_sandboxed.Sandbox, proc *bash_sandboxed.BackgroundProcess) (*mcp.CallToolResult, error) {
+	select {
+	case <-proc.Done():
+	case <-ctx.Done():
+		// Already exited is fine: the task is cancelled either way.
+		_ = sandbox.KillBackground(proc.ID)
+		<-proc.Done()
+		return nil, ctx.Err()
+	}
+	st := proc.Summary()
+	var b strings.Builder
+	switch st.Status {
+	case "killed":
+		fmt.Fprintf(&b, "Background command %s was killed.\n", st.ID)
+	default:
+		fmt.Fprintf(&b, "Background command %s exited with code %d.\n", st.ID, st.ExitCode)
+	}
+	fmt.Fprintf(&b, "Command: %s\nOutput file: %s\n", st.Command, st.OutputPath)
+	if tail := proc.OutputTail(taskOutputTailBytes); tail != "" {
+		fmt.Fprintf(&b, "End of output:\n%s", tail)
+	} else {
+		b.WriteString("It produced no output.")
+	}
+	result := mcp.NewToolResultText(strings.TrimRight(b.String(), "\n"))
+	result.IsError = st.Status != "completed" || st.ExitCode != 0
+	return result, nil
 }
 
 // approveCall returns ctx marked approved (bash_sandboxed.WithApproval) when
