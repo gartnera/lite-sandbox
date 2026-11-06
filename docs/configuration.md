@@ -155,12 +155,13 @@ the interpreter at all: it runs natively on the host, as the program its
 shebang names (`bash` for a script without one), so nothing it runs is
 checked, `ask` entries and the path boundary included. It gets the variables
 the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
-should not trust its environment. Every `no_sandbox` command starts without
-the variables a native shell acts on before the script's first line
-(`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `BASH_XTRACEFD`,
-`ZDOTDIR`, exported `BASH_FUNC_*` functions), and assigning them is refused.
-The script itself runs with the server's `PATH` and `HOME`, whatever the
-agent set them to, and as the file the entry names by its resolved path. Run by a script allowed without
+should not trust its environment. Every `no_sandbox` command gets your own
+values (the server's environment's) for the variables a native shell acts on
+before the script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+`PS4`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions) and for
+`CDPATH`, whatever the agent set, and assigning them is refused. Run directly
+or as `bash <script>`, the script also gets the server's `PATH` and `HOME`,
+and runs as the file the entry names by its resolved path. Run by a script allowed without
 `no_sandbox`, it stays where that script runs: in the interpreter, in the
 shared worker.
 

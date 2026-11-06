@@ -1471,31 +1471,35 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		return err
 	}
 	restrictCommandEnv(args, envMap)
-	if !injectDockerProxy {
-		// Allowed with no_sandbox: a native shell it is or starts would act
-		// on these before running anything (see shellStartupEnv).
-		for _, name := range shellStartupEnv {
-			delete(envMap, name)
-		}
-		for name := range envMap {
-			if strings.HasPrefix(name, "BASH_FUNC_") {
-				delete(envMap, name)
-			}
-		}
-	}
 	// The environment the command is looked up in: the interpreter's, or for
 	// a script run natively, the server's PATH (see nativeScriptEnv).
 	var lookupEnv expand.Environ = hc.Env
-	if isNativeScript(ctx) {
+	if !injectDockerProxy {
+		// Allowed with no_sandbox: a native shell it is or starts would act
+		// on these before running anything, so they are the server's own,
+		// whatever the agent set (see shellStartupEnv and nativeScriptEnv).
 		base := envSliceToMap(s.commandBaseEnv())
-		for _, name := range nativeScriptEnv {
+		fromServer := func(name string) {
 			if v, ok := base[name]; ok {
 				envMap[name] = v
 			} else {
 				delete(envMap, name)
 			}
 		}
-		lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
+		for _, name := range shellStartupEnv {
+			fromServer(name)
+		}
+		for name := range envMap {
+			if strings.HasPrefix(name, "BASH_FUNC_") {
+				fromServer(name)
+			}
+		}
+		if isNativeScript(ctx) {
+			for _, name := range nativeScriptEnv {
+				fromServer(name)
+			}
+			lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
+		}
 	}
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.

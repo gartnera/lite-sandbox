@@ -1412,9 +1412,10 @@ func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
 
 // TestNoSandboxScript_ShellStartupEnv: a native shell acts on SHELLOPTS and
 // PS4 before a script's first line (xtrace expands PS4, command substitutions
-// included), which the sandbox's interpreter ignores. Setting them is
-// refused, and a script allowed with no_sandbox starts without them even
-// when they reach the interpreter's environment some other way.
+// included), and sources BASH_ENV, which the sandbox's interpreter ignores.
+// Setting them is refused, and a script allowed with no_sandbox gets the
+// server's own values even when the agent exports them some other way; the
+// server's own values (the user's) are kept.
 func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "host.sh"), []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
@@ -1440,22 +1441,33 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		}
 	}
 
+	// Exported past the static check, which sees only names it can read.
 	evil := filepath.Join(t.TempDir(), "evil.sh")
 	if err := os.WriteFile(evil, []byte("touch "+pwned+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("SHELLOPTS", "xtrace")
-	t.Setenv("PS4", "$(touch "+pwned+")")
-	t.Setenv("BASH_ENV", evil)
-	t.Setenv("ENV", evil)
+	inject := `a=SHELLOPTS; b=PS4; c=BASH_ENV; d=ENV; export "$a=xtrace" "$b="'$(touch ` + pwned + `)' "$c=` + evil + `" "$d=` + evil + `"; `
 	for _, cmd := range []string{"./host.sh", "bash host.sh", "timeout 60 ./host.sh"} {
-		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		out, err := executeInDirWithSandbox(t, s, dir, inject+cmd)
 		if err != nil || !strings.Contains(out, "ran") {
 			t.Fatalf("%s: %v %q", cmd, err, out)
 		}
 		if _, err := os.Stat(pwned); err == nil {
 			t.Fatalf("%s: the native shell ran code from the environment", cmd)
 		}
+	}
+
+	// The server's own value reaches the script, whatever the agent set.
+	if err := os.WriteFile(filepath.Join(dir, "show.sh"), []byte("#!/bin/bash\necho zdotdir=$ZDOTDIR\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	t.Setenv("ZDOTDIR", "/users/own")
+	out, err := executeInDirWithSandbox(t, s, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`)
+	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
+		t.Errorf("want the server's ZDOTDIR: %v %q", err, out)
 	}
 }
 
@@ -1487,6 +1499,9 @@ func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 	write("evil/noshebang.sh", evil)
 	write("evilbin/bash", evil)
 	write(".zshenv", "touch "+pwned+"\n")
+	write("cd.sh", "#!/bin/bash\ncd sub && ./tool\n")
+	write("sub/tool", "#!/bin/sh\necho legit\n")
+	write("evil/sub/tool", evil)
 	if err := os.Symlink(filepath.Join(dir, "evil/sub"), filepath.Join(dir, "x")); err != nil {
 		t.Fatal(err)
 	}
@@ -1496,9 +1511,11 @@ func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; bash host.sh`,
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./noshebang.sh`,
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./envbash.sh`,
+		`n=CDPATH; export "$n=$PWD/evil"; ./cd.sh`,
 	}
 	yes := true
 	entries := []config.CommandEntry{
+		{Command: "./cd.sh", Allow: &yes, NoSandbox: true},
 		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
 		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
 		{Command: "./envbash.sh", Allow: &yes, NoSandbox: true},

@@ -565,16 +565,17 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	return s.dispatchExec(ctx, args, useOSSandbox)
 }
 
-// shellStartupEnv are the variables a native shell acts on before a script's
-// first line runs, which the sandbox's interpreter ignores: BASH_ENV and ENV
-// (sourced), SHELLOPTS (with xtrace, bash expands PS4, command substitutions
-// included), BASHOPTS, PS4, BASH_XTRACEFD, and zsh's ZDOTDIR (it sources
-// $ZDOTDIR/.zshenv). Assigning them is refused (blockedEnvVars), but that
-// check sees only assignments it can name, so a command allowed with
-// no_sandbox (a script run natively, or a program that starts a shell) also
-// starts without them on the host, whatever set them (execOnHost).
-// Exported bash functions (BASH_FUNC_name%%) are dropped the same way.
-var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR"}
+// shellStartupEnv are the variables a native shell acts on that the
+// sandbox's interpreter ignores: before a script's first line, BASH_ENV and
+// ENV (sourced), SHELLOPTS (with xtrace, bash expands PS4, command
+// substitutions included), BASHOPTS, PS4, BASH_XTRACEFD, and zsh's ZDOTDIR
+// (it sources $ZDOTDIR/.zshenv); and CDPATH, which redirects the script's
+// own `cd`. Assigning them is refused (blockedEnvVars), but that check sees
+// only assignments it can name, so a command allowed with no_sandbox (a
+// script run natively, or a program that starts a shell) gets the server's
+// own values for them on the host, whatever set them (execOnHost). Exported
+// bash functions (BASH_FUNC_name%%) are treated the same way.
+var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR", "CDPATH"}
 
 // nativeScriptEnv are the variables a script allowed with no_sandbox gets
 // from the server's environment rather than the interpreter's (execOnHost):
