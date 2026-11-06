@@ -451,6 +451,12 @@ const execArgvMaxDepth = 4
 // interpreter's OS-call authorization. depth counts shebang re-dispatches (see
 // the script branch).
 func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool, readAllowedPaths, writeAllowedPaths []string, sets resolvedPathSets, depth int) error {
+	// A blocked variable set where the static check could not name it
+	// (export "PATH=...", read PATH under set -a) is refused here, before
+	// the command is looked up in, or inherits, the changed environment.
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkBlockedEnv(interp.HandlerCtx(ctx).Env)); err != nil {
+		return err
+	}
 	// Intercept `aws configure list-profiles` in brokered IMDS mode so an
 	// agent can discover the profiles it may select via AWS_PROFILE (the
 	// real command would read the masked ~/.aws and return nothing).
