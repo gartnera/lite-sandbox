@@ -1189,6 +1189,11 @@ func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir st
 	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
 	if mayTrust && s.trustsScript(path) {
 		ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+		// One allowed with no_sandbox runs natively on the host (see
+		// execArgv), so the interpreter never checks its body.
+		if ts, _ := trustedScriptFrom(ctx); ts.host {
+			return nil
+		}
 	}
 	if isBinaryExecutable(path) {
 		return nil
@@ -1374,8 +1379,8 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 // unsandboxed ones reach the real docker daemon (or the host's own DOCKER_HOST).
 //
 // Inside a script a bare allow names (withTrustedScript), the script's routing
-// applies instead: everything it runs goes to the shared worker, or to the
-// host when the script itself is allowed with no_sandbox.
+// applies instead: everything it runs goes to the shared worker, and a script
+// allowed with no_sandbox, run natively, goes to the host.
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	if ts, ok := trustedScriptFrom(ctx); ok {
 		if useOSSandbox && !ts.host {

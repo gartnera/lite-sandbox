@@ -238,6 +238,11 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		// entry registered as `./web/foo/build.sh`.
 		if s.trustsScript(path) {
 			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+			// One allowed with no_sandbox runs natively on the host: this
+			// invocation, with the host's own bash (or sh).
+			if ts, _ := trustedScriptFrom(ctx); ts.host {
+				return s.dispatchExec(ctx, args, s.osSandboxEnabled())
+			}
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -516,8 +521,12 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			// A bare allow of the script trusts it (see bareAllowsScript for
 			// how an invocation matches): a shell script runs through the
 			// interpreter below like any other, with the checks a bare allow
-			// lifts not enforced for what it runs (withTrustedScript).
+			// lifts not enforced for what it runs (withTrustedScript) — unless
+			// it is allowed with no_sandbox, when it runs natively on the host.
 			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+			if ts, _ := trustedScriptFrom(ctx); ts.host {
+				return s.dispatchExec(ctx, nativeScriptArgv(path, args), useOSSandbox)
+			}
 		} else if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
 			// A subcommand-restricted extra_commands entry (e.g. "./gradlew
 			// build") allows the invocation but, unlike a bare entry, is not
@@ -551,6 +560,18 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 		return s.executeScript(ctx, args)
 	}
 	return s.dispatchExec(ctx, args, useOSSandbox)
+}
+
+// nativeScriptArgv is the argv that runs the script at path natively, as
+// invoked by args (args[0] is the word that named it): the script itself,
+// which the kernel starts through its shebang or as a binary, or, for a text
+// file without a shebang (which exec refuses), `bash <script>`, which is what
+// bash does with one.
+func nativeScriptArgv(path string, args []string) []string {
+	if isBinaryExecutable(path) || scriptShebangArgv(path) != nil {
+		return args
+	}
+	return append([]string{"bash", args[0]}, args[1:]...)
 }
 
 // runtimeArgValidator re-runs the per-command argument validator for name

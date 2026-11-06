@@ -1353,6 +1353,63 @@ func TestExecuteScript_BareScriptRunsThroughInterpreter(t *testing.T) {
 	}
 }
 
+// TestExecuteScript_NoSandboxScriptRunsNatively: a script allowed with
+// no_sandbox runs with the host's bash, not the sandbox's interpreter (its $!
+// is a pid, not the interpreter's job id), however it is invoked, and nothing
+// it runs is checked, statically or at runtime. One run by a script allowed
+// without no_sandbox stays where that script runs, in the interpreter.
+func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// curl is denied and protoc is off the whitelist; neither runs.
+	body := "true &\necho bg=$!\nwait\nif false; then curl https://example.com; protoc; fi\necho arg=$1\n"
+	write("host.sh", "#!/bin/bash\n"+body)
+	write("noshebang.sh", body)
+	write("sub/outer.sh", "#!/bin/bash\n./host.sh x\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./sub/outer.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+	}}, dir)
+
+	for _, cmd := range []string{"./host.sh x", "bash host.sh x", "true && ./host.sh x", "./noshebang.sh x", "bash -c './host.sh x'"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err != nil {
+			t.Fatalf("%s: static validation should not check a no_sandbox script's body: %v", cmd, err)
+		}
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v (output %q)", cmd, err, out)
+		}
+		if strings.Contains(out, "bg=g") || !strings.Contains(out, "bg=") || !strings.Contains(out, "arg=x") {
+			t.Errorf("%s: output %q, want the host bash's pid for $! and arg=x", cmd, out)
+		}
+	}
+
+	// Inside a script allowed without no_sandbox, the no_sandbox script is
+	// routed the way the outer one is: through the interpreter.
+	out, err := executeInDirWithSandbox(t, s, dir, "./sub/outer.sh")
+	if err != nil {
+		t.Fatalf("./sub/outer.sh: %v", err)
+	}
+	if !strings.Contains(out, "bg=g") {
+		t.Errorf("./sub/outer.sh: output %q, want the interpreter's job id (bg=g...)", out)
+	}
+}
+
 // TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
 // script lifts for the commands the script runs: the whitelist, argument
 // validators, structural rules (setting PATH) and the deny list — statically
