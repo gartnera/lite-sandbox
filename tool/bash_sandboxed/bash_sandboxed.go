@@ -809,6 +809,11 @@ func blockedEnvVarError(name string) error {
 	if reason, blocked := blockedEnvVars[name]; blocked {
 		return fmt.Errorf("setting %s is not allowed: %s", name, reason)
 	}
+	// An exported bash function (only env can name one): a native bash
+	// defines it before the script's first line, over a command it runs.
+	if strings.HasPrefix(name, "BASH_FUNC_") {
+		return fmt.Errorf("setting %s is not allowed: a native bash defines it as a function", name)
+	}
 	return nil
 }
 
@@ -1472,6 +1477,25 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		for _, name := range shellStartupEnv {
 			delete(envMap, name)
 		}
+		for name := range envMap {
+			if strings.HasPrefix(name, "BASH_FUNC_") {
+				delete(envMap, name)
+			}
+		}
+	}
+	// The environment the command is looked up in: the interpreter's, or for
+	// a script run natively, the server's PATH (see nativeScriptEnv).
+	var lookupEnv expand.Environ = hc.Env
+	if isNativeScript(ctx) {
+		base := envSliceToMap(s.commandBaseEnv())
+		for _, name := range nativeScriptEnv {
+			if v, ok := base[name]; ok {
+				envMap[name] = v
+			} else {
+				delete(envMap, name)
+			}
+		}
+		lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
 	}
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
@@ -1482,7 +1506,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		env = append(env, k+"="+v)
 	}
 
-	path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
+	path, err := interp.LookPathDir(hc.Dir, lookupEnv, args[0])
 	if err != nil {
 		fmt.Fprintln(hc.Stderr, err)
 		return interp.ExitStatus(127)

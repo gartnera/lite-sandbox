@@ -1433,6 +1433,7 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		`PS4='$(touch ` + pwned + `)' bash -x host.sh`,
 		`env BASHOPTS=extglob ./host.sh`,
 		`export ZDOTDIR=$PWD; ./host.sh`,
+		`env BASH_FUNC_echo%%=\(\)\ \{\ touch\ ` + pwned + `\;\ \} ./host.sh`,
 	} {
 		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "is not allowed") {
 			t.Errorf("%s: expected the assignment to be refused, got %v", cmd, err)
@@ -1454,6 +1455,68 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		}
 		if _, err := os.Stat(pwned); err == nil {
 			t.Fatalf("%s: the native shell ran code from the environment", cmd)
+		}
+	}
+}
+
+// TestNoSandboxScript_RunsOnlyTheTrustedFile: a script allowed with
+// no_sandbox runs natively as the file it is trusted by, found with the
+// server's PATH and HOME, never as another file or program the agent
+// arranged: a symlinked directory in its path, a shell found through a PATH
+// the agent set (past the static check, with a dynamic name), a .zshenv in a
+// HOME the agent set, or an exported bash function.
+func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	evil := "#!/bin/sh\ntouch " + pwned + "\necho evil\n"
+	write("host.sh", "#!/bin/bash\necho legit\n")
+	write("noshebang.sh", "echo legit\n")
+	write("envbash.sh", "#!/usr/bin/env bash\necho legit\n")
+	write("evil/sub/placeholder", "")
+	write("evil/host.sh", evil)
+	write("evil/noshebang.sh", evil)
+	write("evilbin/bash", evil)
+	write(".zshenv", "touch "+pwned+"\n")
+	if err := os.Symlink(filepath.Join(dir, "evil/sub"), filepath.Join(dir, "x")); err != nil {
+		t.Fatal(err)
+	}
+	cmds := []string{
+		"bash x/../host.sh",
+		"./x/../noshebang.sh",
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; bash host.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./noshebang.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./envbash.sh`,
+	}
+	yes := true
+	entries := []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./envbash.sh", Allow: &yes, NoSandbox: true},
+	}
+	if _, err := exec.LookPath("zsh"); err == nil {
+		write("host.zsh", "#!/usr/bin/env zsh\necho legit\n")
+		entries = append(entries, config.CommandEntry{Command: "./host.zsh", Allow: &yes, NoSandbox: true})
+		cmds = append(cmds, "HOME=$PWD ./host.zsh", "export HOME=$PWD; ./host.zsh")
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: entries}, dir)
+	for _, cmd := range cmds {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("%s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err != nil || !strings.Contains(out, "legit") {
+			t.Errorf("%s: want the trusted script to run: %v %q", cmd, err, out)
 		}
 	}
 }

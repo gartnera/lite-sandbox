@@ -158,7 +158,9 @@ the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
 should not trust its environment. Every `no_sandbox` command starts without
 the variables a native shell acts on before the script's first line
 (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `BASH_XTRACEFD`,
-`ZDOTDIR`), and assigning them is refused. Run by a script allowed without
+`ZDOTDIR`, exported `BASH_FUNC_*` functions), and assigning them is refused.
+The script itself runs with the server's `PATH` and `HOME`, whatever the
+agent set them to, and as the file the entry names by its resolved path. Run by a script allowed without
 `no_sandbox`, it stays where that script runs: in the interpreter, in the
 shared worker.
 

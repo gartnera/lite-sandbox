@@ -239,9 +239,12 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		if s.trustsScript(path) {
 			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 			// One allowed with no_sandbox runs natively on the host: this
-			// invocation, with the host's own bash (or sh).
+			// invocation, with the host's own bash (or sh), given the script
+			// by the path it is trusted by (see nativeScriptArgv).
 			if ts, _ := trustedScriptFrom(ctx); ts.host {
-				return s.dispatchExec(ctx, args, s.osSandboxEnabled())
+				native := append([]string(nil), args...)
+				native[inv.script] = filepath.Clean(path)
+				return s.dispatchExec(withNativeScript(ctx), native, s.osSandboxEnabled())
 			}
 		}
 		data, err := os.ReadFile(path)
@@ -525,7 +528,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			// it is allowed with no_sandbox, when it runs natively on the host.
 			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 			if ts, _ := trustedScriptFrom(ctx); ts.host {
-				return s.dispatchExec(ctx, nativeScriptArgv(path, args), useOSSandbox)
+				return s.dispatchExec(withNativeScript(ctx), nativeScriptArgv(filepath.Clean(path), args), useOSSandbox)
 			}
 		} else if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
 			// A subcommand-restricted extra_commands entry (e.g. "./gradlew
@@ -570,18 +573,42 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 // check sees only assignments it can name, so a command allowed with
 // no_sandbox (a script run natively, or a program that starts a shell) also
 // starts without them on the host, whatever set them (execOnHost).
+// Exported bash functions (BASH_FUNC_name%%) are dropped the same way.
 var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR"}
 
-// nativeScriptArgv is the argv that runs the script at path natively, as
-// invoked by args (args[0] is the word that named it): the script itself,
-// which the kernel starts through its shebang or as a binary, or, for a text
-// file without a shebang (which exec refuses), `bash <script>`, which is what
-// bash does with one.
+// nativeScriptEnv are the variables a script allowed with no_sandbox gets
+// from the server's environment rather than the interpreter's (execOnHost):
+// PATH, which finds its shell (`bash <script>`, `#!/usr/bin/env bash`), and
+// HOME, where zsh finds .zshenv. Assigning PATH is refused, but that check
+// sees only assignments it can name; HOME may be set for other commands.
+var nativeScriptEnv = []string{"PATH", "HOME"}
+
+type nativeScriptKey struct{}
+
+// withNativeScript marks ctx as the native run of a script allowed with
+// no_sandbox (see nativeScriptEnv).
+func withNativeScript(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeScriptKey{}, true)
+}
+
+func isNativeScript(ctx context.Context) bool {
+	v, _ := ctx.Value(nativeScriptKey{}).(bool)
+	return v
+}
+
+// nativeScriptArgv is the argv that runs the script at path (the cleaned
+// absolute path it is trusted by) natively, with the arguments of args (the
+// invocation): the script itself, which the kernel starts through its
+// shebang or as a binary, or, for a text file without a shebang (which exec
+// refuses), `bash <script>`, which is what bash does with one. It is run by
+// path, never by the word that named it: through a symlinked directory,
+// `x/../build.sh` cleans to the trusted file but the kernel would open another.
 func nativeScriptArgv(path string, args []string) []string {
+	argv := append([]string{path}, args[1:]...)
 	if isBinaryExecutable(path) || scriptShebangArgv(path) != nil {
-		return args
+		return argv
 	}
-	return append([]string{"bash", args[0]}, args[1:]...)
+	return append([]string{"bash"}, argv...)
 }
 
 // runtimeArgValidator re-runs the per-command argument validator for name
