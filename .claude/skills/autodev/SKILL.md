@@ -153,25 +153,25 @@ filed during this run.
 
 Add **exactly one** `release:*` label: `release:minor` for a feature,
 `release:patch` for a fix or refactor, `release:skip` for a docs-only,
-CI-only or tests-only change, `release:major` for a breaking change.
+CI-only or tests-only change, `release:major` for a breaking change. Then
+enable auto-merge right away (step 9).
 
 ## 9. Auto-merge and watch
 
-Nothing in this repo gates a merge on CI: there is no merge queue, and `main`
-may not require status checks. Enabling auto-merge right away could therefore
-merge, and release, before CI runs.
-
-- Wait until every check on the PR's current head commit is green. Then
-  enable auto-merge with the squash method. If GitHub won't enable it
-  (for example because the PR is already mergeable), squash-merge the green
-  PR directly.
+- Enable auto-merge with the squash method as soon as the PR is created and
+  labeled, without waiting for CI. GitHub then merges it once the required
+  checks pass.
+- If GitHub won't enable auto-merge (for example because the PR is already
+  mergeable, meaning no required check is pending), don't merge right away:
+  wait until every check on the PR's current head commit is green, then
+  squash-merge it directly.
 - Keep watching until the PR merges or closes, in whatever way this
   environment supports.
 - **CI failure:** read the failing job's log and reproduce the failure
   locally with the job's command and environment. Fix it and show the same
   command passing. If the fix touches the security boundary, run step 7 on
-  it. Commit, rebase, push, and wait for green again before re-enabling
-  auto-merge if it was dropped. If the failure can't be reproduced here (for
+  it. Commit, rebase, push, and re-enable auto-merge right away if it was
+  dropped. If the failure can't be reproduced here (for
   example, it only happens on macOS), reason from the log and say so in the
   PR. If a failure is unrelated to the diff and looks flaky, rerun the failed
   jobs once. If it fails again, file an issue.
@@ -179,8 +179,8 @@ merge, and release, before CI runs.
 - **Review comments from people:** triage them as in step 5. Reply to the
   ones you reject with the reason. Don't resolve or dismiss anyone else's
   review.
-- If the same failure survives three fix attempts, stop. Leave the PR open
-  with auto-merge off and report what you tried.
+- If the same failure survives three fix attempts, stop. Disable auto-merge,
+  leave the PR open, and report what you tried.
 
 After the merge, check that CI and the release on `main` pass for the merge
 commit, and that any issue the PR closes is closed. If this change broke `main`, start a new autodev run to fix it
