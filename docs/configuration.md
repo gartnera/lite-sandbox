@@ -158,8 +158,10 @@ command (a script or any other program, run directly or under a wrapper) gets
 your own values (the server's environment's) for the variables that make a
 program load code or config before anything of yours runs, whatever the agent
 set: `PATH`, `HOME`, `XDG_CONFIG_HOME`, git's (`GIT_CONFIG*`, `GIT_DIR`,
-`GIT_SSH_COMMAND`, `GIT_EDITOR`, ...), `EDITOR`/`VISUAL`/`PAGER`, the dynamic
-loader's (`LD_*`, `DYLD_*`), the language runtimes' (`NODE_OPTIONS`,
+`GIT_SSH_COMMAND`, `GIT_ALLOW_PROTOCOL`, `GIT_EDITOR`, ...),
+`EDITOR`/`VISUAL`/`PAGER`, the dynamic loader's (`LD_*`, `DYLD_*`), CLI config
+locations (`DOCKER_CONFIG`, `KUBECONFIG`, `AWS_CONFIG_FILE`, `GH_CONFIG_DIR`,
+`CARGO_HOME`, `DEVELOPER_DIR`, ...), the language runtimes' (`NODE_OPTIONS`,
 `NODE_PATH`, `npm_config_*`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`,
 `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `GOFLAGS`, ...), and those a native shell acts
 on before a script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
@@ -208,7 +210,9 @@ the agent set, so `HOME=$PWD/h git status` can't hand a `no_sandbox` git a
 `.gitconfig` the agent wrote; `env HOME=... git status` is refused. See
 [allowed scripts](#allowed-scripts) for the list and
 [security](security.md#general-limitations) for what it can't cover: the rest of
-the environment is the agent's.
+the environment is the agent's. A bare entry lifts the program's argument
+validator too (`git -c core.fsmonitor=... status`), so this mostly protects an
+entry restricted to subcommands.
 
 ```yaml
 commands:

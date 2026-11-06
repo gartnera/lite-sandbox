@@ -608,7 +608,19 @@ var serverEnv = []string{
 	"GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS",
 	"GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_EXTERNAL_DIFF",
 	"GIT_PROXY_COMMAND", "GIT_DIR", "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR", "GIT_WORK_TREE",
+	// ext:: runs a command as the transport.
+	"GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER",
 	"EDITOR", "VISUAL", "PAGER",
+	// The CLIs no_sandbox is for, pointed at config (or plugins) the agent
+	// wrote: docker's cli-plugins, kubeconfig's exec credential plugins,
+	// AWS's credential_process, gh's shell aliases, terraform's
+	// dev_overrides, gradle's init scripts, cargo's config and wrapper, and
+	// xcrun's choice of toolchain.
+	"DOCKER_CONFIG", "KUBECONFIG", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+	"GH_CONFIG_DIR", "TF_CLI_CONFIG_FILE", "GRADLE_USER_HOME",
+	"CARGO_HOME", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+	"YARN_RC_FILENAME", "YARN_YARN_PATH",
+	"DEVELOPER_DIR", "TOOLCHAINS", "SDKROOT",
 	// Language runtimes: modules and options loaded at startup.
 	"NODE_OPTIONS", "NODE_PATH",
 	"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
@@ -620,9 +632,14 @@ var serverEnv = []string{
 
 // serverEnvPrefixes are the prefixes of serverEnv's variable families: the
 // dynamic loader's (LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES), git's
-// config (GIT_CONFIG_GLOBAL, GIT_CONFIG_KEY_n, GIT_CONFIG_PARAMETERS), npm's
-// config (npm_config_node_options, ...), and exported bash functions.
-var serverEnvPrefixes = []string{"LD_", "DYLD_", "GIT_CONFIG", "npm_config_", "NPM_CONFIG_", "BASH_FUNC_"}
+// config (GIT_CONFIG_GLOBAL, GIT_CONFIG_KEY_n, GIT_CONFIG_PARAMETERS) and
+// trace files (GIT_TRACE, GIT_TRACE2_EVENT, which git appends to wherever
+// they name), and exported bash functions.
+var serverEnvPrefixes = []string{"LD_", "DYLD_", "GIT_CONFIG", "GIT_TRACE", "BASH_FUNC_"}
+
+// npmConfigPrefix is npm's config variables' prefix, which npm matches in
+// any case (npm_config_userconfig, NPM_CONFIG_USERCONFIG, Npm_Config_...).
+const npmConfigPrefix = "npm_config_"
 
 // isServerEnv reports whether a command allowed with no_sandbox gets the
 // variable from the server's environment (see serverEnv).
@@ -635,7 +652,7 @@ func isServerEnv(name string) bool {
 			return true
 		}
 	}
-	return false
+	return len(name) >= len(npmConfigPrefix) && strings.EqualFold(name[:len(npmConfigPrefix)], npmConfigPrefix)
 }
 
 // checkServerEnvAssign refuses an env wrapper in args (at any depth of

@@ -1622,6 +1622,10 @@ func TestNoSandbox_ServerEnv(t *testing.T) {
 	gitConfig := "[core]\n\tfsmonitor = touch " + pwned + "\n"
 	write("h/.gitconfig", gitConfig)
 	write("x/git/config", gitConfig)
+	write("show.sh", "#!/bin/sh\necho home=$HOME\n")
+	if err := os.Chmod(filepath.Join(dir, "show.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
@@ -1630,6 +1634,7 @@ func TestNoSandbox_ServerEnv(t *testing.T) {
 	entries := []config.CommandEntry{
 		{Command: "git", Allow: &yes, NoSandbox: true},
 		{Command: "printenv", Allow: &yes, NoSandbox: true},
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
 	}
 	for _, mode := range []config.Mode{"", config.ModeOpen} {
 		s := NewSandbox()
@@ -1642,12 +1647,13 @@ func TestNoSandbox_ServerEnv(t *testing.T) {
 			`GIT_CONFIG_GLOBAL=$PWD/h/.gitconfig git status`,
 			`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch ` + pwned + `" git status`,
 			`HOME=$PWD/h nice git status`,
+			`GIT_ALLOW_PROTOCOL=ext git ls-remote "ext::sh -c touch% ` + pwned + `"`,
 		} {
 			out, err := executeInDirWithSandbox(t, s, dir, cmd)
 			if _, statErr := os.Stat(pwned); statErr == nil {
 				t.Fatalf("mode %q, %s: git ran the agent's config on the host (err %v, output %q)", mode, cmd, err, out)
 			}
-			if err != nil {
+			if err != nil && !strings.Contains(cmd, "ls-remote") {
 				t.Errorf("mode %q, %s: want git to run with the server's environment: %v %q", mode, cmd, err, out)
 			}
 		}
@@ -1656,6 +1662,7 @@ func TestNoSandbox_ServerEnv(t *testing.T) {
 		for _, cmd := range []string{
 			`env HOME=$PWD/h git status`,
 			`nice env -u FOO HOME=$PWD/h git status`,
+			`timeout 10 env -i HOME=$PWD/h git status`,
 			`env NODE_OPTIONS=--require=./x.js printenv`,
 		} {
 			out, err := executeInDirWithSandbox(t, s, dir, cmd)
@@ -1671,6 +1678,16 @@ func TestNoSandbox_ServerEnv(t *testing.T) {
 		out, err := executeInDirWithSandbox(t, s, dir, `HOME=/agent NODE_OPTIONS=--require=./x.js FOO=bar printenv HOME NODE_OPTIONS FOO`)
 		if err != nil || out != home+"\n--server\nbar\n" {
 			t.Errorf("mode %q: printenv: %v %q, want the server's HOME and NODE_OPTIONS and the agent's FOO", mode, err, out)
+		}
+		// npm reads its config variables in any case.
+		if out, err := executeInDirWithSandbox(t, s, dir, `Npm_Config_userconfig=./rc printenv Npm_Config_userconfig`); err == nil || out != "" {
+			t.Errorf("mode %q: want a mixed-case npm config variable dropped: %v %q", mode, err, out)
+		}
+		// A no_sandbox script under a wrapper gets the server's HOME too
+		// (zsh would source the agent's $HOME/.zshenv).
+		out, err = executeInDirWithSandbox(t, s, dir, `HOME=$PWD nice ./show.sh`)
+		if err != nil || out != "home="+home+"\n" {
+			t.Errorf("mode %q: wrapped no_sandbox script: %v %q, want the server's HOME", mode, err, out)
 		}
 	}
 
