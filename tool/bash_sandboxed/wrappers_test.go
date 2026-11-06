@@ -180,6 +180,36 @@ func TestEnvRefusesRelocatingOptions(t *testing.T) {
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("a refused env -C still ran a script")
 	}
+	// A replace string put in a wrapper's own words smuggles the options
+	// in after validation: with input Cevil, `xargs -I{} env -{} ./host.sh`
+	// runs env -Cevil ./host.sh.
+	for _, cmd := range []string{
+		"printf 'Cevil\\n' | xargs -I{} env -{} ./host.sh",
+		"printf 'Cevil\\n' | xargs -i env -{} ./host.sh",
+		"printf 'Cevil\\n' | xargs --replace env -{} ./host.sh",
+		"printf 'chdir=evil\\n' | xargs -I% env --% ./host.sh",
+		"printf 'Cevil\\n' | xargs -J% env -% ./host.sh",
+		"printf 'Cevil\\n' | xargs -I{} timeout 5 env -{} ./host.sh",
+		"printf 'Cevil\\n' | xargs -I{} env {}=x ./host.sh",
+		"printf 'x\\n' | xargs -I{} timeout {} ./host.sh",
+		"find . -maxdepth 0 -exec env -{} ./host.sh \\;",
+		"find . -maxdepth 0 -exec nice env -i{} ./host.sh \\;",
+	} {
+		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil || !strings.Contains(err.Error(), "replace string") {
+			t.Errorf("%s: want a replace-string refusal, got %v", cmd, err)
+		}
+	}
+	// Elsewhere the input stays an argument or an assignment's value.
+	for _, cmd := range []string{
+		"printf 'a\\n' | xargs -I{} env FOO={} ./host.sh",
+		"printf 'a\\n' | xargs -I{} timeout 5 ./host.sh {}",
+		"printf 'a\\n' | xargs env -i ./host.sh",
+		"find . -maxdepth 0 -exec env ./host.sh {} \\;",
+	} {
+		if err := s.ValidateCommand(cmd, dir, paths, paths); err != nil {
+			t.Errorf("%s should be allowed: %v", cmd, err)
+		}
+	}
 	if got := s.execIsUnsandboxed(context.Background(), []string{"env", "-C", "evil", "./host.sh"}); got {
 		t.Error("env -C evil ./host.sh must not route to the host")
 	}

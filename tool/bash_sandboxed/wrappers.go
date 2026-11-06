@@ -207,9 +207,80 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := validateSubCommand(s, args[idx:]); err != nil {
 			return err
 		}
+		if err := validateWrapperUnderXargs(args[:idx], args[idx:]); err != nil {
+			return err
+		}
 		return validateSSHUnderXargs(s, args[:idx], args[idx:])
 	}
 	return validateSubCommand(s, args[idx:])
+}
+
+// validateWrapperUnderXargs is validateWrappedReplaceStrings for a command
+// xargs runs; xargsOpts are xargs's own words before the command (xargs
+// itself included), which set its replace strings. A replace string that is
+// not literal could be any text, so a wrapper under it is refused.
+func validateWrapperUnderXargs(xargsOpts, args []*syntax.Word) error {
+	if len(args) == 0 {
+		return nil
+	}
+	if _, ok := wrapperSpecs[args[0].Lit()]; !ok {
+		return nil
+	}
+	opts := make([]string, len(xargsOpts))
+	for i, w := range xargsOpts {
+		v, ok := wordLiteral(w)
+		if !ok {
+			return fmt.Errorf("xargs: a wrapper (%s) under xargs options that are not literal is not allowed: a replace string set by them could put the input in the wrapper's options", args[0].Lit())
+		}
+		opts[i] = v
+	}
+	return validateWrappedReplaceStrings("xargs", xargsReplaceStrings(opts), args)
+}
+
+// validateWrappedReplaceStrings refuses a wrapper (wrapperSpecs) that xargs
+// with replace strings (-I, -i, --replace, BSD -J) or find -exec ({}) runs
+// with a replace string in one of the wrapper's own words before its
+// command. The input is put there after validation, so it can become one of
+// the wrapper's options or its command: with input "Cevil",
+// `xargs -I{} env -{} ./host.sh` runs `env -Cevil ./host.sh`, which runs
+// evil/host.sh where ./host.sh was validated and routed. Nested wrappers are
+// walked. An env assignment's value may hold one (env FOO={} cmd): the input
+// there stays the value. wrapper names the outer command for messages.
+func validateWrappedReplaceStrings(wrapper string, replace []string, args []*syntax.Word) error {
+	for guard := 0; guard <= maxBashDepth && len(args) > 0 && len(replace) > 0; guard++ {
+		lits := wordLits(args)
+		spec, ok := wrapperSpecs[lits[0]]
+		if !ok {
+			return nil
+		}
+		idx, operands, _ := spec.layout(lits, wordLeadingLits(args))
+		end := idx
+		if idx < 0 {
+			end = len(args)
+		}
+		vals := wordValues(args)
+		for i := 1; i < end; i++ {
+			v := vals[i]
+			at := -1
+			for _, r := range replace {
+				if j := strings.Index(v, r); r != "" && j >= 0 && (at < 0 || j < at) {
+					at = j
+				}
+			}
+			if at < 0 {
+				continue
+			}
+			if spec.assignments && i >= operands && strings.Contains(v[:at], "=") {
+				continue
+			}
+			return fmt.Errorf("%s: %s word %q holds a replace string before the command %s runs, so the input put there could become one of its options or its command", wrapper, lits[0], v, lits[0])
+		}
+		if idx < 0 {
+			return nil
+		}
+		args = args[idx:]
+	}
+	return nil
 }
 
 // validateEnvAssignments holds env's NAME=VALUE operands (assigns, the words
