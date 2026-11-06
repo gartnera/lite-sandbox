@@ -12,7 +12,7 @@ require (
 	github.com/fugue-labs/monty-go v0.2.0
 	github.com/jellydator/ttlcache/v3 v3.4.0
 	github.com/jonathonwebb/getopt v1.0.2
-	github.com/mark3labs/mcp-go v0.44.0
+	github.com/mark3labs/mcp-go v1.5.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/peterh/liner v1.2.3
 	github.com/spf13/cobra v1.10.2
@@ -36,18 +36,16 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 // indirect
-	github.com/bahlo/generic-list-go v0.2.0 // indirect
-	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/invopop/jsonschema v0.13.0 // indirect
-	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-runewidth v0.0.31 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/tetratelabs/wazero v1.11.0 // indirect
-	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/text v0.14.0 // indirect
 )
 
 replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20261104045841-c72915f64e61
