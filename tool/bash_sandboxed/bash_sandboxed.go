@@ -673,25 +673,34 @@ func ParseBash(command string) (*syntax.File, error) {
 	return f, nil
 }
 
-// normalizeDupOutToFile rewrites `>&word`, with no fd number and a literal word
+// normalizeDupOutToFile rewrites `>&word` (or `1>&word`), with a literal word
 // that is not a file descriptor, to `&>word`: bash runs it as that (stdout and
 // stderr both to the file; see "Duplicating File Descriptors" in bash(1)), but
 // the interpreter only duplicates to a descriptor, and the validators hold an
-// output fd duplication to one. `n>&file` stays as it is (bash's "ambiguous
-// redirect"), and so does a word only known after expansion.
+// output fd duplication to one. Another fd (`2>&file`, bash's "ambiguous
+// redirect") stays as it is, and so does a word only known after expansion.
 func normalizeDupOutToFile(f *syntax.File) {
 	syntax.Walk(f, func(node syntax.Node) bool {
 		r, ok := node.(*syntax.Redirect)
-		if !ok || r.Op != syntax.DplOut || r.N != nil {
+		if !ok || r.Op != syntax.DplOut || (r.N != nil && r.N.Value != "1") {
 			return true
 		}
 		word, ok := wordLiteral(r.Word)
-		if !ok || word == "" || word == "-" || strings.Trim(word, "0123456789") == "" {
+		if !ok || isDupOutTarget(word) {
 			return true
 		}
 		r.Op = syntax.RdrAll
+		r.N = nil
 		return true
 	})
+}
+
+// isDupOutTarget reports whether word, after `>&`, names a file descriptor
+// rather than a file: digits (duplicate), "-" (close), or digits then "-"
+// (move).
+func isDupOutTarget(word string) bool {
+	digits := strings.TrimSuffix(word, "-")
+	return word == "-" || (digits != "" && strings.Trim(digits, "0123456789") == "")
 }
 
 // stripShebang removes a leading "#!" interpreter line from a script's source,

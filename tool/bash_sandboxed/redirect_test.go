@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 func TestValidate_AllowedRedirections(t *testing.T) {
@@ -56,6 +58,7 @@ func TestValidate_AllowedOutputRedirections(t *testing.T) {
 		// `>&word` with no fd number is bash's other spelling of `&>word`.
 		{"fd dup form of all to file", "echo hello >& file.txt"},
 		{"fd dup form of all to /dev/null", "ls >&/dev/null"},
+		{"fd 1 dup form of all to file", "echo hello 1>& file.txt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,6 +91,18 @@ func TestExecute_DupOutToFile(t *testing.T) {
 	}
 	if got := string(data); got != "out\nerr\n" {
 		t.Fatalf("out.txt = %q, want both streams", got)
+	}
+	// Descriptor forms are left alone: duplicate, close, and move (`>&2-`
+	// is not a file named "2-").
+	for _, cmd := range []string{"echo a >&2", "echo a >&-", "echo a >&2-"} {
+		f, err := ParseBash(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := f.Stmts[0].Redirs[0]
+		if r.Op != syntax.DplOut {
+			t.Errorf("%s: rewritten to %v", cmd, r.Op)
+		}
 	}
 	outside := filepath.Join(t.TempDir(), "x.txt")
 	if _, err := executeInDirWithSandbox(t, s, dir, `echo hi >&`+outside); err == nil {
