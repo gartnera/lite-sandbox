@@ -632,7 +632,8 @@ func nativeScriptArgv(path string, args []string) []string {
 // themselves (commandSpec.revalidatesItself) are dispatched to dedicated executors that re-validate their contents
 // instead. args is the full argv.
 func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
-	if s.allowLiftsValidator(name, args[1:]) || lookupCommand(name).revalidatesItself {
+	dir := func() string { return interp.HandlerCtx(ctx).Dir }
+	if s.allowLiftsValidator(name, args[1:], dir) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
 	validator, ok := s.validator(name)

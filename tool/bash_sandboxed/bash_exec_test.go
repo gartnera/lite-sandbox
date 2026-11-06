@@ -1748,6 +1748,47 @@ func TestScopedCommand_BareAllowKeepsValidators(t *testing.T) {
 	}
 }
 
+// TestRunsInScopedWorker_WrappedScriptPath verifies that a wrapper running a
+// script path (`env ./host.sh`) is routed without an interpreter handler
+// context, which the static pass and a bare runtime check don't have: it once
+// panicked resolving the script against interp.HandlerCtx. A relative script
+// path resolves against the directory the caller gives.
+func TestRunsInScopedWorker_WrappedScriptPath(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	yes := true
+	hostSh := config.CommandEntry{Command: "./host.sh", Allow: &yes, NoSandbox: true}
+	inDir := func() string { return dir }
+
+	s := NewSandbox()
+	defer s.Close()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{hostSh}}, dir)
+	if s.runsInScopedWorker([]string{"env", "./host.sh"}, inDir) {
+		t.Error("env ./host.sh: no scope claims env")
+	}
+	if err := s.runtimeArgValidator(context.Background(), "env", []string{"env", "./host.sh"}); err != nil {
+		t.Errorf("runtime env ./host.sh: %v", err)
+	}
+
+	// A scope claiming the wrapper: the wrapped script's no_sandbox entry
+	// takes it to the host, out of the scope's worker, only where the
+	// script resolves to the entry's file.
+	scoped := []config.PathEntry{{Path: filepath.Join(dir, "..", "envcreds"), Read: &yes, Internal: true, Commands: []string{"env"}}}
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{hostSh, {Command: "env", Allow: &yes}}, Paths: scoped}, dir)
+	if s.runsInScopedWorker([]string{"env", "./host.sh"}, inDir) {
+		t.Error("env ./host.sh in the entry's directory runs on the host")
+	}
+	if !s.runsInScopedWorker([]string{"env", "./host.sh"}, func() string { return filepath.Join(dir, "sub") }) {
+		t.Error("env ./host.sh from another directory names another file and runs in the scope's worker")
+	}
+	if !s.runsInScopedWorker([]string{"env", "./host.sh"}, func() string { return "" }) {
+		t.Error("env ./host.sh with no known directory matches no entry")
+	}
+	if err := s.ValidateCommand("env ./host.sh", dir, paths, paths); err != nil {
+		t.Errorf("static env ./host.sh: %v", err)
+	}
+}
+
 // TestTrustedScript_AbsoluteEntryAndSource verifies that an absolute script
 // entry is trusted whatever the working directory the config was loaded for,
 // and that a sourced script is never trusted: it runs in the caller's shell,
