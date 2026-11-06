@@ -16,7 +16,7 @@ const (
 	CodexVersion = "0.153.4"
 	// ClaudeCodeVersion is a Claude Code release, fetched from the native
 	// distribution that https://claude.ai/install.sh uses.
-	ClaudeCodeVersion = "2.1.261"
+	ClaudeCodeVersion = "2.1.319"
 	// OpencodeVersion is an anomalyco/opencode v1 GitHub release (without the "v").
 	OpencodeVersion = "1.18.29"
 	// OpencodeV2Version is an anomalyco/opencode v2 GitHub release (without

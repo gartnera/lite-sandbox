@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/e2e/mockedserver/mockmodel"
@@ -134,7 +135,10 @@ func TestClaudeCodeLaunchLayersOverUserConfig(t *testing.T) {
 	if tools["Bash"] {
 		t.Errorf("built-in Bash tool still offered despite lite-sandbox's deny")
 	}
-	if !tools["mcp__probe__bash"] {
+	// Tool search defers MCP tools that are not marked always-load (launch
+	// marks only the sandbox's), so the user's server is either offered
+	// outright or announced to the model by name as a deferred tool.
+	if !tools["mcp__probe__bash"] && !strings.Contains(model.AgentTurns()[0].Text, "mcp__probe__bash") {
 		t.Errorf("the user's own MCP server was dropped: %v", tools)
 	}
 	assertDirective(t, model, memoryMarker)
