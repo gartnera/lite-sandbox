@@ -91,7 +91,7 @@ var hookFlags hookOptions
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Evaluate a Claude Code, Codex, Grok Build, or pi PreToolUse event from stdin",
+	Short: "Evaluate a Claude Code, Codex, Grok Build, or pi PreToolUse event (or a Claude Code PermissionRequest event) from stdin",
 	Long: "Reads a PreToolUse hook event as JSON on stdin (Claude Code's protocol, which " +
 		"Codex and Grok Build also speak, and lite-sandbox's pi extension sends) and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
@@ -101,6 +101,9 @@ var hookCmd = &cobra.Command{
 		"(anthropics/claude-code#18950). All other calls defer to " +
 		"Claude Code's normal permission flow. Invoked by Claude Code; registered " +
 		"by `lite-sandbox install`.\n\n" +
+		"For Claude Code's PermissionRequest event, it allows the sandbox's MCP tools in " +
+		"plan mode, where Claude Code ignores the PreToolUse allow and permissions.allow, " +
+		"except for a call the PreToolUse hook answers \"ask\", which is left to the user.\n\n" +
 		"With --validate-bash, the built-in Bash tool is validated through the " +
 		"sandbox (AST whitelist + path boundaries) and allowed when it passes " +
 		"instead of being redirected to the MCP tool.\n\n" +
@@ -140,6 +143,12 @@ func runHook(cmd *cobra.Command, opts hookOptions) error {
 	if perr != nil {
 		// tool_input failed to decode but we can still act on tool name.
 		fmt.Fprintf(errOut, "lite-sandbox hook: %v\n", perr)
+	}
+	if event.HookEventName == hook.EventPermissionRequest {
+		if d := evaluatePermissionRequest(event, opts); d != nil {
+			return d.Write(out)
+		}
+		return nil
 	}
 	if event.HookEventName != hook.EventPreToolUse {
 		// Not our event; defer.
@@ -313,17 +322,11 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if cwd == "" {
 		return nil
 	}
-	// The hot path for every sandbox bash call: read the settings alone, and
-	// build a sandbox only when some entry asks.
-	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+	sb, prompted := promptedCommands(command, cwd)
+	if sb == nil {
 		return nil
 	}
-	sb := configuredSandbox(cwd)
 	defer sb.Close()
-	prompted := sb.AskCommands(command)
-	if len(prompted) == 0 {
-		return nil
-	}
 	readPaths, writePaths := sandboxPaths(sb, cwd)
 	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
@@ -333,6 +336,94 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 			"Blocked by lite-sandbox: could not record the command for the user's approval: %v", err))
 	}
 	return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+}
+
+// promptedCommands returns the commands entries with ask: true that command
+// runs, with the sandbox that found them (the caller closes it), or a nil
+// sandbox when it runs none. It has no side effects. It is the hot path for
+// every sandbox bash call, so it reads the settings alone and builds a sandbox
+// only when some entry asks.
+func promptedCommands(command, cwd string) (*bash_sandboxed.Sandbox, []string) {
+	if cfg, err := config.LoadSettingsForDirectory(cwd); err != nil || len(cfg.AskCommandList()) == 0 {
+		return nil, nil
+	}
+	sb := configuredSandbox(cwd)
+	prompted := sb.AskCommands(command)
+	if len(prompted) == 0 {
+		sb.Close()
+		return nil, nil
+	}
+	return sb, prompted
+}
+
+// evaluatePermissionRequest answers Claude Code's PermissionRequest event,
+// which fires when Claude Code is about to prompt the user for a tool call.
+// It allows a call to one of the sandbox's MCP tools in plan mode, and
+// otherwise returns nil to leave the prompt to the user.
+//
+// Plan mode is the one place the PreToolUse allow (evaluateTool) and the
+// installer's permissions.allow rules don't reach: Claude Code ignores both
+// for a call it doesn't consider read-only, and it counts every MCP tool as
+// such (https://code.claude.com/docs/en/permissions.md#hook-approvals-in-plan-mode,
+// anthropics/claude-code#104446). A PermissionRequest allow still applies
+// there. Like the PreToolUse allow, it grants nothing the sandbox doesn't
+// already police: the tools validate and sandbox every command themselves,
+// and Claude Code still applies matching deny and ask rules.
+//
+// It must not answer for a call that PreToolUse put to the user on purpose.
+// Claude Code shows that prompt too, and so fires this event for it. That
+// covers a config request and a command whose commands entry has ask: true:
+// for those it defers, so the user still decides. It is side-effect free:
+// the approval tickets those prompts depend on are issued by PreToolUse
+// alone.
+//
+// Plan mode writes: a call allowed here runs with the sandbox's usual write
+// set, the same as outside plan mode. This is the place to consult a setting
+// that confines plan mode to reads instead.
+func evaluatePermissionRequest(event *hook.Event, opts hookOptions) *hook.PermissionRequestDecision {
+	if event.PermissionMode != hook.PermissionModePlan || !isSandboxMCPTool(event) ||
+		event.FromGrok() || event.FromPi() || event.FromCodex() {
+		return nil
+	}
+	if isSandboxBashTool(event) && needsUserApproval(event, opts) {
+		return nil
+	}
+	return hook.NewPermissionRequestDecision(hook.BehaviorAllow)
+}
+
+// needsUserApproval reports whether a sandbox bash call is one that
+// evaluateConfigRequest or evaluateAskCommand would put to the user: a config
+// request that changes the config, or a command running a commands entry with
+// ask: true. It reads the call as they do but issues no ticket. When the
+// arguments can't be read it answers true, so the user decides.
+func needsUserApproval(event *hook.Event, opts hookOptions) bool {
+	if !opts.configRequests {
+		// Without --config-requests neither is ever put to the user: the server
+		// refuses both outright, so there is nothing to protect.
+		return false
+	}
+	var args map[string]any
+	if err := json.Unmarshal(event.RawToolInput, &args); err != nil {
+		return true
+	}
+	command, _, ok := bashToolArgs(args)
+	if !ok {
+		return true
+	}
+	if req, ok := configrequest.Parse(command); ok {
+		scope, err := parseConfigRequest(req)
+		return err != nil || !scope.ReadOnly
+	}
+	cwd := eventCWD(event)
+	if cwd == "" {
+		return true
+	}
+	sb, _ := promptedCommands(command, cwd)
+	if sb == nil {
+		return false
+	}
+	sb.Close()
+	return true
 }
 
 // askReason is the "ask" reason for a command running the prompted
