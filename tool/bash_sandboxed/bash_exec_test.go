@@ -1410,6 +1410,48 @@ func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
 	}
 }
 
+// TestNoSandboxScript_ShellStartupEnv: a native shell acts on SHELLOPTS and
+// PS4 before a script's first line (xtrace expands PS4, command substitutions
+// included), which the sandbox's interpreter ignores. Setting them is
+// refused, and a script allowed with no_sandbox starts without them even
+// when they reach the interpreter's environment some other way.
+func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "host.sh"), []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+
+	for _, cmd := range []string{
+		`export SHELLOPTS=xtrace PS4='$(touch ` + pwned + `)'; ./host.sh`,
+		`SHELLOPTS=xtrace ./host.sh`,
+		`PS4='$(touch ` + pwned + `)' bash -x host.sh`,
+		`env BASHOPTS=extglob ./host.sh`,
+		`export ZDOTDIR=$PWD; ./host.sh`,
+	} {
+		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "is not allowed") {
+			t.Errorf("%s: expected the assignment to be refused, got %v", cmd, err)
+		}
+	}
+
+	t.Setenv("SHELLOPTS", "xtrace")
+	t.Setenv("PS4", "$(touch "+pwned+")")
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "timeout 60 ./host.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil || !strings.Contains(out, "ran") {
+			t.Fatalf("%s: %v %q", cmd, err, out)
+		}
+		if _, err := os.Stat(pwned); err == nil {
+			t.Fatalf("%s: the native shell ran PS4 from the environment", cmd)
+		}
+	}
+}
+
 // TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
 // script lifts for the commands the script runs: the whitelist, argument
 // validators, structural rules (setting PATH) and the deny list — statically

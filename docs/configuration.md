@@ -117,7 +117,7 @@ A shell script runs one of three ways, by its entry:
 | --- | --- | --- | --- |
 | none | the sandbox's interpreter | all | the OS sandbox worker, when enabled |
 | bare `allow: true` | the sandbox's interpreter | lifted (below) | the OS sandbox's shared worker, when enabled |
-| bare `allow: true` + `no_sandbox: true` | the host's own bash | none | the host |
+| bare `allow: true` + `no_sandbox: true` | natively: its shebang's program (`bash` without one) | none | the host |
 
 A bare entry that names a script by path (any word with a `/`:
 `./scripts/build.sh`, `scripts/build.sh`, or an absolute path) also **trusts
@@ -155,7 +155,10 @@ the interpreter at all: it runs natively on the host, as the program its
 shebang names (`bash` for a script without one), so nothing it runs is
 checked, `ask` entries and the path boundary included. It gets the variables
 the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
-should not trust its environment. Run by a script allowed without
+should not trust its environment. The variables a native shell acts on
+before the script's first line (`SHELLOPTS`, `BASHOPTS`, `PS4`,
+`BASH_XTRACEFD`, `ZDOTDIR`) can't be set, and every `no_sandbox` command
+starts without them. Run by a script allowed without
 `no_sandbox`, it stays where that script runs: in the interpreter, in the
 shared worker.
 

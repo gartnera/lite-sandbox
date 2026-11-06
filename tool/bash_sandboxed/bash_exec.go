@@ -562,6 +562,15 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	return s.dispatchExec(ctx, args, useOSSandbox)
 }
 
+// shellStartupEnv are the variables a native shell acts on before a script's
+// first line runs, which the sandbox's interpreter ignores: SHELLOPTS (with
+// xtrace, bash expands PS4, command substitutions included), BASHOPTS, PS4,
+// BASH_XTRACEFD, and zsh's ZDOTDIR (it sources $ZDOTDIR/.zshenv). Assigning
+// them is refused (blockedEnvVars), and a command allowed with no_sandbox (a
+// script run natively, or a program that starts a shell) also starts without
+// them on the host, whatever set them (execOnHost).
+var shellStartupEnv = []string{"SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR"}
+
 // nativeScriptArgv is the argv that runs the script at path natively, as
 // invoked by args (args[0] is the word that named it): the script itself,
 // which the kernel starts through its shebang or as a binary, or, for a text

@@ -728,6 +728,14 @@ var blockedEnvVars = map[string]string{
 	"ENV":             "auto-sourced script injection",
 	"CDPATH":          "unexpected directory resolution",
 	"PROMPT_COMMAND":  "arbitrary command execution",
+	// A native shell acts on these before a script's first line runs (see
+	// shellStartupEnv): with xtrace in SHELLOPTS, bash expands PS4, command
+	// substitutions included, and zsh sources $ZDOTDIR/.zshenv.
+	"SHELLOPTS":     "a native shell runs PS4 as a command with xtrace",
+	"BASHOPTS":      "sets the options of a native bash",
+	"PS4":           "a native shell expands it, command substitutions included",
+	"BASH_XTRACEFD": "redirects a native bash's trace output",
+	"ZDOTDIR":       "auto-sourced script injection",
 	// Option injection into the archive tools, past their argument validators.
 	"TAR_OPTIONS": "injects tar options",
 	"TAPE":        "selects tar's default archive, which may be remote",
@@ -1458,6 +1466,13 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		return err
 	}
 	restrictCommandEnv(args, envMap)
+	if !injectDockerProxy {
+		// Allowed with no_sandbox: a native shell it is or starts would act
+		// on these before running anything (see shellStartupEnv).
+		for _, name := range shellStartupEnv {
+			delete(envMap, name)
+		}
+	}
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
