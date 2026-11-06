@@ -576,18 +576,20 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 // ENV (sourced), SHELLOPTS (with xtrace, bash expands PS4, command
 // substitutions included), BASHOPTS, PS4, BASH_XTRACEFD, and zsh's ZDOTDIR
 // (it sources $ZDOTDIR/.zshenv); and CDPATH, which redirects the script's
-// own `cd`. Assigning them is refused (blockedEnvVars), but that check sees
-// only assignments it can name, so a command allowed with no_sandbox (a
-// script run natively, or a program that starts a shell) gets the server's
-// own values for them on the host, whatever set them (execOnHost). Exported
-// bash functions (BASH_FUNC_name%%) are treated the same way.
+// own `cd`. Assigning them is refused (blockedEnvVars), statically and at
+// runtime (checkBlockedEnv); as a backstop, for open mode, where those checks
+// only audit, and for what they don't cover, a command allowed with
+// no_sandbox (a script run natively, or a program that starts a shell) gets
+// the server's own values for them on the host, whatever set them
+// (execOnHost). Exported bash functions (BASH_FUNC_name%%) are treated the
+// same way.
 var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR", "CDPATH"}
 
 // nativeScriptEnv are the variables a script allowed with no_sandbox gets
 // from the server's environment rather than the interpreter's (execOnHost):
 // PATH, which finds its shell (`bash <script>`, `#!/usr/bin/env bash`), and
-// HOME, where zsh finds .zshenv. Assigning PATH is refused, but that check
-// sees only assignments it can name; HOME may be set for other commands.
+// HOME, where zsh finds .zshenv. Changing PATH is refused (checkBlockedEnv),
+// so this is its backstop, for open mode; HOME may be set for other commands.
 var nativeScriptEnv = []string{"PATH", "HOME"}
 
 type nativeScriptKey struct{}

@@ -846,7 +846,7 @@ func (s *Sandbox) checkBlockedEnv(env expand.Environ) error {
 		if vr.IsSet() && inBase && vr.Kind == expand.String && vr.String() == want {
 			continue
 		}
-		return fmt.Errorf("%s differs from its starting value (a new shell starts with it): %w", name, blockedEnvVarError(name))
+		return fmt.Errorf("%s was changed or unset since the shell started (restore it, or start a new shell): %w", name, blockedEnvVarError(name))
 	}
 	return nil
 }
