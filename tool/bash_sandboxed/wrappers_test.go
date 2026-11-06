@@ -148,9 +148,10 @@ func TestEnvRefusesRelocatingOptions(t *testing.T) {
 	}
 	yes := true
 	s := NewSandbox()
-	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
-		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
-	}}, dir)
+	s.updateConfig(&config.Config{
+		Commands: []config.CommandEntry{{Command: "./host.sh", Allow: &yes, NoSandbox: true}},
+		Profiles: []config.ProfileEntry{{Name: "xcode"}},
+	}, dir)
 	paths := []string{dir}
 
 	if err := s.ValidateCommand("env ./host.sh", dir, paths, paths); err != nil {
@@ -194,6 +195,10 @@ func TestEnvRefusesRelocatingOptions(t *testing.T) {
 		"printf 'x\\n' | xargs -I{} timeout {} ./host.sh",
 		"find . -maxdepth 0 -exec env -{} ./host.sh \\;",
 		"find . -maxdepth 0 -exec nice env -i{} ./host.sh \\;",
+		"printf 'Pevil\\n' | xargs -I{} xcrun env -{} ./host.sh",
+		"find . -maxdepth 0 -exec xcrun env -{} ./host.sh \\;",
+		"printf 'Cevil\\n' | xargs -I% find . -maxdepth 0 -exec env -% ./host.sh \\;",
+		"printf 'Cevil\\n' | xargs -I% find . -maxdepth 0 -execdir timeout 5 env -% ./host.sh \\;",
 	} {
 		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil || !strings.Contains(err.Error(), "replace string") {
 			t.Errorf("%s: want a replace-string refusal, got %v", cmd, err)
@@ -205,6 +210,8 @@ func TestEnvRefusesRelocatingOptions(t *testing.T) {
 		"printf 'a\\n' | xargs -I{} timeout 5 ./host.sh {}",
 		"printf 'a\\n' | xargs env -i ./host.sh",
 		"find . -maxdepth 0 -exec env ./host.sh {} \\;",
+		"printf 'a\\n' | xargs -I{} xcrun env ./host.sh {}",
+		"printf 'a\\n' | xargs -I% find . -maxdepth 0 -exec env ./host.sh % {} \\;",
 	} {
 		if err := s.ValidateCommand(cmd, dir, paths, paths); err != nil {
 			t.Errorf("%s should be allowed: %v", cmd, err)
