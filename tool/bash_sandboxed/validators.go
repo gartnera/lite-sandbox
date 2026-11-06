@@ -186,6 +186,9 @@ func validateFindArgs(s *Sandbox, args []*syntax.Word) error {
 		}
 		// find puts the file names where {} is (with +, several of
 		// them).
+		if err := validateWrappedReplaceStrings("find "+a.flag, []string{"{}"}, subArgs); err != nil {
+			return err
+		}
 		if err := validateSSHWrappedInput(s, "find "+a.flag, []string{"{}"}, subArgs); err != nil {
 			return err
 		}

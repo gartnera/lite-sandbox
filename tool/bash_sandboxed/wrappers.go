@@ -1,7 +1,9 @@
 package bash_sandboxed
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -33,8 +35,9 @@ const (
 	// `env FOO=bar`, `xargs` with its default echo, `timeout 5`).
 	wrapperNoCommand = -1
 	// wrapperRejected means the invocation uses an option that makes the
-	// wrapped command unknowable and is therefore refused outright
-	// (env -S/--split-string).
+	// wrapped command unknowable, or makes it a different file than the one
+	// validated, and is therefore refused outright (env -S/--split-string,
+	// -C/--chdir, -P).
 	wrapperRejected = -2
 )
 
@@ -43,9 +46,13 @@ type wrapperSpec struct {
 	// opts is the wrapper's option table; it is read in "+" mode,
 	// stopping at the first operand.
 	opts optSpec
-	// rejected lists options (by name) that build the command from a
-	// string, so it cannot be known: commandIndex returns wrapperRejected.
-	rejected []string
+	// rejected maps options (by name) that the sandbox refuses to the error
+	// it reports: commandIndex returns wrapperRejected for them. They are
+	// the options that build the command from a string, so it cannot be
+	// known, and those that change where the command is looked up, so the
+	// file the wrapper runs is not the one validation, path checks, and
+	// routing resolved.
+	rejected map[string]string
 	// dashIsOption makes a lone "-" an option (env's spelling of -i)
 	// rather than the command.
 	dashIsOption bool
@@ -66,13 +73,14 @@ type wrapperSpec struct {
 // FOO=$BAR still reads as one) where every option test keeps to the strict
 // literal; callers with already-expanded strings pass lits for both.
 func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
-	idx, _ := sp.layout(lits, assignLits)
+	idx, _, _ := sp.layout(lits, assignLits)
 	return idx
 }
 
 // layout is commandIndex, also returning the index of the first operand
-// (env's first NAME=VALUE assignment).
-func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
+// (env's first NAME=VALUE assignment) and, for wrapperRejected, the error
+// for the first rejected option.
+func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int, rejected error) {
 	opts := sp.opts
 	opts.stopAtOperand = true
 	p := parsedArgs{args: lits}
@@ -85,8 +93,10 @@ func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
 		start = p.operands[n] + 1
 		p.operands = p.operands[:n]
 	}
-	if p.has(sp.rejected...) {
-		return wrapperRejected, 0
+	for _, o := range p.opts {
+		if msg, ok := sp.rejected[o.name]; ok {
+			return wrapperRejected, 0, errors.New(msg)
+		}
 	}
 	i := len(lits)
 	if len(p.operands) > 0 {
@@ -100,9 +110,9 @@ func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
 	}
 	i += sp.operands
 	if i >= len(lits) {
-		return wrapperNoCommand, operands
+		return wrapperNoCommand, operands, nil
 	}
-	return i, operands
+	return i, operands, nil
 }
 
 // wrapperSpecs describes each wrapper's options (see wrapperSpec).
@@ -123,6 +133,13 @@ var wrapperSpecs = map[string]wrapperSpec{
 	// GNU env "+C:iS:u:v0" (newer releases add -a/--argv0), BSD env
 	// "-0C:iL:P:S:U:u:v": -P names the directories the command is looked
 	// up in, -L and -U a user.
+	//
+	// -S builds the argv from a string, which would smuggle an otherwise
+	// blocked command past validation. -C runs the command from another
+	// directory and -P looks it up in other directories, while validation,
+	// path checks, and no_sandbox routing resolve it against the shell's
+	// own directory and PATH: `env -C evil ./host.sh` would run
+	// evil/host.sh where ./host.sh was checked.
 	"env": {
 		opts: optSpec{
 			short: "aCLPSUu",
@@ -131,9 +148,13 @@ var wrapperSpecs = map[string]wrapperSpec{
 				"ignore-environment", "null", "block-signal", "default-signal", "ignore-signal",
 				"list-signal-handling", "debug", "help", "version",
 			},
-			alias: map[string]string{"split-string": "S"},
+			alias: map[string]string{"split-string": "S", "chdir": "C"},
 		},
-		rejected:     []string{"S"},
+		rejected: map[string]string{
+			"S": "env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)",
+			"C": "env -C/--chdir is not allowed (the command would run from another directory than the one it was validated against; cd first instead)",
+			"P": "env -P is not allowed (the command would be looked up in other directories than the one it was validated against)",
+		},
 		dashIsOption: true,
 		assignments:  true,
 	},
@@ -162,14 +183,6 @@ func wrapperCommandIndex(lits []string) int {
 	return wrapperSpecs[lits[0]].commandIndex(lits, lits)
 }
 
-// errEnvSplitString is returned when env is invoked with -S/--split-string.
-// That option builds a whole argv from a single string (intended for shebang
-// lines), which would smuggle an otherwise-blocked command past validation, so
-// it is rejected outright.
-func errEnvSplitString() error {
-	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
-}
-
 // validateWrapperArgs validates a wrapper by recursively validating the
 // command it runs against the whitelist. With no command there is nothing to
 // run: xargs defaults to echo, env prints the environment, and the rest fail
@@ -179,9 +192,9 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	// wordLeadingLits handles env assignment values that are non-literal
 	// expansions (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
 	assignLits := wordLeadingLits(args)
-	idx, operands := wrapperSpecs[lits[0]].layout(lits, assignLits)
+	idx, operands, rejected := wrapperSpecs[lits[0]].layout(lits, assignLits)
 	if idx == wrapperRejected {
-		return errEnvSplitString()
+		return rejected
 	}
 	if idx < 0 {
 		return nil
@@ -195,9 +208,109 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := validateSubCommand(s, args[idx:]); err != nil {
 			return err
 		}
+		if err := validateWrapperUnderXargs(args[:idx], args[idx:]); err != nil {
+			return err
+		}
 		return validateSSHUnderXargs(s, args[:idx], args[idx:])
 	}
 	return validateSubCommand(s, args[idx:])
+}
+
+// validateWrapperUnderXargs is validateWrappedReplaceStrings for a command
+// xargs runs; xargsOpts are xargs's own words before the command (xargs
+// itself included), which set its replace strings. A replace string that is
+// not literal could be any text, so a wrapper under it is refused.
+func validateWrapperUnderXargs(xargsOpts, args []*syntax.Word) error {
+	if len(args) == 0 || !replaceWalked(args[0].Lit()) {
+		return nil
+	}
+	opts := make([]string, len(xargsOpts))
+	for i, w := range xargsOpts {
+		v, ok := wordLiteral(w)
+		if !ok {
+			return fmt.Errorf("xargs: %s under xargs options that are not literal is not allowed: a replace string set by them could put the input in the options of the command it runs", args[0].Lit())
+		}
+		opts[i] = v
+	}
+	return validateWrappedReplaceStrings("xargs", xargsReplaceStrings(opts), args)
+}
+
+// replaceWalked reports whether validateWrappedReplaceStrings looks into a
+// command: a wrapper (wrapperSpecs), xcrun, or find, whose -exec commands it
+// walks.
+func replaceWalked(name string) bool {
+	_, ok := wrapperSpecs[name]
+	return ok || name == "xcrun" || name == "find"
+}
+
+// validateWrappedReplaceStrings refuses a wrapper (wrapperSpecs, or xcrun)
+// that xargs with replace strings (-I, -i, --replace, BSD -J) or find -exec
+// ({}) runs with a replace string in one of the wrapper's own words before
+// its command. The input is put there after validation, so it can become one
+// of the wrapper's options or its command: with input "Cevil",
+// `xargs -I{} env -{} ./host.sh` runs `env -Cevil ./host.sh`, which runs
+// evil/host.sh where ./host.sh was validated and routed. Nested wrappers are
+// walked, and so are the -exec commands of a find (with {} added to the
+// replace strings). An env assignment's value may hold one (env FOO={} cmd):
+// the input there stays the value. wrapper names the outer command for
+// messages.
+func validateWrappedReplaceStrings(wrapper string, replace []string, args []*syntax.Word) error {
+	return walkReplaceStrings(wrapper, replace, args, 0)
+}
+
+func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, depth int) error {
+	if len(args) == 0 || len(replace) == 0 || depth > maxBashDepth {
+		return nil
+	}
+	lits := wordLits(args)
+	vals := wordValues(args)
+	var idx, operands int
+	assignments := false
+	switch name := lits[0]; name {
+	case "find":
+		withBraces := append(slices.Clone(replace), "{}")
+		for _, a := range findActions(vals) {
+			if a.end > a.start {
+				if err := walkReplaceStrings(wrapper, withBraces, args[a.start:a.end], depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	case "xcrun":
+		idx = xcrunCommandIndex(lits)
+	default:
+		spec, ok := wrapperSpecs[name]
+		if !ok {
+			return nil
+		}
+		idx, operands, _ = spec.layout(lits, wordLeadingLits(args))
+		assignments = spec.assignments
+	}
+	end := idx
+	if idx < 0 {
+		end = len(args)
+	}
+	for i := 1; i < end; i++ {
+		v := vals[i]
+		at := -1
+		for _, r := range replace {
+			if j := strings.Index(v, r); r != "" && j >= 0 && (at < 0 || j < at) {
+				at = j
+			}
+		}
+		if at < 0 {
+			continue
+		}
+		if assignments && i >= operands && strings.Contains(v[:at], "=") {
+			continue
+		}
+		return fmt.Errorf("%s: %s word %q holds a replace string before the command %s runs, so the input put there could become one of its options or its command", wrapper, lits[0], v, lits[0])
+	}
+	if idx < 0 {
+		return nil
+	}
+	return walkReplaceStrings(wrapper, replace, args[idx:], depth+1)
 }
 
 // validateEnvAssignments holds env's NAME=VALUE operands (assigns, the words
