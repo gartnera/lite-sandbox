@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gartnera/lite-sandbox/config"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -208,7 +209,7 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := validateSubCommand(s, args[idx:]); err != nil {
 			return err
 		}
-		if err := validateWrapperUnderXargs(args[:idx], args[idx:]); err != nil {
+		if err := validateWrapperUnderXargs(s, args[:idx], args[idx:]); err != nil {
 			return err
 		}
 		return validateSSHUnderXargs(s, args[:idx], args[idx:])
@@ -216,23 +217,31 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[idx:])
 }
 
-// validateWrapperUnderXargs is validateWrappedReplaceStrings for a command
-// xargs runs; xargsOpts are xargs's own words before the command (xargs
-// itself included), which set its replace strings. A replace string that is
-// not literal could be any text, so a wrapper under it is refused.
-func validateWrapperUnderXargs(xargsOpts, args []*syntax.Word) error {
-	if len(args) == 0 || !replaceWalked(args[0].Lit()) {
+// validateWrapperUnderXargs checks the replace strings of a command xargs
+// runs; xargsOpts are xargs's own words before the command (xargs itself
+// included), which set them. xargs puts its input where they are after
+// validation, so the command is walked with validateWrappedReplaceStrings
+// (none in a wrapper's own words) and checkReplacedOptions (none where the
+// command, nested under wrappers and find -exec, could read it as an
+// option). A replace string that is not literal could be any text, so a
+// command either check looks into is refused under it.
+func validateWrapperUnderXargs(s *Sandbox, xargsOpts, args []*syntax.Word) error {
+	if len(args) == 0 {
 		return nil
 	}
 	opts := make([]string, len(xargsOpts))
 	for i, w := range xargsOpts {
 		v, ok := wordLiteral(w)
 		if !ok {
-			return fmt.Errorf("xargs: %s under xargs options that are not literal is not allowed: a replace string set by them could put the input in the options of the command it runs", args[0].Lit())
+			if name := args[0].Lit(); replaceWalked(name) || replaceOptionsChecked(s, name) {
+				return fmt.Errorf("xargs: %s under xargs options that are not literal is not allowed: a replace string set by them could put the input in the options of the command it runs", name)
+			}
+			return nil
 		}
 		opts[i] = v
 	}
-	return validateWrappedReplaceStrings("xargs", xargsReplaceStrings(opts), args)
+	replace := xargsReplaceStrings(opts)
+	return walkReplaceStrings(s, "xargs", replace, replace, args, 0)
 }
 
 // replaceWalked reports whether validateWrappedReplaceStrings looks into a
@@ -241,6 +250,19 @@ func validateWrapperUnderXargs(xargsOpts, args []*syntax.Word) error {
 func replaceWalked(name string) bool {
 	_, ok := wrapperSpecs[name]
 	return ok || name == "xcrun" || name == "find"
+}
+
+// replaceOptionsChecked reports whether checkReplacedOptions looks at a
+// command's words: one with an argument validator, which an option the input
+// becomes would get past. A command without one accepts any option already.
+// ssh, sshpass, scp, and rsync have a finer check of their own
+// (validateSSHWrappedInput), which lets the input into ssh's remote command.
+func replaceOptionsChecked(s *Sandbox, name string) bool {
+	if name == "ssh" || name == "sshpass" || slices.Contains(config.SSHCopyCommands, name) {
+		return false
+	}
+	_, ok := s.validator(name)
+	return ok
 }
 
 // validateWrappedReplaceStrings refuses a wrapper (wrapperSpecs, or xcrun)
@@ -254,11 +276,14 @@ func replaceWalked(name string) bool {
 // replace strings). An env assignment's value may hold one (env FOO={} cmd):
 // the input there stays the value. wrapper names the outer command for
 // messages.
-func validateWrappedReplaceStrings(wrapper string, replace []string, args []*syntax.Word) error {
-	return walkReplaceStrings(wrapper, replace, args, 0)
+func validateWrappedReplaceStrings(s *Sandbox, wrapper string, replace []string, args []*syntax.Word) error {
+	return walkReplaceStrings(s, wrapper, replace, nil, args, 0)
 }
 
-func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, depth int) error {
+// walkReplaceStrings is validateWrappedReplaceStrings, which also runs
+// checkReplacedOptions with optReplace (xargs's replace strings; find's {}
+// is not among them) on every command it reaches that is not a wrapper.
+func walkReplaceStrings(s *Sandbox, wrapper string, replace, optReplace []string, args []*syntax.Word, depth int) error {
 	if len(args) == 0 || len(replace) == 0 || depth > maxBashDepth {
 		return nil
 	}
@@ -268,10 +293,16 @@ func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, d
 	assignments := false
 	switch name := lits[0]; name {
 	case "find":
+		actions := findActions(vals)
+		if len(optReplace) > 0 {
+			if err := checkReplacedFindOptions(wrapper, optReplace, args, actions); err != nil {
+				return err
+			}
+		}
 		withBraces := append(slices.Clone(replace), "{}")
-		for _, a := range findActions(vals) {
+		for _, a := range actions {
 			if a.end > a.start {
-				if err := walkReplaceStrings(wrapper, withBraces, args[a.start:a.end], depth+1); err != nil {
+				if err := walkReplaceStrings(s, wrapper, withBraces, optReplace, args[a.start:a.end], depth+1); err != nil {
 					return err
 				}
 			}
@@ -282,6 +313,9 @@ func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, d
 	default:
 		spec, ok := wrapperSpecs[name]
 		if !ok {
+			if len(optReplace) > 0 && replaceOptionsChecked(s, name) {
+				return checkReplacedOptions(wrapper, optReplace, args)
+			}
 			return nil
 		}
 		idx, operands, _ = spec.layout(lits, wordLeadingLits(args))
@@ -293,12 +327,7 @@ func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, d
 	}
 	for i := 1; i < end; i++ {
 		v := vals[i]
-		at := -1
-		for _, r := range replace {
-			if j := strings.Index(v, r); r != "" && j >= 0 && (at < 0 || j < at) {
-				at = j
-			}
-		}
+		at := replaceIndex(v, replace)
 		if at < 0 {
 			continue
 		}
@@ -310,7 +339,125 @@ func walkReplaceStrings(wrapper string, replace []string, args []*syntax.Word, d
 	if idx < 0 {
 		return nil
 	}
-	return walkReplaceStrings(wrapper, replace, args[idx:], depth+1)
+	return walkReplaceStrings(s, wrapper, replace, optReplace, args[idx:], depth+1)
+}
+
+// replaceIndex returns where the first of the replace strings starts in v,
+// or -1 when none is in it.
+func replaceIndex(v string, replace []string) int {
+	at := -1
+	for _, r := range replace {
+		if j := strings.Index(v, r); r != "" && j >= 0 && (at < 0 || j < at) {
+			at = j
+		}
+	}
+	return at
+}
+
+// replacedOptionError is the refusal of a word that checkReplacedOptions or
+// checkReplacedFindOptions finds the input could change.
+func replacedOptionError(wrapper string, args []*syntax.Word, v string) error {
+	name := args[0].Lit()
+	return fmt.Errorf("%s: %s word %q holds a replace string, but %s's argument checks saw the word as written, and the input put there could become an option or change what they check (a sed script, a tar option cluster); run %s without a replace string in its words", wrapper, name, v, name, name)
+}
+
+// checkReplacedOptions refuses a replace string (xargs -I, -i, --replace,
+// BSD -J) in any word of a command with an argument validator (args, its
+// name first). The validator saw the word as written, and xargs puts its
+// input there after: with input "-delete" `xargs -I% find . %` would run
+// `find . -delete`, and with "I" `xargs -I% tar c%f prog out.tar src` would
+// run tar's compress program. Neither literal text before it (tar's first
+// word is options, sed's /%/ an address) nor a -- (sed -- 's/%//') makes
+// the word safe for every command, so none is accepted; find, whose words
+// are read the same way everywhere, is checkReplacedFindOptions.
+func checkReplacedOptions(wrapper string, replace []string, args []*syntax.Word) error {
+	vals := wordValues(args)
+	for i := 1; i < len(args); i++ {
+		if replaceIndex(vals[i], replace) >= 0 {
+			return replacedOptionError(wrapper, args, vals[i])
+		}
+	}
+	return nil
+}
+
+// findValueTests are GNU find's tests and options (find --help) that take
+// the next word as their value, which find does not read as a primary:
+// `find . -name %` matches the input as a name whatever it is.
+var findValueTests = map[string]bool{
+	"-amin": true, "-anewer": true, "-atime": true, "-cmin": true, "-cnewer": true,
+	"-context": true, "-ctime": true, "-fstype": true, "-gid": true, "-group": true,
+	"-ilname": true, "-iname": true, "-inum": true, "-ipath": true, "-iwholename": true,
+	"-iregex": true, "-links": true, "-lname": true, "-mmin": true, "-mtime": true,
+	"-name": true, "-newer": true, "-path": true, "-perm": true, "-regex": true,
+	"-wholename": true, "-size": true, "-type": true, "-uid": true, "-used": true,
+	"-user": true, "-xtype": true, "-maxdepth": true, "-mindepth": true,
+	"-regextype": true, "-samefile": true, "-printf": true,
+}
+
+// findNoValue are find's primaries, options, and operators that take no
+// value. checkReplacedFindOptions treats any other word starting with - that
+// is not in findValueTests as one that may take the next word as its value
+// (BSD's -Bnewer, GNU's -files0-from, ...), so that word is never read as a
+// test whose value it could skip.
+var findNoValue = map[string]bool{
+	"-print": true, "-print0": true, "-ls": true, "-prune": true, "-quit": true,
+	"-delete": true, "-depth": true, "-mount": true, "-xdev": true, "-noleaf": true,
+	"-follow": true, "-daystart": true, "-nowarn": true, "-warn": true,
+	"-empty": true, "-false": true, "-true": true, "-nouser": true, "-nogroup": true,
+	"-readable": true, "-writable": true, "-executable": true,
+	"-ignore_readdir_race": true, "-noignore_readdir_race": true,
+	"-not": true, "-and": true, "-or": true, "-a": true, "-o": true,
+	"-H": true, "-L": true, "-P": true, "--": true,
+}
+
+// findTakesValue reports whether find reads the word after v as v's value:
+// v is in findValueTests or is a -newerXY test (-newermt).
+func findTakesValue(v string) bool {
+	return findValueTests[v] || (len(v) == len("-newerXY") && strings.HasPrefix(v, "-newer"))
+}
+
+// checkReplacedFindOptions is checkReplacedOptions for find (args, with its
+// -exec commands at actions, which walkReplaceStrings walks on their own).
+// find reads a word as a primary or an operator by its first character (-,
+// or the words (, ), !, and ,), wherever it sits, -- or not, so a replace
+// string is safe only as the value of a test in findValueTests (or -newerXY),
+// which find
+// matches as a name, pattern, or number, or after literal text that does
+// not start with one of those characters (./%), which keeps it a start
+// path.
+func checkReplacedFindOptions(wrapper string, replace []string, args []*syntax.Word, actions []findAction) error {
+	vals := wordValues(args)
+	inAction := make(map[int]bool)
+	for _, a := range actions {
+		for i := a.start - 1; i <= a.end && i < len(args); i++ {
+			inAction[i] = true
+		}
+	}
+	for i := 1; i < len(args); i++ {
+		if inAction[i] {
+			continue
+		}
+		v := vals[i]
+		if findTakesValue(v) {
+			i++ // its value
+			continue
+		}
+		if strings.HasPrefix(v, "-") && !findNoValue[v] && i+1 < len(args) && !inAction[i+1] {
+			// It may take the next word as its value: that word is
+			// checked, never read as a test.
+			if replaceIndex(v, replace) >= 0 {
+				return replacedOptionError(wrapper, args, v)
+			}
+			i++
+			v = vals[i]
+		}
+		at := replaceIndex(v, replace)
+		if at < 0 || (at > 0 && !strings.ContainsRune("-()!,", rune(v[0]))) {
+			continue
+		}
+		return replacedOptionError(wrapper, args, v)
+	}
+	return nil
 }
 
 // validateEnvAssignments holds env's NAME=VALUE operands (assigns, the words
