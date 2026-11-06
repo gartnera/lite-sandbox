@@ -96,6 +96,17 @@ and one under a wrapper (`find -exec`, `xargs`, `env`, `timeout`, `nice`,
 whose child the validators cannot tie to the approval, is refused always. See
 [Commands that ask first](configuration.md#commands-that-ask-first).
 
+In Claude Code's plan mode, a `PermissionRequest` hook (the same
+`lite-sandbox hook` command) answers the prompts for the sandbox's MCP tools,
+because plan mode ignores both the PreToolUse allow and `permissions.allow`
+for them. Claude Code fires that event for the prompts the PreToolUse hook asked
+for too, so the hook reads the call as PreToolUse does and stays silent for a
+config request that changes the config and for a command a prompted entry
+runs. The user still answers those. Answering the event records no ticket,
+so it can't stand in for the PreToolUse ask. Commands allowed in plan mode
+run with the same read and write paths as outside it. The sandbox doesn't
+make plan mode read-only.
+
 A config request lands either in the agent's project or, with `--global`, in
 the base config. Config commands scope a change to the git root of the working
 directory (in a linked git worktree, the repository's main worktree, whose

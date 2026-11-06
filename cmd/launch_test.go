@@ -138,6 +138,13 @@ func TestClaudeLaunchArgsDefault(t *testing.T) {
 	if want := testBin + " hook --config-requests"; command != want {
 		t.Errorf("hook command = %q, want %q", command, want)
 	}
+	pr := asSlice(settings.Hooks["PermissionRequest"])
+	if len(pr) != 1 {
+		t.Fatalf("expected one PermissionRequest group, got %v", settings.Hooks)
+	}
+	if g := asMap(pr[0]); asString(g["matcher"]) != mcpToolMatcher || asString(asMap(asSlice(g["hooks"])[0])["command"]) != command {
+		t.Errorf("PermissionRequest group = %v, want the MCP tools matched with the PreToolUse command", g)
+	}
 
 	if got := flagValue(t, argv, "--append-system-prompt"); got != strings.Join(claudeDirectives, "\n\n") {
 		t.Errorf("--append-system-prompt = %q, want the usage directive", got)
@@ -197,6 +204,9 @@ func TestClaudeLaunchArgsBashASTHookMode(t *testing.T) {
 	}
 	if want := testBin + " hook --validate-bash"; command != want {
 		t.Errorf("hook command = %q, want %q", command, want)
+	}
+	if _, ok := settings.Hooks["PermissionRequest"]; ok {
+		t.Errorf("PermissionRequest hook registered with no MCP tools to approve: %v", settings.Hooks)
 	}
 }
 

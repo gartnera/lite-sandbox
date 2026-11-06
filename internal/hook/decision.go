@@ -51,7 +51,53 @@ func (d *Decision) WithContext(ctx string) *Decision {
 
 // Write emits the decision as JSON to w.
 func (d *Decision) Write(w io.Writer) error {
+	return writeJSON(w, d)
+}
+
+// PermissionBehavior is the verdict a PermissionRequest hook returns.
+type PermissionBehavior string
+
+const (
+	// BehaviorAllow grants the permission the user was about to be asked for.
+	// Claude Code still applies matching deny and ask rules.
+	BehaviorAllow PermissionBehavior = "allow"
+)
+
+// permissionRequestDecision is the decision object nested in a
+// PermissionRequest response.
+type permissionRequestDecision struct {
+	Behavior PermissionBehavior `json:"behavior"`
+}
+
+// permissionRequestOutput is the PermissionRequest-specific payload.
+type permissionRequestOutput struct {
+	HookEventName EventName                 `json:"hookEventName"`
+	Decision      permissionRequestDecision `json:"decision"`
+}
+
+// PermissionRequestDecision is the document a PermissionRequest hook writes
+// to stdout (exit 0) to answer the prompt on the user's behalf.
+type PermissionRequestDecision struct {
+	HookSpecificOutput permissionRequestOutput `json:"hookSpecificOutput"`
+}
+
+// NewPermissionRequestDecision builds a PermissionRequest decision.
+func NewPermissionRequestDecision(b PermissionBehavior) *PermissionRequestDecision {
+	return &PermissionRequestDecision{
+		HookSpecificOutput: permissionRequestOutput{
+			HookEventName: EventPermissionRequest,
+			Decision:      permissionRequestDecision{Behavior: b},
+		},
+	}
+}
+
+// Write emits the decision as JSON to w.
+func (d *PermissionRequestDecision) Write(w io.Writer) error {
+	return writeJSON(w, d)
+}
+
+func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(d)
+	return enc.Encode(v)
 }

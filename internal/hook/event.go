@@ -11,12 +11,17 @@ import (
 	"io"
 )
 
-// EventName identifies which lifecycle hook fired. We only handle PreToolUse,
-// but the field is modeled so unexpected events are reported clearly.
+// EventName identifies which lifecycle hook fired. We handle PreToolUse and
+// Claude Code's PermissionRequest; the field is modeled so unexpected events
+// are reported clearly.
 type EventName string
 
 const (
 	EventPreToolUse EventName = "PreToolUse"
+	// EventPermissionRequest fires when Claude Code is about to prompt the user
+	// for a tool call. Its payload carries the same tool_name, tool_input,
+	// cwd and permission_mode as PreToolUse.
+	EventPermissionRequest EventName = "PermissionRequest"
 )
 
 // PermissionMode is the session's current permission posture.
