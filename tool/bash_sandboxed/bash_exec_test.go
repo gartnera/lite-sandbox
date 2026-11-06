@@ -1413,9 +1413,9 @@ func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
 // TestNoSandboxScript_ShellStartupEnv: a native shell acts on SHELLOPTS and
 // PS4 before a script's first line (xtrace expands PS4, command substitutions
 // included), and sources BASH_ENV, which the sandbox's interpreter ignores.
-// Setting them is refused, and a script allowed with no_sandbox gets the
-// server's own values even when the agent exports them some other way; the
-// server's own values (the user's) are kept.
+// Setting them is refused, statically or, when exported by a name the static
+// check can't read, at runtime (checkBlockedEnv); the server's own values (the
+// user's) reach a script allowed with no_sandbox.
 func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "host.sh"), []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
@@ -1441,7 +1441,8 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		}
 	}
 
-	// Exported past the static check, which sees only names it can read.
+	// Exported past the static check, which sees only names it can read:
+	// the runtime check (checkBlockedEnv) refuses the run.
 	evil := filepath.Join(t.TempDir(), "evil.sh")
 	if err := os.WriteFile(evil, []byte("touch "+pwned+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1450,15 +1451,31 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 	// env, not timeout, for the wrapped form: macOS has no timeout.
 	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
 		out, err := executeInDirWithSandbox(t, s, dir, inject+cmd)
-		if err != nil || !strings.Contains(out, "ran") {
-			t.Fatalf("%s: %v %q", cmd, err, out)
+		if err == nil || !strings.Contains(err.Error(), "is not allowed") || strings.Contains(out, "ran") {
+			t.Fatalf("%s: expected the exported startup variables to be refused, got %v %q", cmd, err, out)
 		}
 		if _, err := os.Stat(pwned); err == nil {
 			t.Fatalf("%s: the native shell ran code from the environment", cmd)
 		}
 	}
+	// In open mode the runtime check only audits, so the script runs: with
+	// the server's values (execOnHost's reset), not the agent's.
+	open := NewSandbox()
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
+		out, err := executeInDirWithSandbox(t, open, dir, inject+cmd)
+		if err != nil || !strings.Contains(out, "ran") {
+			t.Fatalf("open mode, %s: %v %q", cmd, err, out)
+		}
+		if _, err := os.Stat(pwned); err == nil {
+			t.Fatalf("open mode, %s: the native shell ran code from the environment", cmd)
+		}
+	}
 
-	// The server's own value reaches the script, whatever the agent set.
+	// The server's own value reaches the script; one the agent set is
+	// refused, or in open mode replaced by the server's.
 	if err := os.WriteFile(filepath.Join(dir, "show.sh"), []byte("#!/bin/bash\necho zdotdir=$ZDOTDIR\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1466,18 +1483,28 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
 	}}, dir)
 	t.Setenv("ZDOTDIR", "/users/own")
-	out, err := executeInDirWithSandbox(t, s, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`)
+	out, err := executeInDirWithSandbox(t, s, dir, `./show.sh`)
 	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
 		t.Errorf("want the server's ZDOTDIR: %v %q", err, out)
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`); err == nil || !strings.Contains(err.Error(), "setting ZDOTDIR is not allowed") {
+		t.Errorf("want a changed ZDOTDIR refused: %v", err)
+	}
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: []config.CommandEntry{
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	out, err = executeInDirWithSandbox(t, open, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`)
+	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
+		t.Errorf("open mode: want the server's ZDOTDIR: %v %q", err, out)
 	}
 }
 
 // TestNoSandboxScript_RunsOnlyTheTrustedFile: a script allowed with
 // no_sandbox runs natively as the file it is trusted by, found with the
 // server's PATH and HOME, never as another file or program the agent
-// arranged: a symlinked directory in its path, a shell found through a PATH
-// the agent set (past the static check, with a dynamic name), a .zshenv in a
-// HOME the agent set, or an exported bash function.
+// arranged: a symlinked directory in its path, a .zshenv in a HOME the agent
+// set, or an exported bash function. A PATH or CDPATH the agent set past the
+// static check, with a dynamic name, is refused at runtime (checkBlockedEnv).
 func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) {
@@ -1509,6 +1536,10 @@ func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 	cmds := []string{
 		"bash x/../host.sh",
 		"./x/../noshebang.sh",
+	}
+	// Set past the static check, with a dynamic name: the runtime check
+	// (checkBlockedEnv) refuses the run.
+	refused := []string{
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; bash host.sh`,
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./noshebang.sh`,
 		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./envbash.sh`,
@@ -1535,6 +1566,29 @@ func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 		}
 		if err != nil || !strings.Contains(out, "legit") {
 			t.Errorf("%s: want the trusted script to run: %v %q", cmd, err, out)
+		}
+	}
+	for _, cmd := range refused {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("%s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err == nil || !strings.Contains(err.Error(), "is not allowed") || strings.Contains(out, "legit") {
+			t.Errorf("%s: want the changed variable refused: %v %q", cmd, err, out)
+		}
+	}
+	// In open mode the runtime check only audits, so the script runs: found
+	// with the server's PATH, its own cd unaffected by CDPATH (execOnHost's
+	// reset).
+	open := NewSandbox()
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: entries}, dir)
+	for _, cmd := range refused {
+		out, err := executeInDirWithSandbox(t, open, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("open mode, %s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err != nil || !strings.Contains(out, "legit") {
+			t.Errorf("open mode, %s: want the trusted script to run: %v %q", cmd, err, out)
 		}
 	}
 }

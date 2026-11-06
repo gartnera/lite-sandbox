@@ -817,6 +817,51 @@ func blockedEnvVarError(name string) error {
 	return nil
 }
 
+// checkBlockedEnv is the runtime layer of blockedEnvVars: validateAssigns
+// and env's operand check refuse the assignments whose variable name is a
+// literal in the parsed command, but a name only the interpreter sees sets it
+// too (export "PATH=...", export "$n=...", read PATH, for PATH in ...,
+// set -a). Before an external command runs, every blocked variable a child
+// would inherit from env — exported, set, plain string — must hold the value
+// it has in the environment commands start from (commandBaseEnv), or be
+// absent from both. Unsetting one is allowed: a command then runs without
+// it, as the static check permits with unset or env -u. PATH is the
+// exception: it is held to its starting value whether exported or not, and
+// unsetting it is refused too, since the host's command lookup
+// (interp.LookPathDir in execOnHost) reads it either way and searches the
+// current directory when it is empty or unset, which would run a planted
+// ./ls for ls.
+func (s *Sandbox) checkBlockedEnv(env expand.Environ) error {
+	base := envSliceToMap(s.commandBaseEnv())
+	for _, name := range blockedEnvVarNames {
+		vr := env.Get(name)
+		want, inBase := base[name]
+		if name == "PATH" {
+			if !vr.IsSet() && !inBase {
+				continue
+			}
+		} else if !isExportedEnvVar(vr) {
+			continue
+		}
+		if vr.IsSet() && inBase && vr.Kind == expand.String && vr.String() == want {
+			continue
+		}
+		return fmt.Errorf("%s was changed or unset since the shell started (restore it, or start a new shell): %w", name, blockedEnvVarError(name))
+	}
+	return nil
+}
+
+// blockedEnvVarNames is blockedEnvVars' keys, sorted so checkBlockedEnv
+// reports the same variable first every time.
+var blockedEnvVarNames = func() []string {
+	names := make([]string, 0, len(blockedEnvVars))
+	for name := range blockedEnvVars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}()
+
 // collectDeclaredFunctions walks the AST and collects function names from:
 // 1. FuncDecl nodes (inline function declarations)
 // 2. source/. commands with literal file paths (read and extract FuncDecl names)
