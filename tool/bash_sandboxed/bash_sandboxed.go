@@ -1118,7 +1118,7 @@ func (s *Sandbox) validateWithFunctionsCtx(ctx context.Context, f *syntax.File, 
 					// the user has explicitly opted in to those commands — except a
 					// command a scoped grant names, which keeps them under a bare allow
 					// (see allowLiftsValidator).
-					if !inExtra || (s.isScopedCommand(cmdName) && !s.allowLiftsValidator(cmdName, wordLits(n.Args[1:]))) {
+					if !inExtra || (s.isScopedCommand(cmdName) && !s.allowLiftsValidator(cmdName, wordLits(n.Args[1:]), func() string { return workDir })) {
 						// The command's own argument validator applies in every
 						// enforcing mode.
 						if validator, ok := s.validator(cmdName); ok {
@@ -1390,6 +1390,15 @@ func (s *Sandbox) runsOnHost(ctx context.Context, args []string) bool {
 // arguments match the restriction, so e.g. "git push" unsandboxes only pushes
 // and not every git command.
 func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
+	return s.execIsUnsandboxedIn(func() string { return interp.HandlerCtx(ctx).Dir }, args)
+}
+
+// execIsUnsandboxedIn is execIsUnsandboxed with the directory a relative
+// script path resolves against given by dir, called only for a script path
+// (after unwrapping wrappers), so a caller outside an interpreter handler can
+// supply its own. A relative script path with dir "" matches nothing, as in
+// bareAllowsScript.
+func (s *Sandbox) execIsUnsandboxedIn(dir func() string, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
@@ -1402,12 +1411,18 @@ func (s *Sandbox) execIsUnsandboxed(ctx context.Context, args []string) bool {
 		return false
 	}
 	cmdName := args[0]
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	scriptAt := ""
 	if isScriptPath(cmdName) {
 		// A script path matches by where it resolves, never by the literal
 		// string, which names another file after a `cd`.
-		if s.unsandboxedBareScriptPaths[filepath.Clean(absPath(cmdName, interp.HandlerCtx(ctx).Dir))] {
+		if d := dir(); d != "" || filepath.IsAbs(cmdName) {
+			scriptAt = filepath.Clean(absPath(cmdName, d))
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if isScriptPath(cmdName) {
+		if scriptAt != "" && s.unsandboxedBareScriptPaths[scriptAt] {
 			return true
 		}
 	} else if s.unsandboxedBare[cmdName] {
