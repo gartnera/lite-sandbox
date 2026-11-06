@@ -18,7 +18,7 @@ func TestIsServerOnlyHostEnv(t *testing.T) {
 		"DYLD_INSERT_LIBRARIES", "BASH_ENV", "ZDOTDIR", "BASH_FUNC_ls%%",
 		"XDG_CONFIG_HOME", "npm_config_script_shell", "NPM_CONFIG_USERCONFIG",
 		"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER", "KUBECONFIG", "LESSOPEN",
-		"GH_BROWSER", "GH_CONFIG_DIR", "GOCACHEPROG", "PKG_CONFIG", "DEVELOPER_DIR",
+		"GH_BROWSER", "GH_CONFIG_DIR", "GH_PATH", "GOCACHEPROG", "PKG_CONFIG", "DEVELOPER_DIR",
 		"GIT_PAGER", "GIT_TRACE",
 	} {
 		if !isServerOnlyHostEnv(name) {
@@ -62,6 +62,8 @@ func TestCheckHostEnvAssigns(t *testing.T) {
 		{[]string{"env", "-uGIT_CONFIG_COUNT", "git", "status"}, false},
 		{[]string{"timeout", "5", "env", "--unset=HOME", "git", "status"}, false},
 		{[]string{"env", "--unset", "HOME", "git", "status"}, false},
+		{[]string{"env", "--u=HOME", "git", "status"}, false},
+		{[]string{"env", "--un", "GIT_CONFIG_COUNT", "git", "status"}, false},
 		{[]string{"env", "-i", "git", "status"}, false},
 		{[]string{"env", "-", "git", "status"}, false},
 		{[]string{"env", "--ignore-environment", "git", "status"}, false},
@@ -195,6 +197,20 @@ func TestNoSandboxLooksUpInServerPath(t *testing.T) {
 	}
 	if err == nil {
 		t.Errorf("expected a refusal, got %q", out)
+	}
+}
+
+func TestNoSandboxCommandGetsAbsolutePath(t *testing.T) {
+	work := t.TempDir()
+	t.Setenv("PATH", ".:"+os.Getenv("PATH")+":")
+	s := newHostEnvSandbox(t, work)
+	paths := []string{work}
+	out, err := s.Execute(context.Background(), `printenv PATH`, work, paths, paths)
+	if err != nil {
+		t.Fatalf("%v %q", err, out)
+	}
+	if got := strings.TrimSpace(out); got != serverPath() {
+		t.Errorf("PATH = %q, want the server's absolute entries %q", got, serverPath())
 	}
 }
 

@@ -1533,6 +1533,10 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 			return fmt.Errorf("%s: a command allowed with no_sandbox is looked up in the server's PATH, which has no absolute directory", args[0])
 		}
 		lookupEnv = expand.ListEnviron("PATH=" + path)
+		// The command gets it too, so a program it runs (`timeout 5 git`,
+		// a native script's `#!/usr/bin/env bash`) isn't found in the
+		// working directory either.
+		envMap["PATH"] = path
 		// A native shell it is or starts would act on these before running
 		// anything, so they are the server's own, whatever the agent set
 		// (see shellStartupEnv and nativeScriptEnv): a backstop for open

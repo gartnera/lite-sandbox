@@ -250,8 +250,8 @@ check only audits. These are `HOME`,
 refuses to assign (`TAR_OPTIONS`, `LESSOPEN`, ...), since a name known only at
 runtime (`export "$n=..."`) gets past that check. `env NAME=...` setting one
 of them for such a command is refused, as are `env -u` of one, `env -i`, and
-`env` under `xargs` (whose `-I` can build the variable's name). The `PATH` lookup skips empty and
-relative entries. The agent may still set git's identity and dates
+`env` under `xargs` (whose `-I` can build the variable's name). The command is looked up in, and
+runs with, the server's `PATH` without its empty or relative entries. The agent may still set git's identity and dates
 (`GIT_AUTHOR_NAME`, `GIT_COMMITTER_DATE`, ...), `GIT_TERMINAL_PROMPT`,
 `CARGO_TERM_*`, and `CARGO_INCREMENTAL`. To skip a pager, use the program's
 own option (`git --no-pager`) or pipe its output, since `GIT_PAGER=cat` is

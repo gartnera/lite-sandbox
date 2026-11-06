@@ -50,6 +50,7 @@ var serverOnlyHostEnv = map[string]bool{
 	"AWS_CONFIG_FILE": true, "AWS_SHARED_CREDENTIALS_FILE": true,
 	"TF_CLI_CONFIG_FILE": true, "TERRAFORM_CONFIG": true,
 	"GH_BROWSER": true, "GH_PAGER": true, "GH_EDITOR": true, "GH_CONFIG_DIR": true,
+	"GH_PATH":     true, // gh writes it into git credential helpers
 	"KUBE_EDITOR": true, "MANPAGER": true, "GNUPGHOME": true, "HELM_PLUGINS": true,
 	// Apple's /usr/bin shims (git, clang, ...) run the developer tools
 	// these select.
@@ -226,7 +227,9 @@ func checkHostEnvOptions(opts []string) error {
 			return fmt.Errorf("env -i is not allowed %s", prefix)
 		case strings.HasPrefix(w, "--"):
 			name, val, hasVal := strings.Cut(w[2:], "=")
-			if len(name) >= 3 && strings.HasPrefix("unset", name) {
+			// getopt takes any unambiguous prefix; no other env long
+			// option starts with "u".
+			if name != "" && strings.HasPrefix("unset", name) {
 				if !hasVal {
 					val = next()
 				}
