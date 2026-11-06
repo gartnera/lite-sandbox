@@ -76,15 +76,12 @@ func (r rule) blockedIn(m config.Mode) bool {
 // (setting PATH, the deny list's commands) is not checked. Ask entries, which
 // only the user lifts, are still enforced, and so is the path boundary, which
 // is what confines the interpreter's own redirects and file opens (those are
-// made by lite-sandbox itself, on the host, outside the OS sandbox) — unless
-// the script is allowed with no_sandbox, which runs everything it does on the
-// host anyway.
-func (r rule) liftedInTrustedScript(ts trustedScript) bool {
+// made by lite-sandbox itself, on the host, outside the OS sandbox). A script
+// allowed with no_sandbox never reaches here: it runs natively on the host.
+func (r rule) liftedInTrustedScript() bool {
 	switch r {
-	case ruleCommandAsk:
+	case ruleCommandAsk, rulePathBoundary:
 		return false
-	case rulePathBoundary:
-		return ts.host
 	}
 	return true
 }
@@ -181,13 +178,16 @@ func auditScopeFrom(ctx context.Context) *auditScope {
 // liftedInTrustedScript names for anything it runs, at any depth (the user
 // allowed the script, not each command in it), and that where its commands run
 // is the script's own routing, not theirs (dispatchExec): the OS sandbox's
-// shared worker, or the host when the script is allowed with no_sandbox. So
-// neither another command's no_sandbox entry nor a grant scoped to a command
-// applies inside it, and the script cannot reach the host or a credential by
-// running, with its checks lifted, a command that would.
+// shared worker. So neither another command's no_sandbox entry nor a grant
+// scoped to a command applies inside it, and the script cannot reach the host
+// or a credential by running, with its checks lifted, a command that would.
+//
+// A script allowed with no_sandbox is marked too, but is not interpreted: the
+// mark only routes the native run of the script to the host (execArgv,
+// executeBash).
 type trustedScript struct {
-	// host: the script is allowed with no_sandbox, so it and everything it
-	// runs run on the host.
+	// host: the script is allowed with no_sandbox (and not run by a trusted
+	// script without it), so it runs natively on the host.
 	host bool
 }
 
@@ -229,7 +229,7 @@ func (s *Sandbox) report(ctx context.Context, layer string, fallback rule, err e
 	mode := s.getConfig().EffectiveMode()
 	r, subject, fix := ruleOf(err, fallback)
 	blocked := r.blockedIn(mode)
-	if ts, ok := trustedScriptFrom(ctx); ok && r.liftedInTrustedScript(ts) {
+	if _, ok := trustedScriptFrom(ctx); ok && r.liftedInTrustedScript() {
 		blocked = false
 	}
 

@@ -1353,6 +1353,192 @@ func TestExecuteScript_BareScriptRunsThroughInterpreter(t *testing.T) {
 	}
 }
 
+// TestExecuteScript_NoSandboxScriptRunsNatively: a script allowed with
+// no_sandbox runs with the host's bash, not the sandbox's interpreter (its $!
+// is a pid, not the interpreter's job id), however it is invoked, and nothing
+// it runs is checked, statically or at runtime. One run by a script allowed
+// without no_sandbox stays where that script runs, in the interpreter.
+func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// curl is denied and protoc is off the whitelist; neither runs.
+	body := "true &\necho bg=$!\nwait\nif false; then curl https://example.com; protoc; fi\necho arg=$1\n"
+	write("host.sh", "#!/bin/bash\n"+body)
+	write("noshebang.sh", body)
+	write("sub/outer.sh", "#!/bin/bash\n./host.sh x\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./sub/outer.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+	}}, dir)
+
+	for _, cmd := range []string{"./host.sh x", "bash host.sh x", "true && ./host.sh x", "./noshebang.sh x", "bash -c './host.sh x'"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err != nil {
+			t.Fatalf("%s: static validation should not check a no_sandbox script's body: %v", cmd, err)
+		}
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v (output %q)", cmd, err, out)
+		}
+		if strings.Contains(out, "bg=g") || !strings.Contains(out, "bg=") || !strings.Contains(out, "arg=x") {
+			t.Errorf("%s: output %q, want the host bash's pid for $! and arg=x", cmd, out)
+		}
+	}
+
+	// Inside a script allowed without no_sandbox, the no_sandbox script is
+	// routed the way the outer one is: through the interpreter.
+	out, err := executeInDirWithSandbox(t, s, dir, "./sub/outer.sh")
+	if err != nil {
+		t.Fatalf("./sub/outer.sh: %v", err)
+	}
+	if !strings.Contains(out, "bg=g") {
+		t.Errorf("./sub/outer.sh: output %q, want the interpreter's job id (bg=g...)", out)
+	}
+}
+
+// TestNoSandboxScript_ShellStartupEnv: a native shell acts on SHELLOPTS and
+// PS4 before a script's first line (xtrace expands PS4, command substitutions
+// included), and sources BASH_ENV, which the sandbox's interpreter ignores.
+// Setting them is refused, and a script allowed with no_sandbox gets the
+// server's own values even when the agent exports them some other way; the
+// server's own values (the user's) are kept.
+func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "host.sh"), []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+
+	for _, cmd := range []string{
+		`export SHELLOPTS=xtrace PS4='$(touch ` + pwned + `)'; ./host.sh`,
+		`SHELLOPTS=xtrace ./host.sh`,
+		`PS4='$(touch ` + pwned + `)' bash -x host.sh`,
+		`env BASHOPTS=extglob ./host.sh`,
+		`export ZDOTDIR=$PWD; ./host.sh`,
+		`env BASH_FUNC_echo%%=\(\)\ \{\ touch\ ` + pwned + `\;\ \} ./host.sh`,
+	} {
+		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "is not allowed") {
+			t.Errorf("%s: expected the assignment to be refused, got %v", cmd, err)
+		}
+	}
+
+	// Exported past the static check, which sees only names it can read.
+	evil := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(evil, []byte("touch "+pwned+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inject := `a=SHELLOPTS; b=PS4; c=BASH_ENV; d=ENV; export "$a=xtrace" "$b="'$(touch ` + pwned + `)' "$c=` + evil + `" "$d=` + evil + `"; `
+	// env, not timeout, for the wrapped form: macOS has no timeout.
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, inject+cmd)
+		if err != nil || !strings.Contains(out, "ran") {
+			t.Fatalf("%s: %v %q", cmd, err, out)
+		}
+		if _, err := os.Stat(pwned); err == nil {
+			t.Fatalf("%s: the native shell ran code from the environment", cmd)
+		}
+	}
+
+	// The server's own value reaches the script, whatever the agent set.
+	if err := os.WriteFile(filepath.Join(dir, "show.sh"), []byte("#!/bin/bash\necho zdotdir=$ZDOTDIR\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	t.Setenv("ZDOTDIR", "/users/own")
+	out, err := executeInDirWithSandbox(t, s, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`)
+	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
+		t.Errorf("want the server's ZDOTDIR: %v %q", err, out)
+	}
+}
+
+// TestNoSandboxScript_RunsOnlyTheTrustedFile: a script allowed with
+// no_sandbox runs natively as the file it is trusted by, found with the
+// server's PATH and HOME, never as another file or program the agent
+// arranged: a symlinked directory in its path, a shell found through a PATH
+// the agent set (past the static check, with a dynamic name), a .zshenv in a
+// HOME the agent set, or an exported bash function.
+func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	evil := "#!/bin/sh\ntouch " + pwned + "\necho evil\n"
+	write("host.sh", "#!/bin/bash\necho legit\n")
+	write("noshebang.sh", "echo legit\n")
+	write("envbash.sh", "#!/usr/bin/env bash\necho legit\n")
+	write("evil/sub/placeholder", "")
+	write("evil/host.sh", evil)
+	write("evil/noshebang.sh", evil)
+	write("evilbin/bash", evil)
+	write(".zshenv", "touch "+pwned+"\n")
+	write("cd.sh", "#!/bin/bash\ncd sub && ./tool\n")
+	write("sub/tool", "#!/bin/sh\necho legit\n")
+	write("evil/sub/tool", evil)
+	if err := os.Symlink(filepath.Join(dir, "evil/sub"), filepath.Join(dir, "x")); err != nil {
+		t.Fatal(err)
+	}
+	cmds := []string{
+		"bash x/../host.sh",
+		"./x/../noshebang.sh",
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; bash host.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./noshebang.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./envbash.sh`,
+		`n=CDPATH; export "$n=$PWD/evil"; ./cd.sh`,
+	}
+	yes := true
+	entries := []config.CommandEntry{
+		{Command: "./cd.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./envbash.sh", Allow: &yes, NoSandbox: true},
+	}
+	if _, err := exec.LookPath("zsh"); err == nil {
+		write("host.zsh", "#!/usr/bin/env zsh\necho legit\n")
+		entries = append(entries, config.CommandEntry{Command: "./host.zsh", Allow: &yes, NoSandbox: true})
+		cmds = append(cmds, "HOME=$PWD ./host.zsh", "export HOME=$PWD; ./host.zsh")
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: entries}, dir)
+	for _, cmd := range cmds {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("%s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err != nil || !strings.Contains(out, "legit") {
+			t.Errorf("%s: want the trusted script to run: %v %q", cmd, err, out)
+		}
+	}
+}
+
 // TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
 // script lifts for the commands the script runs: the whitelist, argument
 // validators, structural rules (setting PATH) and the deny list — statically

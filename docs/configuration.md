@@ -111,10 +111,19 @@ enabled, or the worker of a [grant scoped to it](#grants-for-one-command-command
 
 #### Allowed scripts
 
+A shell script runs one of three ways, by its entry:
+
+| Entry | Runs with | Checks on what it runs | Where |
+| --- | --- | --- | --- |
+| none | the sandbox's interpreter | all | the OS sandbox worker, when enabled |
+| bare `allow: true` | the sandbox's interpreter | lifted (below) | the OS sandbox's shared worker, when enabled |
+| bare `allow: true` + `no_sandbox: true` | natively: its shebang's program (`bash` without one) | none | the host |
+
 A bare entry that names a script by path (any word with a `/`:
 `./scripts/build.sh`, `scripts/build.sh`, or an absolute path) also **trusts
-the script**. It runs through the sandbox's interpreter like any other script,
-whether it's called directly, as `bash scripts/build.sh`, or after a `cd`. A
+the script**. It runs through the sandbox's interpreter like any other script
+(unless it is [allowed with `no_sandbox`](#unsandboxed-commands)), whether
+it's called directly, as `bash scripts/build.sh`, or after a `cd`. A
 script that is sourced (`source scripts/build.sh`) isn't trusted: it runs in
 the caller's shell, and is checked like the rest of the command line. The entry matches the
 file it names, wherever the invocation is written from: `cd sub && ./build.sh`
@@ -141,11 +150,20 @@ can't reach the host or a credential by running, with its checks lifted, a
 command that would. It can still write what the working directory holds, as
 any program in the worker can, including files that programs on the host act
 on later: `.git/config` (whose `core.fsmonitor` or hooks your own `git` would
-run) or a build file. A script allowed with `no_sandbox` runs everything on
-the host instead, and since nothing it does is then confined by the OS
-sandbox, its own redirects aren't held to the path boundary either; it also
-gets the variables the agent exported earlier on the command line
-(`GIT_CONFIG_*`, ...), so it should not trust its environment.
+run) or a build file. A script allowed with `no_sandbox` doesn't go through
+the interpreter at all: it runs natively on the host, as the program its
+shebang names (`bash` for a script without one), so nothing it runs is
+checked, `ask` entries and the path boundary included. It gets the variables
+the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
+should not trust its environment. Every `no_sandbox` command gets your own
+values (the server's environment's) for the variables a native shell acts on
+before the script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+`PS4`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions) and for
+`CDPATH`, whatever the agent set, and assigning them is refused. Run directly
+or as `bash <script>`, the script also gets the server's `PATH` and `HOME`,
+and runs as the file the entry names by its resolved path. Run by a script allowed without
+`no_sandbox`, it stays where that script runs: in the interpreter, in the
+shared worker.
 
 The command line that runs the script is validated as usual, the deny list
 included. Under a wrapper (`timeout`, `env`, `xargs`, `find -exec`) the script
@@ -172,7 +190,9 @@ forms, same checks lifted), except matching invocations always run
 **directly on the host**, outside the
 [OS sandbox](security.md#os-level-sandboxing-optional) worker
 (bwrap/sandbox-exec) even when it is enabled. It's an escape hatch for trusted
-commands that can't run confined.
+commands that can't run confined. A bare `no_sandbox` entry for a script
+also takes it out of the sandbox's interpreter: the host's own bash runs it,
+with nothing it runs checked (see [allowed scripts](#allowed-scripts)).
 
 ```yaml
 commands:

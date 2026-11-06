@@ -669,7 +669,38 @@ func ParseBash(command string) (*syntax.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse bash: %w", err)
 	}
+	normalizeDupOutToFile(f)
 	return f, nil
+}
+
+// normalizeDupOutToFile rewrites `>&word` (or `1>&word`), with a literal word
+// that is not a file descriptor, to `&>word`: bash runs it as that (stdout and
+// stderr both to the file; see "Duplicating File Descriptors" in bash(1)), but
+// the interpreter only duplicates to a descriptor, and the validators hold an
+// output fd duplication to one. Another fd (`2>&file`, bash's "ambiguous
+// redirect") stays as it is, and so does a word only known after expansion.
+func normalizeDupOutToFile(f *syntax.File) {
+	syntax.Walk(f, func(node syntax.Node) bool {
+		r, ok := node.(*syntax.Redirect)
+		if !ok || r.Op != syntax.DplOut || (r.N != nil && r.N.Value != "1") {
+			return true
+		}
+		word, ok := wordLiteral(r.Word)
+		if !ok || isDupOutTarget(word) {
+			return true
+		}
+		r.Op = syntax.RdrAll
+		r.N = nil
+		return true
+	})
+}
+
+// isDupOutTarget reports whether word, after `>&`, names a file descriptor
+// rather than a file: digits (duplicate), "-" (close), or digits then "-"
+// (move).
+func isDupOutTarget(word string) bool {
+	digits := strings.TrimSuffix(word, "-")
+	return word == "-" || (digits != "" && strings.Trim(digits, "0123456789") == "")
 }
 
 // stripShebang removes a leading "#!" interpreter line from a script's source,
@@ -697,6 +728,14 @@ var blockedEnvVars = map[string]string{
 	"ENV":             "auto-sourced script injection",
 	"CDPATH":          "unexpected directory resolution",
 	"PROMPT_COMMAND":  "arbitrary command execution",
+	// A native shell acts on these before a script's first line runs (see
+	// shellStartupEnv): with xtrace in SHELLOPTS, bash expands PS4, command
+	// substitutions included, and zsh sources $ZDOTDIR/.zshenv.
+	"SHELLOPTS":     "a native shell runs PS4 as a command with xtrace",
+	"BASHOPTS":      "sets the options of a native bash",
+	"PS4":           "a native shell expands it, command substitutions included",
+	"BASH_XTRACEFD": "redirects a native bash's trace output",
+	"ZDOTDIR":       "auto-sourced script injection",
 	// Option injection into the archive tools, past their argument validators.
 	"TAR_OPTIONS": "injects tar options",
 	"TAPE":        "selects tar's default archive, which may be remote",
@@ -769,6 +808,11 @@ func (s *Sandbox) checkRedirect(r *syntax.Redirect) error {
 func blockedEnvVarError(name string) error {
 	if reason, blocked := blockedEnvVars[name]; blocked {
 		return fmt.Errorf("setting %s is not allowed: %s", name, reason)
+	}
+	// An exported bash function (only env can name one): a native bash
+	// defines it before the script's first line, over a command it runs.
+	if strings.HasPrefix(name, "BASH_FUNC_") {
+		return fmt.Errorf("setting %s is not allowed: a native bash defines it as a function", name)
 	}
 	return nil
 }
@@ -1167,6 +1211,11 @@ func (s *Sandbox) validateScriptFile(ctx context.Context, scriptPath, workDir st
 	// `bash build.sh` to an entry registered as ./build.sh by resolved path.
 	if mayTrust && s.trustsScript(path) {
 		ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+		// One allowed with no_sandbox runs natively on the host (see
+		// execArgv), so the interpreter never checks its body.
+		if ts, _ := trustedScriptFrom(ctx); ts.host {
+			return nil
+		}
 	}
 	if isBinaryExecutable(path) {
 		return nil
@@ -1352,8 +1401,8 @@ func argsMatchSubCommand(restrictions [][]string, args []string) bool {
 // unsandboxed ones reach the real docker daemon (or the host's own DOCKER_HOST).
 //
 // Inside a script a bare allow names (withTrustedScript), the script's routing
-// applies instead: everything it runs goes to the shared worker, or to the
-// host when the script itself is allowed with no_sandbox.
+// applies instead: everything it runs goes to the shared worker, and a script
+// allowed with no_sandbox, run natively, goes to the host.
 func (s *Sandbox) dispatchExec(ctx context.Context, args []string, useOSSandbox bool) error {
 	if ts, ok := trustedScriptFrom(ctx); ok {
 		if useOSSandbox && !ts.host {
@@ -1422,6 +1471,36 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		return err
 	}
 	restrictCommandEnv(args, envMap)
+	// The environment the command is looked up in: the interpreter's, or for
+	// a script run natively, the server's PATH (see nativeScriptEnv).
+	var lookupEnv expand.Environ = hc.Env
+	if !injectDockerProxy {
+		// Allowed with no_sandbox: a native shell it is or starts would act
+		// on these before running anything, so they are the server's own,
+		// whatever the agent set (see shellStartupEnv and nativeScriptEnv).
+		base := envSliceToMap(s.commandBaseEnv())
+		fromServer := func(name string) {
+			if v, ok := base[name]; ok {
+				envMap[name] = v
+			} else {
+				delete(envMap, name)
+			}
+		}
+		for _, name := range shellStartupEnv {
+			fromServer(name)
+		}
+		for name := range envMap {
+			if strings.HasPrefix(name, "BASH_FUNC_") {
+				fromServer(name)
+			}
+		}
+		if isNativeScript(ctx) {
+			for _, name := range nativeScriptEnv {
+				fromServer(name)
+			}
+			lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
+		}
+	}
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)
@@ -1431,7 +1510,7 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 		env = append(env, k+"="+v)
 	}
 
-	path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
+	path, err := interp.LookPathDir(hc.Dir, lookupEnv, args[0])
 	if err != nil {
 		fmt.Fprintln(hc.Stderr, err)
 		return interp.ExitStatus(127)
