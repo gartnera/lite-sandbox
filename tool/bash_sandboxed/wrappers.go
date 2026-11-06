@@ -391,14 +391,37 @@ var findValueTests = map[string]bool{
 	"-name": true, "-newer": true, "-path": true, "-perm": true, "-regex": true,
 	"-wholename": true, "-size": true, "-type": true, "-uid": true, "-used": true,
 	"-user": true, "-xtype": true, "-maxdepth": true, "-mindepth": true,
-	"-regextype": true,
+	"-regextype": true, "-samefile": true, "-printf": true,
+}
+
+// findNoValue are find's primaries, options, and operators that take no
+// value. checkReplacedFindOptions treats any other word starting with - that
+// is not in findValueTests as one that may take the next word as its value
+// (BSD's -Bnewer, GNU's -files0-from, ...), so that word is never read as a
+// test whose value it could skip.
+var findNoValue = map[string]bool{
+	"-print": true, "-print0": true, "-ls": true, "-prune": true, "-quit": true,
+	"-delete": true, "-depth": true, "-mount": true, "-xdev": true, "-noleaf": true,
+	"-follow": true, "-daystart": true, "-nowarn": true, "-warn": true,
+	"-empty": true, "-false": true, "-true": true, "-nouser": true, "-nogroup": true,
+	"-readable": true, "-writable": true, "-executable": true,
+	"-ignore_readdir_race": true, "-noignore_readdir_race": true,
+	"-not": true, "-and": true, "-or": true, "-a": true, "-o": true,
+	"-H": true, "-L": true, "-P": true, "--": true,
+}
+
+// findTakesValue reports whether find reads the word after v as v's value:
+// v is in findValueTests or is a -newerXY test (-newermt).
+func findTakesValue(v string) bool {
+	return findValueTests[v] || (len(v) == len("-newerXY") && strings.HasPrefix(v, "-newer"))
 }
 
 // checkReplacedFindOptions is checkReplacedOptions for find (args, with its
 // -exec commands at actions, which walkReplaceStrings walks on their own).
 // find reads a word as a primary or an operator by its first character (-,
 // or the words (, ), !, and ,), wherever it sits, -- or not, so a replace
-// string is safe only as the value of a test in findValueTests, which find
+// string is safe only as the value of a test in findValueTests (or -newerXY),
+// which find
 // matches as a name, pattern, or number, or after literal text that does
 // not start with one of those characters (./%), which keeps it a start
 // path.
@@ -415,9 +438,18 @@ func checkReplacedFindOptions(wrapper string, replace []string, args []*syntax.W
 			continue
 		}
 		v := vals[i]
-		if findValueTests[v] {
+		if findTakesValue(v) {
 			i++ // its value
 			continue
+		}
+		if strings.HasPrefix(v, "-") && !findNoValue[v] && i+1 < len(args) && !inAction[i+1] {
+			// It may take the next word as its value: that word is
+			// checked, never read as a test.
+			if replaceIndex(v, replace) >= 0 {
+				return replacedOptionError(wrapper, args, v)
+			}
+			i++
+			v = vals[i]
 		}
 		at := replaceIndex(v, replace)
 		if at < 0 || (at > 0 && !strings.ContainsRune("-()!,", rune(v[0]))) {
