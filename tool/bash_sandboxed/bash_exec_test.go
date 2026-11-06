@@ -1771,3 +1771,38 @@ func TestTrustedScript_AbsoluteEntryAndSource(t *testing.T) {
 		}
 	}
 }
+
+// TestTrustedScript_SourceRefusedBeforeRun verifies that the static and
+// runtime passes agree on a sourced script a bare allow names (#141): the
+// runtime runs it in the caller's shell, untrusted, so the static pass must
+// not trust it either. Otherwise the line would pass preflight and be refused
+// partway through, after the script's first commands had already run.
+func TestTrustedScript_SourceRefusedBeforeRun(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "b.sh"), []byte("echo first > first.txt\nprintf x\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./b.sh", Allow: &yes},
+		{Command: "printf", Allow: &no},
+	}}, dir)
+	first := filepath.Join(dir, "first.txt")
+	for _, cmd := range []string{"source ./b.sh", ". ./b.sh", "echo hi; source ./b.sh", "bash -c 'source ./b.sh'"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err == nil || !strings.Contains(err.Error(), "printf") {
+			t.Errorf("%s: static validation should refuse the sourced script's printf, got %v", cmd, err)
+		}
+		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "printf") {
+			t.Errorf("%s: execution should refuse the sourced script's printf, got %v", cmd, err)
+		}
+		if _, err := os.Stat(first); err == nil {
+			t.Errorf("%s: the script's first command ran before the refusal", cmd)
+			os.Remove(first)
+		}
+	}
+	// Run as its own process, the script is trusted by both passes.
+	if out, err := executeInDirWithSandbox(t, s, dir, "./b.sh"); err != nil || out != "x" {
+		t.Errorf("./b.sh: a bare-allowed script should run trusted: %v %q", err, out)
+	}
+}
