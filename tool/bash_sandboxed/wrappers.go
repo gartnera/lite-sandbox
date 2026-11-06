@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -33,8 +34,9 @@ const (
 	// `env FOO=bar`, `xargs` with its default echo, `timeout 5`).
 	wrapperNoCommand = -1
 	// wrapperRejected means the invocation uses an option that makes the
-	// wrapped command unknowable and is therefore refused outright
-	// (env -S/--split-string).
+	// wrapped command unknowable, or makes it a different file than the one
+	// validated, and is therefore refused outright (env -S/--split-string,
+	// -C/--chdir, -P).
 	wrapperRejected = -2
 )
 
@@ -43,9 +45,13 @@ type wrapperSpec struct {
 	// opts is the wrapper's option table; it is read in "+" mode,
 	// stopping at the first operand.
 	opts optSpec
-	// rejected lists options (by name) that build the command from a
-	// string, so it cannot be known: commandIndex returns wrapperRejected.
-	rejected []string
+	// rejected maps options (by name) that the sandbox refuses to the error
+	// it reports: commandIndex returns wrapperRejected for them. They are
+	// the options that build the command from a string, so it cannot be
+	// known, and those that change where the command is looked up, so the
+	// file the wrapper runs is not the one validation, path checks, and
+	// routing resolved.
+	rejected map[string]string
 	// dashIsOption makes a lone "-" an option (env's spelling of -i)
 	// rather than the command.
 	dashIsOption bool
@@ -66,13 +72,14 @@ type wrapperSpec struct {
 // FOO=$BAR still reads as one) where every option test keeps to the strict
 // literal; callers with already-expanded strings pass lits for both.
 func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
-	idx, _ := sp.layout(lits, assignLits)
+	idx, _, _ := sp.layout(lits, assignLits)
 	return idx
 }
 
 // layout is commandIndex, also returning the index of the first operand
-// (env's first NAME=VALUE assignment).
-func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
+// (env's first NAME=VALUE assignment) and, for wrapperRejected, the error
+// for the first rejected option.
+func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int, rejected error) {
 	opts := sp.opts
 	opts.stopAtOperand = true
 	p := parsedArgs{args: lits}
@@ -85,8 +92,10 @@ func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
 		start = p.operands[n] + 1
 		p.operands = p.operands[:n]
 	}
-	if p.has(sp.rejected...) {
-		return wrapperRejected, 0
+	for _, o := range p.opts {
+		if msg, ok := sp.rejected[o.name]; ok {
+			return wrapperRejected, 0, errors.New(msg)
+		}
 	}
 	i := len(lits)
 	if len(p.operands) > 0 {
@@ -100,9 +109,9 @@ func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int) {
 	}
 	i += sp.operands
 	if i >= len(lits) {
-		return wrapperNoCommand, operands
+		return wrapperNoCommand, operands, nil
 	}
-	return i, operands
+	return i, operands, nil
 }
 
 // wrapperSpecs describes each wrapper's options (see wrapperSpec).
@@ -123,6 +132,13 @@ var wrapperSpecs = map[string]wrapperSpec{
 	// GNU env "+C:iS:u:v0" (newer releases add -a/--argv0), BSD env
 	// "-0C:iL:P:S:U:u:v": -P names the directories the command is looked
 	// up in, -L and -U a user.
+	//
+	// -S builds the argv from a string, which would smuggle an otherwise
+	// blocked command past validation. -C runs the command from another
+	// directory and -P looks it up in other directories, while validation,
+	// path checks, and no_sandbox routing resolve it against the shell's
+	// own directory and PATH: `env -C evil ./host.sh` would run
+	// evil/host.sh where ./host.sh was checked.
 	"env": {
 		opts: optSpec{
 			short: "aCLPSUu",
@@ -131,9 +147,13 @@ var wrapperSpecs = map[string]wrapperSpec{
 				"ignore-environment", "null", "block-signal", "default-signal", "ignore-signal",
 				"list-signal-handling", "debug", "help", "version",
 			},
-			alias: map[string]string{"split-string": "S"},
+			alias: map[string]string{"split-string": "S", "chdir": "C"},
 		},
-		rejected:     []string{"S"},
+		rejected: map[string]string{
+			"S": "env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)",
+			"C": "env -C/--chdir is not allowed (the command would run from another directory than the one it was validated against; cd first instead)",
+			"P": "env -P is not allowed (the command would be looked up in other directories than the one it was validated against)",
+		},
 		dashIsOption: true,
 		assignments:  true,
 	},
@@ -162,14 +182,6 @@ func wrapperCommandIndex(lits []string) int {
 	return wrapperSpecs[lits[0]].commandIndex(lits, lits)
 }
 
-// errEnvSplitString is returned when env is invoked with -S/--split-string.
-// That option builds a whole argv from a single string (intended for shebang
-// lines), which would smuggle an otherwise-blocked command past validation, so
-// it is rejected outright.
-func errEnvSplitString() error {
-	return fmt.Errorf("env -S/--split-string is not allowed (it builds a command from a string, bypassing validation)")
-}
-
 // validateWrapperArgs validates a wrapper by recursively validating the
 // command it runs against the whitelist. With no command there is nothing to
 // run: xargs defaults to echo, env prints the environment, and the rest fail
@@ -179,9 +191,9 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	// wordLeadingLits handles env assignment values that are non-literal
 	// expansions (e.g. FOO=$BAR), whose Lit() would otherwise be empty.
 	assignLits := wordLeadingLits(args)
-	idx, operands := wrapperSpecs[lits[0]].layout(lits, assignLits)
+	idx, operands, rejected := wrapperSpecs[lits[0]].layout(lits, assignLits)
 	if idx == wrapperRejected {
-		return errEnvSplitString()
+		return rejected
 	}
 	if idx < 0 {
 		return nil
