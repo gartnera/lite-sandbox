@@ -1439,15 +1439,21 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		}
 	}
 
+	evil := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(evil, []byte("touch "+pwned+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("SHELLOPTS", "xtrace")
 	t.Setenv("PS4", "$(touch "+pwned+")")
+	t.Setenv("BASH_ENV", evil)
+	t.Setenv("ENV", evil)
 	for _, cmd := range []string{"./host.sh", "bash host.sh", "timeout 60 ./host.sh"} {
 		out, err := executeInDirWithSandbox(t, s, dir, cmd)
 		if err != nil || !strings.Contains(out, "ran") {
 			t.Fatalf("%s: %v %q", cmd, err, out)
 		}
 		if _, err := os.Stat(pwned); err == nil {
-			t.Fatalf("%s: the native shell ran PS4 from the environment", cmd)
+			t.Fatalf("%s: the native shell ran code from the environment", cmd)
 		}
 	}
 }
