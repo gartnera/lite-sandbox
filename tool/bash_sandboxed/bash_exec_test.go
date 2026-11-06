@@ -1447,7 +1447,8 @@ func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	inject := `a=SHELLOPTS; b=PS4; c=BASH_ENV; d=ENV; export "$a=xtrace" "$b="'$(touch ` + pwned + `)' "$c=` + evil + `" "$d=` + evil + `"; `
-	for _, cmd := range []string{"./host.sh", "bash host.sh", "timeout 60 ./host.sh"} {
+	// env, not timeout, for the wrapped form: macOS has no timeout.
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
 		out, err := executeInDirWithSandbox(t, s, dir, inject+cmd)
 		if err != nil || !strings.Contains(out, "ran") {
 			t.Fatalf("%s: %v %q", cmd, err, out)
