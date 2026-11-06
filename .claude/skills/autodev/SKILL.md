@@ -16,8 +16,9 @@ somewhere in the user's message, for example "fix X /autodev". In that case
 the request is the rest of that message.
 
 Invoking autodev counts as the user's explicit request to commit, push, open a
-pull request, label it, enable auto-merge and merge it once CI is green.
-**Every merge to `main` is released**, so the bar for "green" is the full CI.
+pull request, label it, and enable auto-merge as soon as the PR is open.
+**Every merge to `main` is released.** The checks `main` requires gate the
+merge, and you are responsible for the checks it doesn't require (see step 9).
 
 This skill says *what* to do and *when*. It doesn't say which tools to use.
 Use whatever this environment provides for git, GitHub and watching the PR,
@@ -33,6 +34,9 @@ activity.
     (`docs/security.md`) in a way the request doesn't clearly ask for, or
   - the work needs something you can't get, such as credentials, access, or a
     decision about a breaking change.
+
+  Whenever you stop with the PR still open, turn off its auto-merge first, so
+  it can't merge later with nobody watching.
 - **Stay in scope.** If you find an unrelated problem that doesn't block this
   change (a bug, a flaky test, stale docs, a lint nit in code you didn't
   touch), don't fix it. File it as a GitHub issue (see
@@ -161,6 +165,10 @@ enable auto-merge right away (step 9).
 - Enable auto-merge with the squash method as soon as the PR is created and
   labeled, without waiting for CI. GitHub then merges it once the required
   checks pass.
+- Auto-merge doesn't wait for checks `main` doesn't require, such as the
+  Docs link check and the release-label check. Step 2's link check and
+  step 8's single label cover them. If one fails before the merge, fix it
+  right away. If it fails after the merge, fix it forward.
 - If GitHub won't enable auto-merge (for example because the PR is already
   mergeable, meaning no required check is pending), don't merge right away:
   wait until every check on the PR's current head commit is green, then
@@ -176,9 +184,10 @@ enable auto-merge right away (step 9).
   PR. If a failure is unrelated to the diff and looks flaky, rerun the failed
   jobs once. If it fails again, file an issue.
 - **Merge conflict:** rebase onto `main`, resolve, rerun step 2, and push.
-- **Review comments from people:** triage them as in step 5. Reply to the
-  ones you reject with the reason. Don't resolve or dismiss anyone else's
-  review.
+- **Review comments from people:** triage them as in step 5. While you work
+  on a **Fix**, turn off auto-merge so the PR can't merge without it, and
+  turn it back on once the fix is pushed. Reply to the ones you reject with
+  the reason. Don't resolve or dismiss anyone else's review.
 - If the same failure survives three fix attempts, stop. Disable auto-merge,
   leave the PR open, and report what you tried.
 
