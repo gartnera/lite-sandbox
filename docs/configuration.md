@@ -153,15 +153,23 @@ on later: `.git/config` (whose `core.fsmonitor` or hooks your own `git` would
 run) or a build file. A script allowed with `no_sandbox` doesn't go through
 the interpreter at all: it runs natively on the host, as the program its
 shebang names (`bash` for a script without one), so nothing it runs is
-checked, `ask` entries and the path boundary included. It gets the variables
-the agent exported earlier on the command line (`GIT_CONFIG_*`, ...), so it
-should not trust its environment. Every `no_sandbox` command gets your own
-values (the server's environment's) for the variables a native shell acts on
-before the script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
-`PS4`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions) and for
-`CDPATH`, whatever the agent set, and assigning them is refused. Run directly
-or as `bash <script>`, the script also gets the server's `PATH` and `HOME`,
-and runs as the file the entry names by its resolved path. Run by a script allowed without
+checked, `ask` entries and the path boundary included. Every `no_sandbox`
+command (a script or any other program, run directly or under a wrapper) gets
+your own values (the server's environment's) for the variables that make a
+program load code or config before anything of yours runs, whatever the agent
+set: `PATH`, `HOME`, `XDG_CONFIG_HOME`, git's (`GIT_CONFIG*`, `GIT_DIR`,
+`GIT_SSH_COMMAND`, `GIT_EDITOR`, ...), `EDITOR`/`VISUAL`/`PAGER`, the dynamic
+loader's (`LD_*`, `DYLD_*`), the language runtimes' (`NODE_OPTIONS`,
+`NODE_PATH`, `npm_config_*`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`,
+`RUBYOPT`, `JAVA_TOOL_OPTIONS`, `GOFLAGS`, ...), and those a native shell acts
+on before a script's first line (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+`PS4`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions, and
+`CDPATH`). `env` setting one of them for a `no_sandbox` command
+(`env HOME=... git status`) is refused. The rest of its environment is the
+agent's to set (`CC`, a tool's own options variable, ...), so allow with
+`no_sandbox` only programs you trust whatever their environment, and a script
+should not trust its environment. Run directly or as `bash <script>`, the
+script runs as the file the entry names by its resolved path. Run by a script allowed without
 `no_sandbox`, it stays where that script runs: in the interpreter, in the
 shared worker.
 
@@ -193,6 +201,14 @@ forms, same checks lifted), except matching invocations always run
 commands that can't run confined. A bare `no_sandbox` entry for a script
 also takes it out of the sandbox's interpreter: the host's own bash runs it,
 with nothing it runs checked (see [allowed scripts](#allowed-scripts)).
+
+They run with your own values (the server's environment's) for the variables
+that make programs load code or config, `PATH` and `HOME` among them, whatever
+the agent set, so `HOME=$PWD/h git status` can't hand a `no_sandbox` git a
+`.gitconfig` the agent wrote; `env HOME=... git status` is refused. See
+[allowed scripts](#allowed-scripts) for the list and
+[security](security.md#general-limitations) for what it can't cover: the rest of
+the environment is the agent's.
 
 ```yaml
 commands:

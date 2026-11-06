@@ -1593,6 +1593,97 @@ func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
 	}
 }
 
+// TestNoSandbox_ServerEnv: a command allowed with no_sandbox runs on the
+// host with the server's values for the variables that make a program load
+// code or config (serverEnv), whatever the agent set, so a trusted git can't
+// be handed a config the agent wrote (#148). env setting one of them under a
+// wrapper is refused; the rest of the environment is the agent's.
+func TestNoSandbox_ServerEnv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("NODE_OPTIONS", "--server")
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitConfig := "[core]\n\tfsmonitor = touch " + pwned + "\n"
+	write("h/.gitconfig", gitConfig)
+	write("x/git/config", gitConfig)
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+
+	yes := true
+	entries := []config.CommandEntry{
+		{Command: "git", Allow: &yes, NoSandbox: true},
+		{Command: "printenv", Allow: &yes, NoSandbox: true},
+	}
+	for _, mode := range []config.Mode{"", config.ModeOpen} {
+		s := NewSandbox()
+		s.updateConfig(&config.Config{Mode: string(mode), Commands: entries}, dir)
+		for _, cmd := range []string{
+			`HOME=$PWD/h git status`,
+			`export HOME=$PWD/h; git status`,
+			`n=HOME; export "$n=$PWD/h"; git status`,
+			`XDG_CONFIG_HOME=$PWD/x git status`,
+			`GIT_CONFIG_GLOBAL=$PWD/h/.gitconfig git status`,
+			`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="touch ` + pwned + `" git status`,
+			`HOME=$PWD/h nice git status`,
+		} {
+			out, err := executeInDirWithSandbox(t, s, dir, cmd)
+			if _, statErr := os.Stat(pwned); statErr == nil {
+				t.Fatalf("mode %q, %s: git ran the agent's config on the host (err %v, output %q)", mode, cmd, err, out)
+			}
+			if err != nil {
+				t.Errorf("mode %q, %s: want git to run with the server's environment: %v %q", mode, cmd, err, out)
+			}
+		}
+		// env sets the variable in the process that runs the command, past
+		// the reset: refused.
+		for _, cmd := range []string{
+			`env HOME=$PWD/h git status`,
+			`nice env -u FOO HOME=$PWD/h git status`,
+			`env NODE_OPTIONS=--require=./x.js printenv`,
+		} {
+			out, err := executeInDirWithSandbox(t, s, dir, cmd)
+			if _, statErr := os.Stat(pwned); statErr == nil {
+				t.Fatalf("mode %q, %s: git ran the agent's config on the host (err %v, output %q)", mode, cmd, err, out)
+			}
+			if err == nil || !strings.Contains(err.Error(), "not allowed for a command allowed with no_sandbox") {
+				t.Errorf("mode %q, %s: want the env assignment refused: %v %q", mode, cmd, err, out)
+			}
+		}
+		// The server's values reach the command; other variables the agent
+		// set do too.
+		out, err := executeInDirWithSandbox(t, s, dir, `HOME=/agent NODE_OPTIONS=--require=./x.js FOO=bar printenv HOME NODE_OPTIONS FOO`)
+		if err != nil || out != home+"\n--server\nbar\n" {
+			t.Errorf("mode %q: printenv: %v %q, want the server's HOME and NODE_OPTIONS and the agent's FOO", mode, err, out)
+		}
+	}
+
+	// A command allowed without no_sandbox keeps the agent's values (with
+	// the OS sandbox off it, too, runs on the host).
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "printenv", Allow: &yes}}}, dir)
+	out, err := executeInDirWithSandbox(t, s, dir, `HOME=/agent printenv HOME`)
+	if err != nil || out != "/agent\n" {
+		t.Errorf("sandboxed printenv: want the agent's HOME: %v %q", err, out)
+	}
+}
+
 // TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
 // script lifts for the commands the script runs: the whitelist, argument
 // validators, structural rules (setting PATH) and the deny list — statically

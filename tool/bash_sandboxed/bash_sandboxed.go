@@ -1515,37 +1515,35 @@ func (s *Sandbox) execOnHost(ctx context.Context, args []string, injectDockerPro
 	if err != nil {
 		return err
 	}
-	restrictCommandEnv(args, envMap)
 	// The environment the command is looked up in: the interpreter's, or for
-	// a script run natively, the server's PATH (see nativeScriptEnv).
+	// a command allowed with no_sandbox, the server's PATH (see serverEnv).
 	var lookupEnv expand.Environ = hc.Env
 	if !injectDockerProxy {
-		// Allowed with no_sandbox: a native shell it is or starts would act
-		// on these before running anything, so they are the server's own,
-		// whatever the agent set (see shellStartupEnv and nativeScriptEnv).
+		// Allowed with no_sandbox: the program, or a native shell it is or
+		// starts, would load code or config from these before running
+		// anything of the user's, so they are the server's own, whatever the
+		// agent set (see serverEnv and shellStartupEnv).
+		if err := checkServerEnvAssign(args); err != nil {
+			return err
+		}
 		base := envSliceToMap(s.commandBaseEnv())
-		fromServer := func(name string) {
-			if v, ok := base[name]; ok {
-				envMap[name] = v
-			} else {
-				delete(envMap, name)
-			}
-		}
-		for _, name := range shellStartupEnv {
-			fromServer(name)
-		}
 		for name := range envMap {
-			if strings.HasPrefix(name, "BASH_FUNC_") {
-				fromServer(name)
+			if isServerEnv(name) {
+				if _, ok := base[name]; !ok {
+					delete(envMap, name)
+				}
 			}
 		}
-		if isNativeScript(ctx) {
-			for _, name := range nativeScriptEnv {
-				fromServer(name)
+		for name, v := range base {
+			if isServerEnv(name) {
+				envMap[name] = v
 			}
-			lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
 		}
+		lookupEnv = expand.ListEnviron("PATH=" + envMap["PATH"])
 	}
+	// After the server's values: what the command must not see (rsync's
+	// HOME) it doesn't get from the server either.
+	restrictCommandEnv(args, envMap)
 	if injectDockerProxy {
 		// A sandboxed command, run on the host because the OS sandbox is off.
 		s.sshAgentHostEnv(envMap)

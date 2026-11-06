@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -244,7 +245,7 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 			if ts, _ := trustedScriptFrom(ctx); ts.host {
 				native := append([]string(nil), args...)
 				native[inv.script] = filepath.Clean(path)
-				return s.dispatchExec(withNativeScript(ctx), native, s.osSandboxEnabled())
+				return s.dispatchExec(ctx, native, s.osSandboxEnabled())
 			}
 		}
 		data, err := os.ReadFile(path)
@@ -534,7 +535,7 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 			// it is allowed with no_sandbox, when it runs natively on the host.
 			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
 			if ts, _ := trustedScriptFrom(ctx); ts.host {
-				return s.dispatchExec(withNativeScript(ctx), nativeScriptArgv(filepath.Clean(path), args), useOSSandbox)
+				return s.dispatchExec(ctx, nativeScriptArgv(filepath.Clean(path), args), useOSSandbox)
 			}
 		} else if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
 			// A subcommand-restricted extra_commands entry (e.g. "./gradlew
@@ -581,28 +582,90 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 // only audit, and for what they don't cover, a command allowed with
 // no_sandbox (a script run natively, or a program that starts a shell) gets
 // the server's own values for them on the host, whatever set them
-// (execOnHost). Exported bash functions (BASH_FUNC_name%%) are treated the
-// same way.
+// (execOnHost), as it does for serverEnv. Exported bash functions
+// (BASH_FUNC_name%%) are treated the same way.
 var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR", "CDPATH"}
 
-// nativeScriptEnv are the variables a script allowed with no_sandbox gets
-// from the server's environment rather than the interpreter's (execOnHost):
-// PATH, which finds its shell (`bash <script>`, `#!/usr/bin/env bash`), and
-// HOME, where zsh finds .zshenv. Changing PATH is refused (checkBlockedEnv),
-// so this is its backstop, for open mode; HOME may be set for other commands.
-var nativeScriptEnv = []string{"PATH", "HOME"}
-
-type nativeScriptKey struct{}
-
-// withNativeScript marks ctx as the native run of a script allowed with
-// no_sandbox (see nativeScriptEnv).
-func withNativeScript(ctx context.Context) context.Context {
-	return context.WithValue(ctx, nativeScriptKey{}, true)
+// serverEnv are the variables a command allowed with no_sandbox gets from
+// the server's environment rather than the interpreter's on the host
+// (execOnHost), along with shellStartupEnv: those that make a program load
+// code or config the agent could have written before any of the user's own
+// code runs. PATH finds the program and its shell (`bash <script>`,
+// `#!/usr/bin/env bash`); HOME and XDG_CONFIG_HOME are where git, zsh
+// (.zshenv) and most tools read config that names programs; the rest are
+// the loader's, git's, and the language runtimes' code-loading variables.
+// A trusted program would otherwise run the agent's code on the host,
+// outside the OS sandbox (`HOME=$PWD/h git status` with a planted
+// .gitconfig's core.fsmonitor). Names with a serverEnvPrefixes prefix are
+// held too. The list can't name every variable some program acts on: the
+// rest of a no_sandbox command's environment is the agent's (see
+// docs/security.md).
+var serverEnv = []string{
+	"PATH", "HOME", "XDG_CONFIG_HOME",
+	// git: config, the programs it runs, and the repository it acts on
+	// (a GIT_DIR outside .git holds a config the path checks let the agent
+	// write).
+	"GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS",
+	"GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_EXTERNAL_DIFF",
+	"GIT_PROXY_COMMAND", "GIT_DIR", "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR", "GIT_WORK_TREE",
+	"EDITOR", "VISUAL", "PAGER",
+	// Language runtimes: modules and options loaded at startup.
+	"NODE_OPTIONS", "NODE_PATH",
+	"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+	"PERL5LIB", "PERLLIB", "PERL5OPT",
+	"RUBYOPT", "RUBYLIB",
+	"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+	"GOFLAGS", "GOENV",
 }
 
-func isNativeScript(ctx context.Context) bool {
-	v, _ := ctx.Value(nativeScriptKey{}).(bool)
-	return v
+// serverEnvPrefixes are the prefixes of serverEnv's variable families: the
+// dynamic loader's (LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES), git's
+// config (GIT_CONFIG_GLOBAL, GIT_CONFIG_KEY_n, GIT_CONFIG_PARAMETERS), npm's
+// config (npm_config_node_options, ...), and exported bash functions.
+var serverEnvPrefixes = []string{"LD_", "DYLD_", "GIT_CONFIG", "npm_config_", "NPM_CONFIG_", "BASH_FUNC_"}
+
+// isServerEnv reports whether a command allowed with no_sandbox gets the
+// variable from the server's environment (see serverEnv).
+func isServerEnv(name string) bool {
+	if slices.Contains(serverEnv, name) || slices.Contains(shellStartupEnv, name) {
+		return true
+	}
+	for _, p := range serverEnvPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkServerEnvAssign refuses an env wrapper in args (at any depth of
+// wrappers) that sets a variable a no_sandbox command gets from the server
+// (isServerEnv): env sets it after execOnHost has held the environment, in
+// the process that runs the command, so `env HOME=$PWD/h git status` would
+// hand a trusted git the agent's config.
+func checkServerEnvAssign(args []string) error {
+	for guard := 0; guard <= maxBashDepth && len(args) > 0; guard++ {
+		unwrap := lookupCommand(args[0]).unwrap
+		if unwrap == nil {
+			return nil
+		}
+		inner := unwrap(args)
+		if len(inner) == 0 {
+			return nil
+		}
+		if filepath.Base(args[0]) == "env" {
+			for _, w := range args[1 : len(args)-len(inner)] {
+				if strings.HasPrefix(w, "-") {
+					continue
+				}
+				if name, _, ok := strings.Cut(w, "="); ok && isServerEnv(name) {
+					return fmt.Errorf("env: setting %s is not allowed for a command allowed with no_sandbox: it runs on the host, which takes %s from the server's environment", name, name)
+				}
+			}
+		}
+		args = inner
+	}
+	return nil
 }
 
 // nativeScriptArgv is the argv that runs the script at path (the cleaned
