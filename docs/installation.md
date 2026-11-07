@@ -563,6 +563,8 @@ Add this to `~/.claude/settings.json` so Claude Code never prompts for the sandb
 
 The `kill_shell` and `list_shells` entries cover the background-process
 tools, so checking on and stopping background commands don't prompt either.
+Sessions that run background commands as MCP tasks don't get those two tools
+at all (see [Background processes](background-processes.md)).
 
 Without the `Bash` deny, Claude could fall back to the unvalidated built-in shell whenever the sandbox rejected a command.
 
