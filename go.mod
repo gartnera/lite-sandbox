@@ -54,4 +54,4 @@ replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20
 // extension (io.modelcontextprotocol/tasks, mark3labs/mcp-go#987) and
 // per-request task starts (server.WithTaskStart). The fork's lite-sandbox
 // branch is upstream main + #987 + WithTaskDecision + WithTaskStart.
-replace github.com/mark3labs/mcp-go => github.com/gartnera/mcp-go v0.0.0-20261107004148-3829ea698465
+replace github.com/mark3labs/mcp-go => github.com/gartnera/mcp-go v0.0.0-20261107005320-73c7475eb500

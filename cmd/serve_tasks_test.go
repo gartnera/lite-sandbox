@@ -259,3 +259,23 @@ func TestTasks_CancelKillsCommand(t *testing.T) {
 	}
 	t.Fatalf("background command not killed after cancel: %+v", s.sandbox.ListBackground())
 }
+
+// TestTasks_BadTimeoutRefusedAtOnce checks that a background command with an
+// out-of-range timeout is refused at once, as it is for a plain client, and
+// not started.
+func TestTasks_BadTimeoutRefusedAtOnce(t *testing.T) {
+	s := newTaskTestServer(t)
+	result := s.call("tools/call", map[string]any{
+		"name":      "bash",
+		"arguments": map[string]any{"command": "echo hi", "run_in_background": true, "timeout": 900000},
+	}, true)
+	if result["resultType"] == "task" {
+		t.Fatalf("background command with a bad timeout became a task: %v", result)
+	}
+	if text, isErr := resultText(t, result); !isErr || !strings.Contains(text, "timeout exceeds maximum") {
+		t.Fatalf("got %q (error %v), want the timeout error", text, isErr)
+	}
+	if procs := s.sandbox.ListBackground(); len(procs) != 0 {
+		t.Errorf("command with a bad timeout was started: %+v", procs)
+	}
+}

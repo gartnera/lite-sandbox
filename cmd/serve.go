@@ -108,12 +108,30 @@ func (o serveOptions) backgroundAsTask(ctx context.Context, request mcp.CallTool
 }
 
 // startedTaskKey carries what startBackgroundTask did for a call to the bash
-// handler: the command it started, or why the sandbox refused it.
+// handler: the command it started, or the error result refusing it.
 type startedTaskKey struct{}
 
 type startedTask struct {
-	proc *bash_sandboxed.BackgroundProcess
-	err  error
+	proc    *bash_sandboxed.BackgroundProcess
+	refusal *mcp.CallToolResult
+}
+
+// bashToolTimeout returns the bash tool's timeout argument in milliseconds
+// (default 120000), or the error result for an out-of-range one. A
+// background command does not use it, but is refused for a bad one all the
+// same, whether or not it runs as a task.
+func bashToolTimeout(args map[string]any) (float64, *mcp.CallToolResult) {
+	timeout, ok := args["timeout"].(float64)
+	if !ok {
+		return 120000, nil
+	}
+	if timeout > 600000 {
+		return 0, mcp.NewToolResultError("timeout exceeds maximum of 600000ms (10 minutes)")
+	}
+	if timeout < 0 {
+		return 0, mcp.NewToolResultError("timeout must be positive")
+	}
+	return timeout, nil
 }
 
 // startBackgroundTask is the server's per-request task start
@@ -122,29 +140,37 @@ type startedTask struct {
 // command the sandbox refuses is answered at once with the error, as a plain
 // call (the handler reports it), and one that starts becomes a task whose
 // first status message, and Claude Code's start note, name its output file,
-// so the agent can read the output while the command runs. Every other call
-// is a plain call that the handler runs as usual.
+// so the agent can read the output while the command runs. If the task then
+// cannot be created, the command is killed. Every other call is a plain call
+// that the handler runs as usual.
 func (o serveOptions) startBackgroundTask(sandbox *bash_sandboxed.Sandbox) server.TaskStartFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) server.TaskStart {
 		if !o.backgroundAsTask(ctx, request) {
 			return server.TaskStart{}
 		}
+		refuse := func(ctx context.Context, result *mcp.CallToolResult) server.TaskStart {
+			return server.TaskStart{Context: context.WithValue(ctx, startedTaskKey{}, startedTask{refusal: result})}
+		}
 		args, _ := request.Params.Arguments.(map[string]any)
 		command, _, _ := bashToolArgs(args)
+		if _, bad := bashToolTimeout(args); bad != nil {
+			return refuse(ctx, bad)
+		}
 		cwd, err := os.Getwd()
 		if err != nil {
-			err = fmt.Errorf("failed to get working directory: %w", err)
-			return server.TaskStart{Context: context.WithValue(ctx, startedTaskKey{}, startedTask{err: err})}
+			return refuse(ctx, mcp.NewToolResultError("failed to get working directory: "+err.Error()))
 		}
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
 		ctx = o.approveCall(ctx, sandbox, cwd, command)
 		proc, err := sandbox.ExecuteBackgroundContext(ctx, command, cwd, readPaths, writePaths)
 		if err != nil {
-			return server.TaskStart{Context: context.WithValue(ctx, startedTaskKey{}, startedTask{err: err})}
+			return refuse(ctx, mcp.NewToolResultError(o.errorText(err)))
 		}
 		return server.TaskStart{
-			AsTask:        true,
-			Context:       context.WithValue(ctx, startedTaskKey{}, startedTask{proc: proc}),
+			AsTask:  true,
+			Context: context.WithValue(ctx, startedTaskKey{}, startedTask{proc: proc}),
+			// Already exited is fine: no task follows it either way.
+			Abort:         func() { _ = sandbox.KillBackground(proc.ID) },
 			StatusMessage: "Running. Output file: " + proc.OutputPath,
 			Meta: &mcp.Meta{AdditionalFields: map[string]any{
 				agentTaskMetaKey: map[string]any{
@@ -206,8 +232,8 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 		// A background command startBackgroundTask already started (this
 		// call is its task) or refused (this call answers with the error).
 		if started, ok := ctx.Value(startedTaskKey{}).(startedTask); ok {
-			if started.err != nil {
-				return mcp.NewToolResultError(opts.errorText(started.err)), nil
+			if started.refusal != nil {
+				return started.refusal, nil
 			}
 			return awaitBackgroundTask(ctx, sandbox, started.proc)
 		}
@@ -218,20 +244,9 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
 
-		// Extract optional timeout parameter (default 120000ms = 2 minutes)
-		timeoutMs := 120000.0 // default
-		if args != nil {
-			if timeout, ok := args["timeout"]; ok {
-				if timeoutFloat, ok := timeout.(float64); ok {
-					if timeoutFloat > 600000 {
-						return mcp.NewToolResultError("timeout exceeds maximum of 600000ms (10 minutes)"), nil
-					}
-					if timeoutFloat < 0 {
-						return mcp.NewToolResultError("timeout must be positive"), nil
-					}
-					timeoutMs = timeoutFloat
-				}
-			}
+		timeoutMs, bad := bashToolTimeout(args)
+		if bad != nil {
+			return bad, nil
 		}
 
 		cwd, err := os.Getwd()
