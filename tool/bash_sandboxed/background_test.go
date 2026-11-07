@@ -521,3 +521,29 @@ func TestOutputFileCapCompaction(t *testing.T) {
 		t.Fatalf("write after close: n=%d err=%v", n, err)
 	}
 }
+
+// TestOutputTail checks that the tail of an output file starts on a line
+// boundary, or within one long line on a character boundary.
+func TestOutputTail(t *testing.T) {
+	tail := func(t *testing.T, content string, maxBytes int64) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "out.log")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return (&BackgroundProcess{OutputPath: path}).OutputTail(maxBytes)
+	}
+	if got := tail(t, "short\n", 100); got != "short\n" {
+		t.Errorf("whole file: got %q", got)
+	}
+	if got := tail(t, "first line\nsecond\nthird\n", 10); got != "third\n" {
+		t.Errorf("line boundary: got %q, want %q", got, "third\n")
+	}
+	// "é" is two bytes, so a 5-byte tail of "ééé" starts inside one.
+	if got := tail(t, "ééé", 5); got != "éé" {
+		t.Errorf("character boundary: got %q, want %q", got, "éé")
+	}
+	if got := (&BackgroundProcess{OutputPath: filepath.Join(t.TempDir(), "gone.log")}).OutputTail(10); got != "" {
+		t.Errorf("missing file: got %q, want empty", got)
+	}
+}

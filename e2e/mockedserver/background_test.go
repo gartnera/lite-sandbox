@@ -8,7 +8,7 @@ import (
 )
 
 // bgMarker is what the background command prints; list_shells shows it in the
-// command column once the command has run.
+// command column.
 const bgMarker = "bg-e2e-marker"
 
 // backgroundAgent is one agent the background scenario runs against: tool is
@@ -88,9 +88,14 @@ func TestBackgroundCommands(t *testing.T) {
 			if len(results) != len(calls) {
 				t.Fatalf("expected %d tool results, got %d", len(calls), len(results))
 			}
-			assertResult(t, results, 0, "shell id")
-			assertResult(t, results, 1, "completed (exit 0)")
-			assertResult(t, results, 1, bgMarker)
+			assertResult(t, results, 0, `shell id "bash_1"`)
+			// The echo usually finishes before the next turn, but nothing
+			// orders the two, so the listing may still show it running.
+			assertResult(t, results, 1, "bash_1\t")
+			assertResult(t, results, 1, "echo "+bgMarker)
+			if !strings.Contains(results[1], "completed (exit 0)") && !strings.Contains(results[1], "running") {
+				t.Errorf("list_shells shows neither running nor a clean exit: %q", results[1])
+			}
 			if !strings.Contains(output, finalPrefix) {
 				t.Errorf("final answer missing from the agent's output")
 			}

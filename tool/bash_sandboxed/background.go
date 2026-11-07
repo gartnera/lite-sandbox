@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/interp"
 )
@@ -215,10 +217,6 @@ func (p *BackgroundProcess) Done() <-chan struct{} {
 func (p *BackgroundProcess) Summary() BackgroundStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.summaryLocked()
-}
-
-func (p *BackgroundProcess) summaryLocked() BackgroundStatus {
 	return BackgroundStatus{
 		ID:         p.ID,
 		Command:    p.Command,
@@ -229,7 +227,8 @@ func (p *BackgroundProcess) summaryLocked() BackgroundStatus {
 }
 
 // OutputTail returns up to the last maxBytes of the process's output file,
-// starting at a line boundary when the file is longer. It reads the file the
+// starting at a line boundary when the file is longer (or, within a single
+// longer line, at a character boundary). It reads the file the
 // process writes to, so it is "" once the server has removed it.
 func (p *BackgroundProcess) OutputTail(maxBytes int64) string {
 	f, err := os.Open(p.OutputPath)
@@ -249,8 +248,13 @@ func (p *BackgroundProcess) OutputTail(maxBytes int64) string {
 	}
 	buf = buf[:n]
 	if start > 0 {
-		if i := strings.IndexByte(string(buf), '\n'); i >= 0 {
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
 			buf = buf[i+1:]
+		} else {
+			// One long line: at least start on a whole character.
+			for len(buf) > 0 && !utf8.RuneStart(buf[0]) {
+				buf = buf[1:]
+			}
 		}
 	}
 	return string(buf)

@@ -23,7 +23,10 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import TaskNotificationMessage
 
-MARKER = "bg-task-marker-7c1f"
+# The command computes its output, so the output appears nowhere in the
+# prompt: Claude can only report it after receiving the task's result.
+COMMAND = "sleep 5; echo bg-task-$((6*7))-done"
+OUTPUT = "bg-task-42-done"
 
 # How long to wait for the whole exchange: the command sleeps a few seconds,
 # then Claude Code's next poll picks up the result and Claude answers.
@@ -47,7 +50,7 @@ async def test_background_command_runs_as_task(agent_options: ClaudeAgentOptions
     )
     prompt = (
         "Use the mcp__lite-sandbox__bash tool with run_in_background set to true "
-        f"to run exactly: sleep 5; echo {MARKER}\n"
+        f"to run exactly: {COMMAND}\n"
         "Do not run any other command or poll it. Wait until you are notified "
         "that it finished, then tell me exactly what it printed."
     )
@@ -56,10 +59,12 @@ async def test_background_command_runs_as_task(agent_options: ClaudeAgentOptions
     bash_calls: list[ToolUseBlock] = []
     tool_results: list[str] = []
     notifications: list[TaskNotificationMessage] = []
-    final_text = ""
+    # What Claude says once the task has completed: only this can carry the
+    # command's output.
+    after_text = ""
 
     async def converse() -> None:
-        nonlocal final_text
+        nonlocal after_text
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
             async for message in client.receive_messages():
@@ -71,26 +76,26 @@ async def test_background_command_runs_as_task(agent_options: ClaudeAgentOptions
                     for block in message.content:
                         if isinstance(block, ToolUseBlock) and block.name == "mcp__lite-sandbox__bash":
                             bash_calls.append(block)
-                        elif isinstance(block, TextBlock):
-                            final_text += block.text + "\n"
+                        elif isinstance(block, TextBlock) and notifications:
+                            after_text += block.text + "\n"
                 elif isinstance(message, UserMessage) and isinstance(message.content, list):
                     for block in message.content:
                         if isinstance(block, ToolResultBlock):
                             tool_results.append(block_text(block))
-                elif isinstance(message, ResultMessage):
-                    final_text += (message.result or "") + "\n"
+                elif isinstance(message, ResultMessage) and notifications:
                     # The first result ends the turn that started the task;
                     # the task's completion starts another.
-                    if notifications and MARKER in final_text:
+                    after_text += (message.result or "") + "\n"
+                    if OUTPUT in after_text:
                         return
 
     try:
         await asyncio.wait_for(converse(), TIMEOUT_S)
-    except TimeoutError:
+    except asyncio.TimeoutError:  # not the builtin TimeoutError before 3.11
         pytest.fail(
-            f"no answer quoting {MARKER!r} within {TIMEOUT_S}s; "
+            f"no answer quoting {OUTPUT!r} within {TIMEOUT_S}s; "
             f"bash calls: {[c.input for c in bash_calls]}, tool results: {tool_results}, "
-            f"notifications: {[n.summary for n in notifications]}, text: {final_text!r}"
+            f"notifications: {[n.summary for n in notifications]}, text after: {after_text!r}"
         )
 
     assert "mcp__lite-sandbox__bash" in session_tools, session_tools
@@ -104,4 +109,4 @@ async def test_background_command_runs_as_task(agent_options: ClaudeAgentOptions
     assert any(n.status == "completed" for n in notifications), [
         (n.status, n.summary) for n in notifications
     ]
-    assert MARKER in final_text, final_text
+    assert OUTPUT in after_text, after_text

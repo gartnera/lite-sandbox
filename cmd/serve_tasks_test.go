@@ -162,8 +162,8 @@ func TestTasks_BackgroundRunsAsTask(t *testing.T) {
 	}
 
 	procs := s.sandbox.ListBackground()
-	if len(procs) != 1 || procs[0].Status != "failed" && procs[0].Status != "completed" {
-		t.Errorf("expected the task's process to be tracked as finished, got %+v", procs)
+	if len(procs) != 1 || procs[0].Status != "failed" || procs[0].ExitCode != 3 {
+		t.Errorf("expected the task's process to be tracked as failed with exit 3, got %+v", procs)
 	}
 }
 

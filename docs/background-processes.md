@@ -32,7 +32,13 @@ sessions (the interactive CLI, and Agent SDK sessions with
 `CLAUDE_AUTO_BACKGROUND_TASKS=1`, among other conditions; see its
 [MCP docs](https://code.claude.com/docs/en/mcp#mcp-tasks-that-run-on-the-server)).
 It never uses them for calls from subagents or one-shot `claude -p` runs.
-Those calls, and every other agent's, get the shell id reply.
+Those calls, and every other agent's, get the shell id reply. A subagent shares
+its session's tool list, though, so in a session that runs tasks it is not
+offered `list_shells` or `kill_shell`. It can still read its background
+command's output file, and the command is stopped when the session ends.
+Because a command is validated once its task exists, a command the sandbox
+refuses shows up as a task that fails on its first poll rather than as an
+immediate error.
 
 **Reading output.** There is no dedicated output tool: stdout and stderr are
 written, as they are produced, to `<shell id>.log` in a per-server directory
