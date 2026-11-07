@@ -146,24 +146,67 @@ func TestTasks_BackgroundRunsAsTask(t *testing.T) {
 	}
 	taskID := fmt.Sprint(created["taskId"])
 
+	procs := s.sandbox.ListBackground()
+	if len(procs) != 1 {
+		t.Fatalf("expected one background process once the task exists, got %+v", procs)
+	}
+	outputPath := procs[0].OutputPath
+
+	// The output file is known from the start: in the task's status message
+	// and in the note Claude Code hands the agent when the task starts.
+	if msg := fmt.Sprint(created["statusMessage"]); !strings.Contains(msg, outputPath) {
+		t.Errorf("created task's statusMessage %q does not name the output file %s", msg, outputPath)
+	}
+	meta, _ := created["_meta"].(map[string]any)
+	agentTask, _ := meta[agentTaskMetaKey].(map[string]any)
+	if note := fmt.Sprint(agentTask["modelImmediateResponse"]); !strings.Contains(note, outputPath) {
+		t.Errorf("start note %q does not name the output file %s (_meta %v)", note, outputPath, meta)
+	}
+
 	final := s.awaitTask(taskID)
 	if final["status"] != "completed" {
 		t.Fatalf("task status = %v, want completed: %v", final["status"], final)
 	}
+	if msg, ok := final["statusMessage"]; ok && msg != "" {
+		t.Errorf("finished task kept its working status message %q", msg)
+	}
 	result, _ := final["result"].(map[string]any)
 	text, isErr := resultText(t, result)
-	for _, want := range []string{"exited with code 3", "task-hello", "Output file: "} {
+	for _, want := range []string{"exited with code 3", "task-hello", "Output file: " + outputPath} {
 		if !strings.Contains(text, want) {
 			t.Errorf("task result missing %q: %q", want, text)
 		}
+	}
+	// The shell id names nothing a tasks client can act on (the output
+	// file's name aside).
+	if strings.Contains(strings.ReplaceAll(text, outputPath, ""), procs[0].ID) {
+		t.Errorf("task result mentions the shell id %s: %q", procs[0].ID, text)
 	}
 	if !isErr {
 		t.Errorf("a non-zero exit should be reported as an error result: %q", text)
 	}
 
-	procs := s.sandbox.ListBackground()
+	procs = s.sandbox.ListBackground()
 	if len(procs) != 1 || procs[0].Status != "failed" || procs[0].ExitCode != 3 {
 		t.Errorf("expected the task's process to be tracked as failed with exit 3, got %+v", procs)
+	}
+}
+
+// TestTasks_RefusedBackgroundFailsAtOnce checks that a background command the
+// sandbox refuses is answered at once with the error, not with a task that
+// fails later, and that nothing was started.
+func TestTasks_RefusedBackgroundFailsAtOnce(t *testing.T) {
+	s := newTaskTestServer(t)
+	result := s.bash("echo tampered > /etc/lite-sandbox-task-test", true, true)
+	if result["resultType"] == "task" {
+		t.Fatalf("refused background command became a task: %v", result)
+	}
+	text, isErr := resultText(t, result)
+	if !isErr || !strings.Contains(text, "validation failed") {
+		t.Fatalf("got %q (error %v), want the validation error", text, isErr)
+	}
+	if procs := s.sandbox.ListBackground(); len(procs) != 0 {
+		t.Errorf("refused command was started: %+v", procs)
 	}
 }
 
