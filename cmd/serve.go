@@ -82,12 +82,14 @@ func clientRunsTasks(ctx context.Context) bool {
 	return info != nil && info.Modern && info.ClientCapabilities.HasExtension(mcp.ExtensionTasks)
 }
 
+// agentTaskMetaKey is the _meta key of Claude Code's agent-task metadata. Its
+// modelImmediateResponse, on the result that creates an MCP task, is a note
+// Claude Code hands the agent alongside the task's ids when the task starts.
+const agentTaskMetaKey = "com.anthropic/agent-task"
+
 // backgroundAsTask reports whether a bash call runs as an MCP task: a
-// run_in_background call from a client that runs tasks. It is the server's
-// per-request task decision (server.WithTaskDecision) and how the handler
-// tells a task run from a plain call, so the two cannot disagree. Config
-// requests never run in the background, so they stay plain calls and are
-// refused at once.
+// run_in_background call from a client that runs tasks. Config requests never
+// run in the background, so they stay plain calls and are refused at once.
 func (o serveOptions) backgroundAsTask(ctx context.Context, request mcp.CallToolRequest) bool {
 	if request.Params.Name != "bash" || !clientRunsTasks(ctx) {
 		return false
@@ -103,6 +105,83 @@ func (o serveOptions) backgroundAsTask(ctx context.Context, request mcp.CallTool
 		}
 	}
 	return true
+}
+
+// startedTaskKey carries what startBackgroundTask did for a call to the bash
+// handler: the command it started, or the error result refusing it.
+type startedTaskKey struct{}
+
+type startedTask struct {
+	proc    *bash_sandboxed.BackgroundProcess
+	refusal *mcp.CallToolResult
+}
+
+// bashToolTimeout returns the bash tool's timeout argument in milliseconds
+// (default 120000), or the error result for an out-of-range one. A
+// background command does not use it, but is refused for a bad one all the
+// same, whether or not it runs as a task.
+func bashToolTimeout(args map[string]any) (float64, *mcp.CallToolResult) {
+	timeout, ok := args["timeout"].(float64)
+	if !ok {
+		return 120000, nil
+	}
+	if timeout > 600000 {
+		return 0, mcp.NewToolResultError("timeout exceeds maximum of 600000ms (10 minutes)")
+	}
+	if timeout < 0 {
+		return 0, mcp.NewToolResultError("timeout must be positive")
+	}
+	return timeout, nil
+}
+
+// startBackgroundTask is the server's per-request task start
+// (server.WithTaskStart). It runs before any task exists, so a background
+// command from a client that runs tasks is validated and started here: a
+// command the sandbox refuses is answered at once with the error, as a plain
+// call (the handler reports it), and one that starts becomes a task whose
+// first status message, and Claude Code's start note, name its output file,
+// so the agent can read the output while the command runs. If the task then
+// cannot be created, the command is killed. Every other call is a plain call
+// that the handler runs as usual.
+func (o serveOptions) startBackgroundTask(sandbox *bash_sandboxed.Sandbox) server.TaskStartFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) server.TaskStart {
+		if !o.backgroundAsTask(ctx, request) {
+			return server.TaskStart{}
+		}
+		refuse := func(ctx context.Context, result *mcp.CallToolResult) server.TaskStart {
+			return server.TaskStart{Context: context.WithValue(ctx, startedTaskKey{}, startedTask{refusal: result})}
+		}
+		args, _ := request.Params.Arguments.(map[string]any)
+		command, _, _ := bashToolArgs(args)
+		if _, bad := bashToolTimeout(args); bad != nil {
+			return refuse(ctx, bad)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return refuse(ctx, mcp.NewToolResultError("failed to get working directory: "+err.Error()))
+		}
+		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		ctx = o.approveCall(ctx, sandbox, cwd, command)
+		proc, err := sandbox.ExecuteBackgroundContext(ctx, command, cwd, readPaths, writePaths)
+		if err != nil {
+			return refuse(ctx, mcp.NewToolResultError(o.errorText(err)))
+		}
+		return server.TaskStart{
+			AsTask:  true,
+			Context: context.WithValue(ctx, startedTaskKey{}, startedTask{proc: proc}),
+			// Already exited is fine: no task follows it either way.
+			Abort:         func() { _ = sandbox.KillBackground(proc.ID) },
+			StatusMessage: "Running. Output file: " + proc.OutputPath,
+			Meta: &mcp.Meta{AdditionalFields: map[string]any{
+				agentTaskMetaKey: map[string]any{
+					"modelImmediateResponse": fmt.Sprintf(
+						"The command is running. Its output is being written to %s; read it with the bash tool (e.g. `tail -n 50 %s`) to check on it before it finishes.",
+						proc.OutputPath, proc.OutputPath,
+					),
+				},
+			}},
+		}
+	}
 }
 
 // hideBackgroundControls drops kill_shell and list_shells for a client that
@@ -129,13 +208,13 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 		// tasks extension; every other call is answered directly.
 		server.WithTaskCapabilities(false, true, true),
 		server.WithTasksExtension(),
-		server.WithTaskDecision(opts.backgroundAsTask),
+		server.WithTaskStart(opts.startBackgroundTask(sandbox)),
 		server.WithToolFilter(hideBackgroundControls),
 	)
 
 	bashTool := mcp.NewTool(
 		"bash",
-		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking. If your client runs it as a background task, you are notified with its exit code, output file, and the end of its output when it finishes. Otherwise the call returns a shell id and the path of a file its output is written to: read that file with this tool (e.g. `tail -n 50 <file>`), check whether the command has finished with the list_shells tool, and stop it with the kill_shell tool."),
+		mcp.WithDescription("Execute a bash command in a lightweight sandbox. The command is parsed and validated before execution.\n\nSet run_in_background to true to start a long-running command without blocking. If your client runs it as a background task, you are told the file its output is written to when it starts, and its exit code and the end of its output when it finishes. Otherwise the call returns a shell id and the path of a file its output is written to: read that file with this tool (e.g. `tail -n 50 <file>`), check whether the command has finished with the list_shells tool, and stop it with the kill_shell tool."),
 		mcp.WithTaskSupport(mcp.TaskSupportOptional),
 		mcp.WithString("command",
 			mcp.Description("The bash command to execute"),
@@ -150,26 +229,24 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 	)
 
 	s.AddTool(bashTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// A background command startBackgroundTask already started (this
+		// call is its task) or refused (this call answers with the error).
+		if started, ok := ctx.Value(startedTaskKey{}).(startedTask); ok {
+			if started.refusal != nil {
+				return started.refusal, nil
+			}
+			return awaitBackgroundTask(ctx, sandbox, started.proc)
+		}
+
 		args, _ := request.Params.Arguments.(map[string]any)
 		command, runInBackground, ok := bashToolArgs(args)
 		if !ok {
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
 
-		// Extract optional timeout parameter (default 120000ms = 2 minutes)
-		timeoutMs := 120000.0 // default
-		if args != nil {
-			if timeout, ok := args["timeout"]; ok {
-				if timeoutFloat, ok := timeout.(float64); ok {
-					if timeoutFloat > 600000 {
-						return mcp.NewToolResultError("timeout exceeds maximum of 600000ms (10 minutes)"), nil
-					}
-					if timeoutFloat < 0 {
-						return mcp.NewToolResultError("timeout must be positive"), nil
-					}
-					timeoutMs = timeoutFloat
-				}
-			}
+		timeoutMs, bad := bashToolTimeout(args)
+		if bad != nil {
+			return bad, nil
 		}
 
 		cwd, err := os.Getwd()
@@ -187,13 +264,9 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 		ctx = opts.approveCall(ctx, sandbox, cwd, command)
 
 		if runInBackground {
-			asTask := opts.backgroundAsTask(ctx, request)
 			proc, err := sandbox.ExecuteBackgroundContext(ctx, command, cwd, readPaths, writePaths)
 			if err != nil {
 				return mcp.NewToolResultError(opts.errorText(err)), nil
-			}
-			if asTask {
-				return awaitBackgroundTask(ctx, sandbox, proc)
 			}
 			msg := fmt.Sprintf(
 				"Started background process with shell id %q.\nIts output is being written to %s; read it with this tool (e.g. `tail -n 50 %s`). Use the list_shells tool to see whether it has finished and its exit code, and the kill_shell tool (shell_id=%q) to stop it.",
@@ -261,8 +334,10 @@ func newMCPServer(sandbox *bash_sandboxed.Sandbox, opts serveOptions) *server.MC
 // awaitBackgroundTask is the body of a background command run as an MCP task:
 // it waits for proc to exit and returns what the client hands the agent when
 // the task ends — the exit status, the output file, and the end of the output.
-// The task's context ends when the client cancels the task (tasks/cancel),
-// which stops the command.
+// It leaves out the shell id: a client that runs tasks follows and stops the
+// command through the task and has no tool that takes the id. The task's
+// context ends when the client cancels the task (tasks/cancel), which stops
+// the command.
 func awaitBackgroundTask(ctx context.Context, sandbox *bash_sandboxed.Sandbox, proc *bash_sandboxed.BackgroundProcess) (*mcp.CallToolResult, error) {
 	select {
 	case <-proc.Done():
@@ -276,9 +351,9 @@ func awaitBackgroundTask(ctx context.Context, sandbox *bash_sandboxed.Sandbox, p
 	var b strings.Builder
 	switch st.Status {
 	case "killed":
-		fmt.Fprintf(&b, "Background command %s was killed.\n", st.ID)
+		b.WriteString("Background command was killed.\n")
 	default:
-		fmt.Fprintf(&b, "Background command %s exited with code %d.\n", st.ID, st.ExitCode)
+		fmt.Fprintf(&b, "Background command exited with code %d.\n", st.ExitCode)
 	}
 	fmt.Fprintf(&b, "Command: %s\nOutput file: %s\n", st.Command, st.OutputPath)
 	if tail := proc.OutputTail(taskOutputTailBytes); tail != "" {

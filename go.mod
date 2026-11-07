@@ -52,6 +52,6 @@ replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20
 
 // TODO: drop this fork once a mcp-go release supports the SEP-2663 tasks
 // extension (io.modelcontextprotocol/tasks, mark3labs/mcp-go#987) and
-// per-request task decisions (server.WithTaskDecision). The fork's main is
-// upstream main + #987 + WithTaskDecision.
-replace github.com/mark3labs/mcp-go => github.com/gartnera/mcp-go v0.0.0-20261106234818-8999d8155119
+// per-request task starts (server.WithTaskStart). The fork's lite-sandbox
+// branch is upstream main + #987 + WithTaskDecision + WithTaskStart.
+replace github.com/mark3labs/mcp-go => github.com/gartnera/mcp-go v0.0.0-20261107005320-73c7475eb500
