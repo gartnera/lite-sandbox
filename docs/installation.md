@@ -615,7 +615,7 @@ lite-sandbox install --with-tool-hook
 
 This registers a `PreToolUse` hook (`lite-sandbox hook`) in `~/.claude/settings.json`. On each matching tool call it:
 
-- **redirects `Bash` and `Monitor`**: the built-in shell tools are denied with a message telling the model to use `mcp__lite-sandbox__bash` instead (with `run_in_background` for a `Monitor` watch). A `Monitor` call that watches a WebSocket instead of running a command runs no shell, so it defers to Claude Code's own prompt;
+- **redirects `Bash` and `Monitor`**: the built-in shell tools are denied with a message telling the model to use `mcp__lite-sandbox__bash` instead (for a `Monitor` watch, to run it in a background shell with `run_in_background`). A `Monitor` call that watches a WebSocket instead of running a command runs no shell, so it defers to Claude Code's own prompt;
 - **denies reads** (`Read`, and `Grep`/`Glob` with an explicit `path`) outside the readable paths;
 - **denies writes** (`Write`, `Edit`, `NotebookEdit`) outside the writable paths;
 - **allows the sandbox's own tools** (`mcp__lite-sandbox__*`), so they stay prompt-free in subagents and skills, which don't inherit `permissions.allow` ([anthropics/claude-code#18950](https://github.com/anthropics/claude-code/issues/18950));

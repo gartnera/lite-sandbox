@@ -474,10 +474,15 @@ func TestBuiltinMonitor(t *testing.T) {
 		t.Fatalf("expected Monitor to be denied, got %+v", got)
 	}
 	reason := got.HookSpecificOutput.PermissionDecisionReason
-	for _, want := range []string{"built-in Monitor tool is disabled", "mcp__lite-sandbox__bash", "run_in_background"} {
+	for _, want := range []string{"built-in Monitor tool is disabled", "tail -f build.log", "background shell", "mcp__lite-sandbox__bash", "run_in_background: true"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("deny reason does not contain %q: %s", want, reason)
 		}
+	}
+	// The redirect is terse: the model already knows why the sandboxed tool
+	// is required.
+	if strings.Contains(reason, "bypasses the sandbox") {
+		t.Errorf("deny reason repeats the rationale: %s", reason)
 	}
 	if evaluate(&hook.Event{ToolName: hook.ToolMonitor, CWD: cwd}, hookOptions{}) == nil {
 		t.Error("expected Monitor to be denied even without parsed tool input")

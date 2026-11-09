@@ -488,23 +488,24 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 			event.ToolName, grokRedirectHint,
 		))
 	}
-	instead := "run this command with the mcp__lite-sandbox__bash tool"
+	tool := "mcp__lite-sandbox__bash"
 	if event.FromPi() {
-		instead = "run this command with the " + piMCPToolPrefix + "bash tool"
-		if event.ToolName == hook.PiToolPowerShell {
-			instead += " (it runs bash, not PowerShell)"
-		}
+		tool = piMCPToolPrefix + "bash"
 	}
-	if event.ToolName == hook.ToolMonitor {
-		instead += " and run_in_background set to true, then read the output file it names"
+	instead := "Use the " + tool + " tool instead."
+	switch {
+	case event.FromPi() && event.ToolName == hook.PiToolPowerShell:
+		instead = "Use the " + tool + " tool instead (it runs bash, not PowerShell)."
+	case event.ToolName == hook.ToolMonitor:
+		// The MCP tool's background shells take Monitor's place; a client
+		// that runs MCP tasks also reports when they finish.
+		instead = "Run it in a background shell instead: call " + tool +
+			" with run_in_background: true, and read the output file it names to follow progress."
 	}
 	reason := fmt.Sprintf(
 		"Blocked by lite-sandbox: the built-in %s tool is disabled.\n"+
-			"Attempted action: %s\n"+
-			"What to do instead: %s, "+
-			"which executes it through lite-sandbox's validation and path boundaries. "+
-			"The built-in %s tool bypasses the sandbox and is not permitted.",
-		event.ToolName, what, instead, event.ToolName,
+			"Attempted action: %s\n%s",
+		event.ToolName, what, instead,
 	)
 	return hook.NewDecision(hook.DecisionDeny, reason)
 }
