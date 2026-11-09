@@ -57,6 +57,11 @@ activity.
 
 ## 1. Develop
 
+Before you start, search the repository's open issues and pull requests for
+the requested work. If an open issue describes it, note the number for
+step 8. If an open PR already does it, stop and report the PR instead of
+duplicating it.
+
 Work on the branch the environment designates. If it doesn't designate one,
 create a new branch from an up-to-date `main`. Read enough of the code to
 change it the way it is already written. Implement the feature or fix. Add or
@@ -89,7 +94,8 @@ they apply:
 If a suite can't run here (a missing tool, a blocked network), note it in the
 PR and rely on CI. Fix every failure before you move on. If a failure looks
 unrelated to your change, check it against `main`. If it fails there too, it's
-an unrelated problem: file an issue, and fix it only if it blocks this change.
+an unrelated problem: report it as in [Filing issues](#filing-issues), and fix
+it only if it blocks this change.
 
 ## 3. Commit and rebase
 
@@ -113,7 +119,7 @@ Put each finding in exactly one bucket and log it:
 | --- | --- | --- |
 | **Fix** | It's real, and it's in code this change adds or alters, or caused by it | Fix it in this PR |
 | **Reject** | It's a false positive, or it contradicts the documented design | Log one line on why |
-| **Issue** | It's real, but it's pre-existing or unrelated and doesn't block this change | File a GitHub issue; don't fix it |
+| **Issue** | It's real, but it's pre-existing or unrelated and doesn't block this change | Report it as in [Filing issues](#filing-issues); don't fix it |
 
 Check a finding against the code before you act on it. Reviewers can be wrong.
 
@@ -182,7 +188,8 @@ enable auto-merge right away (step 9).
   dropped. If the failure can't be reproduced here (for
   example, it only happens on macOS), reason from the log and say so in the
   PR. If a failure is unrelated to the diff and looks flaky, rerun the failed
-  jobs once. If it fails again, file an issue.
+  jobs once. If it fails again, report it as in
+  [Filing issues](#filing-issues).
 - **Merge conflict:** rebase onto `main`, resolve, rerun step 2, and push.
 - **Review comments from people:** triage them as in step 5. While you work
   on a **Fix**, turn off auto-merge so the PR can't merge without it, and
@@ -197,16 +204,34 @@ forward.
 
 ## Filing issues
 
-For each unrelated, non-blocking problem:
+Never file an issue without searching first. Parallel autodev runs review
+neighboring code and tend to find the same problems, so duplicates are easy
+to create. For each unrelated, non-blocking problem:
 
-1. Search the repository's issues, open and closed, for an existing one. If
-   one covers the problem, comment on it only if you have new information.
-2. Otherwise file a new issue with a specific title. In the body, cover:
+1. **Search** the repository's issues, open and closed, and its open pull
+   requests. Run several searches, not one: the command or function name, the
+   flag or option, the file path, and a few words of the symptom. Read the
+   candidates' bodies, not just their titles: a differently worded issue can
+   describe the same root cause.
+2. **If an existing issue or PR covers it**, don't file a new one:
+   - open issue: comment only if you have new information, such as another
+     trigger, a reproduction, or a `path:line` it doesn't name;
+   - closed as fixed, but the problem is back on `main`: file a new issue
+     that links the old one and says it regressed;
+   - closed as not planned or as a duplicate: respect that decision and
+     don't refile it;
+   - an open PR already fixes it: link the PR and don't file anything.
+
+   Link the existing issue or PR from your PR's **Review** section.
+3. **Otherwise file a new issue** with a specific title. Right before you
+   create it, rerun the most specific search, since another run may have
+   filed it in the meantime. In the body, cover:
    - what's wrong and where, as `path:line` on `main`;
    - how to reproduce it, or the evidence;
+   - related issues you found but judged different, and why;
    - why it's out of scope for the autodev PR, with a link to the PR.
-3. Link the issue from the PR's **Review** section and list it in the final
-   report.
+4. Link the issue from the PR's **Review** section and list it in the final
+   report, marking which issues you filed and which already existed.
 
 File an issue only for a problem you have confirmed, not for style
 preferences or speculation.
@@ -219,5 +244,5 @@ When the PR merges, or when you stop, give the user:
 - what changed, in two or three lines;
 - what you tested locally, and what CI covered;
 - the review findings and how you triaged them;
-- the issues you filed;
+- the issues you filed, and the existing issues you linked or commented on;
 - anything still unresolved.
