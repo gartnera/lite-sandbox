@@ -258,22 +258,6 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		return fmt.Errorf("%s: no command or script file specified", cmdName)
 	}
 
-	// Prepend shell flags as set commands, each quoted: an -o value is the
-	// option's name, never shell syntax.
-	if len(inv.set) > 0 {
-		set := make([]string, len(inv.set))
-		for i, w := range inv.set {
-			q, err := syntax.Quote(w, syntax.LangBash)
-			if err != nil {
-				return fmt.Errorf("%s: option %q: %w", cmdName, w, err)
-			}
-			set[i] = q
-		}
-		// bash refuses to start (status 2) on an option it does not know;
-		// stop before the script runs too.
-		script = "set " + strings.Join(set, " ") + " || exit 2\n" + script
-	}
-
 	// Parse the script
 	f, err := ParseBash(script)
 	if err != nil {
@@ -292,7 +276,13 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
 	// Build and run nested interpreter
-	return s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile, params...)
+	err = s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile, inv.set, params...)
+	// bash refuses to start (status 2) on an option it does not know.
+	if oe, ok := err.(shellOptionError); ok {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", cmdName, oe)
+		return interp.ExitStatus(2)
+	}
+	return err
 }
 
 // executeScript runs a script file (e.g., ./script.sh) by reading it,
@@ -340,29 +330,21 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	nestedCtx := context.WithValue(ctx, bashDepthKey, depth+1)
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
-	// If script has arguments, prepend a `set -- arg1 arg2 ...` to pass them
-	if len(args) > 1 {
-		var setArgs []string
-		for _, a := range args[1:] {
-			setArgs = append(setArgs, "'"+strings.ReplaceAll(a, "'", "'\\''")+"'")
-		}
-		script = "set -- " + strings.Join(setArgs, " ") + "\n" + script
-		// Re-parse with the set command prepended
-		f, err = ParseBash(script)
-		if err != nil {
-			return fmt.Errorf("script %s: %w", args[0], err)
-		}
-	}
-
-	return s.runNestedInterp(nestedCtx, f, hc, paths, args[0])
+	// The words after the script are its $1, $2, ...
+	return s.runNestedInterp(nestedCtx, f, hc, paths, args[0], nil, args[1:]...)
 }
 
 // runNestedInterp creates and runs a nested interpreter with the same
 // security handlers as the parent. scriptName is the script path as invoked,
 // empty for `bash -c`; it becomes $0 and BASH_SOURCE, which scripts use to
-// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`). params, when
+// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`). flags are the
+// shell's set options (`bash -e -o pipefail`), in `set` syntax. params, when
 // given, are the script's positional parameters ($1, $2, ...).
-func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string, params ...string) error {
+//
+// Both are handed to the runner rather than prepended to the script as `set`
+// commands, so the script's line numbers ($LINENO, error positions) stay the
+// ones in its text.
+func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string, flags []string, params ...string) error {
 	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context: a nested script is a child
@@ -400,8 +382,22 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		return fmt.Errorf("failed to create nested interpreter: %w", err)
 	}
 
+	// The flags go on after New, so an option the interpreter does not know
+	// is told apart from a failure to build the runner. Applied before the
+	// first Run, they are part of the runner's initial state.
+	if len(flags) > 0 {
+		if err := interp.Params(flags...)(runner); err != nil {
+			return shellOptionError{err}
+		}
+	}
+
 	return runner.Run(ctx, f)
 }
+
+// shellOptionError is a shell flag the interpreter does not know.
+type shellOptionError struct{ err error }
+
+func (e shellOptionError) Error() string { return e.err.Error() }
 
 // scriptEnviron adds a script's BASH_SOURCE to its environment. The variable is
 // not exported, so the script's children do not inherit it.

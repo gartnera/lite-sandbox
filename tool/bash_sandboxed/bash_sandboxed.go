@@ -704,7 +704,9 @@ func isDupOutTarget(word string) bool {
 }
 
 // stripShebang removes a leading "#!" interpreter line from a script's source,
-// which the bash parser would otherwise treat as a comment. A file whose only
+// which the bash parser would otherwise treat as a comment. It keeps the
+// line's newline, so the script's line numbers ($LINENO, error positions)
+// stay the ones in the file. A file whose only
 // line is the shebang (no trailing newline) becomes empty: an interpreter line
 // carries no shell statements, so dropping it never discards executable code.
 func stripShebang(script string) string {
@@ -712,7 +714,7 @@ func stripShebang(script string) string {
 		return script
 	}
 	if idx := strings.IndexByte(script, '\n'); idx >= 0 {
-		return script[idx+1:]
+		return script[idx:]
 	}
 	return ""
 }
