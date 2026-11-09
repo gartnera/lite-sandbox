@@ -931,6 +931,72 @@ bash -c 'echo "child=[${BASH_SOURCE[0]}]"'
 	}
 }
 
+// A nested script's line numbers are the ones in its file, however it is
+// invoked: its arguments, shell flags and shebang line must not shift them.
+func TestNestedScript_LineNumbers(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		command string
+		want    string
+	}{
+		{"direct", "echo \"line=$LINENO\"\n", `./s.sh`, "line=1\n"},
+		{"direct with args", "echo \"line=$LINENO $*\"\n", `./s.sh x 'y z'`, "line=1 x y z\n"},
+		{"shebang", "#!/bin/bash\necho \"line=$LINENO\"\n", `./s.sh`, "line=2\n"},
+		{"shebang with args", "#!/bin/bash\necho \"line=$LINENO $1\"\n", `./s.sh x`, "line=2 x\n"},
+		{"bash script", "echo \"line=$LINENO\"\n", `bash s.sh`, "line=1\n"},
+		{"bash flags", "echo \"line=$LINENO\"\n", `bash -e -o pipefail s.sh`, "line=1\n"},
+		{"bash flags and args", "echo \"line=$LINENO $1\"\n", `bash -eu s.sh x`, "line=1 x\n"},
+		{"bash -c flags", "", `bash -e -c 'echo "line=$LINENO"'`, "line=1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.script != "" {
+				if err := os.WriteFile(filepath.Join(dir, "s.sh"), []byte(tt.script), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := executeInDirWithSandbox(t, newTestSandboxWithLocalBinaryExecution(), dir, tt.command)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out != tt.want {
+				t.Errorf("output %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
+// A parse error in a script run with arguments or shell flags names the line
+// it is on.
+func TestNestedScript_ParseErrorLine(t *testing.T) {
+	for _, command := range []string{`./s.sh x`, `bash -e s.sh`} {
+		t.Run(command, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "s.sh"), []byte("echo ok\nif then\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			_, err := executeInDirWithSandbox(t, newTestSandboxWithLocalBinaryExecution(), dir, command)
+			if err == nil || !strings.Contains(err.Error(), "2:") || strings.Contains(err.Error(), "3:") {
+				t.Errorf("error should name line 2, got %v", err)
+			}
+		})
+	}
+}
+
+// bash refuses to start, with status 2, on a shell option it does not know.
+func TestExecuteBash_UnknownSetOption(t *testing.T) {
+	dir := t.TempDir()
+	out, err := executeInDir(t, dir, `bash -o bogus -c 'echo ran'; echo "status=$?"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "ran") || !strings.Contains(out, "status=2") || !strings.Contains(out, "bogus") {
+		t.Errorf("output %q, want the option refused with status 2", out)
+	}
+}
+
 func TestExecuteScript_BlockedWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "script.sh"), []byte("echo hello\n"), 0755)
