@@ -32,8 +32,9 @@ commits, rebases, runs a code review, then a separate security review when
 the diff touches the sandbox's security boundary, triages the findings, and
 opens a PR with one `release:*` label. It enables auto-merge as soon as the
 PR is open, so the checks `main` requires gate the merge, and it keeps fixing CI failures and merge conflicts until the PR
-merges. It files GitHub issues for unrelated, non-blocking problems rather
-than fixing them in the PR. Start it with `/autodev <request>`, or include the
+merges. It reports unrelated, non-blocking problems as GitHub issues rather
+than fixing them in the PR, searching existing issues and PRs first so it
+reuses an issue instead of filing a duplicate. Start it with `/autodev <request>`, or include the
 word "autodev" in a prompt.
 
 ### Adding or changing a command
