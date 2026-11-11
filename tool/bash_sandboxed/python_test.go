@@ -1614,3 +1614,16 @@ func TestPythonDecimal(t *testing.T) {
 		t.Errorf("got %q, want 0.3", out)
 	}
 }
+
+// The fnmatch module arrived in monty v1.5.0.
+func TestPythonFnmatch(t *testing.T) {
+	s := newTestSandbox()
+	defer s.Close()
+	out, err := runPython(t, s, t.TempDir(), `python3 -c "import fnmatch; print(fnmatch.filter(['a.py', 'b.txt', 'c.py'], '*.py'))"`)
+	if err != nil {
+		t.Fatalf("fnmatch: %v", err)
+	}
+	if strings.TrimSpace(out) != "['a.py', 'c.py']" {
+		t.Errorf("got %q, want ['a.py', 'c.py']", out)
+	}
+}
