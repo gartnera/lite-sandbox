@@ -48,7 +48,7 @@ require (
 	golang.org/x/text v0.14.0 // indirect
 )
 
-replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20261104045841-c72915f64e61
+replace github.com/fugue-labs/monty-go => github.com/gartnera/monty-go v0.0.0-20261111044626-2f884308beef
 
 // TODO: drop this fork once a mcp-go release supports the SEP-2663 tasks
 // extension (io.modelcontextprotocol/tasks, mark3labs/mcp-go#987) and

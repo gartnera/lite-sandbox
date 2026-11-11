@@ -728,10 +728,10 @@ monty implements a **subset of Python**, which is the most likely source of
 surprises. There are no third-party packages: `numpy`, `pandas`, `requests`,
 and the rest can't be imported, and there's no `pip` or `venv`. The standard
 library is partial: `os` (with `os.path`), `pathlib`, `json`, `re`, `math`,
-`random`, `datetime`, `decimal`, `time`, `sys`, `typing`, `asyncio`,
-`dataclasses`, `collections`, `copy`, `functools`, `itertools`, `base64`,
-`binascii`, `bisect`, `csv`, `hashlib`, `tomllib`, and `unicodedata` are
-available.
+`random`, `datetime`, `decimal`, `time`, `sys`, `typing`, `annotationlib`,
+`asyncio`, `dataclasses`, `collections`, `copy`, `functools`, `itertools`,
+`fnmatch`, `base64`, `binascii`, `bisect`, `csv`, `hashlib`, `tomllib`, and
+`unicodedata` are available.
 
 Also unavailable:
 
