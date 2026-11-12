@@ -166,10 +166,9 @@ and runs as the file the entry names by its resolved path. Run by a script allow
 shared worker.
 
 The command line that runs the script is validated as usual, the deny list
-included. A wrapper (`timeout`, `env`, `xargs`, `find -exec`) would start a
-shell script as a native program, outside the interpreter, so a wrapped shell
-script is refused, as a wrapped `bash` is; run it directly. One allowed with
-`no_sandbox` is the exception: it runs natively on the host either way. A script whose shebang names another interpreter
+included. Under a wrapper (`timeout`, `env`, `xargs`, `find -exec`) the script
+runs as a native program, routed as its own entry says (the worker, or the
+host for `no_sandbox`), as any wrapped command is. A script whose shebang names another interpreter
 (`#!/usr/bin/env python3`), and a compiled binary, run as the native program
 instead, since the sandbox has nothing of theirs to interpret. The interpreter
 implements most of bash but isn't GNU bash; see
