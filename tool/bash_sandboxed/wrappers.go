@@ -1,8 +1,14 @@
 package bash_sandboxed
 
 import (
+	"debug/elf"
+	"debug/macho"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -538,4 +544,338 @@ func sliceWrappedCommand(args []string, idx int) []string {
 		return nil
 	}
 	return args[idx:]
+}
+
+// wrappedScriptMaxDepth bounds checkWrappedScripts's re-dispatch through
+// shebang interpreters (a wrapper's walk is bounded by its argv: each level
+// drops at least one word).
+const wrappedScriptMaxDepth = 8
+
+// checkWrappedScripts refuses a shell script that a wrapper (timeout, env,
+// xargs, nice, ..., xcrun, find -exec) would start, at any depth of nesting.
+// Run directly (./b.sh) or as `bash b.sh`, a shell script goes through the
+// sandbox's interpreter, which validates and routes every command in it; a
+// wrapper spawns it as a native program instead, so a native shell would run
+// its body with none of it seen (the whitelist, deny list, ask entries, and
+// path boundary on its commands). This is the script-path counterpart of
+// commandSpec.notWrappable, which refuses a wrapped bash or sh. It runs on the
+// expanded argv at exec time, when the file a script path names, and so
+// whether it is a shell script, is known; dir is the directory relative
+// paths resolve against.
+//
+// A compiled binary is not affected, and neither is a script allowed with
+// no_sandbox, which runs natively on the host wrapped or not. A script for
+// another interpreter (#!/usr/bin/env python3) is checked as the invocation
+// the kernel makes of it ("python3 ./x.py ...") would be under the wrapper,
+// as it is when run directly, unless a bare allow trusts it (it then runs as
+// a native program either way), but not when its shebang's interpreter is
+// itself a script, which the kernel would run natively too. What the check
+// cannot see is refused: a command name holding the input of xargs -I or
+// find's {}; a wrapper left without a command under xargs, which runs the
+// input as one; a relative script path under find -execdir or -okdir, which
+// run it from each found file's directory; and a path with nothing there yet.
+// The file can still be replaced between this check and the wrapper's exec
+// (by an earlier find -exec action, say): like any program the agent can
+// write, it then runs natively, confined by the OS sandbox only.
+func (s *Sandbox) checkWrappedScripts(dir string, args []string) error {
+	return s.walkWrappedScripts(dir, args, wrappedWalk{}, 0)
+}
+
+// wrappedWalk is what checkWrappedScripts knows about where a command sits.
+type wrappedWalk struct {
+	// replace are the replace strings the input of an outer xargs -I or
+	// find -exec takes the place of, in any word of the command.
+	replace []string
+	// argReplace are the replace strings of the xargs directly running the
+	// command: xargs puts its input in the words after the command's name,
+	// never in the name itself (find does replace {} in it).
+	argReplace []string
+	// dirUnknown reports whether a relative path is resolved somewhere other
+	// than dir (find -execdir).
+	dirUnknown bool
+	// appended reports whether an outer xargs without a replace string adds
+	// its input to the end of the command, where a wrapper left without a
+	// command of its own would run the input as one.
+	appended bool
+}
+
+// walkWrappedScripts checks each command args[0] starts, when it is a
+// wrapper or find.
+func (s *Sandbox) walkWrappedScripts(dir string, args []string, w wrappedWalk, depth int) error {
+	if len(args) == 0 {
+		return nil
+	}
+	name := args[0]
+	if name == "find" {
+		for _, a := range findActions(args) {
+			if a.end <= a.start {
+				continue
+			}
+			execdir := a.flag == "-execdir" || a.flag == "-okdir"
+			inner := wrappedWalk{
+				replace:    append(slices.Clone(w.replace), "{}"),
+				dirUnknown: w.dirUnknown || execdir,
+			}
+			if err := s.checkWrappedCommand(dir, args[a.start:a.end], inner, depth); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if lookupCommand(name).unwrap == nil {
+		return nil
+	}
+	inner := lookupCommand(name).unwrap(args)
+	if len(inner) == 0 {
+		if w.appended {
+			return tagRule(ruleStructural, name, fmt.Errorf("%s under xargs has no command of its own, so it would run xargs's input as one, which cannot be checked", name))
+		}
+		return nil
+	}
+	if name == "xargs" {
+		w.argReplace = xargsReplaceStrings(args[:len(args)-len(inner)])
+		w.appended = len(w.argReplace) == 0
+	}
+	return s.checkWrappedCommand(dir, inner, w, depth)
+}
+
+// checkWrappedCommand checks one command a wrapper starts (see
+// checkWrappedScripts), then the commands it starts in turn.
+func (s *Sandbox) checkWrappedCommand(dir string, args []string, w wrappedWalk, depth int) error {
+	if depth > wrappedScriptMaxDepth {
+		return tagRule(ruleStructural, args[0], fmt.Errorf("command %q: shebang interpreters nested too deep", args[0]))
+	}
+	name := args[0]
+	if replaceIndex(name, w.replace) >= 0 {
+		return tagRule(ruleStructural, name, fmt.Errorf("wrapped command name %q is built from the wrapper's input, so the program it runs cannot be checked (a shell script would run natively, outside the sandbox's interpreter)", name))
+	}
+	// Past the name, the input of the xargs running this command can be
+	// anywhere, the name of a command it wraps included.
+	if len(w.argReplace) > 0 {
+		w.replace = append(slices.Clone(w.replace), w.argReplace...)
+		w.argReplace = nil
+	}
+	if !isScriptPath(name) {
+		return s.walkWrappedScripts(dir, args, w, depth)
+	}
+	if w.dirUnknown && !strings.HasPrefix(name, "/") {
+		return tagRule(ruleStructural, name, fmt.Errorf("relative script path %q under find -execdir/-okdir resolves from each found file's directory, so it cannot be checked; use an absolute path", name))
+	}
+	// raw is the path as the kernel resolves it, ".." after a symlink
+	// included (absPath would clean it away); path is how config entries
+	// name it.
+	raw := kernelPath(name, dir)
+	path := filepath.Clean(raw)
+	if _, err := os.Stat(raw); err != nil {
+		// Nothing there yet, so nothing to check; but the wrapper may start it
+		// after something has written it (an earlier find -exec action, a
+		// command feeding xargs).
+		return tagRule(ruleStructural, name, fmt.Errorf("wrapped command %q does not exist (yet), so what it runs cannot be checked", name))
+	}
+	// A script allowed with no_sandbox runs natively on the host wrapped or
+	// not; the wrapper execs the path as written, so it must be the file
+	// the entry names, not another one reached through a symlinked directory
+	// (s/../b.sh) that cleans to it.
+	if s.scriptUnsandboxed(path) && sameFile(raw, path) {
+		return nil
+	}
+	// The exemption needs a header the kernel loads: a text file that only
+	// starts with the ELF magic fails exec with ENOEXEC, and the wrappers'
+	// execvp then hands it to /bin/sh.
+	if isCompiledProgram(raw) {
+		return nil
+	}
+	names, flags, err := wrappedShebang(raw)
+	if err != nil {
+		return tagRule(ruleStructural, name, fmt.Errorf("script %q under a wrapper: %w", name, err))
+	}
+	if len(names) > 0 && !slices.ContainsFunc(names, isShellInterpreter) {
+		if s.trustsScript(path) && sameFile(raw, path) {
+			return nil
+		}
+		// Checked as the invocation the kernel makes of it, under each name
+		// its interpreter goes by (python3 and the python3.12 it links to).
+		for _, interp := range names {
+			full := append(append(append([]string{interp}, flags...), path), args[1:]...)
+			if err := validateSubCommand(s, literalWords(full)); err != nil {
+				return fmt.Errorf("script %s (run as %s): %w", name, interp, err)
+			}
+			if err := s.checkWrappedCommand(dir, full, wrappedWalk{}, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return tagRule(ruleStructural, name, fmt.Errorf("shell script %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, nice, nohup, setsid, stdbuf, xcrun): the wrapper would run it as a native program, outside the sandbox's interpreter; run it directly, without the wrapper", name))
+}
+
+// sameFile reports whether the paths a and b resolve to the same file.
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
+// shebangBufSize is how much of a file the kernel reads for its shebang
+// line: BINPRM_BUF_SIZE (256) on Linux, 512 on macOS. A line that does not
+// end inside it is cut off or refused with ENOEXEC (then handed to /bin/sh
+// by the wrapper's execvp), so the check refuses it rather than guess.
+func shebangBufSize() int {
+	if runtime.GOOS == "darwin" {
+		return 512
+	}
+	return 256
+}
+
+// wrappedShebang reads the shebang of the script at path the way the kernel
+// runs it under a wrapper, which, unlike a direct run (scriptShebangArgv,
+// re-dispatched by execArgv), the sandbox does not see. It returns the names
+// the interpreter goes by (the name the line gives and, for a symlink, the
+// name of the program it resolves to; one only when they agree) and its
+// arguments, or no names when the file has no shebang. The line is split
+// only on spaces and tabs, and on Linux everything after the interpreter is
+// one argument, as the kernel passes it. A shebang the check could misread
+// is an error: one that does not end within the kernel's buffer, an
+// interpreter that is not an absolute path to a program the kernel loads (a
+// relative one resolves from wherever the wrapper runs; one that is a script
+// runs that script natively in turn), and env with options or assignments
+// (#!/usr/bin/env -S bash ... runs bash, whatever word follows) or with
+// more than a command name.
+func wrappedShebang(path string) (names, args []string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, shebangBufSize())
+	n, _ := io.ReadFull(f, buf)
+	head := string(buf[:n])
+	if !strings.HasPrefix(head, "#!") {
+		return nil, nil, nil
+	}
+	end := strings.IndexByte(head, '\n')
+	if end < 0 {
+		if n == len(buf) {
+			return nil, nil, fmt.Errorf("shebang line does not end within the kernel's %d bytes", len(buf))
+		}
+		end = n
+	}
+	line := strings.Trim(head[2:end], " \t")
+	interp, rest := line, ""
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		interp, rest = line[:i], strings.Trim(line[i+1:], " \t")
+	}
+	if interp == "" {
+		return nil, nil, fmt.Errorf("shebang names no interpreter")
+	}
+	if runtime.GOOS == "darwin" {
+		args = strings.FieldsFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
+	} else if rest != "" {
+		args = []string{rest}
+	}
+	names, err = interpreterNames(interp)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !slices.Contains(names, "env") {
+		return names, args, nil
+	}
+	if len(args) != 1 || strings.ContainsAny(args[0], " \t") {
+		return nil, nil, fmt.Errorf("shebang runs env with %q, not a single command name", rest)
+	}
+	cmd := args[0]
+	if strings.HasPrefix(cmd, "-") || strings.Contains(cmd, "=") {
+		return nil, nil, fmt.Errorf("shebang passes env option or assignment %q", cmd)
+	}
+	if strings.Contains(cmd, "/") {
+		names, err = interpreterNames(cmd)
+		if err != nil {
+			return nil, nil, err
+		}
+		return names, nil, nil
+	}
+	return []string{cmd}, nil, nil
+}
+
+// interpreterNames checks a shebang's interpreter path (see wrappedShebang)
+// and returns the names it goes by.
+func interpreterNames(p string) ([]string, error) {
+	if !filepath.IsAbs(p) {
+		return nil, fmt.Errorf("shebang interpreter %q is not an absolute path", p)
+	}
+	if !isCompiledProgram(p) {
+		return nil, fmt.Errorf("shebang interpreter %q is not a compiled program", p)
+	}
+	names := []string{filepath.Base(p)}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil && filepath.Base(resolved) != names[0] {
+		names = append(names, filepath.Base(resolved))
+	}
+	return names, nil
+}
+
+// hostELFMachine is the ELF machine this host's kernel loads natively.
+var hostELFMachine = map[string]elf.Machine{
+	"amd64":   elf.EM_X86_64,
+	"386":     elf.EM_386,
+	"arm64":   elf.EM_AARCH64,
+	"arm":     elf.EM_ARM,
+	"riscv64": elf.EM_RISCV,
+	"ppc64le": elf.EM_PPC64,
+	"ppc64":   elf.EM_PPC64,
+	"s390x":   elf.EM_S390,
+	"loong64": elf.EM_LOONGARCH,
+}[runtime.GOARCH]
+
+// hostMachoCPU is the Mach-O CPU type this host's kernel loads natively.
+var hostMachoCPU = map[string]macho.Cpu{
+	"amd64": macho.CpuAmd64,
+	"arm64": macho.CpuArm64,
+}[runtime.GOARCH]
+
+// isCompiledProgram reports whether the kernel loads the file at path as a
+// program rather than answering exec with ENOEXEC, which the wrappers'
+// execvp turns into running the file with /bin/sh. Parsing is not enough (a
+// relocatable object, or another system's format, parses too), so it fails
+// closed: an ELF executable or shared object for this machine with program
+// headers on Linux and the other ELF systems, a Mach-O executable for this
+// CPU (thin, or a fat file holding one) on macOS. A file that only starts
+// with the magic bytes (isBinaryExecutable) is not one.
+func isCompiledProgram(path string) bool {
+	if runtime.GOOS == "darwin" {
+		if f, err := macho.Open(path); err == nil {
+			defer f.Close()
+			return f.Type == macho.TypeExec && f.Cpu == hostMachoCPU
+		}
+		if f, err := macho.OpenFat(path); err == nil {
+			defer f.Close()
+			for _, a := range f.Arches {
+				if a.Type == macho.TypeExec && a.Cpu == hostMachoCPU {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	f, err := elf.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return (f.Type == elf.ET_EXEC || f.Type == elf.ET_DYN) && f.Machine == hostELFMachine && hostELFMachine != elf.EM_NONE && len(f.Progs) > 0
+}
+
+// kernelPath is path made absolute against dir without cleaning it, so it
+// names the file the kernel opens: "s/../b.sh" goes up from where the
+// symlink s points, not from dir.
+func kernelPath(path, dir string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return dir + string(filepath.Separator) + path
 }

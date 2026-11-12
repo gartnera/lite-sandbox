@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -298,5 +299,271 @@ func TestXargsReplaceStringsInOptions(t *testing.T) {
 	// A replace string xargs's non-literal options could set is unknown.
 	if err := s.ValidateCommand(`printf 'x\n' | xargs -I "$R" find . -name x`, dir, paths, paths); err == nil || !strings.Contains(err.Error(), "not literal") {
 		t.Errorf("xargs -I $R find: want a refusal, got %v", err)
+	}
+}
+
+// writeWrappedScriptFixtures writes the scripts TestWrappedShellScript runs
+// into dir: shell scripts with and without a shebang, a python script, and a
+// compiled binary.
+func writeWrappedScriptFixtures(t *testing.T, dir string) {
+	t.Helper()
+	files := map[string]string{
+		"b.sh":   "echo \"bash=$BASH_VERSION\"\n",
+		"sb.sh":  "#!/bin/bash\necho \"bash=$BASH_VERSION\"\n",
+		"env.sh": "#!/usr/bin/env sh\necho hi\n",
+		"p.py":   "#!/usr/bin/env python3\nprint('hi')\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// outer's shebang names a "cat" that is a bash script: the kernel would
+	// run it natively.
+	if err := os.WriteFile(filepath.Join(dir, "cat"), []byte("#!/bin/bash\necho \"bash=$BASH_VERSION\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outer"), []byte("#!"+filepath.Join(dir, "cat")+"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	more := map[string]string{
+		// Only the ELF magic: exec fails with ENOEXEC and the wrapper's
+		// execvp hands the file to /bin/sh.
+		"fakeelf": "\x7fELF\necho \"bash=$BASH_VERSION\"\n",
+		// env -S runs bash, whatever word the check would take for the
+		// interpreter.
+		"envs.py": "#!/usr/bin/env -Sbash --rcfile cat\necho \"bash=$BASH_VERSION\"\n",
+		"rel.sh":  "#!cat\necho hi\n",
+		"c.txt":   "#!/bin/cat\nhello\n",
+	}
+	for name, body := range more {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A shebang naming a symlink to bash by another name.
+	if real, err := filepath.EvalSymlinks("/bin/bash"); err == nil {
+		if err := os.Symlink(real, filepath.Join(dir, "kat")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "viakat"), []byte("#!"+filepath.Join(dir, "kat")+"\necho \"bash=$BASH_VERSION\"\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Skip("no /bin/true to copy")
+	}
+	payload := "\necho \"bash=$BASH_VERSION\"\necho PWNED\n"
+	// A shebang past the kernel's buffer: exec fails with ENOEXEC and
+	// execvp runs the file with /bin/sh, which reads line 1 as a comment.
+	pad := 300 // past Linux's 256-byte buffer, within the 512 bytes read before
+	if runtime.GOOS == "darwin" {
+		pad = 560
+	}
+	long := map[string]string{
+		"longpad": "#!" + strings.Repeat(" ", pad) + "/bin/cat" + payload,
+		"longsep": "#!/usr/bin" + strings.Repeat("/", pad) + "cat" + payload,
+		// Parses as Mach-O but no Linux kernel loads it.
+		"macho": "\xcf\xfa\xed\xfe" + strings.Repeat("\x00", 28) + payload,
+	}
+	for name, body := range long {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A relocatable object: a valid ELF header the kernel will not load.
+	if len(bin) > 64 && string(bin[:4]) == "\x7fELF" {
+		rel := append([]byte{}, bin[:64]...)
+		rel[7] = '\n'           // EI_OSABI: ends /bin/sh's first line
+		rel[16], rel[17] = 1, 0 // e_type = ET_REL (little-endian)
+		// No program or section headers, so it parses on its own.
+		for i := 32; i < 48; i++ {
+			rel[i] = 0 // e_phoff, e_shoff
+		}
+		for i := 56; i < 64; i++ {
+			rel[i] = 0 // e_phnum, e_shentsize, e_shnum, e_shstrndx
+		}
+		rel = append(rel, payload...)
+		if err := os.WriteFile(filepath.Join(dir, "etrel"), rel, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin"), bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A shell script a wrapper starts would run as a native program, so its body
+// would go unchecked; it is refused, as a wrapped bash or sh is (#143).
+func TestWrappedShellScript(t *testing.T) {
+	refused := []string{
+		`timeout 5 ./b.sh`,
+		`timeout 5 ./sb.sh`,
+		`timeout 5 ./env.sh`,
+		`env ./b.sh`,
+		`env FOO=1 ./b.sh x`,
+		`nice -n 5 timeout 5 ./b.sh`,
+		`echo x | xargs ./b.sh`,
+		`echo b.sh | xargs -I{} ./{}`,
+		`echo b.sh | xargs -I{} env ./{}`,
+		`echo b.sh | xargs -I c env ./c`,
+		`find . -name b.sh -exec ./b.sh {} +`,
+		`find . -name b.sh -exec {} \;`,
+		`find . -name b.sh -execdir ./b.sh \;`,
+		`find . -name b.sh -exec timeout 5 ./b.sh \;`,
+		`timeout 5 ./p.py`,
+		// The input is the command of a wrapper left without one.
+		`echo ./b.sh | xargs timeout 5`,
+		`echo ./b.sh | xargs -n1 env`,
+		`echo ./b.sh | xargs nice`,
+		// Nothing there to check: an earlier action could write it.
+		`timeout 5 ./missing`,
+		`find . -maxdepth 0 -exec cp b.sh c.sh \; -exec ./c.sh \;`,
+		// The shebang's interpreter is itself a shell script.
+		`timeout 5 ./outer`,
+		`timeout 5 ./fakeelf`,
+		`find . -maxdepth 0 -exec ./fakeelf \;`,
+		`timeout 5 ./envs.py`,
+		`timeout 5 ./viakat`,
+		`timeout 5 ./rel.sh`,
+		`timeout 5 ./longpad`,
+		`timeout 5 ./longsep`,
+		`timeout 5 ./macho`,
+		`timeout 5 ./etrel`,
+	}
+	allowed := []struct{ command, want string }{
+		{`./b.sh`, "bash=\n"},
+		{`bash b.sh`, "bash=\n"},
+		{`timeout 5 ./bin && echo ok`, "ok\n"},
+		{`find . -name bin -exec ./bin \; && echo ok`, "ok\n"},
+		{`echo x | xargs -I{} timeout 5 ./bin {} && echo ok`, "ok\n"},
+		{`timeout 5 ./c.txt`, "#!/bin/cat\nhello\n"},
+		{`echo x | xargs echo`, "x\n"},
+		// xargs never replaces in the name of the command it runs.
+		{`echo x | xargs -I c echo c`, "x\n"},
+		{`echo x | xargs -I n ./bin n && echo ok`, "ok\n"},
+		// Walking nested wrappers has no depth limit of its own.
+		{`nice nice nice nice nice nice nice nice nice nice echo deep`, "deep\n"},
+		{`echo x | xargs`, "x\n"},
+	}
+	sandboxes := map[string]func(t *testing.T, dir string) *Sandbox{
+		"allowlist": func(*testing.T, string) *Sandbox { return newTestSandboxWithLocalBinaryExecution() },
+		"denylist": func(t *testing.T, dir string) *Sandbox {
+			s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+			return s
+		},
+	}
+	for mode, newSandbox := range sandboxes {
+		t.Run(mode, func(t *testing.T) {
+			for _, command := range refused {
+				t.Run(command, func(t *testing.T) {
+					dir := t.TempDir()
+					writeWrappedScriptFixtures(t, dir)
+					out, err := executeInDirWithSandbox(t, newSandbox(t, dir), dir, command)
+					if err == nil {
+						t.Fatalf("expected refusal, got output %q", out)
+					}
+					if strings.Contains(out, "bash=5") || strings.Contains(out, "bash=4") || strings.Contains(out, "PWNED") {
+						t.Fatalf("script ran under a native bash: %q", out)
+					}
+					// The whitelist refuses a script path before this check
+					// in allowlist mode; in denylist mode only it does.
+					if mode == "denylist" && !strings.Contains(err.Error(), "wrapped") && !strings.Contains(err.Error(), "wrapper") && !strings.Contains(err.Error(), "-execdir") && !strings.Contains(err.Error(), "cannot be checked") {
+						t.Errorf("err = %v, want the wrapped-script refusal", err)
+					}
+				})
+			}
+			if mode != "denylist" {
+				return // the whitelist refuses wrapped script paths
+			}
+			for _, tt := range allowed {
+				t.Run(tt.command, func(t *testing.T) {
+					dir := t.TempDir()
+					writeWrappedScriptFixtures(t, dir)
+					out, err := executeInDirWithSandbox(t, newSandbox(t, dir), dir, tt.command)
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					if out != tt.want {
+						t.Errorf("output %q, want %q", out, tt.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A bare allow of a shell script trusts it to run through the interpreter,
+// not as a native program, so it is refused wrapped too; one allowed with
+// no_sandbox runs natively on the host either way, so a wrapper does not
+// change what is checked.
+func TestWrappedShellScript_BareAllowed(t *testing.T) {
+	dir := t.TempDir()
+	writeWrappedScriptFixtures(t, dir)
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./b.sh", "./p.py"}}, dir)
+	if _, err := executeInDirWithSandbox(t, s, dir, `timeout 5 ./b.sh`); err == nil || !strings.Contains(err.Error(), "wrapped") {
+		t.Errorf("wrapped bare-allowed shell script: err = %v, want a wrapped-script refusal", err)
+	}
+	// A trusted script for another interpreter runs natively, wrapped or not.
+	if err := s.checkWrappedScripts(dir, []string{"timeout", "5", "./p.py"}); err != nil {
+		t.Errorf("wrapped bare-allowed python script: %v", err)
+	}
+
+	// An absolute path under find -execdir names the same file everywhere.
+	if err := s.checkWrappedScripts(dir, []string{"find", ".", "-execdir", filepath.Join(dir, "bin"), ";"}); err != nil {
+		t.Errorf("absolute binary under -execdir: %v", err)
+	}
+	if err := s.checkWrappedScripts(dir, []string{"find", ".", "-execdir", filepath.Join(dir, "sb.sh"), ";"}); err == nil {
+		t.Errorf("absolute shell script under -execdir: allowed")
+	}
+
+	host := NewSandbox()
+	host.updateConfig(&config.Config{
+		Commands: []config.CommandEntry{{Command: "./b.sh", Allow: boolPtr(true), NoSandbox: true}},
+	}, dir)
+	if err := host.checkWrappedScripts(dir, []string{"timeout", "5", "./b.sh"}); err != nil {
+		t.Errorf("wrapped no_sandbox script: %v", err)
+	}
+	// Through a symlinked directory, s/../b.sh cleans to the allowed script
+	// but the wrapper would run another file.
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("a", "b"), filepath.Join(dir, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "b.sh"), []byte("echo agent\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.checkWrappedScripts(dir, []string{"timeout", "5", "./s/../b.sh"}); err == nil {
+		t.Errorf("no_sandbox script through a symlinked directory: allowed")
+	}
+}
+
+// Under xargs without a replace string, a wrapper with no command of its own
+// would run the input as its command, which nothing validated (#151): it is
+// refused in allowlist mode too.
+func TestWrapperWithoutCommandUnderXargs(t *testing.T) {
+	dir := t.TempDir()
+	for _, command := range []string{
+		`echo curl | xargs env`,
+		`echo curl | xargs timeout 5`,
+		`echo curl | xargs nice nohup`,
+		`printf '%s\n' -C . curl | xargs env`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			out, err := executeInDirWithSandbox(t, NewSandbox(), dir, command)
+			if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+				t.Errorf("err = %v (output %q), want a refusal", err, out)
+			}
+		})
+	}
+	// With a command of its own, or with a replace string, it runs.
+	for _, command := range []string{`echo x | xargs env echo`, `echo x | xargs -I{} env echo {}`} {
+		if out, err := executeInDirWithSandbox(t, NewSandbox(), dir, command); err != nil || out != "x\n" {
+			t.Errorf("%s: out %q, err %v", command, out, err)
+		}
 	}
 }
