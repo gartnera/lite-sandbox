@@ -317,6 +317,14 @@ func writeWrappedScriptFixtures(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 	}
+	// outer's shebang names a "cat" that is a bash script: the kernel would
+	// run it natively.
+	if err := os.WriteFile(filepath.Join(dir, "cat"), []byte("#!/bin/bash\necho \"bash=$BASH_VERSION\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outer"), []byte("#!"+filepath.Join(dir, "cat")+"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
 		t.Skip("no /bin/true to copy")
@@ -343,13 +351,24 @@ func TestWrappedShellScript(t *testing.T) {
 		`find . -name b.sh -execdir ./b.sh \;`,
 		`find . -name b.sh -exec timeout 5 ./b.sh \;`,
 		`timeout 5 ./p.py`,
+		// The input is the command of a wrapper left without one.
+		`echo ./b.sh | xargs timeout 5`,
+		`echo ./b.sh | xargs -n1 env`,
+		`echo ./b.sh | xargs nice`,
+		// Nothing there to check: an earlier action could write it.
+		`timeout 5 ./missing`,
+		`find . -maxdepth 0 -exec cp b.sh c.sh \; -exec ./c.sh \;`,
+		// The shebang's interpreter is itself a shell script.
+		`timeout 5 ./outer`,
 	}
 	allowed := []struct{ command, want string }{
 		{`./b.sh`, "bash=\n"},
 		{`bash b.sh`, "bash=\n"},
 		{`timeout 5 ./bin && echo ok`, "ok\n"},
 		{`find . -name bin -exec ./bin \; && echo ok`, "ok\n"},
-		{`timeout 5 ./missing 2>/dev/null || echo failed`, "failed\n"},
+		{`echo x | xargs -I{} timeout 5 ./bin {} && echo ok`, "ok\n"},
+		{`echo x | xargs echo`, "x\n"},
+		{`echo x | xargs`, "x\n"},
 	}
 	sandboxes := map[string]func(t *testing.T, dir string) *Sandbox{
 		"allowlist": func(*testing.T, string) *Sandbox { return newTestSandboxWithLocalBinaryExecution() },
@@ -373,7 +392,7 @@ func TestWrappedShellScript(t *testing.T) {
 					}
 					// The whitelist refuses a script path before this check
 					// in allowlist mode; in denylist mode only it does.
-					if mode == "denylist" && !strings.Contains(err.Error(), "wrapped") && !strings.Contains(err.Error(), "wrapper") && !strings.Contains(err.Error(), "-execdir") {
+					if mode == "denylist" && !strings.Contains(err.Error(), "wrapped") && !strings.Contains(err.Error(), "wrapper") && !strings.Contains(err.Error(), "-execdir") && !strings.Contains(err.Error(), "cannot be checked") {
 						t.Errorf("err = %v, want the wrapped-script refusal", err)
 					}
 				})
@@ -429,5 +448,19 @@ func TestWrappedShellScript_BareAllowed(t *testing.T) {
 	}, dir)
 	if err := host.checkWrappedScripts(dir, []string{"timeout", "5", "./b.sh"}); err != nil {
 		t.Errorf("wrapped no_sandbox script: %v", err)
+	}
+	// Through a symlinked directory, s/../b.sh cleans to the allowed script
+	// but the wrapper would run another file.
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("a", "b"), filepath.Join(dir, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "b.sh"), []byte("echo agent\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.checkWrappedScripts(dir, []string{"timeout", "5", "./s/../b.sh"}); err == nil {
+		t.Errorf("no_sandbox script through a symlinked directory: allowed")
 	}
 }
