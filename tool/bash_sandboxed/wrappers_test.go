@@ -464,3 +464,29 @@ func TestWrappedShellScript_BareAllowed(t *testing.T) {
 		t.Errorf("no_sandbox script through a symlinked directory: allowed")
 	}
 }
+
+// Under xargs without a replace string, a wrapper with no command of its own
+// would run the input as its command, which nothing validated (#151): it is
+// refused in allowlist mode too.
+func TestWrapperWithoutCommandUnderXargs(t *testing.T) {
+	dir := t.TempDir()
+	for _, command := range []string{
+		`echo curl | xargs env`,
+		`echo curl | xargs timeout 5`,
+		`echo curl | xargs nice nohup`,
+		`printf '%s\n' -C . curl | xargs env`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			out, err := executeInDirWithSandbox(t, NewSandbox(), dir, command)
+			if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+				t.Errorf("err = %v (output %q), want a refusal", err, out)
+			}
+		})
+	}
+	// With a command of its own, or with a replace string, it runs.
+	for _, command := range []string{`echo x | xargs env echo`, `echo x | xargs -I{} env echo {}`} {
+		if out, err := executeInDirWithSandbox(t, NewSandbox(), dir, command); err != nil || out != "x\n" {
+			t.Errorf("%s: out %q, err %v", command, out, err)
+		}
+	}
+}
