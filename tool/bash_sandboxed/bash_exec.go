@@ -349,8 +349,10 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 
 	// Build environment from parent context: a nested script is a child
 	// process, so it inherits only the exported variables.
+	// Under env (runWrappedScript), the environment it built; the override
+	// is the script's alone, not its commands'.
 	var env []string
-	hc.Env.Each(func(name string, vr expand.Variable) bool {
+	scriptBaseEnv(ctx).Each(func(name string, vr expand.Variable) bool {
 		if !isExportedEnvVar(vr) {
 			return true
 		}
@@ -391,7 +393,7 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		}
 	}
 
-	return runner.Run(ctx, f)
+	return runner.Run(withEnvOverride(ctx, nil), f)
 }
 
 // shellOptionError is a shell flag the interpreter does not know.
@@ -506,11 +508,14 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	if err := s.runtimeArgValidator(ctx, cmdName, args); err != nil {
 		return err
 	}
-	// A shell script a wrapper would start runs natively, outside this
-	// interpreter (see checkWrappedScripts); only here is the file its path
-	// names known.
-	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedScripts(interp.HandlerCtx(ctx).Dir, args)); err != nil {
+	// A shell script under timeout, env, ... runs through this interpreter
+	// with the wrapper's effect applied, not as the native program the
+	// wrapper would start (see runWrappedScript).
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedScript(interp.HandlerCtx(ctx).Dir, args)); err != nil {
 		return err
+	}
+	if s.wrapsShellScript(interp.HandlerCtx(ctx).Dir, args) {
+		return s.runWrappedScript(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, sets, depth)
 	}
 	// The command's own preparation (deno's permission flags, SwiftPM's
 	// nested sandbox) and in-process executor (awk, bash, sh, python); see
