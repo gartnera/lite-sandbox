@@ -259,14 +259,15 @@ func TestXargsInputAsWrappedCommand(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{
-		`echo x | xargs xargs echo`,
-		`echo x | xargs -I{} timeout 5 echo {}`,
-	} {
-		s, _ := newModeSandbox(t, config.ModeDenylist, dir)
-		if out, err := executeInDirWithSandbox(t, s, dir, command); err != nil || out != "x\n" {
-			t.Errorf("%s: out %q, err %v", command, out, err)
-		}
+	// With a command of their own, or a replace string only in arguments,
+	// they run. (macOS has no timeout binary, and BSD xargs runs nothing on
+	// empty input, so the nested xargs's output differs by platform.)
+	s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+	if out, err := executeInDirWithSandbox(t, s, dir, `echo x | xargs -I{} nice echo {}`); err != nil || out != "x\n" {
+		t.Errorf("xargs -I{} nice echo {}: out %q, err %v", out, err)
+	}
+	if out, err := executeInDirWithSandbox(t, s, dir, `echo x | xargs xargs echo`); err != nil {
+		t.Errorf("xargs xargs echo: out %q, err %v", out, err)
 	}
 }
 
