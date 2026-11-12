@@ -5,8 +5,10 @@ import (
 	"debug/macho"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -720,59 +722,85 @@ func sameFile(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
+// shebangBufSize is how much of a file the kernel reads for its shebang
+// line: BINPRM_BUF_SIZE (256) on Linux, 512 on macOS. A line that does not
+// end inside it is cut off or refused with ENOEXEC (then handed to /bin/sh
+// by the wrapper's execvp), so the check refuses it rather than guess.
+func shebangBufSize() int {
+	if runtime.GOOS == "darwin" {
+		return 512
+	}
+	return 256
+}
+
 // wrappedShebang reads the shebang of the script at path the way the kernel
 // runs it under a wrapper, which, unlike a direct run (scriptShebangArgv,
 // re-dispatched by execArgv), the sandbox does not see. It returns the names
 // the interpreter goes by (the name the line gives and, for a symlink, the
 // name of the program it resolves to; one only when they agree) and its
-// flags, or no names when the file has no shebang. A shebang the check could
-// misread is an error: an interpreter that is not an absolute path to a
-// compiled program (a relative one resolves from wherever the wrapper runs;
-// one that is a script runs that script natively in turn), and env with
-// options or assignments (#!/usr/bin/env -S bash ... runs bash, whatever
-// word follows).
-func wrappedShebang(path string) (names, flags []string, err error) {
+// arguments, or no names when the file has no shebang. The line is split
+// only on spaces and tabs, and on Linux everything after the interpreter is
+// one argument, as the kernel passes it. A shebang the check could misread
+// is an error: one that does not end within the kernel's buffer, an
+// interpreter that is not an absolute path to a program the kernel loads (a
+// relative one resolves from wherever the wrapper runs; one that is a script
+// runs that script natively in turn), and env with options or assignments
+// (#!/usr/bin/env -S bash ... runs bash, whatever word follows) or with
+// more than a command name.
+func wrappedShebang(path string) (names, args []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer f.Close()
-	buf := make([]byte, 512)
-	n, _ := f.Read(buf)
-	line := string(buf[:n])
-	if !strings.HasPrefix(line, "#!") {
+	buf := make([]byte, shebangBufSize())
+	n, _ := io.ReadFull(f, buf)
+	head := string(buf[:n])
+	if !strings.HasPrefix(head, "#!") {
 		return nil, nil, nil
 	}
-	line = line[2:]
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
+	end := strings.IndexByte(head, '\n')
+	if end < 0 {
+		if n == len(buf) {
+			return nil, nil, fmt.Errorf("shebang line does not end within the kernel's %d bytes", len(buf))
+		}
+		end = n
 	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return nil, nil, nil
+	line := strings.Trim(head[2:end], " \t")
+	interp, rest := line, ""
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		interp, rest = line[:i], strings.Trim(line[i+1:], " \t")
 	}
-	names, err = interpreterNames(fields[0])
+	if interp == "" {
+		return nil, nil, fmt.Errorf("shebang names no interpreter")
+	}
+	if runtime.GOOS == "darwin" {
+		args = strings.FieldsFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
+	} else if rest != "" {
+		args = []string{rest}
+	}
+	names, err = interpreterNames(interp)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !slices.Contains(names, "env") {
-		return names, fields[1:], nil
+		return names, args, nil
 	}
-	rest := fields[1:]
-	if len(rest) == 0 {
-		return nil, nil, fmt.Errorf("shebang runs env with no command")
+	if len(args) != 1 || strings.ContainsAny(args[0], " \t") {
+		return nil, nil, fmt.Errorf("shebang runs env with %q, not a single command name", rest)
 	}
-	if strings.HasPrefix(rest[0], "-") || strings.Contains(rest[0], "=") {
-		return nil, nil, fmt.Errorf("shebang passes env option or assignment %q", rest[0])
+	cmd := args[0]
+	if strings.HasPrefix(cmd, "-") || strings.Contains(cmd, "=") {
+		return nil, nil, fmt.Errorf("shebang passes env option or assignment %q", cmd)
 	}
-	if strings.Contains(rest[0], "/") {
-		names, err = interpreterNames(rest[0])
+	if strings.Contains(cmd, "/") {
+		names, err = interpreterNames(cmd)
 		if err != nil {
 			return nil, nil, err
 		}
-		return names, rest[1:], nil
+		return names, nil, nil
 	}
-	return []string{rest[0]}, rest[1:], nil
+	return []string{cmd}, nil, nil
 }
 
 // interpreterNames checks a shebang's interpreter path (see wrappedShebang)
@@ -791,23 +819,55 @@ func interpreterNames(p string) ([]string, error) {
 	return names, nil
 }
 
-// isCompiledProgram reports whether the file at path parses as an ELF or
-// Mach-O (thin or fat) executable, rather than only starting with its magic
-// bytes (isBinaryExecutable).
+// hostELFMachine is the ELF machine this host's kernel loads natively.
+var hostELFMachine = map[string]elf.Machine{
+	"amd64":   elf.EM_X86_64,
+	"386":     elf.EM_386,
+	"arm64":   elf.EM_AARCH64,
+	"arm":     elf.EM_ARM,
+	"riscv64": elf.EM_RISCV,
+	"ppc64le": elf.EM_PPC64,
+	"ppc64":   elf.EM_PPC64,
+	"s390x":   elf.EM_S390,
+	"loong64": elf.EM_LOONGARCH,
+}[runtime.GOARCH]
+
+// hostMachoCPU is the Mach-O CPU type this host's kernel loads natively.
+var hostMachoCPU = map[string]macho.Cpu{
+	"amd64": macho.CpuAmd64,
+	"arm64": macho.CpuArm64,
+}[runtime.GOARCH]
+
+// isCompiledProgram reports whether the kernel loads the file at path as a
+// program rather than answering exec with ENOEXEC, which the wrappers'
+// execvp turns into running the file with /bin/sh. Parsing is not enough (a
+// relocatable object, or another system's format, parses too), so it fails
+// closed: an ELF executable or shared object for this machine with program
+// headers on Linux and the other ELF systems, a Mach-O executable for this
+// CPU (thin, or a fat file holding one) on macOS. A file that only starts
+// with the magic bytes (isBinaryExecutable) is not one.
 func isCompiledProgram(path string) bool {
-	if f, err := elf.Open(path); err == nil {
-		f.Close()
-		return true
+	if runtime.GOOS == "darwin" {
+		if f, err := macho.Open(path); err == nil {
+			defer f.Close()
+			return f.Type == macho.TypeExec && f.Cpu == hostMachoCPU
+		}
+		if f, err := macho.OpenFat(path); err == nil {
+			defer f.Close()
+			for _, a := range f.Arches {
+				if a.Type == macho.TypeExec && a.Cpu == hostMachoCPU {
+					return true
+				}
+			}
+		}
+		return false
 	}
-	if f, err := macho.Open(path); err == nil {
-		f.Close()
-		return true
+	f, err := elf.Open(path)
+	if err != nil {
+		return false
 	}
-	if f, err := macho.OpenFat(path); err == nil {
-		f.Close()
-		return true
-	}
-	return false
+	defer f.Close()
+	return (f.Type == elf.ET_EXEC || f.Type == elf.ET_DYN) && f.Machine == hostELFMachine && hostELFMachine != elf.EM_NONE && len(f.Progs) > 0
 }
 
 // kernelPath is path made absolute against dir without cleaning it, so it

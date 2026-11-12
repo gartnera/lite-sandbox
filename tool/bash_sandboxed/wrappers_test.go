@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -353,6 +354,41 @@ func writeWrappedScriptFixtures(t *testing.T, dir string) {
 	if err != nil {
 		t.Skip("no /bin/true to copy")
 	}
+	payload := "\necho \"bash=$BASH_VERSION\"\necho PWNED\n"
+	// A shebang past the kernel's buffer: exec fails with ENOEXEC and
+	// execvp runs the file with /bin/sh, which reads line 1 as a comment.
+	pad := 300 // past Linux's 256-byte buffer, within the 512 bytes read before
+	if runtime.GOOS == "darwin" {
+		pad = 560
+	}
+	long := map[string]string{
+		"longpad": "#!" + strings.Repeat(" ", pad) + "/bin/cat" + payload,
+		"longsep": "#!/usr/bin" + strings.Repeat("/", pad) + "cat" + payload,
+		// Parses as Mach-O but no Linux kernel loads it.
+		"macho": "\xcf\xfa\xed\xfe" + strings.Repeat("\x00", 28) + payload,
+	}
+	for name, body := range long {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A relocatable object: a valid ELF header the kernel will not load.
+	if len(bin) > 64 && string(bin[:4]) == "\x7fELF" {
+		rel := append([]byte{}, bin[:64]...)
+		rel[7] = '\n'           // EI_OSABI: ends /bin/sh's first line
+		rel[16], rel[17] = 1, 0 // e_type = ET_REL (little-endian)
+		// No program or section headers, so it parses on its own.
+		for i := 32; i < 48; i++ {
+			rel[i] = 0 // e_phoff, e_shoff
+		}
+		for i := 56; i < 64; i++ {
+			rel[i] = 0 // e_phnum, e_shentsize, e_shnum, e_shstrndx
+		}
+		rel = append(rel, payload...)
+		if err := os.WriteFile(filepath.Join(dir, "etrel"), rel, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(dir, "bin"), bin, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +427,10 @@ func TestWrappedShellScript(t *testing.T) {
 		`timeout 5 ./envs.py`,
 		`timeout 5 ./viakat`,
 		`timeout 5 ./rel.sh`,
+		`timeout 5 ./longpad`,
+		`timeout 5 ./longsep`,
+		`timeout 5 ./macho`,
+		`timeout 5 ./etrel`,
 	}
 	allowed := []struct{ command, want string }{
 		{`./b.sh`, "bash=\n"},
@@ -424,7 +464,7 @@ func TestWrappedShellScript(t *testing.T) {
 					if err == nil {
 						t.Fatalf("expected refusal, got output %q", out)
 					}
-					if strings.Contains(out, "bash=5") || strings.Contains(out, "bash=4") {
+					if strings.Contains(out, "bash=5") || strings.Contains(out, "bash=4") || strings.Contains(out, "PWNED") {
 						t.Fatalf("script ran under a native bash: %q", out)
 					}
 					// The whitelist refuses a script path before this check
