@@ -82,21 +82,29 @@ func (sp wrapperSpec) commandIndex(lits, assignLits []string) int {
 // (env's first NAME=VALUE assignment) and, for wrapperRejected, the error
 // for the first rejected option.
 func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int, rejected error) {
+	_, idx, operands, rejected = sp.parse(lits, assignLits)
+	return idx, operands, rejected
+}
+
+// parse is layout, also returning the wrapper's options as its getopt reads
+// them (env's lone "-" reported as -i).
+func (sp wrapperSpec) parse(lits, assignLits []string) (p parsedArgs, idx, operands int, rejected error) {
 	opts := sp.opts
 	opts.stopAtOperand = true
-	p := parsedArgs{args: lits}
+	p = parsedArgs{args: lits}
 	for start := 1; ; {
 		n := len(p.operands)
 		opts.scanFrom(&p, start)
 		if !sp.dashIsOption || p.dashdash || len(p.operands) == n || lits[p.operands[n]] != "-" {
 			break
 		}
+		p.opts = append(p.opts, parsedOpt{name: "i", index: p.operands[n], valueIndex: -1})
 		start = p.operands[n] + 1
 		p.operands = p.operands[:n]
 	}
 	for _, o := range p.opts {
 		if msg, ok := sp.rejected[o.name]; ok {
-			return wrapperRejected, 0, errors.New(msg)
+			return p, wrapperRejected, 0, errors.New(msg)
 		}
 	}
 	i := len(lits)
@@ -111,9 +119,9 @@ func (sp wrapperSpec) layout(lits, assignLits []string) (idx, operands int, reje
 	}
 	i += sp.operands
 	if i >= len(lits) {
-		return wrapperNoCommand, operands, nil
+		return p, wrapperNoCommand, operands, nil
 	}
-	return i, operands, nil
+	return p, i, operands, nil
 }
 
 // wrapperSpecs describes each wrapper's options (see wrapperSpec).
@@ -212,9 +220,39 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := validateWrapperUnderXargs(s, args[:idx], args[idx:]); err != nil {
 			return err
 		}
+		if err := validateCommandlessWrapperUnderXargs(lits[:idx], lits[idx:]); err != nil {
+			return err
+		}
 		return validateSSHUnderXargs(s, args[:idx], args[idx:])
 	}
 	return validateSubCommand(s, args[idx:])
+}
+
+// validateCommandlessWrapperUnderXargs refuses a wrapper left without a
+// command under an xargs that appends its input (no replace string): the
+// input would become the wrapper's command and options, which nothing
+// validated (`echo curl | xargs env`). xargsOpts are xargs's own words, xargs
+// included; args is the command it runs. Non-literal xargs options are
+// already refused around a wrapper (validateWrapperUnderXargs).
+func validateCommandlessWrapperUnderXargs(xargsOpts, args []string) error {
+	if len(xargsReplaceStrings(xargsOpts)) > 0 {
+		return nil
+	}
+	for len(args) > 0 {
+		spec, ok := wrapperSpecs[args[0]]
+		if !ok || args[0] == "xargs" {
+			return nil
+		}
+		idx := spec.commandIndex(args, args)
+		if idx == wrapperNoCommand {
+			return fmt.Errorf("xargs: %s has no command of its own, so it would run xargs's input as one, which cannot be checked", args[0])
+		}
+		if idx < 0 {
+			return nil
+		}
+		args = args[idx:]
+	}
+	return nil
 }
 
 // validateWrapperUnderXargs checks the replace strings of a command xargs
