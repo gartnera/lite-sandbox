@@ -73,14 +73,20 @@ func wrappedScriptRoutable(name string, replace []string) bool {
 	return !slices.ContainsFunc(replace, func(r string) bool { return r != "" && strings.Contains(name, r) })
 }
 
-// checkWrappedInterpreterScript checks a script for another interpreter
-// (#!/usr/bin/env python3) that a wrapper starts as the invocation the
-// kernel makes of it ("python3 ./x.py ..."), as execArgv does when it runs
-// directly: the wrapper execs it natively, so its interpreter would
-// otherwise skip the deny list, ask entries, and the rule against a wrapped
-// python. A bare allow of the script trusts it, as when it runs directly.
+// checkWrappedScript checks the script path a wrapper starts (args[0] is
+// the wrapper), which the wrapper execs natively as written:
+//
+//   - A path with a ".." element must name the file its cleaned path does,
+//     which the rest of the sandbox reads, routes, and matches entries by:
+//     through a symlinked directory, s/../b.sh is another file.
+//   - A script for another interpreter (#!/usr/bin/env python3) is checked
+//     as the invocation the kernel makes of it ("python3 ./x.py ..."), as
+//     execArgv does when it runs directly, so its interpreter does not skip
+//     the deny list, ask entries, and the rule against a wrapped python. A
+//     bare allow of the script trusts it, as when it runs directly.
+//
 // A path that names nothing yet is left to the wrapper.
-func (s *Sandbox) checkWrappedInterpreterScript(dir string, args []string) error {
+func (s *Sandbox) checkWrappedScript(dir string, args []string) error {
 	if len(args) == 0 || lookupCommand(args[0]).unwrap == nil {
 		return nil
 	}
@@ -88,19 +94,39 @@ func (s *Sandbox) checkWrappedInterpreterScript(dir string, args []string) error
 	if len(inner) == 0 || !isScriptPath(inner[0]) {
 		return nil
 	}
-	path := absPath(inner[0], dir)
+	name := inner[0]
+	path := absPath(name, dir)
+	if !wrappedScriptRoutable(name, nil) {
+		raw := name
+		if !filepath.IsAbs(raw) {
+			raw = dir + string(filepath.Separator) + raw
+		}
+		if !sameFile(raw, path) {
+			return fmt.Errorf("wrapped script path %q names another file than %s (through a symlinked directory), so it cannot be checked; use the path without \"..\"", name, path)
+		}
+	}
 	if isBinaryExecutable(path) {
 		return nil
 	}
 	shebang := scriptShebangArgv(path)
-	if len(shebang) == 0 || isShellInterpreter(shebang[0]) || s.bareAllowsScript(inner[0], dir) {
+	if len(shebang) == 0 || isShellInterpreter(shebang[0]) || s.bareAllowsScript(name, dir) {
 		return nil
 	}
 	full := append(append(slices.Clone(shebang), path), inner[1:]...)
 	if err := validateSubCommand(s, literalWords(full)); err != nil {
-		return fmt.Errorf("script %s (run as %s): %w", inner[0], shebang[0], err)
+		return fmt.Errorf("script %s (run as %s): %w", name, shebang[0], err)
 	}
 	return nil
+}
+
+// sameFile reports whether the paths a and b name the same existing file.
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // runWrappedScript applies the wrapper args[0] (one of inProcessWrappers) and

@@ -220,7 +220,7 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 		if err := validateWrapperUnderXargs(s, args[:idx], args[idx:]); err != nil {
 			return err
 		}
-		if err := validateCommandlessWrapperUnderXargs(lits[:idx], lits[idx:]); err != nil {
+		if err := validateWrappedUnderXargs(lits[:idx], lits[idx:]); err != nil {
 			return err
 		}
 		return validateSSHUnderXargs(s, args[:idx], args[idx:])
@@ -228,25 +228,41 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[idx:])
 }
 
-// validateCommandlessWrapperUnderXargs refuses a wrapper (or xcrun) left
-// without a command under an xargs that appends its input (no replace
-// string): the input would become the wrapper's command and options, which
-// nothing validated (`echo curl | xargs env`). xargsOpts are xargs's own
-// words, xargs included; args is the command it runs. A nested xargs with
-// no command runs echo. Non-literal xargs options are already refused
-// around a wrapper (validateWrapperUnderXargs).
-func validateCommandlessWrapperUnderXargs(xargsOpts, args []string) error {
-	if len(xargsReplaceStrings(xargsOpts)) > 0 {
-		return nil
-	}
-	for len(args) > 0 && args[0] != "xargs" {
+// validateWrappedUnderXargs walks the commands xargs starts through
+// wrappers (and xcrun); xargsOpts are xargs's own words, xargs included,
+// and args the command it runs. Two things xargs fills in after validation
+// are refused. A wrapper left without a command under an xargs that appends
+// its input (no replace string) would run the input as its command
+// (`echo curl | xargs env`, `xargs xargs`). And a wrapped command name
+// holding a replace string would be built from the input
+// (`xargs -I{} timeout 5 {}`); xargs puts its input only in the words after
+// its own command's name, but a wrapper's command is one of those. A nested
+// xargs validates the command it runs itself, and adds its replace strings
+// to those of the names below it. Non-literal xargs options are already
+// refused around a wrapper (validateWrapperUnderXargs).
+func validateWrappedUnderXargs(xargsOpts, args []string) error {
+	replace := xargsReplaceStrings(xargsOpts)
+	appended := len(replace) == 0
+	var nameReplace []string
+	for len(args) > 0 {
+		if slices.ContainsFunc(nameReplace, func(r string) bool { return r != "" && strings.Contains(args[0], r) }) {
+			return fmt.Errorf("xargs: wrapped command name %q is built from xargs's input, so the program it runs cannot be checked", args[0])
+		}
 		unwrap := lookupCommand(args[0]).unwrap
 		if unwrap == nil {
 			return nil
 		}
 		inner := unwrap(args)
 		if len(inner) == 0 {
-			return fmt.Errorf("xargs: %s has no command of its own, so it would run xargs's input as one, which cannot be checked", args[0])
+			if appended {
+				return fmt.Errorf("xargs: %s has no command of its own, so it would run xargs's input as one, which cannot be checked", args[0])
+			}
+			return nil
+		}
+		nameReplace = replace
+		if args[0] == "xargs" {
+			replace = append(slices.Clone(replace), xargsReplaceStrings(args[:len(args)-len(inner)])...)
+			appended = false
 		}
 		args = inner
 	}

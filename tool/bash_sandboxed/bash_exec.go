@@ -511,11 +511,11 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	// A shell script under timeout, env, ... runs through this interpreter
 	// with the wrapper's effect applied, not as the native program the
 	// wrapper would start (see runWrappedScript).
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedScript(interp.HandlerCtx(ctx).Dir, args)); err != nil {
+		return err
+	}
 	if s.wrapsShellScript(interp.HandlerCtx(ctx).Dir, args) {
 		return s.runWrappedScript(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, sets, depth)
-	}
-	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedInterpreterScript(interp.HandlerCtx(ctx).Dir, args)); err != nil {
-		return err
 	}
 	// The command's own preparation (deno's permission flags, SwiftPM's
 	// nested sandbox) and in-process executor (awk, bash, sh, python); see

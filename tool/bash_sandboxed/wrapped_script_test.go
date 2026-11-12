@@ -184,12 +184,88 @@ func TestWrappedNoSandboxScriptPath(t *testing.T) {
 			t.Errorf("%v: routed to the host", args)
 		}
 	}
-	// Under an in-process wrapper the script then runs as when typed
-	// directly: the file the entry names.
-	for _, command := range []string{`timeout 5 s/../host.sh`, `env s/../host.sh`, `s/../host.sh`} {
+	// Run directly, the path runs as the file the entry names; under a
+	// wrapper, which would exec it as written, it is refused.
+	if out, err := executeInDirWithSandbox(t, s, dir, `s/../host.sh`); err != nil || out != "REAL\n" {
+		t.Errorf("s/../host.sh: out %q, err %v; want the allowed script", out, err)
+	}
+	for _, command := range []string{`timeout 5 s/../host.sh`, `env s/../host.sh`, `nice ./s/./../host.sh`} {
 		out, err := executeInDirWithSandbox(t, s, dir, command)
-		if err != nil || out != "REAL\n" {
-			t.Errorf("%s: out %q, err %v; want the allowed script", command, out, err)
+		if err == nil || !strings.Contains(err.Error(), "another file") {
+			t.Errorf("%s: out %q, err %v; want a refusal", command, out, err)
+		}
+	}
+}
+
+// A wrapped path with a ".." element is checked as the file the wrapper
+// execs, not the one it cleans to: there, a binary stands in for a shell
+// script, which would run natively.
+func TestWrappedScriptDotDotPath(t *testing.T) {
+	dir := t.TempDir()
+	bin, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Skip("no /bin/true to copy")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "evil", "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{
+		"b":        bin,
+		"evil/b":   []byte("echo NATIVE\n"),
+		"same/b":   []byte("echo SAME\n"),
+		"same/d/k": []byte(""),
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("evil", "x"), filepath.Join(dir, "s")); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+	if out, err := executeInDirWithSandbox(t, s, dir, `timeout 5 s/../b`); err == nil || strings.Contains(out, "NATIVE") {
+		t.Errorf("timeout 5 s/../b: out %q, err %v; want a refusal", out, err)
+	}
+	// Without a symlink, ".." names the same file.
+	if out, err := executeInDirWithSandbox(t, s, dir, `timeout 5 same/d/../b`); err != nil || out != "SAME\n" {
+		t.Errorf("timeout 5 same/d/../b: out %q, err %v", out, err)
+	}
+}
+
+// Under xargs, a nested xargs left without a command runs the outer one's
+// input as its command, and a wrapped command name holding a replace string
+// is built from the input; both are refused.
+func TestXargsInputAsWrappedCommand(t *testing.T) {
+	dir := t.TempDir()
+	for _, command := range []string{
+		`echo curl | xargs xargs`,
+		`echo curl | xargs timeout 5 xargs`,
+		`echo curl | xargs -n 2 nice xargs -0`,
+		`echo curl | xargs env FOO=1 xargs`,
+		`echo curl | xargs -r -- xargs`,
+		`echo curl | xargs -I{} timeout 5 {} --version`,
+		`echo curl | xargs -I{} env {} --version`,
+		`echo curl | xargs -I{} xargs {} --version`,
+		`echo curl | xargs -I{} xargs -I@ env {} @`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+			out, err := executeInDirWithSandbox(t, s, dir, command)
+			if err == nil || !strings.Contains(err.Error(), "xargs") {
+				t.Errorf("err = %v (output %q), want a refusal", err, out)
+			}
+		})
+	}
+	for _, command := range []string{
+		`echo x | xargs xargs echo`,
+		`echo x | xargs -I{} timeout 5 echo {}`,
+	} {
+		s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+		if out, err := executeInDirWithSandbox(t, s, dir, command); err != nil || out != "x\n" {
+			t.Errorf("%s: out %q, err %v", command, out, err)
 		}
 	}
 }
