@@ -37,6 +37,8 @@ func TestWrappedShellScriptRunsInInterpreter(t *testing.T) {
 		{`timeout 0.3 ./loop.sh; echo "rc=$?"`, "rc=124\n"},
 		{`timeout --preserve-status 0.3 ./slow.sh; echo "rc=$?"`, "start\nrc=143\n"},
 		{`timeout 5 ./exit.sh; echo "rc=$?"`, "rc=3\n"},
+		{`timeout -s KILL --preserve-status 0.3 ./slow.sh; echo "rc=$?"`, "start\nrc=137\n"},
+		{`timeout nan ./b.sh 2>/dev/null; echo "rc=$?"`, "rc=125\n"},
 	}
 	sandboxes := map[string]func(t *testing.T, dir string) *Sandbox{
 		// The whitelist admits a wrapped script path by a bare allow, which

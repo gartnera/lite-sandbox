@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -88,33 +89,54 @@ func (s *Sandbox) runWrappedScript(ctx context.Context, args []string, useOSSand
 // runWithTimeout runs run under timeout's DURATION (a decimal number of
 // seconds, or of minutes, hours, or days with an m, h, or d suffix; 0 for
 // none), with timeout's exit status when it expires: 124, or with
-// --preserve-status that of a command killed by SIGTERM (143). The -s and
-// -k options have no in-process counterpart: the script is stopped at its
-// next command, and the native program it is running is killed.
+// --preserve-status that of a command killed by its -s signal (143 for the
+// default SIGTERM). Expiry stops the script at its next command and kills
+// the native program it is running; -k has no in-process counterpart.
 func runWithTimeout(ctx context.Context, p parsedArgs, duration string, run func(context.Context) error) error {
 	d, err := parseTimeoutDuration(duration)
 	if err != nil {
-		return fmt.Errorf("timeout: invalid time interval %q", duration)
+		fmt.Fprintf(interp.HandlerCtx(ctx).Stderr, "timeout: invalid time interval %q\n", duration)
+		return interp.ExitStatus(125)
 	}
 	if d == 0 {
 		return run(ctx)
 	}
-	preserve := false
+	preserve, sig := false, 15
 	for _, o := range p.opts {
-		if o.name == "preserve-status" {
+		switch o.name {
+		case "preserve-status":
 			preserve = true
+		case "s", "signal":
+			if n := timeoutSignal(o.value); n > 0 {
+				sig = n
+			}
 		}
 	}
 	tctx, cancel := context.WithTimeout(ctx, d)
-	defer cancel()
 	err = run(tctx)
+	// Cancelled first, a deadline that has not passed yet reads as
+	// Canceled, so a script that finished in time keeps its status.
+	cancel()
 	if ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
 		if preserve {
-			return interp.ExitStatus(128 + 15)
+			return interp.ExitStatus(uint8(128 + sig))
 		}
 		return interp.ExitStatus(124)
 	}
 	return err
+}
+
+// timeoutSignal is the number of timeout's -s SIGNAL (KILL, SIGKILL, or 9),
+// or 0 when it names none.
+func timeoutSignal(v string) int {
+	if n, err := strconv.Atoi(v); err == nil {
+		return n
+	}
+	name := strings.ToUpper(v)
+	if !strings.HasPrefix(name, "SIG") {
+		name = "SIG" + name
+	}
+	return int(unix.SignalNum(name))
 }
 
 // parseTimeoutDuration parses timeout(1)'s DURATION.
@@ -133,7 +155,7 @@ func parseTimeoutDuration(v string) (time.Duration, error) {
 		}
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f < 0 || strings.ContainsAny(v, "xXpP") {
+	if err != nil || !(f >= 0) || strings.ContainsAny(v, "xXpP") {
 		return 0, fmt.Errorf("invalid duration")
 	}
 	d := f * float64(unit)
