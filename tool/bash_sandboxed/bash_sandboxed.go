@@ -1408,11 +1408,33 @@ func (s *Sandbox) execIsUnsandboxedIn(dir func() string, args []string) bool {
 	// command's unsandboxed status governs routing, mirroring how the arg
 	// validators recurse into these wrappers. This lets e.g. `timeout 60 mycmd`
 	// run on the host when mycmd is an unsandboxed_commands entry.
-	args = unwrapWrapperArgs(args)
+	// A script path the wrapper execs as written matches only when that is
+	// the file its cleaned path names (wrappedScriptRoutable): through
+	// s/../host.sh, or xargs -I{} with {}/../host.sh, the wrapper would run
+	// another file on the host.
+	wrapped := false
+	var replace []string
+	for guard := 0; guard <= maxBashDepth && len(args) > 0; guard++ {
+		unwrap := lookupCommand(args[0]).unwrap
+		if unwrap == nil {
+			break
+		}
+		inner := unwrap(args)
+		if len(inner) == 0 {
+			return false
+		}
+		if args[0] == "xargs" {
+			replace = append(replace, xargsReplaceStrings(args[:len(args)-len(inner)])...)
+		}
+		args, wrapped = inner, true
+	}
 	if len(args) == 0 {
 		return false
 	}
 	cmdName := args[0]
+	if isScriptPath(cmdName) && wrapped && !wrappedScriptRoutable(cmdName, replace) {
+		return false
+	}
 	scriptAt := ""
 	if isScriptPath(cmdName) {
 		// A script path matches by where it resolves, never by the literal

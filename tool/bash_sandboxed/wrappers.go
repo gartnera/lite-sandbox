@@ -228,29 +228,27 @@ func validateWrapperArgs(s *Sandbox, args []*syntax.Word) error {
 	return validateSubCommand(s, args[idx:])
 }
 
-// validateCommandlessWrapperUnderXargs refuses a wrapper left without a
-// command under an xargs that appends its input (no replace string): the
-// input would become the wrapper's command and options, which nothing
-// validated (`echo curl | xargs env`). xargsOpts are xargs's own words, xargs
-// included; args is the command it runs. Non-literal xargs options are
-// already refused around a wrapper (validateWrapperUnderXargs).
+// validateCommandlessWrapperUnderXargs refuses a wrapper (or xcrun) left
+// without a command under an xargs that appends its input (no replace
+// string): the input would become the wrapper's command and options, which
+// nothing validated (`echo curl | xargs env`). xargsOpts are xargs's own
+// words, xargs included; args is the command it runs. A nested xargs with
+// no command runs echo. Non-literal xargs options are already refused
+// around a wrapper (validateWrapperUnderXargs).
 func validateCommandlessWrapperUnderXargs(xargsOpts, args []string) error {
 	if len(xargsReplaceStrings(xargsOpts)) > 0 {
 		return nil
 	}
-	for len(args) > 0 {
-		spec, ok := wrapperSpecs[args[0]]
-		if !ok || args[0] == "xargs" {
+	for len(args) > 0 && args[0] != "xargs" {
+		unwrap := lookupCommand(args[0]).unwrap
+		if unwrap == nil {
 			return nil
 		}
-		idx := spec.commandIndex(args, args)
-		if idx == wrapperNoCommand {
+		inner := unwrap(args)
+		if len(inner) == 0 {
 			return fmt.Errorf("xargs: %s has no command of its own, so it would run xargs's input as one, which cannot be checked", args[0])
 		}
-		if idx < 0 {
-			return nil
-		}
-		args = args[idx:]
+		args = inner
 	}
 	return nil
 }

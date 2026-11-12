@@ -134,3 +134,106 @@ func TestWrapperWithoutCommandUnderXargs(t *testing.T) {
 		}
 	}
 }
+
+// A script allowed with no_sandbox is matched by its cleaned path, but a
+// wrapper execs the path as written: through a symlinked directory
+// (s/../host.sh) or an xargs replace string ({}/../host.sh), that is
+// another file, which must not run on the host.
+func TestWrappedNoSandboxScriptPath(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"host.sh":      "echo REAL\n",
+		"evil/host.sh": "echo EVIL\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "evil", "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("evil", "x"), filepath.Join(dir, "s")); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{
+		Mode:     string(config.ModeDenylist),
+		Commands: []config.CommandEntry{{Command: "./host.sh", Allow: boolPtr(true), NoSandbox: true}},
+	}, dir)
+	at := func() string { return dir }
+	for _, args := range [][]string{
+		{"timeout", "5", "./host.sh"},
+		{"xargs", "timeout", "5", "./host.sh"},
+		{"xargs", "-I{}", "./host.sh", "{}"},
+	} {
+		if !s.execIsUnsandboxedIn(at, args) {
+			t.Errorf("%v: not routed to the host", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"timeout", "5", "s/../host.sh"},
+		{"env", "s/../host.sh"},
+		{"xargs", "-I{}", "timeout", "5", "{}/../host.sh"},
+		{"xargs", "-I.", "timeout", "5", "./host.sh"},
+		{"xargs", "-Ih", "env", "./host.sh"},
+	} {
+		if s.execIsUnsandboxedIn(at, args) {
+			t.Errorf("%v: routed to the host", args)
+		}
+	}
+	// Under an in-process wrapper the script then runs as when typed
+	// directly: the file the entry names.
+	for _, command := range []string{`timeout 5 s/../host.sh`, `env s/../host.sh`, `s/../host.sh`} {
+		out, err := executeInDirWithSandbox(t, s, dir, command)
+		if err != nil || out != "REAL\n" {
+			t.Errorf("%s: out %q, err %v; want the allowed script", command, out, err)
+		}
+	}
+}
+
+// A script for another interpreter is checked under a wrapper as the
+// interpreter invocation the kernel makes of it, as when it runs directly.
+func TestWrappedInterpreterScript(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"x.py": "#!/usr/bin/env python3\nprint('CPYTHON')\n",
+		"x.pl": "#!/usr/bin/perl\nprint \"PERL\\n\";\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{
+		Mode: string(config.ModeDenylist),
+		Commands: []config.CommandEntry{
+			{Command: "python3", Allow: boolPtr(false)},
+			{Command: "perl", Allow: boolPtr(false)},
+		},
+	}, dir)
+	for _, command := range []string{`./x.py`, `timeout 5 ./x.py`, `env ./x.py`, `nice ./x.pl`, `echo a | xargs ./x.pl`} {
+		out, err := executeInDirWithSandbox(t, s, dir, command)
+		if err == nil || !strings.Contains(err.Error(), "deny list") {
+			t.Errorf("%s: out %q, err %v; want the interpreter refused by the deny list", command, out, err)
+		}
+	}
+	// A wrapped python is refused whatever the deny list says.
+	s, _ = newModeSandbox(t, config.ModeDenylist, dir)
+	if out, err := executeInDirWithSandbox(t, s, dir, `timeout 5 ./x.py`); err == nil || !strings.Contains(err.Error(), "wrapped") {
+		t.Errorf("wrapped python script: out %q, err %v; want a refusal", out, err)
+	}
+}
+
+// xcrun with no tool of its own runs xargs's input as the tool.
+func TestXcrunWithoutToolUnderXargs(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+	for _, command := range []string{`echo curl | xargs xcrun`, `echo curl | xargs xcrun --sdk macosx`} {
+		if _, err := executeInDirWithSandbox(t, s, dir, command); err == nil || !strings.Contains(err.Error(), "no command of its own") {
+			t.Errorf("%s: err %v, want a refusal", command, err)
+		}
+	}
+}

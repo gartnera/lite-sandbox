@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +34,8 @@ var inProcessWrappers = map[string]bool{
 // runs a shell script that the interpreter would run if it were typed
 // directly (executeScript): a path to a file that is not a compiled binary,
 // with no shebang or a shell's. A script allowed with no_sandbox runs
-// natively on the host either way, and is left to the wrapper.
+// natively on the host either way, and is left to the wrapper, when routing
+// sends it there (see wrappedScriptRoutable).
 func (s *Sandbox) wrapsShellScript(dir string, args []string) bool {
 	if len(args) == 0 || !inProcessWrappers[args[0]] {
 		return false
@@ -47,7 +50,7 @@ func (s *Sandbox) wrapsShellScript(dir string, args []string) bool {
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return false
 	}
-	if s.bareAllowsScript(args[0], dir) && s.scriptUnsandboxed(path) {
+	if wrappedScriptRoutable(args[0], nil) && s.bareAllowsScript(args[0], dir) && s.scriptUnsandboxed(path) {
 		return false
 	}
 	if isBinaryExecutable(path) {
@@ -55,6 +58,49 @@ func (s *Sandbox) wrapsShellScript(dir string, args []string) bool {
 	}
 	shebang := scriptShebangArgv(path)
 	return len(shebang) == 0 || isShellInterpreter(shebang[0])
+}
+
+// wrappedScriptRoutable reports whether a script path a wrapper starts may
+// be matched to a no_sandbox entry by its cleaned path, as routing matches
+// it. The wrapper execs the path as written, which is the same file only
+// without a ".." element (s/../host.sh goes up from where a symlink s
+// points) and without one of xargs's replace strings (replace), which
+// xargs fills in after routing.
+func wrappedScriptRoutable(name string, replace []string) bool {
+	if slices.Contains(strings.Split(filepath.ToSlash(name), "/"), "..") {
+		return false
+	}
+	return !slices.ContainsFunc(replace, func(r string) bool { return r != "" && strings.Contains(name, r) })
+}
+
+// checkWrappedInterpreterScript checks a script for another interpreter
+// (#!/usr/bin/env python3) that a wrapper starts as the invocation the
+// kernel makes of it ("python3 ./x.py ..."), as execArgv does when it runs
+// directly: the wrapper execs it natively, so its interpreter would
+// otherwise skip the deny list, ask entries, and the rule against a wrapped
+// python. A bare allow of the script trusts it, as when it runs directly.
+// A path that names nothing yet is left to the wrapper.
+func (s *Sandbox) checkWrappedInterpreterScript(dir string, args []string) error {
+	if len(args) == 0 || lookupCommand(args[0]).unwrap == nil {
+		return nil
+	}
+	inner := unwrapWrapperArgs(args)
+	if len(inner) == 0 || !isScriptPath(inner[0]) {
+		return nil
+	}
+	path := absPath(inner[0], dir)
+	if isBinaryExecutable(path) {
+		return nil
+	}
+	shebang := scriptShebangArgv(path)
+	if len(shebang) == 0 || isShellInterpreter(shebang[0]) || s.bareAllowsScript(inner[0], dir) {
+		return nil
+	}
+	full := append(append(slices.Clone(shebang), path), inner[1:]...)
+	if err := validateSubCommand(s, literalWords(full)); err != nil {
+		return fmt.Errorf("script %s (run as %s): %w", inner[0], shebang[0], err)
+	}
+	return nil
 }
 
 // runWrappedScript applies the wrapper args[0] (one of inProcessWrappers) and
