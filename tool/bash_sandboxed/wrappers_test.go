@@ -300,3 +300,134 @@ func TestXargsReplaceStringsInOptions(t *testing.T) {
 		t.Errorf("xargs -I $R find: want a refusal, got %v", err)
 	}
 }
+
+// writeWrappedScriptFixtures writes the scripts TestWrappedShellScript runs
+// into dir: shell scripts with and without a shebang, a python script, and a
+// compiled binary.
+func writeWrappedScriptFixtures(t *testing.T, dir string) {
+	t.Helper()
+	files := map[string]string{
+		"b.sh":   "echo \"bash=$BASH_VERSION\"\n",
+		"sb.sh":  "#!/bin/bash\necho \"bash=$BASH_VERSION\"\n",
+		"env.sh": "#!/usr/bin/env sh\necho hi\n",
+		"p.py":   "#!/usr/bin/env python3\nprint('hi')\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Skip("no /bin/true to copy")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin"), bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A shell script a wrapper starts would run as a native program, so its body
+// would go unchecked; it is refused, as a wrapped bash or sh is (#143).
+func TestWrappedShellScript(t *testing.T) {
+	refused := []string{
+		`timeout 5 ./b.sh`,
+		`timeout 5 ./sb.sh`,
+		`timeout 5 ./env.sh`,
+		`env ./b.sh`,
+		`env FOO=1 ./b.sh x`,
+		`nice -n 5 timeout 5 ./b.sh`,
+		`echo x | xargs ./b.sh`,
+		`echo b.sh | xargs -I{} ./{}`,
+		`find . -name b.sh -exec ./b.sh {} +`,
+		`find . -name b.sh -exec {} \;`,
+		`find . -name b.sh -execdir ./b.sh \;`,
+		`find . -name b.sh -exec timeout 5 ./b.sh \;`,
+		`timeout 5 ./p.py`,
+	}
+	allowed := []struct{ command, want string }{
+		{`./b.sh`, "bash=\n"},
+		{`bash b.sh`, "bash=\n"},
+		{`timeout 5 ./bin && echo ok`, "ok\n"},
+		{`find . -name bin -exec ./bin \; && echo ok`, "ok\n"},
+		{`timeout 5 ./missing 2>/dev/null || echo failed`, "failed\n"},
+	}
+	sandboxes := map[string]func(t *testing.T, dir string) *Sandbox{
+		"allowlist": func(*testing.T, string) *Sandbox { return newTestSandboxWithLocalBinaryExecution() },
+		"denylist": func(t *testing.T, dir string) *Sandbox {
+			s, _ := newModeSandbox(t, config.ModeDenylist, dir)
+			return s
+		},
+	}
+	for mode, newSandbox := range sandboxes {
+		t.Run(mode, func(t *testing.T) {
+			for _, command := range refused {
+				t.Run(command, func(t *testing.T) {
+					dir := t.TempDir()
+					writeWrappedScriptFixtures(t, dir)
+					out, err := executeInDirWithSandbox(t, newSandbox(t, dir), dir, command)
+					if err == nil {
+						t.Fatalf("expected refusal, got output %q", out)
+					}
+					if strings.Contains(out, "bash=5") || strings.Contains(out, "bash=4") {
+						t.Fatalf("script ran under a native bash: %q", out)
+					}
+					// The whitelist refuses a script path before this check
+					// in allowlist mode; in denylist mode only it does.
+					if mode == "denylist" && !strings.Contains(err.Error(), "wrapped") && !strings.Contains(err.Error(), "wrapper") && !strings.Contains(err.Error(), "-execdir") {
+						t.Errorf("err = %v, want the wrapped-script refusal", err)
+					}
+				})
+			}
+			if mode != "denylist" {
+				return // the whitelist refuses wrapped script paths
+			}
+			for _, tt := range allowed {
+				t.Run(tt.command, func(t *testing.T) {
+					dir := t.TempDir()
+					writeWrappedScriptFixtures(t, dir)
+					out, err := executeInDirWithSandbox(t, newSandbox(t, dir), dir, tt.command)
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					if out != tt.want {
+						t.Errorf("output %q, want %q", out, tt.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A bare allow of a shell script trusts it to run through the interpreter,
+// not as a native program, so it is refused wrapped too; one allowed with
+// no_sandbox runs natively on the host either way, so a wrapper does not
+// change what is checked.
+func TestWrappedShellScript_BareAllowed(t *testing.T) {
+	dir := t.TempDir()
+	writeWrappedScriptFixtures(t, dir)
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./b.sh", "./p.py"}}, dir)
+	if _, err := executeInDirWithSandbox(t, s, dir, `timeout 5 ./b.sh`); err == nil || !strings.Contains(err.Error(), "wrapped") {
+		t.Errorf("wrapped bare-allowed shell script: err = %v, want a wrapped-script refusal", err)
+	}
+	// A trusted script for another interpreter runs natively, wrapped or not.
+	if err := s.checkWrappedScripts(dir, []string{"timeout", "5", "./p.py"}); err != nil {
+		t.Errorf("wrapped bare-allowed python script: %v", err)
+	}
+
+	// An absolute path under find -execdir names the same file everywhere.
+	if err := s.checkWrappedScripts(dir, []string{"find", ".", "-execdir", filepath.Join(dir, "bin"), ";"}); err != nil {
+		t.Errorf("absolute binary under -execdir: %v", err)
+	}
+	if err := s.checkWrappedScripts(dir, []string{"find", ".", "-execdir", filepath.Join(dir, "sb.sh"), ";"}); err == nil {
+		t.Errorf("absolute shell script under -execdir: allowed")
+	}
+
+	host := NewSandbox()
+	host.updateConfig(&config.Config{
+		Commands: []config.CommandEntry{{Command: "./b.sh", Allow: boolPtr(true), NoSandbox: true}},
+	}, dir)
+	if err := host.checkWrappedScripts(dir, []string{"timeout", "5", "./b.sh"}); err != nil {
+		t.Errorf("wrapped no_sandbox script: %v", err)
+	}
+}

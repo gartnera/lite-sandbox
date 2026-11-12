@@ -3,6 +3,8 @@ package bash_sandboxed
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -538,4 +540,109 @@ func sliceWrappedCommand(args []string, idx int) []string {
 		return nil
 	}
 	return args[idx:]
+}
+
+// wrappedScriptMaxDepth bounds checkWrappedScripts's walk through nested
+// wrappers, find -exec, and shebang interpreters.
+const wrappedScriptMaxDepth = 8
+
+// checkWrappedScripts refuses a shell script that a wrapper (timeout, env,
+// xargs, nice, ..., xcrun, find -exec) would start, at any depth of nesting.
+// Run directly (./b.sh) or as `bash b.sh`, a shell script goes through the
+// sandbox's interpreter, which validates and routes every command in it; a
+// wrapper spawns it as a native program instead, so a native shell would run
+// its body with none of it seen (the whitelist, deny list, ask entries, and
+// path boundary on its commands). This is the script-path counterpart of
+// commandSpec.notWrappable, which refuses a wrapped bash or sh. It runs on the
+// expanded argv at exec time, when the file a script path names, and so
+// whether it is a shell script, is known; dir is the directory relative
+// paths resolve against.
+//
+// A compiled binary is not affected, and neither is a script allowed with
+// no_sandbox, which runs natively on the host wrapped or not. A script for
+// another interpreter (#!/usr/bin/env python3) is checked as the invocation
+// the kernel makes of it ("python3 ./x.py ...") would be under the wrapper,
+// as it is when run directly, unless a bare allow trusts it (it then runs as
+// a native program either way). A command name holding the input of xargs -I
+// or find's {} names a file the check cannot see, and so does a relative
+// script path under find -execdir or -okdir, which run it from each found
+// file's directory; those are refused too.
+func (s *Sandbox) checkWrappedScripts(dir string, args []string) error {
+	return s.walkWrappedScripts(dir, args, nil, false, 0)
+}
+
+// walkWrappedScripts checks each command args[0] starts, when it is a
+// wrapper or find. replace are the replace strings the input of an outer
+// xargs -I or find -exec takes the place of; dirUnknown reports whether a
+// relative path is resolved somewhere other than dir (find -execdir).
+func (s *Sandbox) walkWrappedScripts(dir string, args []string, replace []string, dirUnknown bool, depth int) error {
+	if len(args) == 0 || depth > wrappedScriptMaxDepth {
+		return nil
+	}
+	name := args[0]
+	if name == "find" {
+		for _, a := range findActions(args) {
+			if a.end <= a.start {
+				continue
+			}
+			inner := append(slices.Clone(replace), "{}")
+			execdir := a.flag == "-execdir" || a.flag == "-okdir"
+			if err := s.checkWrappedCommand(dir, args[a.start:a.end], inner, dirUnknown || execdir, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if lookupCommand(name).unwrap == nil {
+		return nil
+	}
+	if name == "xargs" {
+		if idx := wrapperCommandIndex(args); idx > 0 {
+			replace = append(slices.Clone(replace), xargsReplaceStrings(args[:idx])...)
+		}
+	}
+	inner := lookupCommand(name).unwrap(args)
+	if len(inner) == 0 {
+		return nil
+	}
+	return s.checkWrappedCommand(dir, inner, replace, dirUnknown, depth+1)
+}
+
+// checkWrappedCommand checks one command a wrapper starts (see
+// checkWrappedScripts), then the commands it starts in turn.
+func (s *Sandbox) checkWrappedCommand(dir string, args []string, replace []string, dirUnknown bool, depth int) error {
+	if depth > wrappedScriptMaxDepth {
+		return tagRule(ruleStructural, args[0], fmt.Errorf("command %q: wrappers nested too deep", args[0]))
+	}
+	name := args[0]
+	if replaceIndex(name, replace) >= 0 {
+		return tagRule(ruleStructural, name, fmt.Errorf("wrapped command name %q is built from the wrapper's input, so the program it runs cannot be checked (a shell script would run natively, outside the sandbox's interpreter)", name))
+	}
+	if !isScriptPath(name) {
+		return s.walkWrappedScripts(dir, args, replace, dirUnknown, depth)
+	}
+	if dirUnknown && !strings.HasPrefix(name, "/") {
+		return tagRule(ruleStructural, name, fmt.Errorf("relative script path %q under find -execdir/-okdir resolves from each found file's directory, so it cannot be checked; use an absolute path", name))
+	}
+	path := filepath.Clean(absPath(name, dir))
+	if s.scriptUnsandboxed(path) || isBinaryExecutable(path) {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		// Nothing there to run: the wrapper's exec fails.
+		return nil
+	}
+	if shebang := scriptShebangArgv(path); len(shebang) > 0 && !isShellInterpreter(shebang[0]) {
+		if s.trustsScript(path) {
+			return nil
+		}
+		full := append(append(shebang, path), args[1:]...)
+		if !isScriptPath(full[0]) {
+			if err := validateSubCommand(s, literalWords(full)); err != nil {
+				return fmt.Errorf("script %s (run as %s): %w", name, full[0], err)
+			}
+		}
+		return s.checkWrappedCommand(dir, full, nil, false, depth+1)
+	}
+	return tagRule(ruleStructural, name, fmt.Errorf("shell script %q is not allowed as a wrapped subcommand (find -exec, xargs, env, timeout, nice, nohup, setsid, stdbuf, xcrun): the wrapper would run it as a native program, outside the sandbox's interpreter; run it directly, without the wrapper", name))
 }

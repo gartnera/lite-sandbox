@@ -506,6 +506,12 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	if err := s.runtimeArgValidator(ctx, cmdName, args); err != nil {
 		return err
 	}
+	// A shell script a wrapper would start runs natively, outside this
+	// interpreter (see checkWrappedScripts); only here is the file its path
+	// names known.
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedScripts(interp.HandlerCtx(ctx).Dir, args)); err != nil {
+		return err
+	}
 	// The command's own preparation (deno's permission flags, SwiftPM's
 	// nested sandbox) and in-process executor (awk, bash, sh, python); see
 	// commandSpec.prepareExec and run.
