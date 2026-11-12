@@ -325,6 +325,30 @@ func writeWrappedScriptFixtures(t *testing.T, dir string) {
 	if err := os.WriteFile(filepath.Join(dir, "outer"), []byte("#!"+filepath.Join(dir, "cat")+"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	more := map[string]string{
+		// Only the ELF magic: exec fails with ENOEXEC and the wrapper's
+		// execvp hands the file to /bin/sh.
+		"fakeelf": "\x7fELF\necho \"bash=$BASH_VERSION\"\n",
+		// env -S runs bash, whatever word the check would take for the
+		// interpreter.
+		"envs.py": "#!/usr/bin/env -Sbash --rcfile cat\necho \"bash=$BASH_VERSION\"\n",
+		"rel.sh":  "#!cat\necho hi\n",
+		"c.txt":   "#!/bin/cat\nhello\n",
+	}
+	for name, body := range more {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A shebang naming a symlink to bash by another name.
+	if real, err := filepath.EvalSymlinks("/bin/bash"); err == nil {
+		if err := os.Symlink(real, filepath.Join(dir, "kat")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "viakat"), []byte("#!"+filepath.Join(dir, "kat")+"\necho \"bash=$BASH_VERSION\"\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	bin, err := os.ReadFile("/bin/true")
 	if err != nil {
 		t.Skip("no /bin/true to copy")
@@ -346,6 +370,8 @@ func TestWrappedShellScript(t *testing.T) {
 		`nice -n 5 timeout 5 ./b.sh`,
 		`echo x | xargs ./b.sh`,
 		`echo b.sh | xargs -I{} ./{}`,
+		`echo b.sh | xargs -I{} env ./{}`,
+		`echo b.sh | xargs -I c env ./c`,
 		`find . -name b.sh -exec ./b.sh {} +`,
 		`find . -name b.sh -exec {} \;`,
 		`find . -name b.sh -execdir ./b.sh \;`,
@@ -360,6 +386,11 @@ func TestWrappedShellScript(t *testing.T) {
 		`find . -maxdepth 0 -exec cp b.sh c.sh \; -exec ./c.sh \;`,
 		// The shebang's interpreter is itself a shell script.
 		`timeout 5 ./outer`,
+		`timeout 5 ./fakeelf`,
+		`find . -maxdepth 0 -exec ./fakeelf \;`,
+		`timeout 5 ./envs.py`,
+		`timeout 5 ./viakat`,
+		`timeout 5 ./rel.sh`,
 	}
 	allowed := []struct{ command, want string }{
 		{`./b.sh`, "bash=\n"},
@@ -367,7 +398,13 @@ func TestWrappedShellScript(t *testing.T) {
 		{`timeout 5 ./bin && echo ok`, "ok\n"},
 		{`find . -name bin -exec ./bin \; && echo ok`, "ok\n"},
 		{`echo x | xargs -I{} timeout 5 ./bin {} && echo ok`, "ok\n"},
+		{`timeout 5 ./c.txt`, "#!/bin/cat\nhello\n"},
 		{`echo x | xargs echo`, "x\n"},
+		// xargs never replaces in the name of the command it runs.
+		{`echo x | xargs -I c echo c`, "x\n"},
+		{`echo x | xargs -I n ./bin n && echo ok`, "ok\n"},
+		// Walking nested wrappers has no depth limit of its own.
+		{`nice nice nice nice nice nice nice nice nice nice echo deep`, "deep\n"},
 		{`echo x | xargs`, "x\n"},
 	}
 	sandboxes := map[string]func(t *testing.T, dir string) *Sandbox{
