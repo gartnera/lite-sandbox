@@ -50,6 +50,14 @@ lite-sandbox: AWS credentials for profile "dev" are unavailable because the host
 - The broker can only report failures it sees while getting credentials. If AWS rejects credentials the broker already handed out, the command shows AWS's own error (for example `InvalidClientTokenId` or `ExpiredToken`) and gets no note. This happens with an IAM user's keys after they are deactivated, or a session revoked mid-way.
 - Credentials are fetched on first use, and that first fetch can take seconds (an SSO or STS round trip). botocore (AWS CLI, boto3) gives up on the metadata service after 1 second by default, so lite-sandbox sets `AWS_METADATA_SERVICE_TIMEOUT=30` in brokered mode. A value already in the environment is kept. The Go SDK retries on its own while the fetch completes.
 
+### Over ssh
+
+A host in the [`ssh` section](ssh.md#aws-credentials) with
+`aws_credentials: true` gets the brokered credentials for the command ssh runs
+there, through a remote forward to the metadata server
+(`lite-sandbox config ssh hosts add dev-box --aws-credentials`). It is off by
+default.
+
 ### Multiple profiles
 
 `allowed_profiles` lets a command pick one of several brokered profiles with

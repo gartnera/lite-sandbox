@@ -1116,6 +1116,8 @@ ssh:
       commands: [systemctl restart]
     - host: scratch-vm       # the remote command is not checked, and
       write: true            # scp and rsync may copy to and from it
+    - host: dev-box          # the remote command gets the brokered AWS
+      aws_credentials: true  # credentials (default false)
   agent: true                # default true
   unrestricted_agent: false  # default false
   git_signing: false         # default false

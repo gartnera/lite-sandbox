@@ -247,3 +247,39 @@ func TestSectionCommands(t *testing.T) {
 		t.Error("cat is not a section command")
 	}
 }
+
+func TestSSHHostAWSCredentials(t *testing.T) {
+	cfg, err := ParseStrict([]byte("ssh:\n  hosts:\n    - box\n    - host: dev-box\n      aws_credentials: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSH.Host("box").ForwardsAWSCredentials() || !cfg.SSH.Host("DEV-BOX").ForwardsAWSCredentials() {
+		t.Fatalf("parsed %+v", cfg.SSH.Hosts)
+	}
+	if d := cfg.SSH.Host("dev-box").Describe(); d != "read-only remote commands; brokered AWS credentials forwarded" {
+		t.Errorf("describe: %q", d)
+	}
+	out, err := yaml.Marshal(cfg.SSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "- box\n") || !strings.Contains(string(out), "aws_credentials: true") {
+		t.Errorf("marshaled:\n%s", out)
+	}
+
+	if changed, err := cfg.SetSSHHostAWSCredentials("box", true); err != nil || !changed || !cfg.SSH.Host("box").ForwardsAWSCredentials() {
+		t.Errorf("enable: changed=%v err=%v", changed, err)
+	}
+	if changed, _ := cfg.SetSSHHostAWSCredentials("box", true); changed {
+		t.Error("enabling twice reported a change")
+	}
+	if changed, err := cfg.SetSSHHostAWSCredentials("box", false); err != nil || !changed || cfg.SSH.Host("box").AWSCredentials != nil {
+		t.Errorf("disable: changed=%v err=%v entry=%+v", changed, err, cfg.SSH.Host("box"))
+	}
+	if _, err := cfg.SetSSHHostAWSCredentials("other", true); err == nil {
+		t.Error("unlisted host accepted")
+	}
+	if out, _ := yaml.Marshal(cfg.SSH); !strings.Contains(string(out), "- box\n") {
+		t.Errorf("disabled entry not bare again:\n%s", out)
+	}
+}

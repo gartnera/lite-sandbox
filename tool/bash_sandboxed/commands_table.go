@@ -175,6 +175,7 @@ func commandTable() map[string]commandSpec {
 			validate:     validateSSHCommand,
 			nonPathArgs:  sshNonPathArgIndices,
 			writeTargets: func(args []string, _ map[int]bool) []string { return sshControlPathWrites(args) },
+			prepareExec:  sshPrepareExec,
 		},
 		"sshpass": {
 			validate:    validateSSHPassCommand,
@@ -188,7 +189,8 @@ func commandTable() map[string]commandSpec {
 				}
 				return nil
 			},
-			checkPaths: copyReadPaths("sshpass"),
+			checkPaths:  copyReadPaths("sshpass"),
+			prepareExec: sshpassPrepareExec,
 		},
 		"scp":   copyCommand("scp"),
 		"rsync": copyCommand("rsync"),

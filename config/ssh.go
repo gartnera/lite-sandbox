@@ -58,6 +58,8 @@ type SSHConfig struct {
 //	      - docker ps
 //	  - host: scratch-vm         # the remote command is not checked, and
 //	    write: true              # scp and rsync may copy to and from it
+//	  - host: dev-box            # the remote command gets the brokered
+//	    aws_credentials: true    # AWS credentials
 //
 // An entry with neither is written as the bare host.
 type SSHHost struct {
@@ -71,6 +73,12 @@ type SSHHost struct {
 	// ("systemctl restart"), like a commands entry. Their arguments are not
 	// checked.
 	Commands []string `yaml:"commands,omitempty"`
+	// AWSCredentials forwards the brokered AWS credentials (aws.force_profile,
+	// or the profile the command selects with AWS_PROFILE) to the host: ssh
+	// gets a remote forward from a loopback port there to the profile's IMDS
+	// server here, and the remote command gets AWS_EC2_METADATA_SERVICE_ENDPOINT
+	// pointing at it (default false).
+	AWSCredentials *bool `yaml:"aws_credentials,omitempty"`
 }
 
 // sshHostFields is SSHHost without its YAML methods, for decoding and encoding
@@ -94,7 +102,7 @@ func (h *SSHHost) UnmarshalYAML(n *yaml.Node) error {
 
 // MarshalYAML writes an entry that only lists its host as the bare host.
 func (h SSHHost) MarshalYAML() (any, error) {
-	if h.Write == nil && len(h.Commands) == 0 {
+	if h.Write == nil && len(h.Commands) == 0 && h.AWSCredentials == nil {
 		return h.Host, nil
 	}
 	return sshHostFields(h), nil
@@ -107,15 +115,27 @@ func (h SSHHost) MergeKey() string { return normalizeSSHHost(h.Host) }
 // Writes reports whether the remote command goes unchecked (write: true).
 func (h *SSHHost) Writes() bool { return h != nil && h.Write != nil && *h.Write }
 
+// ForwardsAWSCredentials reports whether ssh forwards the brokered AWS
+// credentials to the host (aws_credentials: true).
+func (h *SSHHost) ForwardsAWSCredentials() bool {
+	return h != nil && h.AWSCredentials != nil && *h.AWSCredentials
+}
+
 // Describe renders what the remote command may do on the host, for listings.
 func (h SSHHost) Describe() string {
+	var d string
 	switch {
 	case h.Writes():
-		return "any remote command; scp and rsync; port forwarding and connection sharing"
+		d = "any remote command; scp and rsync; port forwarding and connection sharing"
 	case len(h.Commands) > 0:
-		return "read-only remote commands, and " + strings.Join(h.Commands, ", ")
+		d = "read-only remote commands, and " + strings.Join(h.Commands, ", ")
+	default:
+		d = "read-only remote commands"
 	}
-	return "read-only remote commands"
+	if h.ForwardsAWSCredentials() {
+		d += "; brokered AWS credentials forwarded"
+	}
+	return d
 }
 
 // Validate rejects an entry ssh could not take as a destination, or a
@@ -314,6 +334,25 @@ func (c *Config) AddSSHHost(host string, write bool, commands ...string) (bool, 
 		}
 	}
 	return changed, nil
+}
+
+// SetSSHHostAWSCredentials turns forwarding the brokered AWS credentials to a
+// listed host on or off, and reports whether it changed anything. Off is
+// written as the field's absence, the default.
+func (c *Config) SetSSHHostAWSCredentials(host string, on bool) (bool, error) {
+	h := c.SSH.Host(host)
+	if h == nil {
+		return false, fmt.Errorf("ssh host %q is not listed", host)
+	}
+	if h.ForwardsAWSCredentials() == on {
+		return false, nil
+	}
+	if on {
+		h.AWSCredentials = &on
+	} else {
+		h.AWSCredentials = nil
+	}
+	return true, nil
 }
 
 // RemoveSSHHost removes host from the ssh section and reports whether it was

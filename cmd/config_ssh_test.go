@@ -74,6 +74,36 @@ func TestSSHConfigCommands(t *testing.T) {
 		t.Errorf("show: %s", out)
 	}
 
+	// --aws-credentials turns the forward on, =false off again.
+	t.Cleanup(func() { sshHostsAddAWS = false; sshHostsAddCmd.Flags().Lookup("aws-credentials").Changed = false })
+	out = captureStdout(t, func() {
+		if err := sshHostsAddCmd.Flags().Set("aws-credentials", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"dev-box"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sshShowCmd.RunE(sshShowCmd, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Added ssh host dev-box: read-only remote commands; brokered AWS credentials forwarded") || !strings.Contains(out, "forwarded only when brokered") {
+		t.Errorf("aws-credentials: %s", out)
+	}
+	out = captureStdout(t, func() {
+		if err := sshHostsAddCmd.Flags().Set("aws-credentials", "false"); err != nil {
+			t.Fatal(err)
+		}
+		if err := sshHostsAddCmd.RunE(sshHostsAddCmd, []string{"dev-box"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if cfg, _ = config.Load(); cfg.SSH.Host("dev-box").ForwardsAWSCredentials() || !strings.Contains(out, "Updated ssh host dev-box") {
+		t.Errorf("aws-credentials=false: %s", out)
+	}
+	sshHostsAddAWS = false
+	sshHostsAddCmd.Flags().Lookup("aws-credentials").Changed = false
+
 	captureStdout(t, func() {
 		if err := sshHostsRemoveCmd.RunE(sshHostsRemoveCmd, []string{"build-box"}); err != nil {
 			t.Fatal(err)

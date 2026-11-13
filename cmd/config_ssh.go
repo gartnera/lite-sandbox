@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/gartnera/lite-sandbox/config"
 	"github.com/spf13/cobra"
@@ -68,6 +69,9 @@ var sshShowCmd = &cobra.Command{
 		} else {
 			fmt.Println("  Git signing: off")
 		}
+		if slices.ContainsFunc(s.Hosts, func(h config.SSHHost) bool { return h.ForwardsAWSCredentials() }) && !cfg.AWS.UsesIMDS() {
+			fmt.Println("  Note: AWS credentials are forwarded only when brokered (lite-sandbox config aws force-profile <profile>); none is set here")
+		}
 		if config.SSHAuthSock() == "" {
 			fmt.Println("  Note: SSH_AUTH_SOCK names no agent socket here")
 		}
@@ -83,6 +87,7 @@ var sshHostsCmd = &cobra.Command{
 var (
 	sshHostsAddWrite    bool
 	sshHostsAddCommands []string
+	sshHostsAddAWS      bool
 )
 
 var sshHostsAddCmd = &cobra.Command{
@@ -93,13 +98,17 @@ var sshHostsAddCmd = &cobra.Command{
 commands; --command allows a command beyond those (with any arguments, or
 limited to the leading arguments given), and --write lifts the check, lets
 scp and rsync copy files to and from the host, and lets ssh forward ports
-(-L, -R, -D) and share connections (-M, -S, -O) with it.
+(-L, -R, -D) and share connections (-M, -S, -O) with it. --aws-credentials
+forwards the brokered AWS credentials (aws.force_profile) to the host, for
+the remote command ssh runs there.
 
   lite-sandbox config ssh hosts add build-box
   lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
   lite-sandbox config ssh hosts add scratch-vm --write
+  lite-sandbox config ssh hosts add dev-box --aws-credentials
 
-On a host already listed, the flags add to its entry.`,
+On a host already listed, the flags add to its entry
+(--aws-credentials=false turns the forwarding off).`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -111,6 +120,13 @@ On a host already listed, the flags add to its entry.`,
 			changed, err := cfg.AddSSHHost(h, sshHostsAddWrite, sshHostsAddCommands...)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("aws-credentials") {
+				awsChanged, err := cfg.SetSSHHostAWSCredentials(h, sshHostsAddAWS)
+				if err != nil {
+					return err
+				}
+				changed = changed || awsChanged
 			}
 			entry := cfg.SSH.Host(h)
 			switch {
@@ -228,6 +244,7 @@ var sshDisableCmd = &cobra.Command{
 
 func init() {
 	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddWrite, "write", false, "let the remote command run unchecked (not only read-only commands), scp and rsync copy to and from the host, and ssh forward ports and share connections")
+	sshHostsAddCmd.Flags().BoolVar(&sshHostsAddAWS, "aws-credentials", false, "forward the brokered AWS credentials (aws.force_profile) to the host for the commands ssh runs there; =false turns it off")
 	sshHostsAddCmd.Flags().StringArrayVar(&sshHostsAddCommands, "command", nil, "allow a remote command beyond the read-only ones: a name, or a name and its leading arguments ('systemctl restart'); repeatable")
 	sshHostsCmd.AddCommand(sshHostsAddCmd, sshHostsRemoveCmd)
 	sshAgentCmd.AddCommand(sshAgentEnableCmd, sshAgentDisableCmd, sshAgentRestrictCmd, sshAgentUnrestrictCmd)

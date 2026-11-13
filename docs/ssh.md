@@ -20,6 +20,8 @@ ssh:
     - host: scratch-vm
       write: true            # the remote command is not checked; scp and rsync may copy to and from it;
                              # ssh may forward ports and share connections with it
+    - host: dev-box
+      aws_credentials: true  # forward the brokered AWS credentials to it (default: false)
   agent: true                # give the agent to ssh, sshpass, scp, rsync, and git's remote commands (default: true)
   unrestricted_agent: false  # hand them the real agent socket instead of the filter (default: false)
   git_signing: false         # sign git commits and tags with the agent (default: false)
@@ -30,6 +32,7 @@ lite-sandbox config ssh show
 lite-sandbox config ssh hosts add build-box 10.0.0.12
 lite-sandbox config ssh hosts add deploy-box --command 'systemctl restart' --command 'docker compose up'
 lite-sandbox config ssh hosts add scratch-vm --write
+lite-sandbox config ssh hosts add dev-box --aws-credentials   # =false turns it off
 lite-sandbox config ssh hosts remove 10.0.0.12
 lite-sandbox config ssh agent disable      # no agent for anything
 lite-sandbox config ssh agent unrestrict   # the real socket (see below)
@@ -308,6 +311,56 @@ Without a `write: true` host, `allowlist` mode refuses scp and rsync and names
 the remedy (`lite-sandbox config ssh hosts add <host> --write`). `denylist`
 mode runs them unchecked until hosts are listed, and once they are, holds
 them to the `write: true` ones.
+
+### AWS credentials
+
+With [brokered AWS credentials](aws-and-docker.md#aws-credentials)
+(`aws.force_profile`), `aws_credentials: true` on a host's entry hands them
+to the command ssh runs there, the way you'd do it by hand with a remote
+forward to the metadata server:
+
+```bash
+ssh dev-box aws sts get-caller-identity
+# runs as
+ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:24817:127.0.0.1:<imds port> dev-box \
+  'export AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:24817/ AWS_METADATA_SERVICE_TIMEOUT=30 AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2;' \
+  aws sts get-caller-identity
+```
+
+- The forward listens on a random loopback port on the host, for as long as
+  that one ssh runs, and leads to the IMDS server of the profile the command
+  would get here: `force_profile`'s, or the one it selects with
+  `AWS_PROFILE=dev ssh dev-box ...` (held to `allowed_profiles` as any
+  command is). The region goes along unless it isn't a plain word.
+  `AWS_EC2_METADATA_SERVICE_ENDPOINT` set on the ssh command doesn't move the
+  forward: it always leads to one of lite-sandbox's own metadata servers.
+- A port taken on the host fails the command (`remote port forwarding
+  failed`) rather than leaving the endpoint dead; run it again.
+- It is added after the checks above, which see the command as written: the
+  remote command is still held to the host's policy, so on a host held to
+  read-only commands, list the AWS commands it may run
+  (`--command 'aws sts' --command 'aws s3 ls'`) or set `write: true`.
+- Only ssh run by name gets it (`ssh`, `sshpass -e ssh`, and inside
+  `bash -c`), not ssh under a wrapper (`timeout 60 ssh ...`), as with
+  [the agent](#the-agent), nor `scp` and `rsync`. An invocation that runs no
+  remote command (`-N`, `-O`, `-s`, a login shell with `-n`,
+  `-o RemoteCommand`) gets nothing. In the hook modes, where the agent's own
+  tool runs the command, nothing rewrites it.
+- The remote command is prefixed with `export ...;`, sh syntax that bash,
+  zsh, and fish read too; a csh login shell doesn't.
+- Over a shared connection (`-S`, or a `ControlMaster` in your
+  `~/.ssh/config`), ssh hands the forward to the master, where it stays until
+  the master exits.
+
+What it exposes: the host gets short-lived credentials for the profile, not
+your long-term keys, but anything on the host that can reach its loopback
+port while the command runs can fetch them — another user's processes, and
+root. The forward binds `127.0.0.1` there, unless the host's sshd sets
+`GatewayPorts yes`, which binds it on every interface and so offers the
+credentials to the host's network; check that before turning this on. On
+the host, credentials in the environment (`AWS_ACCESS_KEY_ID`,
+`AWS_PROFILE`) or in `~/.aws` take precedence over the metadata server, as
+the SDKs look there first.
 
 ### sshpass
 
