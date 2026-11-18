@@ -11,7 +11,11 @@ package mockedserver
 // run is reproducible on any machine. Bump deliberately, and re-run the suite.
 const (
 	// CrushVersion is a charmbracelet/crush GitHub release (without the "v").
-	CrushVersion = "0.101.0"
+	// Held at 0.99.0: from 0.100.0 (charmbracelet/crush 2000857d, the
+	// coalescing pubsub broker) `crush run` can return when the agent finishes
+	// before printing the final message's last update, so the answer is
+	// intermittently missing from its output.
+	CrushVersion = "0.99.0"
 	// CodexVersion is an openai/codex GitHub release (tag rust-v<version>).
 	CodexVersion = "0.170.0"
 	// ClaudeCodeVersion is a Claude Code release, fetched from the native
