@@ -497,10 +497,15 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 	case event.FromPi() && event.ToolName == hook.PiToolPowerShell:
 		instead = "Use the " + tool + " tool instead (it runs bash, not PowerShell)."
 	case event.ToolName == hook.ToolMonitor:
-		// The MCP tool's background shells take Monitor's place; a client
-		// that runs MCP tasks also reports when they finish.
+		// The MCP tool's background shells take Monitor's place. A client
+		// that runs MCP tasks reports when one finishes, so a watch written
+		// to exit once its condition holds wakes the model when it matters,
+		// where a stream that never ends would have to be polled.
 		instead = "Run it in a background shell instead: call " + tool +
-			" with run_in_background: true, and read the output file it names to follow progress."
+			" with run_in_background: true. Write the command to exit once the condition " +
+			"you are waiting for is met (e.g. an until-loop that checks and sleeps), " +
+			"so its finishing is the signal, rather than streaming output forever; " +
+			"read the output file it names to follow progress."
 	}
 	reason := fmt.Sprintf(
 		"Blocked by lite-sandbox: the built-in %s tool is disabled.\n"+

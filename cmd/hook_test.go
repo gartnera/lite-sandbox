@@ -474,7 +474,7 @@ func TestBuiltinMonitor(t *testing.T) {
 		t.Fatalf("expected Monitor to be denied, got %+v", got)
 	}
 	reason := got.HookSpecificOutput.PermissionDecisionReason
-	for _, want := range []string{"built-in Monitor tool is disabled", "tail -f build.log", "background shell", "mcp__lite-sandbox__bash", "run_in_background: true"} {
+	for _, want := range []string{"built-in Monitor tool is disabled", "tail -f build.log", "background shell", "mcp__lite-sandbox__bash", "run_in_background: true", "exit once the condition"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("deny reason does not contain %q: %s", want, reason)
 		}
