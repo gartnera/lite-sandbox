@@ -97,12 +97,12 @@ var configModeSetCmd = &cobra.Command{
 		cfg.Mode = string(mode)
 
 		if configDir != "" {
-			// Per-directory: only the override's mode changes. The OS sandbox
+			// Per-directory: only the scope's mode changes. The OS sandbox
 			// toggle is a base-config decision and is left alone.
 			if err := saveConfig(cfg); err != nil {
 				return err
 			}
-			fmt.Printf("mode set to %s%s (base mode stays %s)\n", mode, configScope(), baseMode)
+			fmt.Printf("mode set to %s%s (global mode stays %s)\n", mode, configScope(), baseMode)
 			if mode == config.ModeDenylist && !cfg.OSSandboxEnabled() {
 				fmt.Println("note: os_sandbox is off for this directory, so the deny lists are not enforced against programs commands start")
 			}

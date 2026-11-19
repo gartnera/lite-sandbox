@@ -8,41 +8,49 @@ import (
 	"github.com/gartnera/lite-sandbox/internal/gitworktree"
 )
 
-// DirectoryOverride changes parts of the configuration for commands whose
-// working directory is at (or under) Path. It embeds a full Config, so an
-// override can set any section — aws, docker, profiles, readable/writable paths,
+// Scope changes parts of the configuration for commands whose
+// working directory is at (or under) Path. It embeds a full Config, so a
+// scope can set any section — aws, docker, profiles, readable/writable paths,
 // os_sandbox, and so on — not just one. Path supports ~ expansion. When a
-// directory matches more than one override the most specific (longest) Path wins.
-// A nested Overrides list on an override is ignored.
+// directory matches more than one scope the most specific (longest) Path wins.
+// A nested Scopes list on a scope is ignored.
 //
-// Merge selects how the override combines with the base config:
-//   - false (default): each section the override sets fully REPLACES that section
-//     from the base, so an override's `aws:` block defines the entire AWS mode
+// Merge selects how the scope combines with the global config:
+//   - false (default): each section the scope sets fully REPLACES that section
+//     from the base, so a scope's `aws:` block defines the entire AWS mode
 //     for its directory. Sections it leaves unset are inherited.
-//   - true: the override is DEEP-MERGED into the base — it recurses into struct
+//   - true: the scope is DEEP-MERGED into the base — it recurses into struct
 //     sections and applies only the fields it sets, inheriting the rest. This
-//     lets an override change, say, just `docker.allow_privileged` while keeping
+//     lets a scope change, say, just `docker.allow_privileged` while keeping
 //     the base's `docker.enabled`. The keyed list sections `paths`,
 //     `commands`, and `ssh.hosts` merge entry by entry (see keyedEntry): the
-//     base's statements carry into the directory and the override restates
+//     base's statements carry into the directory and the scope restates
 //     only the paths, commands, and hosts it changes. Every other leaf (scalars, `*bool` flags, and the
 //     deprecated one-list-per-kind keys such as writable_paths) is still taken
-//     from the override when set, otherwise inherited.
-type DirectoryOverride struct {
+//     from the scope when set, otherwise inherited.
+type Scope struct {
 	Path   string `yaml:"path"`
 	Merge  bool   `yaml:"merge,omitempty"`
 	Config `yaml:",inline"`
 }
 
-// SetsAnySection reports whether the override sets at least one config section,
+// IsScopeListField reports whether the Config field named name holds scopes
+// (Scopes, or its deprecated `overrides` alias) rather than a config section,
+// for the code that walks the sections reflectively: a scope cannot nest
+// scopes, so those fields are never copied, merged, or counted as a setting.
+func IsScopeListField(name string) bool {
+	return name == "Scopes" || name == "DeprecatedOverrides"
+}
+
+// SetsAnySection reports whether the scope sets at least one config section,
 // i.e. whether applying it would change anything. Path alone does not count, so
-// callers can drop an override that has been emptied of all its sections.
-func (o *DirectoryOverride) SetsAnySection() bool {
+// callers can drop a scope that has been emptied of all its sections.
+func (o *Scope) SetsAnySection() bool {
 	v := reflect.ValueOf(&o.Config).Elem()
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Name == "Overrides" || !f.IsExported() {
+		if IsScopeListField(f.Name) || !f.IsExported() {
 			continue
 		}
 		switch fv := v.Field(i); fv.Kind() {
@@ -61,21 +69,21 @@ func (o *DirectoryOverride) SetsAnySection() bool {
 }
 
 // ForDirectory returns the configuration in effect for commands whose working
-// directory is dir: the base config combined with the single most specific
-// matching directory override. How they combine depends on the override's Merge
+// directory is dir: the global config combined with the single most specific
+// matching scope. How they combine depends on the scope's Merge
 // flag — whole-section replace by default, deep merge when Merge is true (see
-// DirectoryOverride) — so a directory can switch AWS profiles, widen writable
+// Scope) — so a directory can switch AWS profiles, widen writable
 // paths, flip a single docker flag, and so on, all through one mechanism. The
-// returned config carries no overrides itself, so reading any section off it
+// returned config carries no scopes itself, so reading any section off it
 // reflects dir directly. A nil receiver returns nil.
 //
-// A linked git worktree inherits the overrides of the repository it was created
+// A linked git worktree inherits the scopes of the repository it was created
 // from: when nothing matches dir itself, resolution retries against the main
-// worktree (see matchOverride), so a worktree parked under a container like
+// worktree (see matchScope), so a worktree parked under a container like
 // ~/.superconductor/worktrees is governed by the settings written for the repo.
 //
 // The result is a read-only resolved view. In replace mode its section pointers
-// and slices are shared with the receiver (and with the matched override); deep
+// and slices are shared with the receiver (and with the matched scope); deep
 // merge clones the structs and keyed lists it writes into so it never mutates
 // the stored config.
 // Either way, treat the result as immutable — read the accessors, do not mutate
@@ -85,42 +93,42 @@ func (c *Config) ForDirectory(dir string) *Config {
 		return nil
 	}
 	resolved := *c
-	resolved.Overrides = nil
-	if i := matchOverride(dir, c.Overrides); i >= 0 {
-		overlayConfig(&resolved, &c.Overrides[i].Config, c.Overrides[i].Merge)
+	resolved.Scopes = nil
+	if i := matchScope(dir, c.Scopes); i >= 0 {
+		overlayConfig(&resolved, &c.Scopes[i].Config, c.Scopes[i].Merge)
 	}
 	return &resolved
 }
 
-// matchOverride returns the index of the override governing dir, or -1.
+// matchScope returns the index of the scope governing dir, or -1.
 //
-// A directory is matched directly first, so an override written for a worktree
+// A directory is matched directly first, so a scope written for a worktree
 // (or for the container it sits in) always wins. Only when nothing matches does
 // resolution fall back to the main worktree of the git repository dir belongs
 // to: linked worktrees live wherever `git worktree add` put them — often a
 // shared container far from the checkout — and configuring each one by hand
 // would be unworkable, so a worktree inherits what its repository resolves to.
 // Directories that are not linked worktrees never fork git, and neither does a
-// config without overrides.
-func matchOverride(dir string, overrides []DirectoryOverride) int {
-	pathOf := func(o DirectoryOverride) string { return o.Path }
-	if i := MatchDirectoryOverride(dir, overrides, pathOf); i >= 0 {
+// config without scopes.
+func matchScope(dir string, scopes []Scope) int {
+	pathOf := func(o Scope) string { return o.Path }
+	if i := MatchScopePath(dir, scopes, pathOf); i >= 0 {
 		return i
 	}
-	if len(overrides) == 0 {
+	if len(scopes) == 0 {
 		return -1
 	}
 	main := gitworktree.MainWorktree(dir)
 	if main == "" {
 		return -1
 	}
-	if i := MatchDirectoryOverride(main, overrides, pathOf); i >= 0 {
+	if i := MatchScopePath(main, scopes, pathOf); i >= 0 {
 		return i
 	}
 	// git reports the main worktree with symlinks resolved (/private/var/...),
-	// while an override path is whatever the user wrote (/var/...). Retry with
+	// while a scope path is whatever the user wrote (/var/...). Retry with
 	// both sides resolved so two spellings of one directory still match.
-	return MatchDirectoryOverride(resolveSymlinks(main), overrides, func(o DirectoryOverride) string {
+	return MatchScopePath(resolveSymlinks(main), scopes, func(o Scope) string {
 		return resolveSymlinks(expandPath(o.Path))
 	})
 }
@@ -138,7 +146,7 @@ func resolveSymlinks(path string) string {
 }
 
 // overlayConfig combines the set sections of over onto base (mutating base),
-// skipping the Overrides field so an override cannot nest further overrides.
+// skipping the Scopes field so a scope cannot nest further scopes.
 // When deep is false each set section replaces base's wholesale; when deep is
 // true it recurses into struct sections and applies only the fields over sets.
 // Walking the struct reflectively keeps it complete automatically as new config
@@ -149,7 +157,7 @@ func overlayConfig(base, over *Config, deep bool) {
 	t := bv.Type()
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Name == "Overrides" || !f.IsExported() {
+		if IsScopeListField(f.Name) || !f.IsExported() {
 			continue
 		}
 		if deep {
@@ -172,8 +180,8 @@ func overlayConfig(base, over *Config, deep bool) {
 }
 
 // mergeField deep-merges the value in over into base (same type), used for
-// merge:true overrides. Struct pointers recurse field-by-field into a clone of
-// base's struct, so an override can set individual fields of a section while
+// merge:true scopes. Struct pointers recurse field-by-field into a clone of
+// base's struct, so a scope can set individual fields of a section while
 // inheriting the rest without ever mutating the shared base struct. Every other
 // kind is a leaf: over's value is taken when it is "set" (a non-nil pointer,
 // slice, or map, or a non-zero scalar), otherwise base is kept. The exception
@@ -183,7 +191,7 @@ func mergeField(base, over reflect.Value) {
 	switch over.Kind() {
 	case reflect.Pointer:
 		if over.IsNil() {
-			return // override does not set this; keep base
+			return // scope does not set this; keep base
 		}
 		if over.Elem().Kind() == reflect.Struct {
 			merged := reflect.New(over.Elem().Type())
@@ -200,7 +208,7 @@ func mergeField(base, over reflect.Value) {
 			base.Set(merged)
 			return
 		}
-		base.Set(over) // pointer to a scalar (e.g. *bool): override wins
+		base.Set(over) // pointer to a scalar (e.g. *bool): scope wins
 	case reflect.Slice:
 		if over.IsNil() {
 			return
@@ -228,7 +236,7 @@ func mergeField(base, over reflect.Value) {
 // sandbox matches on, so two spellings of one path (~/x and /home/u/x) or one
 // command ("uv  run" and "uv run") are the same statement.
 //
-// A merge: true override combines such a section with the base entry by entry
+// A merge: true scope combines such a section with the base entry by entry
 // (see mergeKeyedSlices) instead of replacing it wholesale, which is what lets
 // a directory add one path grant or deny one command without restating the
 // base's whole list.
@@ -244,10 +252,10 @@ func isKeyedSlice(t reflect.Type) bool {
 	return t.Kind() == reflect.Slice && t.Elem().Implements(keyedEntryType)
 }
 
-// mergeKeyedSlices combines a keyed list section from a merge: true override
-// with the base's: the base entries whose subject the override does not
-// restate, in their original order, followed by every override entry. So the
-// base's statements carry into the directory, the override's statement about
+// mergeKeyedSlices combines a keyed list section from a merge: true scope
+// with the base's: the base entries whose subject the scope does not
+// restate, in their original order, followed by every scope entry. So the
+// base's statements carry into the directory, the scope's statement about
 // the same path or command replaces it (one statement per subject, as both
 // sections require), and statements about new subjects are added.
 //
@@ -272,16 +280,16 @@ func mergeKeyOf(entry reflect.Value) string {
 }
 
 // PruneRestatedEntries rewrites the keyed list sections (`paths`, `commands`)
-// of a merge: true override as the delta against base: an entry saying exactly
+// of a merge: true scope as the delta against base: an entry saying exactly
 // what base already says is dropped, since the merge inherits it either way.
-// The override then records only what it changes, and later edits to the base
-// keep flowing through to the directory instead of hitting a frozen copy. An
-// override left stating nothing is reported by SetsAnySection, so the caller
+// The scope then records only what it changes, and later edits to the base
+// keep flowing through to the directory instead of hitting a frozen copy. A
+// scope left stating nothing is reported by SetsAnySection, so the caller
 // can drop it.
 //
-// A replace-mode override is left alone: its sections replace the base's
+// A replace-mode scope is left alone: its sections replace the base's
 // outright, so every entry it holds is load-bearing.
-func PruneRestatedEntries(o *DirectoryOverride, base *Config) {
+func PruneRestatedEntries(o *Scope, base *Config) {
 	if o == nil || !o.Merge || base == nil {
 		return
 	}
@@ -298,9 +306,9 @@ func PruneRestatedEntries(o *DirectoryOverride, base *Config) {
 }
 
 // pruneRestatements returns the entries of section that say something base
-// does not already say verbatim — the delta a merge: true override needs to
-// hold. A nil section stays nil, and one emptied by pruning becomes nil, so an
-// override reduced to nothing is dropped by DirectoryOverride.SetsAnySection.
+// does not already say verbatim — the delta a merge: true scope needs to
+// hold. A nil section stays nil, and one emptied by pruning becomes nil, so a
+// scope reduced to nothing is dropped by Scope.SetsAnySection.
 func pruneRestatements(section, base reflect.Value) reflect.Value {
 	if section.IsNil() {
 		return section
@@ -328,19 +336,19 @@ func statesTheSame(entries, e reflect.Value) bool {
 	return false
 }
 
-// MatchDirectoryOverride returns the index into overrides of the most specific
+// MatchScopePath returns the index into entries of the most specific
 // entry whose configured path contains dir, or -1 when none match. It is the
-// shared, config-section-agnostic resolution behind every per-directory
-// override: a caller supplies its own slice of override entries and a pathOf
+// shared, config-section-agnostic resolution behind every
+// scope: a caller supplies its own slice of scope entries and a pathOf
 // accessor that yields each entry's directory, and gets back the winning index.
 //
 // An entry matches dir when dir equals its path or lies beneath it. When several
-// entries match, the one with the longest path wins, so a nested override takes
+// entries match, the one with the longest path wins, so a nested scope takes
 // priority over a broader parent. Paths support ~ expansion and are resolved to
 // absolute before comparison (as is dir), so relative inputs match the concrete
 // directory they denote. Entries with an empty path are skipped.
-func MatchDirectoryOverride[T any](dir string, overrides []T, pathOf func(T) string) int {
-	if dir == "" || len(overrides) == 0 {
+func MatchScopePath[T any](dir string, entries []T, pathOf func(T) string) int {
+	if dir == "" || len(entries) == 0 {
 		return -1
 	}
 	abs, err := filepath.Abs(dir)
@@ -349,8 +357,8 @@ func MatchDirectoryOverride[T any](dir string, overrides []T, pathOf func(T) str
 	}
 	best := -1
 	bestLen := -1
-	for i := range overrides {
-		base := expandPath(pathOf(overrides[i]))
+	for i := range entries {
+		base := expandPath(pathOf(entries[i]))
 		if base == "" {
 			continue
 		}

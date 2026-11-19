@@ -118,7 +118,7 @@ func TestConfigPathsCmd(t *testing.T) {
 
 // TestConfigPathsCmd_Dir: with --dir the edit starts from what the directory
 // resolves to, so allow extends the base's list for the directory (through a
-// merge: true override holding only the new entry) and the base is left alone.
+// merge: true scope holding only the new entry) and the base is left alone.
 func TestConfigPathsCmd_Dir(t *testing.T) {
 	t.Setenv("LITE_SANDBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	const dir = "/work/acme"
@@ -144,9 +144,9 @@ func TestConfigPathsCmd_Dir(t *testing.T) {
 	if !slices.Equal(got, []string{"/base-scratch", "/work/acme/out"}) {
 		t.Errorf("writable for %s = %v", dir, got)
 	}
-	// The override is merge: true, so it holds only the entry it adds.
-	if len(cfg.Overrides) != 1 || !cfg.Overrides[0].Merge || len(cfg.Overrides[0].Paths) != 1 {
-		t.Errorf("overrides = %+v", cfg.Overrides)
+	// The scope is merge: true, so it holds only the entry it adds.
+	if len(cfg.Scopes) != 1 || !cfg.Scopes[0].Merge || len(cfg.Scopes[0].Paths) != 1 {
+		t.Errorf("scopes = %+v", cfg.Scopes)
 	}
 }
 

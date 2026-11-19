@@ -147,7 +147,7 @@ func TestCommands_Validation(t *testing.T) {
 		{"no_sandbox on ask", "commands:\n  - command: curl\n    ask: true\n    no_sandbox: true\n", "no_sandbox applies to an allow only"},
 		{"ask on deny", "commands:\n  - command: curl\n    allow: false\n    ask: true\n", "ask applies to an allow or stands on its own"},
 		{"leading dash", "commands:\n  - command: -lite-sandbox hook\n    allow: false\n", "deprecated denied_commands way"},
-		{"in override", "overrides:\n  - path: /x\n    commands:\n      - command: curl\n", `override "/x"`},
+		{"in override", "scopes:\n  - path: /x\n    commands:\n      - command: curl\n", `scope "/x"`},
 	} {
 		writeConfig(t, tc.body)
 		_, err := Load()
@@ -242,7 +242,7 @@ denied_commands: [sudo, "-lite-sandbox update"]
 commands:
   - command: npm
     allow: true
-overrides:
+scopes:
   - path: /work/a
     extra_commands: [gradle]           # replaces extra, inherits the rest
   - path: /work/b
@@ -299,7 +299,7 @@ overrides:
 			t.Errorf("%s resolves differently after migrate:\n before %+v\n after  %+v", dir, vb, va)
 		}
 	}
-	for _, o := range reloaded.Overrides {
+	for _, o := range reloaded.Scopes {
 		if o.Path == "/work/b" && o.Commands != nil {
 			t.Errorf("/work/b should keep inheriting, got commands %+v", o.Commands)
 		}
@@ -310,17 +310,17 @@ overrides:
 	}
 }
 
-// TestCommands_OverrideReplacesSection: like every section, an override's
+// TestCommands_ScopeReplacesSection: like every section, a scope's
 // commands list replaces the base's for its directory.
-// TestCommands_OverrideReplacesSection: a replace-mode override's commands
+// TestCommands_ScopeReplacesSection: a replace-mode scope's commands
 // list replaces the base's for its directory. Only merge: true combines the
 // two entry by entry (TestForDirectory_MergesKeyedSections).
-func TestCommands_OverrideReplacesSection(t *testing.T) {
+func TestCommands_ScopeReplacesSection(t *testing.T) {
 	writeConfig(t, `
 commands:
   - command: make
     allow: true
-overrides:
+scopes:
   - path: /work
     commands:
       - command: npm
@@ -334,19 +334,19 @@ overrides:
 		t.Errorf("base allowed = %v", got)
 	}
 	if got := cfg.ForDirectory("/work/x").ExtraCommandList(); !slices.Equal(got, []string{"npm"}) {
-		t.Errorf("override allowed = %v", got)
+		t.Errorf("scope allowed = %v", got)
 	}
-	if !(&DirectoryOverride{Path: "/x", Config: Config{Commands: []CommandEntry{{Command: "y"}}}}).SetsAnySection() {
-		t.Error("an override with commands should report a set section")
+	if !(&Scope{Path: "/x", Config: Config{Commands: []CommandEntry{{Command: "y"}}}}).SetsAnySection() {
+		t.Error("a scope with commands should report a set section")
 	}
 }
 
-// TestCommands_MigrateMergeOverride: a merge: true override keeps only its own
+// TestCommands_MigrateMergeScope: a merge: true scope keeps only its own
 // entries, since `commands` merges entry by entry there.
-func TestCommands_MigrateMergeOverride(t *testing.T) {
+func TestCommands_MigrateMergeScope(t *testing.T) {
 	writeConfig(t, `
 extra_commands: [curl]
-overrides:
+scopes:
   - path: /work
     merge: true
     denied_commands: [npm]
@@ -358,15 +358,15 @@ overrides:
 	if cfg.MigrateCommands() == 0 {
 		t.Fatal("MigrateCommands reported nothing to do")
 	}
-	o := cfg.Overrides[0]
+	o := cfg.Scopes[0]
 	if len(o.Commands) != 1 || o.Commands[0].Command != "npm" || !o.Commands[0].Denies() {
-		t.Errorf("override commands = %+v, want only its own entry", o.Commands)
+		t.Errorf("scope commands = %+v, want only its own entry", o.Commands)
 	}
 	scoped := cfg.ForDirectory("/work/sub")
 	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"curl"}) {
 		t.Errorf("allowed = %v, want the base entry inherited", got)
 	}
 	if got := scoped.DeniedCommandList(); !slices.Equal(got, []string{"npm"}) {
-		t.Errorf("denied = %v, want the override entry", got)
+		t.Errorf("denied = %v, want the scope entry", got)
 	}
 }

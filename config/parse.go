@@ -20,6 +20,7 @@ func Parse(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	cfg.foldDeprecatedOverrides()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -30,9 +31,9 @@ func Parse(data []byte) (*Config, error) {
 // mistake Load tolerates is almost always a typo that would otherwise sit in
 // the file silently doing nothing. On top of Parse's checks it rejects keys
 // the config does not define (a misspelled section or field), a second YAML
-// document, an override with no path or with a nested overrides list (which
-// is ignored), and two overrides for the same path (only one of which could
-// ever apply).
+// document, a scope with no path or with a nested scopes list (which is
+// ignored), and two scopes for the same path (only one of which could ever
+// apply).
 func ParseStrict(data []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -58,7 +59,8 @@ func ParseStrict(data []byte) (*Config, error) {
 	if err := checkSSHHostKeys(&root); err != nil {
 		return nil, err
 	}
-	if err := cfg.validateOverrides(); err != nil {
+	cfg.foldDeprecatedOverrides()
+	if err := cfg.validateScopes(); err != nil {
 		return nil, err
 	}
 	if err := cfg.validate(); err != nil {
@@ -77,29 +79,59 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateOverrides rejects overrides that could never take effect as
-// written: one without a path, one nesting overrides of its own, or a second
-// override for a path an earlier one already names.
-func (c *Config) validateOverrides() error {
-	seen := map[string]bool{}
-	for i, o := range c.Overrides {
-		if strings.TrimSpace(o.Path) == "" {
-			return fmt.Errorf("override #%d has no path", i+1)
+// foldDeprecatedOverrides moves the entries of the deprecated `overrides` key
+// into Scopes, ahead of any `scopes` entries, so the rest of the program only
+// ever reads Scopes. A scope nesting the old key is moved the same way, so
+// validateScopes sees (and rejects) it as a nested scopes list.
+func (c *Config) foldDeprecatedOverrides() {
+	if len(c.DeprecatedOverrides) > 0 {
+		c.Scopes = append(c.DeprecatedOverrides, c.Scopes...)
+		c.DeprecatedOverrides = nil
+	}
+	for i := range c.Scopes {
+		s := &c.Scopes[i]
+		if len(s.DeprecatedOverrides) > 0 {
+			s.Scopes = append(s.DeprecatedOverrides, s.Scopes...)
+			s.DeprecatedOverrides = nil
 		}
-		if len(o.Overrides) > 0 {
-			return fmt.Errorf("override %q: overrides cannot be nested", o.Path)
+	}
+}
+
+// validateScopes rejects scopes that could never take effect as written: one
+// without a path, one nesting scopes of its own, or a second scope for a path
+// an earlier one already names (under `scopes` or the deprecated `overrides`).
+func (c *Config) validateScopes() error {
+	seen := map[string]bool{}
+	for i, o := range c.Scopes {
+		if strings.TrimSpace(o.Path) == "" {
+			return fmt.Errorf("scope #%d has no path", i+1)
+		}
+		if len(o.Scopes) > 0 {
+			return fmt.Errorf("scope %q: scopes cannot be nested", o.Path)
 		}
 		key := expandPath(o.Path)
 		if seen[key] {
-			return fmt.Errorf("override %q: another override already names this path; combine them into one", o.Path)
+			return fmt.Errorf("scope %q: another scope already names this path; combine them into one", o.Path)
 		}
 		seen[key] = true
 	}
 	return nil
 }
 
+// scopeNodes returns the entries of the top-level `scopes` list and of the
+// deprecated `overrides` list, for the checks that walk the node tree.
+func scopeNodes(root *yaml.Node) []*yaml.Node {
+	var out []*yaml.Node
+	for _, key := range []string{"scopes", "overrides"} {
+		if list := mappingValue(root, key); list != nil && list.Kind == yaml.SequenceNode {
+			out = append(out, list.Content...)
+		}
+	}
+	return out
+}
+
 // checkProfileKeys rejects a key the mapping form of a profiles entry does not
-// define, in the base config and in every override.
+// define, in the global config and in every scope.
 func checkProfileKeys(doc *yaml.Node) error {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
 		return nil
@@ -127,18 +159,16 @@ func checkProfileKeys(doc *yaml.Node) error {
 	if err := check(root); err != nil {
 		return err
 	}
-	if overrides := mappingValue(root, "overrides"); overrides != nil && overrides.Kind == yaml.SequenceNode {
-		for _, o := range overrides.Content {
-			if err := check(o); err != nil {
-				return err
-			}
+	for _, o := range scopeNodes(root) {
+		if err := check(o); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 // checkSSHHostKeys rejects a key the mapping form of an ssh hosts entry does
-// not define, in the base config and in every override.
+// not define, in the global config and in every scope.
 func checkSSHHostKeys(doc *yaml.Node) error {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
 		return nil
@@ -165,11 +195,9 @@ func checkSSHHostKeys(doc *yaml.Node) error {
 	if err := check(root); err != nil {
 		return err
 	}
-	if overrides := mappingValue(root, "overrides"); overrides != nil && overrides.Kind == yaml.SequenceNode {
-		for _, o := range overrides.Content {
-			if err := check(o); err != nil {
-				return err
-			}
+	for _, o := range scopeNodes(root) {
+		if err := check(o); err != nil {
+			return err
 		}
 	}
 	return nil

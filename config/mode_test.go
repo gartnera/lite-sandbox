@@ -57,12 +57,12 @@ func TestLoad_RejectsInvalidMode(t *testing.T) {
 		t.Fatalf("expected invalid mode error, got %v", err)
 	}
 
-	// Same for an override's mode.
-	if err := os.WriteFile(configPath, []byte("overrides:\n  - path: /work\n    mode: nope\n"), 0o644); err != nil {
+	// Same for a scope's mode.
+	if err := os.WriteFile(configPath, []byte("scopes:\n  - path: /work\n    mode: nope\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "invalid mode") {
-		t.Fatalf("expected invalid override mode error, got %v", err)
+		t.Fatalf("expected invalid scope mode error, got %v", err)
 	}
 }
 
@@ -86,10 +86,10 @@ func TestLoadSave_ModeAndAudit(t *testing.T) {
 	}
 }
 
-func TestForDirectory_ModeOverride(t *testing.T) {
+func TestForDirectory_ModeScope(t *testing.T) {
 	cfg := &Config{
 		Mode: "allowlist",
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: "/scratch", Config: Config{Mode: "open"}},
 			{Path: "/trusted", Merge: true, Config: Config{Mode: "denylist"}},
 		},
@@ -98,13 +98,13 @@ func TestForDirectory_ModeOverride(t *testing.T) {
 		t.Errorf("base mode = %q", got)
 	}
 	if got := cfg.ForDirectory("/scratch/x").EffectiveMode(); got != ModeOpen {
-		t.Errorf("replace override mode = %q, want open", got)
+		t.Errorf("replace scope mode = %q, want open", got)
 	}
 	if got := cfg.ForDirectory("/trusted").EffectiveMode(); got != ModeDenylist {
-		t.Errorf("merge override mode = %q, want denylist", got)
+		t.Errorf("merge scope mode = %q, want denylist", got)
 	}
-	// An override that sets no mode inherits the base.
-	cfg.Overrides = append(cfg.Overrides, DirectoryOverride{Path: "/other", Config: Config{WritablePaths: []string{"/other/out"}}})
+	// A scope that sets no mode inherits the base.
+	cfg.Scopes = append(cfg.Scopes, Scope{Path: "/other", Config: Config{WritablePaths: []string{"/other/out"}}})
 	if got := cfg.ForDirectory("/other").EffectiveMode(); got != ModeAllowlist {
 		t.Errorf("inherit mode = %q, want allowlist", got)
 	}

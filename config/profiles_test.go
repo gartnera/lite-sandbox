@@ -233,38 +233,38 @@ func TestMigrateRuntimes_PreservesEveryDirectory(t *testing.T) {
 			t.Errorf("not migrated: %+v", got)
 		}
 	})
-	t.Run("replace-mode override replaced the base's runtimes", func(t *testing.T) {
-		// The override's runtimes section replaced the base's wholesale, so go
+	t.Run("replace-mode scope replaced the base's runtimes", func(t *testing.T) {
+		// The scope's runtimes section replaced the base's wholesale, so go
 		// (and cargo publish) were off under /work even though it never says so.
 		cfg := &Config{
 			Runtimes: &RuntimesConfig{
 				Go:   &GoConfig{Enabled: &yes},
 				Rust: &RustConfig{Enabled: &yes, Publish: &yes},
 			},
-			Overrides: []DirectoryOverride{{
+			Scopes: []Scope{{
 				Path:   "/work",
 				Config: Config{Runtimes: &RuntimesConfig{Deno: &DenoConfig{AllowNetwork: &yes}}},
 			}},
 		}
 		checkMigrationPreserves(t, cfg, "/work", "/elsewhere")
 	})
-	t.Run("replace-mode override setting commands only", func(t *testing.T) {
-		// The override replaced the base's commands but inherited its runtimes,
+	t.Run("replace-mode scope setting commands only", func(t *testing.T) {
+		// The scope replaced the base's commands but inherited its runtimes,
 		// so cargo publish (a runtimes flag) stayed allowed under /work.
 		cfg := &Config{
 			Commands: []CommandEntry{{Command: "make", Allow: &yes}},
 			Runtimes: &RuntimesConfig{Rust: &RustConfig{Enabled: &yes, Publish: &yes}},
-			Overrides: []DirectoryOverride{{
+			Scopes: []Scope{{
 				Path:   "/work",
 				Config: Config{Commands: []CommandEntry{{Command: "ninja", Allow: &yes}}},
 			}},
 		}
 		checkMigrationPreserves(t, cfg, "/work", "/elsewhere")
 	})
-	t.Run("merge-mode override", func(t *testing.T) {
+	t.Run("merge-mode scope", func(t *testing.T) {
 		cfg := &Config{
 			Runtimes: &RuntimesConfig{Go: &GoConfig{Enabled: &yes}, Uv: &UvConfig{Enabled: &yes, Publish: &yes}},
-			Overrides: []DirectoryOverride{{
+			Scopes: []Scope{{
 				Path:  "/work",
 				Merge: true,
 				Config: Config{Runtimes: &RuntimesConfig{
@@ -275,8 +275,8 @@ func TestMigrateRuntimes_PreservesEveryDirectory(t *testing.T) {
 		}
 		checkMigrationPreserves(t, cfg, "/work", "/elsewhere")
 	})
-	t.Run("default-on profile turned off in an override", func(t *testing.T) {
-		cfg := &Config{Overrides: []DirectoryOverride{{
+	t.Run("default-on profile turned off in a scope", func(t *testing.T) {
+		cfg := &Config{Scopes: []Scope{{
 			Path:   "/work",
 			Config: Config{Runtimes: &RuntimesConfig{MontyPython: &MontyPythonConfig{Enabled: &no}}},
 		}}}

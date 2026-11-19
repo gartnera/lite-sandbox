@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestMatchDirectoryOverride(t *testing.T) {
+func TestMatchScopePath(t *testing.T) {
 	type entry struct{ dir string }
 	overrides := []entry{
 		{"/work"},
@@ -20,7 +20,7 @@ func TestMatchDirectoryOverride(t *testing.T) {
 	tests := []struct {
 		name string
 		dir  string
-		want int // index into overrides, -1 for no match
+		want int // index into scopes, -1 for no match
 	}{
 		{"no match", "/other", -1},
 		{"exact broad", "/work", 0},
@@ -32,32 +32,32 @@ func TestMatchDirectoryOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := MatchDirectoryOverride(tt.dir, overrides, pathOf); got != tt.want {
-				t.Errorf("MatchDirectoryOverride(%q) = %d, want %d", tt.dir, got, tt.want)
+			if got := MatchScopePath(tt.dir, overrides, pathOf); got != tt.want {
+				t.Errorf("MatchScopePath(%q) = %d, want %d", tt.dir, got, tt.want)
 			}
 		})
 	}
 
 	// Nothing to match against.
-	if got := MatchDirectoryOverride("/work", nil, pathOf); got != -1 {
-		t.Errorf("empty overrides = %d, want -1", got)
+	if got := MatchScopePath("/work", nil, pathOf); got != -1 {
+		t.Errorf("empty scopes = %d, want -1", got)
 	}
 }
 
-func TestDirectoryOverride_SetsAnySection(t *testing.T) {
+func TestScope_SetsAnySection(t *testing.T) {
 	bp := func(b bool) *bool { return &b }
 
-	if o := (&DirectoryOverride{Path: "/x"}); o.SetsAnySection() {
-		t.Error("override with only a path should set no section")
+	if o := (&Scope{Path: "/x"}); o.SetsAnySection() {
+		t.Error("scope with only a path should set no section")
 	}
-	if o := (&DirectoryOverride{Path: "/x", Config: Config{AWS: &AWSConfig{ForceProfile: "p"}}}); !o.SetsAnySection() {
-		t.Error("override with an aws section should report a set section")
+	if o := (&Scope{Path: "/x", Config: Config{AWS: &AWSConfig{ForceProfile: "p"}}}); !o.SetsAnySection() {
+		t.Error("scope with an aws section should report a set section")
 	}
-	if o := (&DirectoryOverride{Path: "/x", Config: Config{WritablePaths: []string{"/x/out"}}}); !o.SetsAnySection() {
-		t.Error("override with writable_paths should report a set section")
+	if o := (&Scope{Path: "/x", Config: Config{WritablePaths: []string{"/x/out"}}}); !o.SetsAnySection() {
+		t.Error("scope with writable_paths should report a set section")
 	}
-	if o := (&DirectoryOverride{Path: "/x", Config: Config{OSSandbox: bp(false)}}); !o.SetsAnySection() {
-		t.Error("override with os_sandbox set (even to false) should report a set section")
+	if o := (&Scope{Path: "/x", Config: Config{OSSandbox: bp(false)}}); !o.SetsAnySection() {
+		t.Error("scope with os_sandbox set (even to false) should report a set section")
 	}
 }
 
@@ -77,7 +77,7 @@ commands:
     allow: true
   - command: npm
     allow: true
-overrides:
+scopes:
   - path: /work
     merge: true
     paths:
@@ -98,13 +98,13 @@ overrides:
 
 	scoped := cfg.ForDirectory("/work/app")
 	// The base's untouched entry is inherited, the restated one takes the
-	// override's value (so /base/out is no longer writable here), and the new
+	// scope's value (so /base/out is no longer writable here), and the new
 	// entry is added.
 	if got := scoped.ReadablePathList(); !slices.Equal(got, []string{"/base/data", "/base/out"}) {
 		t.Errorf("readable = %v, want the inherited and the restated entry", got)
 	}
 	if got := scoped.WritablePathList(); !slices.Equal(got, []string{"/work/artifacts"}) {
-		t.Errorf("writable = %v, want only the override's new entry", got)
+		t.Errorf("writable = %v, want only the scope's new entry", got)
 	}
 	if got := scoped.ExtraCommandList(); !slices.Equal(got, []string{"npm", "pnpm"}) {
 		t.Errorf("allowed commands = %v, want the inherited and the new entry", got)
@@ -135,7 +135,7 @@ func TestForDirectory_KeyedSectionsMatchBySubject(t *testing.T) {
 	cfg := &Config{
 		Paths:    []PathEntry{{Path: "~/scratch", Write: &yes}},
 		Commands: []CommandEntry{{Command: "uv run pyright", Allow: &yes}},
-		Overrides: []DirectoryOverride{{
+		Scopes: []Scope{{
 			Path:  "/work",
 			Merge: true,
 			Config: Config{
@@ -149,17 +149,17 @@ func TestForDirectory_KeyedSectionsMatchBySubject(t *testing.T) {
 		t.Errorf("writable = %v, want the restated entry to have replaced the grant", got)
 	}
 	if got := scoped.ExpandedReadablePaths(); !slices.Equal(got, []string{filepath.Join(home, "scratch")}) {
-		t.Errorf("readable = %v, want the override's entry", got)
+		t.Errorf("readable = %v, want the scope's entry", got)
 	}
 	if got := scoped.ExtraCommandList(); len(got) != 0 {
 		t.Errorf("allowed commands = %v, want the restated entry to have replaced the allow", got)
 	}
 	if got := scoped.DeniedCommandList(); len(got) != 1 {
-		t.Errorf("denied commands = %v, want the override's entry", got)
+		t.Errorf("denied commands = %v, want the scope's entry", got)
 	}
 }
 
-// TestPruneRestatedEntries: a merge: true override stores the delta. An entry
+// TestPruneRestatedEntries: a merge: true scope stores the delta. An entry
 // repeating the base is dropped (the merge inherits it either way), one that
 // changes a base entry or names a new subject is kept.
 func TestPruneRestatedEntries(t *testing.T) {
@@ -171,7 +171,7 @@ func TestPruneRestatedEntries(t *testing.T) {
 		},
 		Commands: []CommandEntry{{Command: "curl", Allow: &yes}},
 	}
-	o := &DirectoryOverride{Path: "/work", Merge: true, Config: Config{
+	o := &Scope{Path: "/work", Merge: true, Config: Config{
 		Paths: []PathEntry{
 			{Path: "/base/data", Read: &yes}, // same as the base: inherited
 			{Path: "/base/out", Read: &yes},  // changes the base's entry: kept
@@ -189,21 +189,21 @@ func TestPruneRestatedEntries(t *testing.T) {
 		t.Errorf("commands = %+v, want the repeated entry dropped and the section cleared", o.Commands)
 	}
 	if o.SetsAnySection() != true {
-		t.Error("the override still sets paths")
+		t.Error("the scope still sets paths")
 	}
-	// An override reduced to nothing is reported as setting nothing, so the
+	// A scope reduced to nothing is reported as setting nothing, so the
 	// caller can drop it.
-	empty := &DirectoryOverride{Path: "/work", Merge: true, Config: Config{
+	empty := &Scope{Path: "/work", Merge: true, Config: Config{
 		Paths: []PathEntry{{Path: "/base/data", Read: &yes}},
 	}}
 	PruneRestatedEntries(empty, base)
 	if empty.SetsAnySection() {
-		t.Errorf("override = %+v, want nothing left after pruning", empty.Config)
+		t.Errorf("scope = %+v, want nothing left after pruning", empty.Config)
 	}
-	// A replace-mode override is left alone: omitting an entry there drops it.
-	replace := &DirectoryOverride{Path: "/work", Config: Config{Paths: []PathEntry{{Path: "/base/data", Read: &yes}}}}
+	// A replace-mode scope is left alone: omitting an entry there drops it.
+	replace := &Scope{Path: "/work", Config: Config{Paths: []PathEntry{{Path: "/base/data", Read: &yes}}}}
 	PruneRestatedEntries(replace, base)
 	if len(replace.Paths) != 1 {
-		t.Errorf("replace-mode override paths = %+v, want them left alone", replace.Paths)
+		t.Errorf("replace-mode scope paths = %+v, want them left alone", replace.Paths)
 	}
 }

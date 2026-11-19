@@ -38,7 +38,7 @@ lite-sandbox config ssh git-signing enable # sign commits and tags (see below)
 lite-sandbox config ssh disable            # remove the section
 ```
 
-Like every section it can be set [per directory](configuration.md#per-directory-overrides)
+Like every section it can be set [per directory](configuration.md#scopes)
 (`lite-sandbox config ssh hosts add deploy-box`). `ssh: {}` (or just
 `lite-sandbox config ssh agent enable`) gives git's remote commands the agent
 without allowing `ssh` itself.
