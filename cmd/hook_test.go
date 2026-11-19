@@ -450,6 +450,10 @@ func TestDenyBuiltinBash(t *testing.T) {
 	if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "mcp__lite-sandbox__bash") {
 		t.Errorf("deny reason should redirect to the MCP tool, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
 	}
+	// The model knows the command it sent; the redirect doesn't echo it.
+	if reason := got.HookSpecificOutput.PermissionDecisionReason; strings.Contains(reason, "ls -la") || strings.Contains(reason, "Attempted action") {
+		t.Errorf("deny reason echoes the attempted action: %s", reason)
+	}
 
 	// Bash is denied even when tool_input failed to parse (ToolInput nil).
 	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}
@@ -474,7 +478,7 @@ func TestBuiltinMonitor(t *testing.T) {
 		t.Fatalf("expected Monitor to be denied, got %+v", got)
 	}
 	reason := got.HookSpecificOutput.PermissionDecisionReason
-	for _, want := range []string{"built-in Monitor tool is disabled", "tail -f build.log", "background shell", "mcp__lite-sandbox__bash", "run_in_background: true"} {
+	for _, want := range []string{"built-in Monitor tool is disabled", "background shell", "mcp__lite-sandbox__bash", "run_in_background: true", "exit once the condition"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("deny reason does not contain %q: %s", want, reason)
 		}
@@ -483,6 +487,10 @@ func TestBuiltinMonitor(t *testing.T) {
 	// is required.
 	if strings.Contains(reason, "bypasses the sandbox") {
 		t.Errorf("deny reason repeats the rationale: %s", reason)
+	}
+	// Nor does it echo back the command the model just sent.
+	if strings.Contains(reason, "tail -f build.log") || strings.Contains(reason, "Attempted action") {
+		t.Errorf("deny reason echoes the attempted action: %s", reason)
 	}
 	if evaluate(&hook.Event{ToolName: hook.ToolMonitor, CWD: cwd}, hookOptions{}) == nil {
 		t.Error("expected Monitor to be denied even without parsed tool input")
