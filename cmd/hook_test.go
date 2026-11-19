@@ -450,6 +450,10 @@ func TestDenyBuiltinBash(t *testing.T) {
 	if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "mcp__lite-sandbox__bash") {
 		t.Errorf("deny reason should redirect to the MCP tool, got: %s", got.HookSpecificOutput.PermissionDecisionReason)
 	}
+	// The model knows the command it sent; the redirect doesn't echo it.
+	if reason := got.HookSpecificOutput.PermissionDecisionReason; strings.Contains(reason, "ls -la") || strings.Contains(reason, "Attempted action") {
+		t.Errorf("deny reason echoes the attempted action: %s", reason)
+	}
 
 	// Bash is denied even when tool_input failed to parse (ToolInput nil).
 	bare := &hook.Event{ToolName: hook.ToolBash, CWD: cwd}

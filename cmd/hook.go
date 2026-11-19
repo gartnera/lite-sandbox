@@ -499,8 +499,9 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 		// where a stream that never ends would have to be polled.
 		instead = "Run it in a background shell instead: call " + tool +
 			" with run_in_background: true. Write the command to exit once the condition " +
-			"you are waiting for is met (e.g. an until-loop that checks and sleeps), " +
-			"so its finishing is the signal, rather than streaming output forever; " +
+			"you are waiting for is met and prints a line saying so (e.g. an until-loop " +
+			"that checks and sleeps, then echoes), so its finishing is the signal, " +
+			"rather than streaming output forever; " +
 			"read the output file it names to follow progress."
 	}
 	// The model knows the command it just sent, so the reason does not
