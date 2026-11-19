@@ -103,9 +103,8 @@ func TestDeniedCommands_Modes(t *testing.T) {
 }
 
 // TestDeniedCommands_OutranksEscapeHatches: extra_commands and
-// unsandboxed_commands allow a command and skip validation, which for a bare
-// entry also skips AST parsing entirely. The deny list is the one gate they
-// must not lift.
+// unsandboxed_commands allow a command past the whitelist and its argument
+// validators. The deny list is the one gate they must not lift.
 func TestDeniedCommands_OutranksEscapeHatches(t *testing.T) {
 	workDir := t.TempDir()
 	for _, c := range []struct {
@@ -117,11 +116,6 @@ func TestDeniedCommands_OutranksEscapeHatches(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := newDenySandbox(t, config.ModeDenylist, workDir, c.cfg)
-			// The raw-bash bypass must be declined, or the command would never
-			// reach validation at all.
-			if s.isExtraCommandInvocation("lite-sandbox config mode set open") {
-				t.Error("a denied command must not take the unparsed raw-bash path")
-			}
 			err := s.ValidateCommand("lite-sandbox config mode set open", workDir, []string{workDir}, []string{workDir})
 			if err == nil || !strings.Contains(err.Error(), "command deny list") {
 				t.Fatalf("deny must outrank %s: %v", c.name, err)

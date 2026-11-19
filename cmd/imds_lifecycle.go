@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -98,6 +100,7 @@ func (l *imdsLifecycle) publishLocked() {
 		l.sandbox.SetIMDSEndpoint("")
 		l.sandbox.SetIMDSRegion("")
 		l.sandbox.SetIMDSProfiles(nil)
+		l.sandbox.SetAWSCredentialNotes(nil)
 		return
 	}
 
@@ -113,6 +116,27 @@ func (l *imdsLifecycle) publishLocked() {
 	l.sandbox.SetIMDSEndpoint(def.Endpoint)
 	l.sandbox.SetIMDSRegion(def.Region)
 	l.sandbox.SetIMDSProfiles(targets)
+	l.sandbox.SetAWSCredentialNotes(credentialNotes(l.servers))
+}
+
+// credentialNotes returns the sandbox's credential-failure reporter for a
+// server pool: one imds.Hint per profile whose server recorded a failed
+// credential fetch at or after since, in profile order. It captures a copy of
+// the pool, so it never takes l.mu (a command finishing during a config
+// reload must not wait on the reload), and publishLocked installs a fresh one
+// whenever the pool changes.
+func credentialNotes(servers map[string]*imds.Server) func(since time.Time) []string {
+	pool := maps.Clone(servers)
+	profiles := slices.Sorted(maps.Keys(pool))
+	return func(since time.Time) []string {
+		var notes []string
+		for _, p := range profiles {
+			if err := pool[p].CredentialErrorSince(since); err != nil {
+				notes = append(notes, imds.Hint(p, err))
+			}
+		}
+		return notes
+	}
 }
 
 // endpoint returns the default profile's server URL, or "" when no server is
@@ -138,6 +162,7 @@ func (l *imdsLifecycle) stop() {
 	l.sandbox.SetIMDSEndpoint("")
 	l.sandbox.SetIMDSRegion("")
 	l.sandbox.SetIMDSProfiles(nil)
+	l.sandbox.SetAWSCredentialNotes(nil)
 }
 
 // shutdown gracefully stops one server. l.mu must be held.

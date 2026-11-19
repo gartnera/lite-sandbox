@@ -29,19 +29,22 @@ import (
 // Only a direct invocation of the command, by its bare name, is routed here
 // (`gh pr list`, not `./gh`, `/usr/bin/gh`, `timeout 60 gh` or `xargs gh`;
 // those run in the shared worker, without the grant). The command keeps its
-// argument validators, and three things keep the agent from running code of
+// argument validators — a bare allow does not lift them (allowLiftsValidator),
+// only an allow naming the subcommand does — and nothing a trusted script runs
+// comes here (dispatchExec). Two things keep the agent from running code of
 // its own inside the worker:
 //
 //   - the binary is resolved against the server's PATH and refused when it
 //     lies somewhere the agent can write (scopedBinary);
 //   - the command gets the server's environment, not the variables the agent
 //     set (GH_CONFIG_DIR, GIT_*, a pager, an editor), with the PATH entries
-//     the agent can write removed (safePath);
-//   - a bare allow, which runs the whole command line through `bash -c`,
-//     never reaches a scoped worker: it runs in the shared one.
+//     the agent can write removed (safePath).
 //
 // What it cannot do is limit the CLI itself: once it has the credential it
-// can do anything the credential allows, within what its validators refuse.
+// can do anything the credential allows, within what its validators refuse —
+// and an allow naming a subcommand lifts those for it, so a subcommand that
+// runs code (gh extension exec, an alias with --shell), opened that way, runs
+// it in the worker, with the credential.
 // Nor can it stop the CLI from running code it finds in the working
 // directory, which the scoped worker runs in: a git it starts reads the
 // project's .git/config and hooks. So only grant this to CLIs, and allow only

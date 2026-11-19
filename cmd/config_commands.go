@@ -17,11 +17,12 @@ var configCommandsCmd = &cobra.Command{
 command plus what applies to it:
 
   allow: true             allowed past the command whitelist          (allow <command>)
-                          a bare name ("curl") allows any arguments and, when it
-                          leads an invocation, skips bash AST parsing entirely (the
-                          command string runs via real bash); a name plus arguments
-                          ("uv run pyright") allows only invocations whose leading
-                          non-flag arguments match, and is still validated
+                          a bare name ("curl") allows any arguments; a name plus
+                          arguments ("uv run pyright") allows only invocations
+                          whose leading non-flag arguments match; the command line
+                          around it is validated either way. A bare script path
+                          ("./build.sh") also skips most checks on what the script
+                          runs (see allow --help)
   no_sandbox: true        the allowed command runs directly on the host, outside
                           the OS sandbox worker even when it is enabled — for a
                           command that cannot run confined  (allow ... --no-sandbox)
@@ -94,11 +95,22 @@ var configCommandsListCmd = &cobra.Command{
 var configCommandsAllowCmd = &cobra.Command{
 	Use:   "allow <command>...",
 	Short: "Allow commands beyond the whitelist (--no-sandbox to run them on the host, outside the OS sandbox)",
-	Long: `A bare name ("curl") allows the command with any arguments and, when it leads
-an invocation, skips bash AST parsing entirely — the whole command string runs
-via real bash (inside the OS sandbox when that is enabled). Quote a name plus
-arguments ("uv run pyright") to allow only invocations whose leading non-flag
-arguments match; those still go through normal parsing and validation.
+	Long: `A bare name ("curl") allows the command with any arguments, past the command
+whitelist and the command's own argument checks. Quote a name plus arguments
+("uv run pyright") to allow only invocations whose leading non-flag arguments
+match. Either way the rest of the command line is still parsed and validated:
+other commands on it, its redirects, and the paths it names.
+
+A bare script path ("./scripts/build.sh") trusts the script: it runs through
+the sandbox's interpreter like any other script, but the commands it runs are
+not held to the whitelist, their argument checks, the shell-construct rules
+(it may set PATH) or the deny list. Commands entries with ask: true and the
+path boundary still apply to it. Everything it runs stays in the OS sandbox's
+shared worker, unless the script itself is allowed with --no-sandbox, which
+runs all of it on the host.
+
+A bare name that a command-scoped path grant names (paths allow --commands)
+keeps its argument checks, since it runs with that grant.
 
 --no-sandbox makes matching invocations run directly on the host, bypassing the
 OS sandbox worker (and the docker filtering proxy) even when it is enabled. It

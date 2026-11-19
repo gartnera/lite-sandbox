@@ -16,8 +16,9 @@ somewhere in the user's message, for example "fix X /autodev". In that case
 the request is the rest of that message.
 
 Invoking autodev counts as the user's explicit request to commit, push, open a
-pull request, label it, enable auto-merge and merge it once CI is green.
-**Every merge to `main` is released**, so the bar for "green" is the full CI.
+pull request, label it, and enable auto-merge as soon as the PR is open.
+**Every merge to `main` is released.** The checks `main` requires gate the
+merge, and you are responsible for the checks it doesn't require (see step 9).
 
 This skill says *what* to do and *when*. It doesn't say which tools to use.
 Use whatever this environment provides for git, GitHub and watching the PR,
@@ -33,6 +34,9 @@ activity.
     (`docs/security.md`) in a way the request doesn't clearly ask for, or
   - the work needs something you can't get, such as credentials, access, or a
     decision about a breaking change.
+
+  Whenever you stop with the PR still open, turn off its auto-merge first, so
+  it can't merge later with nobody watching.
 - **Stay in scope.** If you find an unrelated problem that doesn't block this
   change (a bug, a flaky test, stale docs, a lint nit in code you didn't
   touch), don't fix it. File it as a GitHub issue (see
@@ -52,6 +56,11 @@ activity.
   it.
 
 ## 1. Develop
+
+Before you start, search the repository's open issues and pull requests for
+the requested work. If an open issue describes it, note the number for
+step 8. If an open PR already does it, stop and report the PR instead of
+duplicating it.
 
 Work on the branch the environment designates. If it doesn't designate one,
 create a new branch from an up-to-date `main`. Read enough of the code to
@@ -85,7 +94,8 @@ they apply:
 If a suite can't run here (a missing tool, a blocked network), note it in the
 PR and rely on CI. Fix every failure before you move on. If a failure looks
 unrelated to your change, check it against `main`. If it fails there too, it's
-an unrelated problem: file an issue, and fix it only if it blocks this change.
+an unrelated problem: report it as in [Filing issues](#filing-issues), and fix
+it only if it blocks this change.
 
 ## 3. Commit and rebase
 
@@ -109,7 +119,7 @@ Put each finding in exactly one bucket and log it:
 | --- | --- | --- |
 | **Fix** | It's real, and it's in code this change adds or alters, or caused by it | Fix it in this PR |
 | **Reject** | It's a false positive, or it contradicts the documented design | Log one line on why |
-| **Issue** | It's real, but it's pre-existing or unrelated and doesn't block this change | File a GitHub issue; don't fix it |
+| **Issue** | It's real, but it's pre-existing or unrelated and doesn't block this change | Report it as in [Filing issues](#filing-issues); don't fix it |
 
 Check a finding against the code before you act on it. Reviewers can be wrong.
 
@@ -153,34 +163,40 @@ filed during this run.
 
 Add **exactly one** `release:*` label: `release:minor` for a feature,
 `release:patch` for a fix or refactor, `release:skip` for a docs-only,
-CI-only or tests-only change, `release:major` for a breaking change.
+CI-only or tests-only change, `release:major` for a breaking change. Then
+enable auto-merge right away (step 9).
 
 ## 9. Auto-merge and watch
 
-Nothing in this repo gates a merge on CI: there is no merge queue, and `main`
-may not require status checks. Enabling auto-merge right away could therefore
-merge, and release, before CI runs.
-
-- Wait until every check on the PR's current head commit is green. Then
-  enable auto-merge with the squash method. If GitHub won't enable it
-  (for example because the PR is already mergeable), squash-merge the green
-  PR directly.
+- Enable auto-merge with the squash method as soon as the PR is created and
+  labeled, without waiting for CI. GitHub then merges it once the required
+  checks pass.
+- Auto-merge doesn't wait for checks `main` doesn't require, such as the
+  Docs link check and the release-label check. Step 2's link check and
+  step 8's single label cover them. If one fails before the merge, fix it
+  right away. If it fails after the merge, fix it forward.
+- If GitHub won't enable auto-merge (for example because the PR is already
+  mergeable, meaning no required check is pending), don't merge right away:
+  wait until every check on the PR's current head commit is green, then
+  squash-merge it directly.
 - Keep watching until the PR merges or closes, in whatever way this
   environment supports.
 - **CI failure:** read the failing job's log and reproduce the failure
   locally with the job's command and environment. Fix it and show the same
   command passing. If the fix touches the security boundary, run step 7 on
-  it. Commit, rebase, push, and wait for green again before re-enabling
-  auto-merge if it was dropped. If the failure can't be reproduced here (for
+  it. Commit, rebase, push, and re-enable auto-merge right away if it was
+  dropped. If the failure can't be reproduced here (for
   example, it only happens on macOS), reason from the log and say so in the
   PR. If a failure is unrelated to the diff and looks flaky, rerun the failed
-  jobs once. If it fails again, file an issue.
+  jobs once. If it fails again, report it as in
+  [Filing issues](#filing-issues).
 - **Merge conflict:** rebase onto `main`, resolve, rerun step 2, and push.
-- **Review comments from people:** triage them as in step 5. Reply to the
-  ones you reject with the reason. Don't resolve or dismiss anyone else's
-  review.
-- If the same failure survives three fix attempts, stop. Leave the PR open
-  with auto-merge off and report what you tried.
+- **Review comments from people:** triage them as in step 5. While you work
+  on a **Fix**, turn off auto-merge so the PR can't merge without it, and
+  turn it back on once the fix is pushed. Reply to the ones you reject with
+  the reason. Don't resolve or dismiss anyone else's review.
+- If the same failure survives three fix attempts, stop. Disable auto-merge,
+  leave the PR open, and report what you tried.
 
 After the merge, check that CI and the release on `main` pass for the merge
 commit, and that any issue the PR closes is closed. If this change broke `main`, start a new autodev run to fix it
@@ -188,16 +204,34 @@ forward.
 
 ## Filing issues
 
-For each unrelated, non-blocking problem:
+Never file an issue without searching first. Parallel autodev runs review
+neighboring code and tend to find the same problems, so duplicates are easy
+to create. For each unrelated, non-blocking problem:
 
-1. Search the repository's issues, open and closed, for an existing one. If
-   one covers the problem, comment on it only if you have new information.
-2. Otherwise file a new issue with a specific title. In the body, cover:
+1. **Search** the repository's issues, open and closed, and its open pull
+   requests. Run several searches, not one: the command or function name, the
+   flag or option, the file path, and a few words of the symptom. Read the
+   candidates' bodies, not just their titles: a differently worded issue can
+   describe the same root cause.
+2. **If an existing issue or PR covers it**, don't file a new one:
+   - open issue: comment only if you have new information, such as another
+     trigger, a reproduction, or a `path:line` it doesn't name;
+   - closed as fixed, but the problem is back on `main`: file a new issue
+     that links the old one and says it regressed;
+   - closed as not planned or as a duplicate: respect that decision and
+     don't refile it;
+   - an open PR already fixes it: link the PR and don't file anything.
+
+   Link the existing issue or PR from your PR's **Review** section.
+3. **Otherwise file a new issue** with a specific title. Right before you
+   create it, rerun the most specific search, since another run may have
+   filed it in the meantime. In the body, cover:
    - what's wrong and where, as `path:line` on `main`;
    - how to reproduce it, or the evidence;
+   - related issues you found but judged different, and why;
    - why it's out of scope for the autodev PR, with a link to the PR.
-3. Link the issue from the PR's **Review** section and list it in the final
-   report.
+4. Link the issue from the PR's **Review** section and list it in the final
+   report, marking which issues you filed and which already existed.
 
 File an issue only for a problem you have confirmed, not for style
 preferences or speculation.
@@ -210,5 +244,5 @@ When the PR merges, or when you stop, give the user:
 - what changed, in two or three lines;
 - what you tested locally, and what CI covered;
 - the review findings and how you triaged them;
-- the issues you filed;
+- the issues you filed, and the existing issues you linked or commented on;
 - anything still unresolved.

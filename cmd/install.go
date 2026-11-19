@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gartnera/lite-sandbox/internal/hook"
 )
 
 var installWithToolHook bool
@@ -393,7 +395,9 @@ func runInstallClaude(binPath string) error {
 	// permissions.allow from settings.json (anthropics/claude-code#18950), but
 	// PreToolUse hooks still fire there, so this is what keeps the sandbox tools
 	// prompt-free inside them.
-	if err := reconcilePreToolUseHook(claudeDir, binPath, plan.hookCommand, plan.hookMatcher); err != nil {
+	// The PermissionRequest hook covers plan mode, where Claude Code ignores
+	// both the PreToolUse allow and permissions.allow for the MCP tools.
+	if err := reconcileClaudeHooks(claudeDir, binPath, plan); err != nil {
 		return fmt.Errorf("failed to configure tool hook: %w", err)
 	}
 	switch {
@@ -405,6 +409,9 @@ func runInstallClaude(binPath string) error {
 		fmt.Printf("✓ Registered PreToolUse hook to AST-check built-in Bash (runs unsandboxed) in %s\n", settingsPath)
 	case plan.configMCP:
 		fmt.Printf("✓ Registered PreToolUse hook to pre-approve the sandbox tools in subagents and skills in %s\n", settingsPath)
+	}
+	if plan.permissionHookCommand != "" {
+		fmt.Printf("✓ Registered PermissionRequest hook to pre-approve the sandbox tools in plan mode in %s\n", settingsPath)
 	}
 
 	fmt.Println("\n✓ Claude Code installation complete!")
@@ -609,19 +616,38 @@ func setStringList(obj map[string]json.RawMessage, key string, list []string) er
 // conflicting one behind), then registers `command` under `matcher` when command
 // is non-empty. binPath identifies our hook entries to remove.
 func reconcilePreToolUseHook(claudeDir, binPath, command, matcher string) error {
+	return reconcileClaudeHooks(claudeDir, binPath, claudePlan{hookCommand: command, hookMatcher: matcher})
+}
+
+// reconcileClaudeHooks makes the registered lite-sandbox hooks match the
+// plan: the PreToolUse hook (hookCommand under hookMatcher) and the
+// PermissionRequest hook for the MCP tools (permissionHookCommand). Stale
+// lite-sandbox entries for either event are removed first.
+func reconcileClaudeHooks(claudeDir, binPath string, plan claudePlan) error {
 	if err := removeLiteSandboxHooks(claudeDir, binPath); err != nil {
 		return err
 	}
-	if command == "" {
-		return nil
+	if plan.hookCommand != "" {
+		if err := configureClaudeHook(claudeDir, hook.EventPreToolUse, plan.hookCommand, plan.hookMatcher); err != nil {
+			return err
+		}
 	}
-	return configurePreToolUseHook(claudeDir, command, matcher)
+	if plan.permissionHookCommand != "" {
+		if err := configureClaudeHook(claudeDir, hook.EventPermissionRequest, plan.permissionHookCommand, mcpToolMatcher); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// removeLiteSandboxHooks strips any PreToolUse hook entry that invokes the
-// lite-sandbox binary (command `<binPath> hook ...`), dropping matcher groups
-// that become empty. Other hooks and settings are preserved. It is a no-op when
-// no hooks are configured.
+// liteSandboxHookEvents are the settings.json hook events lite-sandbox
+// registers entries under.
+var liteSandboxHookEvents = []hook.EventName{hook.EventPreToolUse, hook.EventPermissionRequest}
+
+// removeLiteSandboxHooks strips any PreToolUse or PermissionRequest hook entry
+// that invokes the lite-sandbox binary (command `<binPath> hook ...`),
+// dropping matcher groups that become empty. Other hooks and settings are
+// preserved. It is a no-op when no hooks are configured.
 func removeLiteSandboxHooks(claudeDir, binPath string) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
@@ -643,28 +669,33 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 		return cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ")
 	}
 
-	pre := asSlice(hooks["PreToolUse"])
-	var kept []any
-	for _, rawGroup := range pre {
-		group := asMap(rawGroup)
-		var cmds []any
-		for _, c := range asSlice(group["hooks"]) {
-			if isOurs(asString(asMap(c)["command"])) {
-				continue
-			}
-			cmds = append(cmds, c)
-		}
-		if len(cmds) == 0 {
-			// Whole group was lite-sandbox's; drop it.
+	for _, event := range liteSandboxHookEvents {
+		key := string(event)
+		if _, ok := hooks[key]; !ok {
 			continue
 		}
-		group["hooks"] = cmds
-		kept = append(kept, group)
-	}
-	if len(kept) == 0 {
-		delete(hooks, "PreToolUse")
-	} else {
-		hooks["PreToolUse"] = kept
+		var kept []any
+		for _, rawGroup := range asSlice(hooks[key]) {
+			group := asMap(rawGroup)
+			var cmds []any
+			for _, c := range asSlice(group["hooks"]) {
+				if isOurs(asString(asMap(c)["command"])) {
+					continue
+				}
+				cmds = append(cmds, c)
+			}
+			if len(cmds) == 0 {
+				// Whole group was lite-sandbox's; drop it.
+				continue
+			}
+			group["hooks"] = cmds
+			kept = append(kept, group)
+		}
+		if len(kept) == 0 {
+			delete(hooks, key)
+		} else {
+			hooks[key] = kept
+		}
 	}
 
 	hooksRaw, err := json.Marshal(hooks)
@@ -677,12 +708,19 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 }
 
 // configurePreToolUseHook registers (or updates) a PreToolUse hook entry in
+// settings.json that invokes `command` for the given tool matcher (see
+// configureClaudeHook).
+func configurePreToolUseHook(claudeDir, command, matcher string) error {
+	return configureClaudeHook(claudeDir, hook.EventPreToolUse, command, matcher)
+}
+
+// configureClaudeHook registers (or updates) a hook entry for event in
 // settings.json that invokes `command` for the given tool matcher. Existing
 // settings and other hooks are preserved, and the operation is idempotent:
 // re-running with the same command/matcher does not duplicate the entry. The
 // hooks subtree is manipulated as untyped JSON so unrelated events
 // (PostToolUse, etc.) and fields (timeouts) survive the round-trip.
-func configurePreToolUseHook(claudeDir, command, matcher string) error {
+func configureClaudeHook(claudeDir string, event hook.EventName, command, matcher string) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	cfg, err := readSettingsFile(settingsPath)
@@ -700,7 +738,7 @@ func configurePreToolUseHook(claudeDir, command, matcher string) error {
 		hooks = map[string]any{}
 	}
 
-	pre := asSlice(hooks["PreToolUse"])
+	pre := asSlice(hooks[string(event)])
 	entry := map[string]any{"type": "command", "command": command}
 
 	// Find an existing matcher group; update it in place if present.
@@ -731,7 +769,7 @@ func configurePreToolUseHook(claudeDir, command, matcher string) error {
 	if !updated {
 		pre = append(pre, map[string]any{"matcher": matcher, "hooks": []any{entry}})
 	}
-	hooks["PreToolUse"] = pre
+	hooks[string(event)] = pre
 
 	hooksRaw, err := json.Marshal(hooks)
 	if err != nil {

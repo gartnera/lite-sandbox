@@ -931,6 +931,72 @@ bash -c 'echo "child=[${BASH_SOURCE[0]}]"'
 	}
 }
 
+// A nested script's line numbers are the ones in its file, however it is
+// invoked: its arguments, shell flags and shebang line must not shift them.
+func TestNestedScript_LineNumbers(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		command string
+		want    string
+	}{
+		{"direct", "echo \"line=$LINENO\"\n", `./s.sh`, "line=1\n"},
+		{"direct with args", "echo \"line=$LINENO $*\"\n", `./s.sh x 'y z'`, "line=1 x y z\n"},
+		{"shebang", "#!/bin/bash\necho \"line=$LINENO\"\n", `./s.sh`, "line=2\n"},
+		{"shebang with args", "#!/bin/bash\necho \"line=$LINENO $1\"\n", `./s.sh x`, "line=2 x\n"},
+		{"bash script", "echo \"line=$LINENO\"\n", `bash s.sh`, "line=1\n"},
+		{"bash flags", "echo \"line=$LINENO\"\n", `bash -e -o pipefail s.sh`, "line=1\n"},
+		{"bash flags and args", "echo \"line=$LINENO $1\"\n", `bash -eu s.sh x`, "line=1 x\n"},
+		{"bash -c flags", "", `bash -e -c 'echo "line=$LINENO"'`, "line=1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.script != "" {
+				if err := os.WriteFile(filepath.Join(dir, "s.sh"), []byte(tt.script), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := executeInDirWithSandbox(t, newTestSandboxWithLocalBinaryExecution(), dir, tt.command)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out != tt.want {
+				t.Errorf("output %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
+// A parse error in a script run with arguments or shell flags names the line
+// it is on.
+func TestNestedScript_ParseErrorLine(t *testing.T) {
+	for _, command := range []string{`./s.sh x`, `bash -e s.sh`} {
+		t.Run(command, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "s.sh"), []byte("echo ok\nif then\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			_, err := executeInDirWithSandbox(t, newTestSandboxWithLocalBinaryExecution(), dir, command)
+			if err == nil || !strings.Contains(err.Error(), "2:") || strings.Contains(err.Error(), "3:") {
+				t.Errorf("error should name line 2, got %v", err)
+			}
+		})
+	}
+}
+
+// bash refuses to start, with status 2, on a shell option it does not know.
+func TestExecuteBash_UnknownSetOption(t *testing.T) {
+	dir := t.TempDir()
+	out, err := executeInDir(t, dir, `bash -o bogus -c 'echo ran'; echo "status=$?"`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "ran") || !strings.Contains(out, "status=2") || !strings.Contains(out, "bogus") {
+		t.Errorf("output %q, want the option refused with status 2", out)
+	}
+}
+
 func TestExecuteScript_BlockedWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "script.sh"), []byte("echo hello\n"), 0755)
@@ -1328,5 +1394,522 @@ func TestExecuteScript_SlashPathWithoutDotIsAScript(t *testing.T) {
 				t.Fatalf("expected error about the read-write redirection, got: %v", err)
 			}
 		})
+	}
+}
+
+// TestExecuteScript_BareScriptRunsThroughInterpreter verifies that a script a
+// bare allow names runs through the sandbox's own interpreter, not a native
+// bash: the interpreter's `$!` is a goroutine id ("g1"), where bash's is a pid.
+func TestExecuteScript_BareScriptRunsThroughInterpreter(t *testing.T) {
+	dir := t.TempDir()
+	body := "#!/bin/bash\ntrue &\necho bg=$!\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"./run.sh"}}, dir)
+	for _, cmd := range []string{"./run.sh", "bash run.sh", "true && ./run.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if !strings.Contains(out, "bg=g") {
+			t.Errorf("%s: output %q, want the interpreter's job id (bg=g...)", cmd, out)
+		}
+	}
+}
+
+// TestExecuteScript_NoSandboxScriptRunsNatively: a script allowed with
+// no_sandbox runs with the host's bash, not the sandbox's interpreter (its $!
+// is a pid, not the interpreter's job id), however it is invoked, and nothing
+// it runs is checked, statically or at runtime. One run by a script allowed
+// without no_sandbox stays where that script runs, in the interpreter.
+func TestExecuteScript_NoSandboxScriptRunsNatively(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// curl is denied and protoc is off the whitelist; neither runs.
+	body := "true &\necho bg=$!\nwait\nif false; then curl https://example.com; protoc; fi\necho arg=$1\n"
+	write("host.sh", "#!/bin/bash\n"+body)
+	write("noshebang.sh", body)
+	write("sub/outer.sh", "#!/bin/bash\n./host.sh x\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./sub/outer.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+	}}, dir)
+
+	for _, cmd := range []string{"./host.sh x", "bash host.sh x", "true && ./host.sh x", "./noshebang.sh x", "bash -c './host.sh x'"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err != nil {
+			t.Fatalf("%s: static validation should not check a no_sandbox script's body: %v", cmd, err)
+		}
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: %v (output %q)", cmd, err, out)
+		}
+		if strings.Contains(out, "bg=g") || !strings.Contains(out, "bg=") || !strings.Contains(out, "arg=x") {
+			t.Errorf("%s: output %q, want the host bash's pid for $! and arg=x", cmd, out)
+		}
+	}
+
+	// Inside a script allowed without no_sandbox, the no_sandbox script is
+	// routed the way the outer one is: through the interpreter.
+	out, err := executeInDirWithSandbox(t, s, dir, "./sub/outer.sh")
+	if err != nil {
+		t.Fatalf("./sub/outer.sh: %v", err)
+	}
+	if !strings.Contains(out, "bg=g") {
+		t.Errorf("./sub/outer.sh: output %q, want the interpreter's job id (bg=g...)", out)
+	}
+}
+
+// TestNoSandboxScript_ShellStartupEnv: a native shell acts on SHELLOPTS and
+// PS4 before a script's first line (xtrace expands PS4, command substitutions
+// included), and sources BASH_ENV, which the sandbox's interpreter ignores.
+// Setting them is refused, statically or, when exported by a name the static
+// check can't read, at runtime (checkBlockedEnv); the server's own values (the
+// user's) reach a script allowed with no_sandbox.
+func TestNoSandboxScript_ShellStartupEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "host.sh"), []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+
+	for _, cmd := range []string{
+		`export SHELLOPTS=xtrace PS4='$(touch ` + pwned + `)'; ./host.sh`,
+		`SHELLOPTS=xtrace ./host.sh`,
+		`PS4='$(touch ` + pwned + `)' bash -x host.sh`,
+		`env BASHOPTS=extglob ./host.sh`,
+		`export ZDOTDIR=$PWD; ./host.sh`,
+		`env BASH_FUNC_echo%%=\(\)\ \{\ touch\ ` + pwned + `\;\ \} ./host.sh`,
+	} {
+		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "is not allowed") {
+			t.Errorf("%s: expected the assignment to be refused, got %v", cmd, err)
+		}
+	}
+
+	// Exported past the static check, which sees only names it can read:
+	// the runtime check (checkBlockedEnv) refuses the run.
+	evil := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(evil, []byte("touch "+pwned+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inject := `a=SHELLOPTS; b=PS4; c=BASH_ENV; d=ENV; export "$a=xtrace" "$b="'$(touch ` + pwned + `)' "$c=` + evil + `" "$d=` + evil + `"; `
+	// env, not timeout, for the wrapped form: macOS has no timeout.
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
+		out, err := executeInDirWithSandbox(t, s, dir, inject+cmd)
+		if err == nil || !strings.Contains(err.Error(), "is not allowed") || strings.Contains(out, "ran") {
+			t.Fatalf("%s: expected the exported startup variables to be refused, got %v %q", cmd, err, out)
+		}
+		if _, err := os.Stat(pwned); err == nil {
+			t.Fatalf("%s: the native shell ran code from the environment", cmd)
+		}
+	}
+	// In open mode the runtime check only audits, so the script runs: with
+	// the server's values (execOnHost's reset), not the agent's.
+	open := NewSandbox()
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: []config.CommandEntry{
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	for _, cmd := range []string{"./host.sh", "bash host.sh", "env ./host.sh"} {
+		out, err := executeInDirWithSandbox(t, open, dir, inject+cmd)
+		if err != nil || !strings.Contains(out, "ran") {
+			t.Fatalf("open mode, %s: %v %q", cmd, err, out)
+		}
+		if _, err := os.Stat(pwned); err == nil {
+			t.Fatalf("open mode, %s: the native shell ran code from the environment", cmd)
+		}
+	}
+
+	// The server's own value reaches the script; one the agent set is
+	// refused, or in open mode replaced by the server's.
+	if err := os.WriteFile(filepath.Join(dir, "show.sh"), []byte("#!/bin/bash\necho zdotdir=$ZDOTDIR\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	t.Setenv("ZDOTDIR", "/users/own")
+	out, err := executeInDirWithSandbox(t, s, dir, `./show.sh`)
+	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
+		t.Errorf("want the server's ZDOTDIR: %v %q", err, out)
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`); err == nil || !strings.Contains(err.Error(), "setting ZDOTDIR is not allowed") {
+		t.Errorf("want a changed ZDOTDIR refused: %v", err)
+	}
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: []config.CommandEntry{
+		{Command: "./show.sh", Allow: &yes, NoSandbox: true},
+	}}, dir)
+	out, err = executeInDirWithSandbox(t, open, dir, `n=ZDOTDIR; export "$n=$PWD"; ./show.sh`)
+	if err != nil || !strings.Contains(out, "zdotdir=/users/own") {
+		t.Errorf("open mode: want the server's ZDOTDIR: %v %q", err, out)
+	}
+}
+
+// TestNoSandboxScript_RunsOnlyTheTrustedFile: a script allowed with
+// no_sandbox runs natively as the file it is trusted by, found with the
+// server's PATH and HOME, never as another file or program the agent
+// arranged: a symlinked directory in its path, a .zshenv in a HOME the agent
+// set, or an exported bash function. A PATH or CDPATH the agent set past the
+// static check, with a dynamic name, is refused at runtime (checkBlockedEnv).
+func TestNoSandboxScript_RunsOnlyTheTrustedFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pwned := filepath.Join(t.TempDir(), "pwned")
+	evil := "#!/bin/sh\ntouch " + pwned + "\necho evil\n"
+	write("host.sh", "#!/bin/bash\necho legit\n")
+	write("noshebang.sh", "echo legit\n")
+	write("envbash.sh", "#!/usr/bin/env bash\necho legit\n")
+	write("evil/sub/placeholder", "")
+	write("evil/host.sh", evil)
+	write("evil/noshebang.sh", evil)
+	write("evilbin/bash", evil)
+	write(".zshenv", "touch "+pwned+"\n")
+	write("cd.sh", "#!/bin/bash\ncd sub && ./tool\n")
+	write("sub/tool", "#!/bin/sh\necho legit\n")
+	write("evil/sub/tool", evil)
+	if err := os.Symlink(filepath.Join(dir, "evil/sub"), filepath.Join(dir, "x")); err != nil {
+		t.Fatal(err)
+	}
+	cmds := []string{
+		"bash x/../host.sh",
+		"./x/../noshebang.sh",
+	}
+	// Set past the static check, with a dynamic name: the runtime check
+	// (checkBlockedEnv) refuses the run.
+	refused := []string{
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; bash host.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./noshebang.sh`,
+		`n=PATH; export "$n=$PWD/evilbin:$PATH"; ./envbash.sh`,
+		`n=CDPATH; export "$n=$PWD/evil"; ./cd.sh`,
+	}
+	yes := true
+	entries := []config.CommandEntry{
+		{Command: "./cd.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./host.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./noshebang.sh", Allow: &yes, NoSandbox: true},
+		{Command: "./envbash.sh", Allow: &yes, NoSandbox: true},
+	}
+	if _, err := exec.LookPath("zsh"); err == nil {
+		write("host.zsh", "#!/usr/bin/env zsh\necho legit\n")
+		entries = append(entries, config.CommandEntry{Command: "./host.zsh", Allow: &yes, NoSandbox: true})
+		cmds = append(cmds, "HOME=$PWD ./host.zsh", "export HOME=$PWD; ./host.zsh")
+	}
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: entries}, dir)
+	for _, cmd := range cmds {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("%s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err != nil || !strings.Contains(out, "legit") {
+			t.Errorf("%s: want the trusted script to run: %v %q", cmd, err, out)
+		}
+	}
+	for _, cmd := range refused {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("%s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err == nil || !strings.Contains(err.Error(), "is not allowed") || strings.Contains(out, "legit") {
+			t.Errorf("%s: want the changed variable refused: %v %q", cmd, err, out)
+		}
+	}
+	// In open mode the runtime check only audits, so the script runs: found
+	// with the server's PATH, its own cd unaffected by CDPATH (execOnHost's
+	// reset).
+	open := NewSandbox()
+	open.updateConfig(&config.Config{Mode: string(config.ModeOpen), Commands: entries}, dir)
+	for _, cmd := range refused {
+		out, err := executeInDirWithSandbox(t, open, dir, cmd)
+		if _, statErr := os.Stat(pwned); statErr == nil {
+			t.Fatalf("open mode, %s: ran the agent's code on the host (err %v, output %q)", cmd, err, out)
+		}
+		if err != nil || !strings.Contains(out, "legit") {
+			t.Errorf("open mode, %s: want the trusted script to run: %v %q", cmd, err, out)
+		}
+	}
+}
+
+// TestExecuteScript_BareScriptLiftsChecks verifies what a bare allow of a
+// script lifts for the commands the script runs: the whitelist, argument
+// validators, structural rules (setting PATH) and the deny list — statically
+// and at runtime, at any depth — while the path boundary and ask entries still
+// apply.
+func TestExecuteScript_BareScriptLiftsChecks(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/bash\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// protoc: not whitelisted; curl: denied; PATH: a structural refusal;
+	// git push: refused by git's argument validator. None of them runs.
+	write("lifted.sh", "PATH=\"$PWD:$PATH\"\nif false; then protoc --version; curl https://example.com; git push; fi\n./nested.sh\necho lifted-$1\n")
+	write("nested.sh", "if false; then curl https://example.com; fi\necho nested\n")
+	outside := t.TempDir()
+	write("escape.sh", "echo x > "+filepath.Join(outside, "f")+"\n")
+	write("asks.sh", "rm -f nothing\n")
+
+	no := false
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./lifted.sh", Allow: &yes},
+		{Command: "./escape.sh", Allow: &yes},
+		{Command: "./asks.sh", Allow: &yes},
+		{Command: "curl", Allow: &no},
+		{Command: "rm", Ask: true},
+	}}, dir)
+
+	for _, cmd := range []string{"./lifted.sh a", "bash lifted.sh a", "true && ./lifted.sh a"} {
+		out, err := executeInDirWithSandbox(t, s, dir, cmd)
+		if err != nil {
+			t.Fatalf("%s: a bare allow of the script should lift its checks: %v", cmd, err)
+		}
+		if !strings.Contains(out, "nested") || !strings.Contains(out, "lifted-a") {
+			t.Errorf("%s: output %q", cmd, out)
+		}
+	}
+	// The deny list still applies to the command line around the script.
+	if _, err := executeInDirWithSandbox(t, s, dir, "./lifted.sh && curl https://example.com"); err == nil {
+		t.Error("the deny list must still apply outside the script")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./escape.sh"); err == nil {
+		t.Error("the path boundary must still confine a bare-allowed script's redirects")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f")); err == nil {
+		t.Error("the script wrote outside the boundary")
+	}
+	if _, err := executeInDirWithSandbox(t, s, dir, "./asks.sh"); err == nil || !strings.Contains(err.Error(), "approval") {
+		t.Errorf("an ask entry must still apply inside a bare-allowed script: %v", err)
+	}
+}
+
+// TestTrustedScript_MatchesByResolvedPathOnly verifies that only the file a
+// bare allow of a script path resolves to is trusted: not a file named like a
+// bare-allowed command (`bash make`), and not another file the same literal
+// path names after a `cd`.
+func TestTrustedScript_MatchesByResolvedPathOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Each body runs a denied command by a dynamic name, which only the
+	// runtime layer sees.
+	body := "#!/bin/bash\nc=printf; $c ran\n"
+	for _, f := range []string{"make", "build.sh", "sub/build.sh"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "make", Allow: &yes},
+		{Command: "./build.sh", Allow: &yes},
+		{Command: "printf", Allow: &no},
+	}}, dir)
+
+	if out, err := executeInDirWithSandbox(t, s, dir, "./build.sh"); err != nil || !strings.Contains(out, "ran") {
+		t.Fatalf("the allowed script itself should be trusted: %v %q", err, out)
+	}
+	for _, cmd := range []string{"bash make", "cd sub && ./build.sh", "cd sub && bash ./build.sh", "cd sub && bash build.sh"} {
+		if out, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil {
+			t.Errorf("%s: should not be trusted, ran: %q", cmd, out)
+		}
+	}
+}
+
+// TestBashScript_PositionalParams verifies `bash <script> args` passes args
+// as $1, $2, ... without shifting the script's line numbers.
+func TestBashScript_PositionalParams(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.sh"), []byte("echo \"line=$LINENO args=$1,$2 n=$#\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSandbox()
+	out, err := executeInDirWithSandbox(t, s, dir, "bash a.sh 'x y' z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "line=1 args=x y,z n=2"; !strings.Contains(out, want) {
+		t.Errorf("output %q, want %q", out, want)
+	}
+}
+
+// TestScopedCommand_BareAllowKeepsValidators verifies that a bare allow of a
+// command a scoped grant names admits it but keeps its argument validators
+// where it would run in the scope's worker, with the grant's credential — the
+// static pass and, for a dynamic name, the runtime one. An allow naming the
+// subcommand still opens it; a bare allow lifts them as usual without a scoped
+// grant, without the OS sandbox (no worker holds the credential), or with
+// no_sandbox (the command runs on the host).
+func TestScopedCommand_BareAllowKeepsValidators(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	yes, no := true, false
+	scoped := []config.PathEntry{{Path: filepath.Join(dir, "..", "ghcreds"), Read: &yes, Internal: true, Commands: []string{"gh"}}}
+	bareGh := []config.CommandEntry{{Command: "gh", Allow: &yes}}
+
+	s := NewSandbox()
+	defer s.Close()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: bareGh, Paths: scoped}, dir)
+	for _, cmd := range []string{"gh auth token", "true && gh auth token"} {
+		if err := s.ValidateCommand(cmd, dir, paths, paths); err == nil {
+			t.Errorf("%s: a bare allow of a scoped command must keep its validators", cmd)
+		}
+	}
+	// Refused by the runtime validator, before anything is dispatched.
+	if _, err := s.Execute(context.Background(), "c=gh; $c auth token", dir, paths, paths); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Errorf("a dynamic name must be refused at runtime too: %v", err)
+	}
+	if err := s.ValidateCommand("gh pr list", dir, paths, paths); err != nil {
+		t.Errorf("gh pr list: %v", err)
+	}
+
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh auth token", Allow: &yes}}, Paths: scoped}, dir)
+	if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
+		t.Errorf("an allow naming the subcommand should open it: %v", err)
+	}
+
+	for name, cfg := range map[string]*config.Config{
+		"no scoped grant": {OSSandbox: &yes, Commands: bareGh},
+		"no OS sandbox":   {OSSandbox: &no, Commands: bareGh, Paths: scoped},
+		"no_sandbox":      {OSSandbox: &yes, Commands: []config.CommandEntry{{Command: "gh", Allow: &yes, NoSandbox: true}}, Paths: scoped},
+	} {
+		s.updateConfig(cfg, dir)
+		if err := s.ValidateCommand("gh auth token", dir, paths, paths); err != nil {
+			t.Errorf("%s: a bare allow should lift the validators: %v", name, err)
+		}
+	}
+}
+
+// TestRunsInScopedWorker_WrappedScriptPath verifies that a wrapper running a
+// script path (`env ./host.sh`) is routed without an interpreter handler
+// context, which the static pass and a bare runtime check don't have: it once
+// panicked resolving the script against interp.HandlerCtx. A relative script
+// path resolves against the directory the caller gives.
+func TestRunsInScopedWorker_WrappedScriptPath(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{dir}
+	yes := true
+	hostSh := config.CommandEntry{Command: "./host.sh", Allow: &yes, NoSandbox: true}
+	inDir := func() string { return dir }
+
+	s := NewSandbox()
+	defer s.Close()
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{hostSh}}, dir)
+	if s.runsInScopedWorker([]string{"env", "./host.sh"}, inDir) {
+		t.Error("env ./host.sh: no scope claims env")
+	}
+	if err := s.runtimeArgValidator(context.Background(), "env", []string{"env", "./host.sh"}); err != nil {
+		t.Errorf("runtime env ./host.sh: %v", err)
+	}
+
+	// A scope claiming the wrapper: the wrapped script's no_sandbox entry
+	// takes it to the host, out of the scope's worker, only where the
+	// script resolves to the entry's file.
+	scoped := []config.PathEntry{{Path: filepath.Join(dir, "..", "envcreds"), Read: &yes, Internal: true, Commands: []string{"env"}}}
+	s.updateConfig(&config.Config{OSSandbox: &yes, Commands: []config.CommandEntry{hostSh, {Command: "env", Allow: &yes}}, Paths: scoped}, dir)
+	if s.runsInScopedWorker([]string{"env", "./host.sh"}, inDir) {
+		t.Error("env ./host.sh in the entry's directory runs on the host")
+	}
+	if !s.runsInScopedWorker([]string{"env", "./host.sh"}, func() string { return filepath.Join(dir, "sub") }) {
+		t.Error("env ./host.sh from another directory names another file and runs in the scope's worker")
+	}
+	if !s.runsInScopedWorker([]string{"env", "./host.sh"}, func() string { return "" }) {
+		t.Error("env ./host.sh with no known directory matches no entry")
+	}
+	if err := s.ValidateCommand("env ./host.sh", dir, paths, paths); err != nil {
+		t.Errorf("static env ./host.sh: %v", err)
+	}
+}
+
+// TestTrustedScript_AbsoluteEntryAndSource verifies that an absolute script
+// entry is trusted whatever the working directory the config was loaded for,
+// and that a sourced script is never trusted: it runs in the caller's shell,
+// where what it sets (PATH) carries on to the rest of the line.
+func TestTrustedScript_AbsoluteEntryAndSource(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "b.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nPATH=\"$PWD:$PATH\"\necho trusted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: script, Allow: &yes}}}, "")
+	if out, err := executeInDirWithSandbox(t, s, dir, script); err != nil || !strings.Contains(out, "trusted") {
+		t.Errorf("absolute entry: %v %q", err, out)
+	}
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{{Command: "./b.sh", Allow: &yes}}}, dir)
+	for _, cmd := range []string{"source ./b.sh", ". ./b.sh"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err == nil {
+			t.Errorf("%s: a sourced script must not be trusted", cmd)
+		}
+	}
+}
+
+// TestTrustedScript_SourceRefusedBeforeRun verifies that the static and
+// runtime passes agree on a sourced script a bare allow names (#141): the
+// runtime runs it in the caller's shell, untrusted, so the static pass must
+// not trust it either. Otherwise the line would pass preflight and be refused
+// partway through, after the script's first commands had already run.
+func TestTrustedScript_SourceRefusedBeforeRun(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "b.sh"), []byte("echo first > first.txt\nprintf x\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Commands: []config.CommandEntry{
+		{Command: "./b.sh", Allow: &yes},
+		{Command: "printf", Allow: &no},
+	}}, dir)
+	first := filepath.Join(dir, "first.txt")
+	for _, cmd := range []string{"source ./b.sh", ". ./b.sh", "echo hi; source ./b.sh", "bash -c 'source ./b.sh'"} {
+		if err := s.ValidateCommand(cmd, dir, []string{dir}, []string{dir}); err == nil || !strings.Contains(err.Error(), "printf") {
+			t.Errorf("%s: static validation should refuse the sourced script's printf, got %v", cmd, err)
+		}
+		if _, err := executeInDirWithSandbox(t, s, dir, cmd); err == nil || !strings.Contains(err.Error(), "printf") {
+			t.Errorf("%s: execution should refuse the sourced script's printf, got %v", cmd, err)
+		}
+		if _, err := os.Stat(first); err == nil {
+			t.Errorf("%s: the script's first command ran before the refusal", cmd)
+			os.Remove(first)
+		}
+	}
+	// Run as its own process, the script is trusted by both passes.
+	if out, err := executeInDirWithSandbox(t, s, dir, "./b.sh"); err != nil || out != "x" {
+		t.Errorf("./b.sh: a bare-allowed script should run trusted: %v %q", err, out)
 	}
 }

@@ -39,11 +39,17 @@ def build_binary():
 
 @pytest.fixture(scope="session", autouse=True)
 def unset_claudecode_env():
-    """Unset CLAUDECODE env var so the SDK doesn't refuse to launch."""
-    old = os.environ.pop("CLAUDECODE", None)
+    """Unset the variables a surrounding Claude Code session sets.
+
+    CLAUDECODE makes the SDK refuse to launch. CLAUDE_CODE_REMOTE and
+    CLAUDE_CODE_ENTRYPOINT, set when the suite runs inside a Claude Code cloud
+    session, make the CLI under test treat itself as one, and those sessions
+    don't run MCP tool calls as tasks.
+    """
+    names = ("CLAUDECODE", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_ENTRYPOINT")
+    old = {name: os.environ.pop(name) for name in names if name in os.environ}
     yield
-    if old is not None:
-        os.environ["CLAUDECODE"] = old
+    os.environ.update(old)
 
 
 @pytest.fixture

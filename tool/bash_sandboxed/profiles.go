@@ -57,6 +57,46 @@ func (s *Sandbox) extraAllowsArgs(cmdName string, args []string) bool {
 	return ok && argsMatchSubCommand(restrictions, args)
 }
 
+// allowLiftsValidator reports whether the config's allows lift cmdName's own
+// argument validator for an invocation with arguments args (argv[1:], "" for
+// a word only known after expansion). An allow lifts it for the invocations it
+// admits, with one exception: a bare allow does not for an invocation that
+// runs in a scoped grant's worker, with the grant's credential, where it
+// would lift the command's checks on every subcommand (gh auth token, gh
+// extension exec). An allow naming the subcommand ("gh pr merge") still opens
+// exactly what it names. dir gives the directory a script path resolves
+// against (see runsInScopedWorker).
+func (s *Sandbox) allowLiftsValidator(cmdName string, args []string, dir func() string) bool {
+	if !s.runsInScopedWorker(append([]string{cmdName}, args...), dir) {
+		return s.extraAllowsArgs(cmdName, args)
+	}
+	if !s.getExtraCommands()[cmdName] {
+		return false
+	}
+	restrictions, ok := s.getExtraSubCommands()[cmdName]
+	return ok && argsMatchSubCommand(restrictions, args)
+}
+
+// runsInScopedWorker reports whether a top-level invocation of argv would run
+// in a scoped grant's worker (see dispatchExec): the OS sandbox is on, no
+// no_sandbox entry takes it to the host, and a scope claims it — for git
+// under the ssh agent's grant, only an invocation that contacts a remote.
+//
+// dir gives the directory a script path a wrapper runs (`env ./host.sh`)
+// resolves against when matching no_sandbox entries: the interpreter's
+// current directory at runtime, the validation's working directory
+// statically. It is called only for a wrapped script path, under a wrapper a
+// scope claims.
+func (s *Sandbox) runsInScopedWorker(argv []string, dir func() string) bool {
+	if !s.osSandboxEnabled() || isScriptPath(argv[0]) {
+		return false
+	}
+	if _, _, ok := s.workerScope(argv); !ok {
+		return false
+	}
+	return !s.execIsUnsandboxedIn(dir, argv)
+}
+
 // agentBrowserSocketEnv points an agent-browser the sandbox runs — on the host,
 // in the shared worker, or in the worker of a grant scoped to it — at the
 // socket directory of lite-sandbox's own agent-browser daemons

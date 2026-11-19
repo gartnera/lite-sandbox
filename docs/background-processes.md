@@ -14,6 +14,37 @@ the file the command's output is written to. The tools involved:
   output file.
 - **`kill_shell`** (`shell_id`): stops a running background process.
 
+**MCP tasks.** A client that declares the MCP tasks extension
+(`io.modelcontextprotocol/tasks`, on protocol revision 2026-07-28) gets
+background commands as tasks instead. The command is validated and started
+before its task is created, so a command the sandbox refuses is answered at
+once with the error, as a plain result, and no task is created. A command that
+starts gets a task handle whose status message (`Running. Output file:
+<path>`) names its output file, which the agent can read while the command
+runs. The handle's `_meta` also carries the path as Claude Code's start note
+(`com.anthropic/agent-task` `modelImmediateResponse`), which Claude Code shows
+the agent next to the task's ids. The client polls the task with `tasks/get`,
+and when the command exits the task completes with its exit code, its output
+file, and the last 8 KiB of its output, without the shell id, which no tool
+the client has takes. A non-zero exit or a kill is reported as an error
+result. Cancelling
+the task (`tasks/cancel`) kills the command. Such a client follows and stops
+background commands through the task, so `list_shells` and `kill_shell` are
+neither listed for it nor callable by it. Foreground commands are still
+answered directly.
+
+In Claude Code (2.1.304 or later), these commands show in `/tasks`, can be
+stopped from there, and wake Claude with the result when they finish, the way
+its own background `Bash` commands do. Claude Code only uses MCP tasks in some
+sessions (the interactive CLI, and Agent SDK sessions with
+`CLAUDE_AUTO_BACKGROUND_TASKS=1`, among other conditions; see its
+[MCP docs](https://code.claude.com/docs/en/mcp#mcp-tasks-that-run-on-the-server)).
+It never uses them for calls from subagents or one-shot `claude -p` runs.
+Those calls, and every other agent's, get the shell id reply. A subagent shares
+its session's tool list, though, so in a session that runs tasks it is not
+offered `list_shells` or `kill_shell`. It can still read its background
+command's output file, and the command is stopped when the session ends.
+
 **Reading output.** There is no dedicated output tool: stdout and stderr are
 written, as they are produced, to `<shell id>.log` in a per-server directory
 under `$TMPDIR/lite-sandbox-<uid>/` (`/tmp/lite-sandbox-<uid>/` on Linux), and

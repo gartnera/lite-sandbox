@@ -204,7 +204,7 @@ func TestScopeBypass(t *testing.T) {
 	}{
 		{"no allow", nil, ""},
 		{"restricted allow", []CommandEntry{{Command: "gh pr", Allow: &yes}}, ""},
-		{"bare allow", []CommandEntry{{Command: "gh", Allow: &yes}}, "bash -c"},
+		{"bare allow", []CommandEntry{{Command: "gh", Allow: &yes}}, ""},
 		{"no_sandbox", []CommandEntry{{Command: "gh pr", Allow: &yes, NoSandbox: true}}, "on the host"},
 	}
 	for _, c := range cases {

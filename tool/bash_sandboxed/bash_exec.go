@@ -209,8 +209,9 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	}
 	hc := interp.HandlerCtx(ctx)
 
-	// Determine the script content
+	// Determine the script content, and the positional parameters it gets
 	var script, scriptFile string
+	var params []string
 	switch {
 	case inv.command >= 0:
 		script = args[inv.command]
@@ -229,38 +230,32 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 		}
 		ctx = withoutApproval(ctx)
 		path := absPath(scriptFile, hc.Dir)
-		// A bare extra_commands script entry is an explicit trust opt-in, so
-		// invoking it via `bash <script>` must behave the same as running it
-		// directly (`./<script>`): run the whole invocation raw without reading
-		// or validating the script body. Match either by the literal token or by
-		// the resolved absolute path so `bash web/foo/build.sh` matches an entry
-		// registered as `./web/foo/build.sh`.
-		if s.getBareExtraCommands()[scriptFile] || s.getBareExtraScriptPaths()[path] {
-			return s.dispatchExec(ctx, args, s.osSandboxEnabled())
+		// A bare allow of the script trusts it, so invoking it via
+		// `bash <script>` behaves the same as running it directly
+		// (`./<script>`): it runs here with the checks a bare allow lifts not
+		// enforced (withTrustedScript). Match either by the literal token or
+		// by the resolved absolute path so `bash web/foo/build.sh` matches an
+		// entry registered as `./web/foo/build.sh`.
+		if s.trustsScript(path) {
+			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+			// One allowed with no_sandbox runs natively on the host: this
+			// invocation, with the host's own bash (or sh), given the script
+			// by the path it is trusted by (see nativeScriptArgv).
+			if ts, _ := trustedScriptFrom(ctx); ts.host {
+				native := append([]string(nil), args...)
+				native[inv.script] = filepath.Clean(path)
+				return s.dispatchExec(withNativeScript(ctx), native, s.osSandboxEnabled())
+			}
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("%s: cannot read script %s: %w", cmdName, path, err)
 		}
 		script = string(data)
+		// The words after the script are its $1, $2, ...
+		params = args[inv.script+1:]
 	default:
 		return fmt.Errorf("%s: no command or script file specified", cmdName)
-	}
-
-	// Prepend shell flags as set commands, each quoted: an -o value is the
-	// option's name, never shell syntax.
-	if len(inv.set) > 0 {
-		set := make([]string, len(inv.set))
-		for i, w := range inv.set {
-			q, err := syntax.Quote(w, syntax.LangBash)
-			if err != nil {
-				return fmt.Errorf("%s: option %q: %w", cmdName, w, err)
-			}
-			set[i] = q
-		}
-		// bash refuses to start (status 2) on an option it does not know;
-		// stop before the script runs too.
-		script = "set " + strings.Join(set, " ") + " || exit 2\n" + script
 	}
 
 	// Parse the script
@@ -281,7 +276,13 @@ func (s *Sandbox) executeBash(ctx context.Context, args []string) error {
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
 	// Build and run nested interpreter
-	return s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile)
+	err = s.runNestedInterp(nestedCtx, f, hc, paths, scriptFile, inv.set, params...)
+	// bash refuses to start (status 2) on an option it does not know.
+	if oe, ok := err.(shellOptionError); ok {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", cmdName, oe)
+		return interp.ExitStatus(2)
+	}
+	return err
 }
 
 // executeScript runs a script file (e.g., ./script.sh) by reading it,
@@ -329,34 +330,29 @@ func (s *Sandbox) executeScript(ctx context.Context, args []string) error {
 	nestedCtx := context.WithValue(ctx, bashDepthKey, depth+1)
 	nestedCtx = context.WithValue(nestedCtx, sandboxPathsKey, paths)
 
-	// If script has arguments, prepend a `set -- arg1 arg2 ...` to pass them
-	if len(args) > 1 {
-		var setArgs []string
-		for _, a := range args[1:] {
-			setArgs = append(setArgs, "'"+strings.ReplaceAll(a, "'", "'\\''")+"'")
-		}
-		script = "set -- " + strings.Join(setArgs, " ") + "\n" + script
-		// Re-parse with the set command prepended
-		f, err = ParseBash(script)
-		if err != nil {
-			return fmt.Errorf("script %s: %w", args[0], err)
-		}
-	}
-
-	return s.runNestedInterp(nestedCtx, f, hc, paths, args[0])
+	// The words after the script are its $1, $2, ...
+	return s.runNestedInterp(nestedCtx, f, hc, paths, args[0], nil, args[1:]...)
 }
 
 // runNestedInterp creates and runs a nested interpreter with the same
 // security handlers as the parent. scriptName is the script path as invoked,
 // empty for `bash -c`; it becomes $0 and BASH_SOURCE, which scripts use to
-// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`).
-func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string) error {
+// locate themselves (`cd "$(dirname "${BASH_SOURCE[0]}")"`). flags are the
+// shell's set options (`bash -e -o pipefail`), in `set` syntax. params, when
+// given, are the script's positional parameters ($1, $2, ...).
+//
+// Both are handed to the runner rather than prepended to the script as `set`
+// commands, so the script's line numbers ($LINENO, error positions) stay the
+// ones in its text.
+func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp.HandlerContext, paths *sandboxPaths, scriptName string, flags []string, params ...string) error {
 	useOSSandbox := s.osSandboxEnabled()
 
 	// Build environment from parent context: a nested script is a child
 	// process, so it inherits only the exported variables.
+	// Under env (runWrappedScript), the environment it built; the override
+	// is the script's alone, not its commands'.
 	var env []string
-	hc.Env.Each(func(name string, vr expand.Variable) bool {
+	scriptBaseEnv(ctx).Each(func(name string, vr expand.Variable) bool {
 		if !isExportedEnvVar(vr) {
 			return true
 		}
@@ -377,6 +373,9 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		interp.StdIO(hc.Stdin, hc.Stdout, hc.Stderr),
 		interp.Env(environ),
 	}
+	if len(params) > 0 {
+		opts = append(opts, interp.Params(append([]string{"--"}, params...)...))
+	}
 
 	opts = append(opts, s.buildSecurityHandlers(paths.readAllowedPaths, paths.writeAllowedPaths, useOSSandbox)...)
 
@@ -385,8 +384,22 @@ func (s *Sandbox) runNestedInterp(ctx context.Context, f *syntax.File, hc interp
 		return fmt.Errorf("failed to create nested interpreter: %w", err)
 	}
 
-	return runner.Run(ctx, f)
+	// The flags go on after New, so an option the interpreter does not know
+	// is told apart from a failure to build the runner. Applied before the
+	// first Run, they are part of the runner's initial state.
+	if len(flags) > 0 {
+		if err := interp.Params(flags...)(runner); err != nil {
+			return shellOptionError{err}
+		}
+	}
+
+	return runner.Run(withEnvOverride(ctx, nil), f)
 }
+
+// shellOptionError is a shell flag the interpreter does not know.
+type shellOptionError struct{ err error }
+
+func (e shellOptionError) Error() string { return e.err.Error() }
 
 // scriptEnviron adds a script's BASH_SOURCE to its environment. The variable is
 // not exported, so the script's children do not inherit it.
@@ -436,6 +449,12 @@ const execArgvMaxDepth = 4
 // interpreter's OS-call authorization. depth counts shebang re-dispatches (see
 // the script branch).
 func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool, readAllowedPaths, writeAllowedPaths []string, sets resolvedPathSets, depth int) error {
+	// A blocked variable set where the static check could not name it
+	// (export "PATH=...", read PATH under set -a) is refused here, before
+	// the command is looked up in, or inherits, the changed environment.
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkBlockedEnv(interp.HandlerCtx(ctx).Env)); err != nil {
+		return err
+	}
 	// Intercept `aws configure list-profiles` in brokered IMDS mode so an
 	// agent can discover the profiles it may select via AWS_PROFILE (the
 	// real command would read the masked ~/.aws and return nothing).
@@ -489,6 +508,15 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	if err := s.runtimeArgValidator(ctx, cmdName, args); err != nil {
 		return err
 	}
+	// A shell script under timeout, env, ... runs through this interpreter
+	// with the wrapper's effect applied, not as the native program the
+	// wrapper would start (see runWrappedScript).
+	if err := s.report(ctx, layerRuntime, ruleStructural, s.checkWrappedScript(interp.HandlerCtx(ctx).Dir, args)); err != nil {
+		return err
+	}
+	if s.wrapsShellScript(interp.HandlerCtx(ctx).Dir, args) {
+		return s.runWrappedScript(ctx, args, useOSSandbox, readAllowedPaths, writeAllowedPaths, sets, depth)
+	}
 	// The command's own preparation (deno's permission flags, SwiftPM's
 	// nested sandbox) and in-process executor (awk, bash, sh, python); see
 	// commandSpec.prepareExec and run.
@@ -505,17 +533,21 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 	if isScriptPath(cmdName) {
 		hc := interp.HandlerCtx(ctx)
 		path := absPath(cmdName, hc.Dir)
-		// Bare extra_commands entries are explicitly opted in by the
-		// user — run them directly without reading/validating script
-		// contents. See bareAllowsScript for how an invocation matches.
 		if bareScript {
-			return s.dispatchExec(ctx, args, useOSSandbox)
-		}
-		// A subcommand-restricted extra_commands entry (e.g. "./gradlew build")
-		// allows the invocation but, unlike a bare entry, is not an opt-out of
-		// the local-binary gate, which the whitelist branch above skipped
-		// because extra[cmdName] was true.
-		if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
+			// A bare allow of the script trusts it (see bareAllowsScript for
+			// how an invocation matches): a shell script runs through the
+			// interpreter below like any other, with the checks a bare allow
+			// lifts not enforced for what it runs (withTrustedScript) — unless
+			// it is allowed with no_sandbox, when it runs natively on the host.
+			ctx = withTrustedScript(ctx, s.scriptUnsandboxed(path))
+			if ts, _ := trustedScriptFrom(ctx); ts.host {
+				return s.dispatchExec(withNativeScript(ctx), nativeScriptArgv(filepath.Clean(path), args), useOSSandbox)
+			}
+		} else if extra[cmdName] && !s.getConfig().LocalBinaryExecution.IsEnabled() {
+			// A subcommand-restricted extra_commands entry (e.g. "./gradlew
+			// build") allows the invocation but, unlike a bare entry, is not
+			// an opt-out of the local-binary gate, which the whitelist branch
+			// above skipped because extra[cmdName] was true.
 			if err := s.report(ctx, layerRuntime, ruleLocalBinary, directExecutionNotAllowed(cmdName)); err != nil {
 				return err
 			}
@@ -528,8 +560,13 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 		// exactly as if the agent had typed the interpreter invocation the
 		// kernel would perform — "python3 -u ./x args" — so the interpreter
 		// goes through the same whitelist gate, argument validator, and
-		// dedicated executor (awk's, bash's) as a direct call would.
+		// dedicated executor (awk's, bash's) as a direct call would. One a
+		// bare allow names runs as the native program its shebang names, as
+		// a binary would: the sandbox has nothing of it to interpret.
 		if shebang := scriptShebangArgv(path); len(shebang) > 0 && !isShellInterpreter(shebang[0]) {
+			if bareScript {
+				return s.dispatchExec(ctx, args, useOSSandbox)
+			}
 			if depth >= execArgvMaxDepth {
 				return fmt.Errorf("script %q: interpreter nesting too deep", cmdName)
 			}
@@ -539,6 +576,55 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 		return s.executeScript(ctx, args)
 	}
 	return s.dispatchExec(ctx, args, useOSSandbox)
+}
+
+// shellStartupEnv are the variables a native shell acts on that the
+// sandbox's interpreter ignores: before a script's first line, BASH_ENV and
+// ENV (sourced), SHELLOPTS (with xtrace, bash expands PS4, command
+// substitutions included), BASHOPTS, PS4, BASH_XTRACEFD, and zsh's ZDOTDIR
+// (it sources $ZDOTDIR/.zshenv); and CDPATH, which redirects the script's
+// own `cd`. Assigning them is refused (blockedEnvVars), statically and at
+// runtime (checkBlockedEnv); as a backstop, for open mode, where those checks
+// only audit, and for what they don't cover, a command allowed with
+// no_sandbox (a script run natively, or a program that starts a shell) gets
+// the server's own values for them on the host, whatever set them
+// (execOnHost). Exported bash functions (BASH_FUNC_name%%) are treated the
+// same way.
+var shellStartupEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "ZDOTDIR", "CDPATH"}
+
+// nativeScriptEnv are the variables a script allowed with no_sandbox gets
+// from the server's environment rather than the interpreter's (execOnHost):
+// PATH, which finds its shell (`bash <script>`, `#!/usr/bin/env bash`), and
+// HOME, where zsh finds .zshenv. Changing PATH is refused (checkBlockedEnv),
+// so this is its backstop, for open mode; HOME may be set for other commands.
+var nativeScriptEnv = []string{"PATH", "HOME"}
+
+type nativeScriptKey struct{}
+
+// withNativeScript marks ctx as the native run of a script allowed with
+// no_sandbox (see nativeScriptEnv).
+func withNativeScript(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeScriptKey{}, true)
+}
+
+func isNativeScript(ctx context.Context) bool {
+	v, _ := ctx.Value(nativeScriptKey{}).(bool)
+	return v
+}
+
+// nativeScriptArgv is the argv that runs the script at path (the cleaned
+// absolute path it is trusted by) natively, with the arguments of args (the
+// invocation): the script itself, which the kernel starts through its
+// shebang or as a binary, or, for a text file without a shebang (which exec
+// refuses), `bash <script>`, which is what bash does with one. It is run by
+// path, never by the word that named it: through a symlinked directory,
+// `x/../build.sh` cleans to the trusted file but the kernel would open another.
+func nativeScriptArgv(path string, args []string) []string {
+	argv := append([]string{path}, args[1:]...)
+	if isBinaryExecutable(path) || scriptShebangArgv(path) != nil {
+		return argv
+	}
+	return append([]string{"bash"}, argv...)
 }
 
 // runtimeArgValidator re-runs the per-command argument validator for name
@@ -553,7 +639,8 @@ func (s *Sandbox) execArgv(ctx context.Context, args []string, useOSSandbox bool
 // themselves (commandSpec.revalidatesItself) are dispatched to dedicated executors that re-validate their contents
 // instead. args is the full argv.
 func (s *Sandbox) runtimeArgValidator(ctx context.Context, name string, args []string) error {
-	if s.extraAllowsArgs(name, args[1:]) || lookupCommand(name).revalidatesItself {
+	dir := func() string { return interp.HandlerCtx(ctx).Dir }
+	if s.allowLiftsValidator(name, args[1:], dir) || lookupCommand(name).revalidatesItself {
 		return nil
 	}
 	validator, ok := s.validator(name)

@@ -200,8 +200,8 @@ func TestOSSandboxScopedGrant(t *testing.T) {
 	s.updateConfig(&config.Config{
 		OSSandbox: &yes,
 		Commands: []config.CommandEntry{
-			{Command: "credtool show", Allow: &yes}, // validated: goes through the exec handler
-			{Command: "bash", Allow: &yes},          // raw: stands in for a program the agent wrote
+			{Command: "credtool show", Allow: &yes},      // validated: goes through the exec handler
+			{Command: nativeShell(t, work), Allow: &yes}, // stands in for a program the agent wrote
 		},
 		Paths: []config.PathEntry{{Path: creds, Read: &yes, Internal: true, Commands: []string{"credtool"}}},
 	}, work)
@@ -226,14 +226,45 @@ func TestOSSandboxScopedGrant(t *testing.T) {
 	}
 
 	for _, cmd := range []string{
-		"bash -c 'cat " + secret + "'", // a program the agent runs
-		"bash -c 'credtool show'",      // the CLI, launched by that program
-		"bash -c 'ls " + creds + "'",   // the directory itself
+		"./nativesh -c 'cat " + secret + "'", // a program the agent runs
+		"./nativesh -c 'credtool show'",      // the CLI, launched by that program
+		"./nativesh -c 'ls " + creds + "'",   // the directory itself
 	} {
 		// Masked: EACCES for a regular user, an empty directory for root.
 		if out, _ := run(cmd); strings.Contains(out, "s3cret") {
 			t.Errorf("%s: shared worker did not hide the credential: %q", cmd, out)
 		}
+	}
+
+	// A bare allow of the CLI leaves the command line parsed, so the CLI
+	// still runs in its own worker, with the grant — wherever it sits on the
+	// line — and the rest of the line is still validated.
+	bare := NewSandbox()
+	bare.updateConfig(&config.Config{
+		OSSandbox: &yes,
+		Commands: []config.CommandEntry{
+			{Command: "credtool", Allow: &yes},
+			{Command: "./uses.sh", Allow: &yes},
+		},
+		Paths: []config.PathEntry{{Path: creds, Read: &yes, Internal: true, Commands: []string{"credtool"}}},
+	}, work)
+	defer bare.Close()
+	// A trusted script runs what it runs in the shared worker, so the CLI it
+	// runs, with its checks lifted, does not get the grant.
+	if err := os.WriteFile(filepath.Join(work, "uses.sh"), []byte("#!/bin/bash\ncredtool show\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := bare.Execute(context.Background(), "./uses.sh", work, paths, paths); strings.Contains(out, "s3cret") {
+		t.Errorf("a trusted script reached the scoped credential: %q", out)
+	}
+	for _, cmd := range []string{"credtool show", "true && credtool show | head -1"} {
+		out, err := bare.Execute(context.Background(), cmd, work, paths, paths)
+		if err != nil || !strings.Contains(out, "s3cret") {
+			t.Errorf("%s: a bare allow should keep the scoped grant: %v %q", cmd, err, out)
+		}
+	}
+	if out, err := bare.Execute(context.Background(), "credtool show; cat "+secret, work, paths, paths); err == nil {
+		t.Errorf("a bare allow must not lift validation of the rest of the line: %q", out)
 	}
 }
 

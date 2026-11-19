@@ -1,6 +1,10 @@
 package cmd
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/gartnera/lite-sandbox/internal/hook"
+)
 
 // claudeOptions are the composable knobs that decide how Claude Code is
 // configured to use the sandbox. `install claude` writes the result into
@@ -55,6 +59,11 @@ type claudePlan struct {
 	// command means no hook.
 	hookCommand string
 	hookMatcher string
+	// permissionHookCommand is the PermissionRequest hook to register for the
+	// sandbox's MCP tools (matcher mcpToolMatcher), or "" for none. It
+	// pre-approves them in plan mode, where Claude Code ignores both the
+	// PreToolUse allow and permissions.allow (see evaluatePermissionRequest).
+	permissionHookCommand string
 }
 
 // plan resolves the options for the lite-sandbox binary at binPath.
@@ -75,6 +84,11 @@ func (o claudeOptions) plan(binPath string) claudePlan {
 	p.denyBash = !(o.redirectBash || o.bashASTHookMode)
 	p.alwaysLoad = o.alwaysLoad && p.configMCP
 	p.hookCommand, p.hookMatcher = claudeHookPlan(binPath, wantHook, p.validateBash, p.governFS, p.configMCP)
+	if p.configMCP {
+		// The same command as the PreToolUse hook, so both read the call with
+		// the same flags (--config-requests in particular).
+		p.permissionHookCommand = p.hookCommand
+	}
 	return p
 }
 
@@ -153,20 +167,27 @@ func (p claudePlan) claudePermissions() permissionsConfig {
 	return perms
 }
 
-// preToolUseHooks is the plan's PreToolUse hook as a settings.json "hooks"
-// value, or nil when the plan registers no hook.
-func (p claudePlan) preToolUseHooks() map[string]any {
-	if p.hookCommand == "" {
+// settingsHooks is the plan's hooks (PreToolUse, and PermissionRequest for
+// the MCP tools) as a settings.json "hooks" value, or nil when the plan
+// registers none.
+func (p claudePlan) settingsHooks() map[string]any {
+	hooks := map[string]any{}
+	group := func(matcher, command string) []any {
+		return []any{map[string]any{
+			"matcher": matcher,
+			"hooks":   []any{map[string]any{"type": "command", "command": command}},
+		}}
+	}
+	if p.hookCommand != "" {
+		hooks[string(hook.EventPreToolUse)] = group(p.hookMatcher, p.hookCommand)
+	}
+	if p.permissionHookCommand != "" {
+		hooks[string(hook.EventPermissionRequest)] = group(mcpToolMatcher, p.permissionHookCommand)
+	}
+	if len(hooks) == 0 {
 		return nil
 	}
-	return map[string]any{
-		"PreToolUse": []any{
-			map[string]any{
-				"matcher": p.hookMatcher,
-				"hooks":   []any{map[string]any{"type": "command", "command": p.hookCommand}},
-			},
-		},
-	}
+	return hooks
 }
 
 // claudeSettings is the subset of Claude Code's settings.json that lite-sandbox
@@ -181,7 +202,7 @@ type claudeSettings struct {
 func (p claudePlan) settingsJSON() (string, error) {
 	data, err := json.Marshal(claudeSettings{
 		Permissions: p.claudePermissions(),
-		Hooks:       p.preToolUseHooks(),
+		Hooks:       p.settingsHooks(),
 	})
 	if err != nil {
 		return "", err

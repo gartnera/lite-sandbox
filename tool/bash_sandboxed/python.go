@@ -402,9 +402,9 @@ func pythonLimitationNote(traceback string) string {
 	case strings.Contains(traceback, "ModuleNotFoundError"), strings.Contains(traceback, "ImportError"):
 		return "\n" + pythonIsMontyNote + " Third-party packages cannot be installed or " +
 			"imported — pip and venv do not exist here. The standard library is partial: os " +
-			"(with os.path), pathlib, json, re, math, random, datetime, time, sys, typing, " +
-			"asyncio, dataclasses, collections, copy, functools, itertools, base64, binascii, " +
-			"bisect, csv, hashlib, tomllib and unicodedata work.\n" +
+			"(with os.path), pathlib, json, re, math, random, datetime, decimal, time, sys, typing, " +
+			"annotationlib, asyncio, dataclasses, collections, copy, functools, itertools, fnmatch, " +
+			"base64, binascii, bisect, csv, hashlib, tomllib and unicodedata work.\n" +
 			pythonEscapeHatches
 	case strings.Contains(traceback, "TimeoutError"):
 		return "\nnote: the sandbox stopped the program at the bash tool's command timeout. " +

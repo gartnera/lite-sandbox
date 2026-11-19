@@ -1,13 +1,29 @@
 package cmd
 
 import (
+	"io"
+	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gartnera/lite-sandbox/config"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
 
+// isolateAWSConfig keeps the IMDS servers these tests start off the
+// developer's real ~/.aws profiles of the same names.
+func isolateAWSConfig(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials"))
+}
+
 func TestIMDSLifecycle(t *testing.T) {
+	isolateAWSConfig(t)
 	lc := &imdsLifecycle{sandbox: bash_sandboxed.NewSandbox()}
 	defer lc.stop()
 
@@ -86,4 +102,57 @@ func TestIMDSLifecycle(t *testing.T) {
 	if len(lc.servers) != 0 {
 		t.Fatalf("expected all servers stopped, got %d", len(lc.servers))
 	}
+}
+
+// TestIMDSLifecycle_CredentialNotes: a command that runs while a brokered
+// profile cannot get credentials on the host comes back with a note naming the
+// profile and the cause, instead of only the AWS client's "Unable to locate
+// credentials". The profile here is missing from the (isolated) host config.
+func TestIMDSLifecycle_CredentialNotes(t *testing.T) {
+	isolateAWSConfig(t)
+	sandbox := bash_sandboxed.NewSandbox()
+	defer sandbox.Close()
+	lc := &imdsLifecycle{sandbox: sandbox}
+	defer lc.stop()
+	if err := lc.apply(&config.AWSConfig{ForceProfile: "dev", AllowedProfiles: []string{"ro"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := time.Now()
+	notes := credentialNotes(lc.servers)
+	if got := notes(before); len(got) != 0 {
+		t.Fatalf("no credential request yet, got %v", got)
+	}
+
+	// A credential request through the default profile's server, as an AWS
+	// client in a command would make, fails; only that profile is reported.
+	fetchVia(t, lc.servers["dev"].Endpoint())
+	got := notes(before)
+	if len(got) != 1 || !strings.Contains(got[0], `profile "dev"`) || !strings.Contains(got[0], "cause:") {
+		t.Fatalf("notes = %v", got)
+	}
+	if got := notes(time.Now().Add(time.Second)); len(got) != 0 {
+		t.Errorf("failure before since should not be reported, got %v", got)
+	}
+}
+
+// fetchVia makes an IMDSv2 credential request against endpoint the way an AWS
+// SDK does: a session token, then the role's credentials document.
+func fetchVia(t *testing.T, endpoint string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, endpoint+"latest/api/token", nil)
+	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	req, _ = http.NewRequest(http.MethodGet, endpoint+"latest/meta-data/iam/security-credentials/sandboxed-role", nil)
+	req.Header.Set("X-aws-ec2-metadata-token", string(tok))
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
 }

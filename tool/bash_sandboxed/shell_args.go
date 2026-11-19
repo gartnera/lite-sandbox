@@ -15,8 +15,8 @@ import (
 type shellInvocation struct {
 	// vals is each word's value, "" for one only known after expansion.
 	vals []string
-	// set is the options executeBash applies with set before the script
-	// (-e, +x, -o pipefail); see shellSetFlags.
+	// set is the options executeBash gives the script's runner, in set
+	// syntax (-e, +x, -o pipefail); see shellSetFlags.
 	set []string
 	// command is the index of the -c command string, script that of the
 	// script file; both are -1 when there is neither. The words after

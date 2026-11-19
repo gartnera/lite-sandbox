@@ -2,6 +2,8 @@ package bash_sandboxed
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/gartnera/lite-sandbox/config"
@@ -81,4 +83,26 @@ func newTestSandboxWithConfig(cfg *config.Config) *Sandbox {
 	s := NewSandbox()
 	s.updateConfig(cfg, "")
 	return s
+}
+
+// nativeShell copies the system bash into dir as ./nativesh and returns that
+// name, for a bare allow of it. A compiled binary the sandbox runs as a native
+// process, it stands in for a program the agent wrote: what it runs is never
+// seen by the sandbox's validation, only confined by the OS sandbox. (A bare
+// allow of `bash` itself no longer does: bash runs in the sandbox's own
+// interpreter, which validates and routes each command it runs.)
+func nativeShell(t *testing.T, dir string) string {
+	t.Helper()
+	src, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nativesh"), data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "./nativesh"
 }

@@ -31,9 +31,15 @@ import (
 // Command is a bare name ("curl", "./scripts/deploy.sh") or a name followed by
 // the leading non-flag arguments the entry is limited to ("uv run pyright",
 // "git push"); internal whitespace is not significant. A bare allow admits the
-// command with any arguments and, when it leads an invocation, skips bash AST
-// parsing entirely (the command string runs via real bash); a restricted allow
-// still goes through parsing and validation. NoSandbox, on an allow, makes
+// command with any arguments; a restricted allow admits only the invocations
+// whose leading non-flag arguments match. Either way the command line is still
+// parsed and validated: the allow lifts the whitelist gate and the command's
+// own argument validators for what it admits, and the rest of the line, its
+// redirects and the paths it names are checked as always. A bare allow of a
+// script path ("./scripts/build.sh") also trusts the script: it runs through
+// the sandbox's interpreter like any other, without its commands being held to
+// the whitelist, their argument validators, the structural rules or the deny
+// list (ask entries and the path boundary still apply). NoSandbox, on an allow, makes
 // matching invocations run directly on the host, bypassing the OS sandbox
 // worker even when it is enabled. A denial is checked before every command
 // gate and outranks every allow, so `git push` denied and `git` allowed refuse
@@ -56,7 +62,7 @@ type CommandEntry struct {
 	// Config.Effective); it is never read from or written to the file. A
 	// profile's allow of a bare command name whitelists the command rather
 	// than opening an escape hatch: the command keeps its argument validators
-	// and is never run via real bash, so it is listed by
+	// and is never trusted the way an allow is, so it is listed by
 	// WhitelistedCommandList, not ExtraCommandList. Every other field, and an
 	// allow with arguments, means what it means in the config.
 	Profile string `yaml:"-"`

@@ -1016,30 +1016,6 @@ func TestValidate_UnsandboxedCommands(t *testing.T) {
 	}
 }
 
-func TestIsUnsandboxedInvocation(t *testing.T) {
-	s := NewSandbox()
-	s.updateConfig(&config.Config{
-		ExtraCommands:       []string{"wget"},
-		UnsandboxedCommands: []string{"curl", "git push"},
-	}, "")
-
-	tests := []struct {
-		command string
-		want    bool
-	}{
-		{"curl https://example.com", true},  // bare unsandboxed entry
-		{"wget https://example.com", false}, // extra_commands, not unsandboxed
-		{"git push origin main", false},     // subcommand entry: not a bare raw invocation
-		{"ls", false},                       // built-in allowed command
-		{"", false},                         // empty command
-	}
-	for _, tt := range tests {
-		if got := s.isUnsandboxedInvocation(tt.command); got != tt.want {
-			t.Errorf("isUnsandboxedInvocation(%q) = %v, want %v", tt.command, got, tt.want)
-		}
-	}
-}
-
 func TestExecIsUnsandboxed(t *testing.T) {
 	s := NewSandbox()
 	s.updateConfig(&config.Config{
@@ -1127,40 +1103,6 @@ func clearDockerHost(t *testing.T) {
 	})
 }
 
-func TestUnsandboxedCommand_SkipsDockerProxy_RawPath(t *testing.T) {
-	clearDockerHost(t)
-	tmpDir := t.TempDir()
-	const proxy = "unix:///tmp/ls-test-proxy.sock"
-
-	// Control: a bare extra_commands entry (no OS sandbox) gets the proxy
-	// DOCKER_HOST injected.
-	extra := NewSandbox()
-	extra.updateConfig(&config.Config{ExtraCommands: []string{"bash"}}, tmpDir)
-	extra.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
-	out, err := extra.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
-	if err != nil {
-		t.Fatalf("extra bash failed: %v", err)
-	}
-	if !strings.Contains(out, "["+proxy+"]") {
-		t.Errorf("expected extra command to see proxy DOCKER_HOST, got %q", out)
-	}
-
-	// Unsandboxed: the same bare entry runs on the host without the proxy.
-	uns := NewSandbox()
-	uns.updateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
-	uns.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
-	out, err = uns.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
-	if err != nil {
-		t.Fatalf("unsandboxed bash failed: %v", err)
-	}
-	if strings.Contains(out, proxy) {
-		t.Errorf("expected unsandboxed command not to see proxy DOCKER_HOST, got %q", out)
-	}
-	if !strings.Contains(out, "[]") {
-		t.Errorf("expected empty DOCKER_HOST for unsandboxed command, got %q", out)
-	}
-}
-
 func TestUnsandboxedCommand_SkipsDockerProxy_InterpPath(t *testing.T) {
 	clearDockerHost(t)
 	tmpDir := t.TempDir()
@@ -1196,17 +1138,17 @@ func TestUnsandboxedCommand_PreservesHostDockerHost(t *testing.T) {
 	t.Setenv("DOCKER_HOST", hostDocker)
 	tmpDir := t.TempDir()
 
-	// Raw path: a bare unsandboxed entry should see the host's own DOCKER_HOST,
-	// not the proxy socket.
+	// The interpreter's own variables are the host's: the proxy socket is set
+	// only for the commands it dispatches to the sandbox.
 	raw := NewSandbox()
 	raw.updateConfig(&config.Config{UnsandboxedCommands: []string{"bash"}}, tmpDir)
 	raw.SetDockerHost(proxy, "/tmp", "/var/run/docker.sock")
 	out, err := raw.Execute(context.Background(), `bash -c 'echo [$DOCKER_HOST]'`, tmpDir, []string{tmpDir}, []string{tmpDir})
 	if err != nil {
-		t.Fatalf("raw unsandboxed bash failed: %v", err)
+		t.Fatalf("bash -c failed: %v", err)
 	}
 	if !strings.Contains(out, "["+hostDocker+"]") {
-		t.Errorf("raw path: expected host DOCKER_HOST %q, got %q", hostDocker, out)
+		t.Errorf("interpreter variables: expected host DOCKER_HOST %q, got %q", hostDocker, out)
 	}
 
 	// Interp path: printenv run on the host should likewise report the host
@@ -1444,53 +1386,23 @@ func TestValidate_ExtraCommandsSubcommandStillValidatesOtherSubcommands(t *testi
 	}
 }
 
-func TestFirstCommandWord(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"fvm flutter test", "fvm"},
-		{"  fvm flutter test", "fvm"},
-		{"echo hello", "echo"},
-		{"fvm", "fvm"},
-		{"", ""},
-		{"echo hello | grep x", "echo"},
-		{"fvm && rm -rf /", "fvm"},
-		{"(subshell)", ""},
-		{"$CMD arg", ""},
-	}
-	for _, tt := range tests {
-		got := firstCommandWord(tt.input)
-		if got != tt.want {
-			t.Errorf("firstCommandWord(%q) = %q, want %q", tt.input, got, tt.want)
+// TestBareAllow_LineStillValidated: a bare allow admits the command with any
+// arguments, and nothing more — the command line around it is parsed and
+// validated like any other, so a refused command chained after it, or a
+// redirect outside the boundary, is still refused.
+func TestBareAllow_LineStillValidated(t *testing.T) {
+	s := NewSandbox()
+	s.updateConfig(&config.Config{ExtraCommands: []string{"fvm"}}, "")
+	dir := t.TempDir()
+	paths := []string{dir}
+	for _, ok := range []string{"fvm flutter test test/foo_test.dart", "fvm --version", "fvm", "fvm --version | grep 3"} {
+		if err := s.ValidateCommand(ok, dir, paths, paths); err != nil {
+			t.Errorf("%q: %v", ok, err)
 		}
 	}
-}
-
-func TestIsExtraCommandInvocation(t *testing.T) {
-	s := NewSandbox()
-	s.updateConfig(&config.Config{
-		ExtraCommands: []string{"fvm", "fvm flutter test", "pnpx prettier"},
-	}, "")
-
-	tests := []struct {
-		command string
-		want    bool
-	}{
-		// "fvm" has a bare entry → bypass
-		{"fvm flutter test test/foo_test.dart", true},
-		{"fvm --version", true},
-		{"fvm", true},
-		// "pnpx" only has a restricted entry → no bypass
-		{"pnpx prettier --check .", false},
-		// unknown command → no bypass
-		{"curl https://example.com", false},
-		{"echo hello", false},
-	}
-	for _, tt := range tests {
-		got := s.isExtraCommandInvocation(tt.command)
-		if got != tt.want {
-			t.Errorf("isExtraCommandInvocation(%q) = %v, want %v", tt.command, got, tt.want)
+	for _, refused := range []string{"fvm --version && curl https://example.com", "fvm; sudo true", "fvm --version > /etc/fvm"} {
+		if err := s.ValidateCommand(refused, dir, paths, paths); err == nil {
+			t.Errorf("%q: a bare allow of fvm must not let the rest of the line skip validation", refused)
 		}
 	}
 }

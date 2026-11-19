@@ -1,6 +1,7 @@
 package bash_sandboxed
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,9 +14,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/interp"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // maxBackgroundOutputBytes caps the size of each background process's output
@@ -188,6 +189,8 @@ type BackgroundProcess struct {
 
 	output *outputFile
 	cancel context.CancelFunc
+	// finished is closed once the terminal state is recorded (see Done).
+	finished chan struct{}
 
 	mu       sync.Mutex
 	done     bool
@@ -202,6 +205,59 @@ func (p *BackgroundProcess) Status() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.statusLocked()
+}
+
+// Done returns a channel that is closed once the process has exited and its
+// terminal state (Summary) is recorded.
+func (p *BackgroundProcess) Done() <-chan struct{} {
+	return p.finished
+}
+
+// Summary returns the process's current state as listed by ListBackground.
+func (p *BackgroundProcess) Summary() BackgroundStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return BackgroundStatus{
+		ID:         p.ID,
+		Command:    p.Command,
+		Status:     p.statusLocked(),
+		ExitCode:   p.exitCode,
+		OutputPath: p.OutputPath,
+	}
+}
+
+// OutputTail returns up to the last maxBytes of the process's output file,
+// starting at a line boundary when the file is longer (or, within a single
+// longer line, at a character boundary). It reads the file the
+// process writes to, so it is "" once the server has removed it.
+func (p *BackgroundProcess) OutputTail(maxBytes int64) string {
+	f, err := os.Open(p.OutputPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	start := max(fi.Size()-maxBytes, 0)
+	buf := make([]byte, fi.Size()-start)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	buf = buf[:n]
+	if start > 0 {
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+			buf = buf[i+1:]
+		} else {
+			// One long line: at least start on a whole character.
+			for len(buf) > 0 && !utf8.RuneStart(buf[0]) {
+				buf = buf[1:]
+			}
+		}
+	}
+	return string(buf)
 }
 
 func (p *BackgroundProcess) statusLocked() string {
@@ -318,6 +374,7 @@ func (m *backgroundManager) create(command string) (*BackgroundProcess, context.
 		OutputPath: path,
 		output:     out,
 		cancel:     cancel,
+		finished:   make(chan struct{}),
 	}
 	m.procs[id] = p
 	return p, ctx, nil
@@ -350,6 +407,7 @@ func (m *backgroundManager) finish(p *BackgroundProcess, err error) {
 	p.done = true
 	p.runErr = err
 	p.exitCode = exitCodeFromErr(err, p.killed)
+	close(p.finished)
 }
 
 // shutdownGracePeriod bounds how long killAll waits for the runner goroutines to
@@ -414,37 +472,38 @@ func (s *Sandbox) ExecuteBackground(command string, workDir string, readAllowedP
 	return s.ExecuteBackgroundContext(context.Background(), command, workDir, readAllowedPaths, writeAllowedPaths)
 }
 
+// backgroundRunKey marks the context of a background run. A command it runs
+// on the host leads its own process group, so stopping the run reaps what the
+// command forked (a dev server's workers, a daemon) too (see execOnHost).
+type backgroundRunKey struct{}
+
+// isBackgroundRun reports whether ctx belongs to a background run.
+func isBackgroundRun(ctx context.Context) bool {
+	v, _ := ctx.Value(backgroundRunKey{}).(bool)
+	return v
+}
+
 // ExecuteBackgroundContext is ExecuteBackground with the approval (see
 // WithApproval) read from ctx. Only ctx's approval carries over to the
 // process, which outlives the call: it is cancelled by KillBackground and
 // shutdown, never by ctx.
 func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command string, workDir string, readAllowedPaths, writeAllowedPaths []string) (*BackgroundProcess, error) {
-	isExtra := s.isExtraCommandInvocation(command)
-	forceHost := s.isUnsandboxedInvocation(command)
 	isApproved := approved(callCtx)
 	validateCtx := withAuditScope(context.Background(), command, workDir, "bash")
 	if isApproved {
 		validateCtx = WithApproval(validateCtx)
 	}
 
-	var f *syntax.File
-	if isExtra {
-		if err := s.checkRawAsk(validateCtx, command); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-	} else {
-		var err error
-		f, err = ParseBash(command)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
-		// The scripts it runs, before any of it runs (as Execute does).
-		if err := s.validateScriptContents(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
-			return nil, fmt.Errorf("validation failed: %w", err)
-		}
+	f, err := ParseBash(command)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateFileCtx(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+	// The scripts it runs, before any of it runs (as Execute does).
+	if err := s.validateScriptContents(validateCtx, f, workDir, readAllowedPaths, writeAllowedPaths, 0); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// create derives the run context from the manager's shared parent (so
@@ -455,6 +514,7 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		return nil, err
 	}
 	ctx = withAuditScope(ctx, command, workDir, "bash")
+	ctx = context.WithValue(ctx, backgroundRunKey{}, true)
 	if isApproved {
 		ctx = WithApproval(ctx)
 	}
@@ -474,19 +534,15 @@ func (s *Sandbox) ExecuteBackgroundContext(callCtx context.Context, command stri
 		// (mvdan.cc/sh pipelines can block on non-context-aware io.Pipe copies
 		// that SIGKILL cannot unblock) does not pin the process in "running"
 		// forever — mirroring the foreground executeWithInterp grace period.
+		start := time.Now()
 		runDone := make(chan error, 1)
 		go func() {
-			if isExtra {
-				// newProcessGroup=true: background bare commands often start
-				// servers/daemons that fork, so kill the whole group on stop.
-				runDone <- s.runRawToWriter(ctx, command, workDir, proc.output, true, forceHost)
-			} else {
-				runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
-			}
+			runDone <- s.runInterpToWriter(ctx, f, workDir, readAllowedPaths, writeAllowedPaths, proc.output)
 		}()
 
 		select {
 		case err := <-runDone:
+			s.writeAWSCredentialNote(start, proc.output)
 			s.bg.finish(proc, err)
 		case <-ctx.Done():
 			// Killed: give the runner a short grace period to return cleanly,
@@ -531,15 +587,7 @@ func (s *Sandbox) ListBackground() []BackgroundStatus {
 	procs := s.bg.list()
 	out := make([]BackgroundStatus, 0, len(procs))
 	for _, p := range procs {
-		p.mu.Lock()
-		out = append(out, BackgroundStatus{
-			ID:         p.ID,
-			Command:    p.Command,
-			Status:     p.statusLocked(),
-			ExitCode:   p.exitCode,
-			OutputPath: p.OutputPath,
-		})
-		p.mu.Unlock()
+		out = append(out, p.Summary())
 	}
 	return out
 }

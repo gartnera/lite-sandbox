@@ -52,18 +52,6 @@ func (s *Sandbox) getDeniedCommands() map[string][]deniedEntry {
 	return s.deniedCommands
 }
 
-// deniedCommandName reports whether any deny entry is registered for the
-// command name, whatever its arguments. It is the cheap pre-check for the
-// raw-bash bypass, which has no parsed argv to match against: a command whose
-// name appears in the deny list must go through AST parsing so the precise
-// per-entry match below can run.
-func (s *Sandbox) deniedCommandName(cmdName string) bool {
-	if cmdName == "" {
-		return false
-	}
-	return len(s.getDeniedCommands()[filepath.Base(cmdName)]) > 0
-}
-
 // deniedCommand reports whether an invocation of cmdName with the given
 // expanded arguments (argv[1:]) matches the deny list, returning the entry
 // that matched for the error message.
