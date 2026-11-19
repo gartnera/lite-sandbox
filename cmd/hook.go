@@ -476,10 +476,6 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 	if !event.IsShellTool() {
 		return nil
 	}
-	what := event.ToolName
-	if event.ToolInput != nil {
-		what = event.ToolInput.Describe()
-	}
 	if event.FromGrok() {
 		// Grok clips the reason to 256 characters, so it carries only the
 		// redirect; the rules file explains the rest.
@@ -507,11 +503,10 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 			"so its finishing is the signal, rather than streaming output forever; " +
 			"read the output file it names to follow progress."
 	}
-	reason := fmt.Sprintf(
-		"Blocked by lite-sandbox: the built-in %s tool is disabled.\n"+
-			"Attempted action: %s\n%s",
-		event.ToolName, what, instead,
-	)
+	// The model knows the command it just sent, so the reason does not
+	// echo it back.
+	reason := fmt.Sprintf("Blocked by lite-sandbox: the built-in %s tool is disabled.\n%s",
+		event.ToolName, instead)
 	return hook.NewDecision(hook.DecisionDeny, reason)
 }
 
