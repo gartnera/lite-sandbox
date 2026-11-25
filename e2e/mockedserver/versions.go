@@ -17,28 +17,28 @@ const (
 	// intermittently missing from its output.
 	CrushVersion = "0.99.0"
 	// CodexVersion is an openai/codex GitHub release (tag rust-v<version>).
-	CodexVersion = "0.170.0"
+	CodexVersion = "0.172.0"
 	// ClaudeCodeVersion is a Claude Code release, fetched from the native
 	// distribution that https://claude.ai/install.sh uses.
-	ClaudeCodeVersion = "2.1.327"
+	ClaudeCodeVersion = "2.1.332"
 	// OpencodeVersion is an anomalyco/opencode v1 GitHub release (without the "v").
 	OpencodeVersion = "1.19.6"
 	// OpencodeV2Version is an anomalyco/opencode v2 GitHub release (without
 	// the "v"). v2 changed the config format, so both majors are tested.
-	OpencodeV2Version = "2.3.2"
+	OpencodeV2Version = "2.4.1"
 	// GrokVersion is a Grok Build release, fetched from the distribution that
 	// https://x.ai/cli/install.sh uses.
-	GrokVersion = "1.0.89"
+	GrokVersion = "1.0.92"
 	// PiVersion is an earendil-works/pi GitHub release (without the "v").
-	PiVersion = "1.5.2"
+	PiVersion = "1.6.0"
 )
 
 // grokSHA256 pins the SHA-256 of the (decompressed) GrokVersion binary per
 // <os>-<arch>, since Grok's distribution publishes no checksum. Update it
 // with GrokVersion; an E2E_GROK_VERSION override runs unverified.
 var grokSHA256 = map[string]string{
-	"linux-x86_64":  "a3dface51d9bdc71fd121e0481dd02d9b46a721f7a6b892f756480e9666eba1f",
-	"linux-aarch64": "641b3e500d6420d3b07117a2c857cceeb82b33f4b53d23a95895bd76a4773f96",
-	"macos-aarch64": "f149e6ad81339491f8d6e0c5fd712f2813042c0dfbb595c28d5767e4567c17a1",
-	"macos-x86_64":  "3103ba39e3bd7f9c6f55e1b4a61219e7d49736f334e97527a49f73aaf5743d8d",
+	"linux-x86_64":  "add4d201dbf2c0bd6077a36feb55a76939de30bae48dbb06f16b2307d38ceacb",
+	"linux-aarch64": "8c74f1dc6cdc1befff6b9faada06bec4cf6759d04f2a60cdc28ece5ff696b44f",
+	"macos-aarch64": "8b5f67b24f2cc9a4341d8e2eb7f67e3228d7d647ed04752a4f932f7133e5ab08",
+	"macos-x86_64":  "66b7a3ef1d647280ac649b68d89b5a3d4800b1ae9df76707c011e2d400858ea9",
 }
