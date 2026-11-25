@@ -36,6 +36,7 @@ func TestEvaluatePathPolicy(t *testing.T) {
 		name      string
 		event     *hook.Event
 		wantDeny  bool
+		wantAllow bool
 		wantInMsg string
 	}{
 		{
@@ -75,12 +76,13 @@ func TestEvaluatePathPolicy(t *testing.T) {
 			wantInMsg: "readable",
 		},
 		{
-			name: "write inside cwd defers",
+			name: "write inside cwd is allowed",
 			event: &hook.Event{
 				ToolName:  hook.ToolWrite,
 				CWD:       cwd,
 				ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "out.txt"), Content: "hi"},
 			},
+			wantAllow: true,
 		},
 		{
 			name: "write outside is denied",
@@ -265,8 +267,12 @@ func TestEvaluatePathPolicy(t *testing.T) {
 				if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, tt.wantInMsg) {
 					t.Errorf("reason %q does not contain %q", got.HookSpecificOutput.PermissionDecisionReason, tt.wantInMsg)
 				}
+			} else if tt.wantAllow {
+				if got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+					t.Fatalf("expected allow, got %+v", got)
+				}
 			} else if got != nil {
-				t.Fatalf("expected defer (nil), got deny: %s", got.HookSpecificOutput.PermissionDecisionReason)
+				t.Fatalf("expected defer (nil), got %q: %s", got.HookSpecificOutput.PermissionDecision, got.HookSpecificOutput.PermissionDecisionReason)
 			}
 		})
 	}
@@ -290,7 +296,7 @@ func TestEvaluatePathPolicyAgentConfig(t *testing.T) {
 		{"claude write opencode.json asks", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "opencode.json")}}, hook.DecisionAsk},
 		{"claude edit .opencode plugin asks", &hook.Event{ToolName: hook.ToolEdit, CWD: cwd, ToolInput: &hook.EditInput{FilePath: filepath.Join(cwd, ".opencode", "plugin", "x.ts")}}, hook.DecisionAsk},
 		{"claude write .claude defers", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, ".claude", "settings.json")}}, ""},
-		{"claude write AGENTS.md defers", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "AGENTS.md")}}, ""},
+		{"claude write AGENTS.md is allowed", &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: filepath.Join(cwd, "AGENTS.md")}}, hook.DecisionAllow},
 		{"claude read opencode.json defers", &hook.Event{ToolName: hook.ToolRead, CWD: cwd, ToolInput: &hook.ReadInput{FilePath: filepath.Join(cwd, "opencode.json")}}, ""},
 		{"codex apply_patch .codex/config.toml denied", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch(".codex/config.toml")}, hook.DecisionDeny},
 		{"codex apply_patch crushrc denied", &hook.Event{ToolName: hook.ToolApplyPatch, CWD: cwd, TurnID: "t", ToolInput: patch("crushrc")}, hook.DecisionDeny},
@@ -309,7 +315,7 @@ func TestEvaluatePathPolicyAgentConfig(t *testing.T) {
 			if got == nil || got.HookSpecificOutput.PermissionDecision != tt.want {
 				t.Fatalf("expected %q, got %+v", tt.want, got)
 			}
-			if !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "agent") {
+			if tt.want != hook.DecisionAllow && !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, "agent") {
 				t.Errorf("reason %q does not name agent configuration", got.HookSpecificOutput.PermissionDecisionReason)
 			}
 		})
@@ -870,5 +876,197 @@ func TestValidateBuiltinBash_LooserModesDefer(t *testing.T) {
 	ev := &hook.Event{ToolName: hook.ToolBash, CWD: cwd, ToolInput: &hook.BashInput{Command: "ls -la"}}
 	if d := validateBuiltinBash(ev); d == nil || d.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
 		t.Errorf("allowlist: expected allow, got %+v", d)
+	}
+}
+
+// TestFileWriteApproval covers the allow the hook gives a Claude Code file
+// tool's write that passed every check: only in allowlist and denylist mode,
+// only for Claude Code outside plan mode, and never for a path sandboxed
+// commands may not write or one Claude Code itself prompts before writing.
+func TestFileWriteApproval(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	cwd := t.TempDir()
+	granted := filepath.Join(home, ".local", "state", "slack-summary")
+	denied := filepath.Join(home, "frozen")
+	outside := t.TempDir()
+	// ~/.config is a dotfiles symlink to home/dotfiles/config, and
+	// ~/.config/autostart (write-denied) doesn't exist yet.
+	realCfg := filepath.Join(home, "dotfiles", "config")
+	if err := os.MkdirAll(realCfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realCfg, filepath.Join(home, ".config")); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{granted, denied, filepath.Join(home, ".ssh"), filepath.Join(home, "bin"), filepath.Join(home, "sbin"), filepath.Join(home, ".config", "tool")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A symlink to a non-ASCII spelling of ~/.ssh, which a case-insensitive
+	// file system could fold onto the real one.
+	if err := os.MkdirAll(filepath.Join(home, ".\u017fsh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".\u017fsh"), filepath.Join(cwd, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".git-credentials"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A repository's symlink to a directory that doesn't exist (yet).
+	if err := os.Symlink(filepath.Join(home, ".config", "nvim"), filepath.Join(cwd, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	// lite-sandbox is on PATH in ~/sbin, after ~/bin: a program planted in
+	// ~/bin would run in its place outside the sandbox.
+	if err := os.WriteFile(filepath.Join(home, "sbin", "lite-sandbox"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(home, "bin")+string(os.PathListSeparator)+filepath.Join(home, "sbin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeCfg := func(mode string) {
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
+		cfg := "mode: " + mode + "\npaths:\n" +
+			"  - path: " + home + "\n    write: true\n" +
+			"  - path: " + denied + "\n    write: false\n" +
+			"  - path: " + filepath.Join(home, ".config", "tool") + "\n    read: true\n    internal: true\n    commands: [tool]\n"
+		if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(p string) *hook.Event {
+		return &hook.Event{ToolName: hook.ToolWrite, CWD: cwd, ToolInput: &hook.WriteInput{FilePath: p}}
+	}
+	edit := func(p string) *hook.Event {
+		return &hook.Event{ToolName: hook.ToolEdit, CWD: cwd, ToolInput: &hook.EditInput{FilePath: p}}
+	}
+	notebook := func(p string) *hook.Event {
+		return &hook.Event{ToolName: hook.ToolNotebook, CWD: cwd, ToolInput: &hook.NotebookEditInput{NotebookPath: p}}
+	}
+	planWrite := write(filepath.Join(granted, "state.json"))
+	planWrite.PermissionMode = hook.PermissionModePlan
+
+	tests := []struct {
+		name  string
+		event *hook.Event
+		want  hook.PermissionDecision // "" for defer
+	}{
+		{"write to a granted path outside the project", write(filepath.Join(granted, "state.json")), hook.DecisionAllow},
+		{"edit inside the project", edit(filepath.Join(cwd, "main.go")), hook.DecisionAllow},
+		{"absolute notebook edit inside the project", notebook(filepath.Join(cwd, "nb", "a.ipynb")), hook.DecisionAllow},
+		{"relative notebook edit defers", notebook("nb/a.ipynb"), ""},
+		{"write to a ~ path defers", write("~/.ssh/authorized_keys"), ""},
+		{"write to a ~/ path in a granted directory defers", write("~/.local/bin/git"), ""},
+		{"write with a leading space defers", write(" " + filepath.Join(granted, "state.json")), ""},
+		{"write with a trailing newline defers", write(filepath.Join(granted, "state.json") + "\n"), ""},
+		{"write to a PATH directory before lite-sandbox's defers", write(filepath.Join(home, "bin", "git")), ""},
+		{"write to a PATH directory case-folded defers", write(filepath.Join(home, "BIN", "git")), ""},
+		{"write to a command-scoped grant defers", write(filepath.Join(home, ".config", "tool", "token")), ""},
+		{"write to a write-denied path case-folded defers", write(filepath.Join(home, "FROZEN", "f")), ""},
+		{"write with a long s past a deny entry defers", write(filepath.Join(home, ".\u017fsh", "authorized_keys")), ""},
+		{"write to a non-ASCII name defers", write(filepath.Join(cwd, "caf\u00e9.txt")), ""},
+		{"write under the scratchpad root defers", write(filepath.Join(claudeScratchpadPath(), "hook-test", "x")), ""},
+		{"write through a dangling symlink defers", write(filepath.Join(cwd, "dangling", "init.lua")), ""},
+		{"write to .pnp.js defers", write(filepath.Join(cwd, ".pnp.js")), ""},
+		{"write through a symlink to a non-ASCII spelling defers", write(filepath.Join(cwd, "s", "authorized_keys")), ""},
+		{"write to a missing deny dir under a symlinked ancestor defers", write(filepath.Join(realCfg, "autostart", "x.desktop")), ""},
+		{"write to ~/.git-credentials defers", write(filepath.Join(home, ".git-credentials")), ""},
+		{"write into an outside .claude/worktrees is allowed", write(filepath.Join(home, "repo", ".claude", "worktrees", "feat", "a.go")), hook.DecisionAllow},
+		{"write outside the writable paths", write(filepath.Join(outside, "x")), hook.DecisionDeny},
+		{"write into .git", write(filepath.Join(cwd, ".git", "hooks", "pre-commit")), hook.DecisionDeny},
+		{"write in plan mode defers", planWrite, ""},
+		{"write under a write: false path defers", write(filepath.Join(denied, "f")), ""},
+		{"write to a built-in write-denied path defers", write(filepath.Join(home, ".ssh", "config")), ""},
+		{"write to ~/.bashrc defers", write(filepath.Join(home, ".bashrc")), ""},
+		{"write to the project's .envrc defers", write(filepath.Join(cwd, ".envrc")), ""},
+		{"edit in the project's .vscode defers", edit(filepath.Join(cwd, ".vscode", "tasks.json")), ""},
+		{"write to the project's .mcp.json asks (agent configuration)", write(filepath.Join(cwd, ".mcp.json")), hook.DecisionAsk},
+		{"write to lefthook.yml defers", write(filepath.Join(cwd, "lefthook.yml")), ""},
+		{"write to ~/.config/git defers", write(filepath.Join(home, ".config", "git", "ignore")), ""},
+		{"write into the project's .claude defers", write(filepath.Join(cwd, ".claude", "settings.json")), ""},
+	}
+	for _, mode := range []string{"allowlist", "denylist"} {
+		writeCfg(mode)
+		for _, tt := range tests {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				got := evaluatePathPolicy(tt.event)
+				if tt.want == "" {
+					if got != nil {
+						t.Fatalf("expected defer, got %q: %s", got.HookSpecificOutput.PermissionDecision, got.HookSpecificOutput.PermissionDecisionReason)
+					}
+					return
+				}
+				if got == nil || got.HookSpecificOutput.PermissionDecision != tt.want {
+					t.Fatalf("expected %q, got %+v", tt.want, got)
+				}
+			})
+		}
+	}
+
+	// A symlink inside the project resolving to a protected path defers too.
+	writeCfg("allowlist")
+	if err := os.Symlink(filepath.Join(home, ".config"), filepath.Join(cwd, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".config", "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := evaluatePathPolicy(write(filepath.Join(cwd, "cfg", "git", "config"))); got != nil {
+		t.Errorf("symlink to ~/.config/git: expected defer, got %+v", got)
+	}
+
+	// The lite-sandbox binary (here, the test binary) is never approved, even
+	// inside the project.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := write(exe)
+	ev.CWD = filepath.Dir(exe)
+	if got := evaluatePathPolicy(ev); got != nil && got.HookSpecificOutput.PermissionDecision == hook.DecisionAllow {
+		t.Errorf("write to the lite-sandbox binary: expected no allow, got %+v", got)
+	}
+
+	// Open mode enforces nothing, so a passing check approves nothing.
+	writeCfg("open")
+	for _, p := range []string{filepath.Join(cwd, "main.go"), filepath.Join(granted, "state.json")} {
+		if got := evaluatePathPolicy(write(p)); got != nil {
+			t.Errorf("open mode %s: expected defer, got %+v", p, got)
+		}
+	}
+}
+
+// TestRunHookAllowsCheckedWrite checks the stdin→stdout contract for an
+// approved write: an allow decision document.
+func TestRunHookAllowsCheckedWrite(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	ev := map[string]any{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "Write",
+		"cwd":             cwd,
+		"permission_mode": "acceptEdits",
+		"tool_input":      map[string]any{"file_path": filepath.Join(cwd, "a.txt"), "content": "x"},
+	}
+	raw, _ := json.Marshal(ev)
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetIn(bytes.NewReader(raw))
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	if err := runHook(cmd, hookOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var d hook.Decision
+	if err := json.Unmarshal(out.Bytes(), &d); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	if d.HookSpecificOutput.PermissionDecision != hook.DecisionAllow {
+		t.Fatalf("expected allow, got %+v", d)
 	}
 }
