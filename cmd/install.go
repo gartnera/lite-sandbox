@@ -616,7 +616,7 @@ func setStringList(obj map[string]json.RawMessage, key string, list []string) er
 // conflicting one behind), then registers `command` under `matcher` when command
 // is non-empty. binPath identifies our hook entries to remove.
 func reconcilePreToolUseHook(claudeDir, binPath, command, matcher string) error {
-	return reconcileClaudeHooks(claudeDir, binPath, claudePlan{hookCommand: command, hookMatcher: matcher})
+	return reconcileClaudeHooks(claudeDir, binPath, claudePlan{hookCommand: command, hookMatcher: matcher, hookBlockOnFailure: command != ""})
 }
 
 // reconcileClaudeHooks makes the registered lite-sandbox hooks match the
@@ -628,12 +628,12 @@ func reconcileClaudeHooks(claudeDir, binPath string, plan claudePlan) error {
 		return err
 	}
 	if plan.hookCommand != "" {
-		if err := configureClaudeHook(claudeDir, hook.EventPreToolUse, plan.hookCommand, plan.hookMatcher); err != nil {
+		if err := configureClaudeHook(claudeDir, hook.EventPreToolUse, claudeHookEntry(plan.hookCommand, plan.hookBlockOnFailure), plan.hookMatcher); err != nil {
 			return err
 		}
 	}
 	if plan.permissionHookCommand != "" {
-		if err := configureClaudeHook(claudeDir, hook.EventPermissionRequest, plan.permissionHookCommand, mcpToolMatcher); err != nil {
+		if err := configureClaudeHook(claudeDir, hook.EventPermissionRequest, claudeHookEntry(plan.permissionHookCommand, false), mcpToolMatcher); err != nil {
 			return err
 		}
 	}
@@ -711,16 +711,16 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 // settings.json that invokes `command` for the given tool matcher (see
 // configureClaudeHook).
 func configurePreToolUseHook(claudeDir, command, matcher string) error {
-	return configureClaudeHook(claudeDir, hook.EventPreToolUse, command, matcher)
+	return configureClaudeHook(claudeDir, hook.EventPreToolUse, claudeHookEntry(command, false), matcher)
 }
 
 // configureClaudeHook registers (or updates) a hook entry for event in
-// settings.json that invokes `command` for the given tool matcher. Existing
+// settings.json (entry, from claudeHookEntry) for the given tool matcher. Existing
 // settings and other hooks are preserved, and the operation is idempotent:
 // re-running with the same command/matcher does not duplicate the entry. The
 // hooks subtree is manipulated as untyped JSON so unrelated events
 // (PostToolUse, etc.) and fields (timeouts) survive the round-trip.
-func configureClaudeHook(claudeDir string, event hook.EventName, command, matcher string) error {
+func configureClaudeHook(claudeDir string, event hook.EventName, entry map[string]any, matcher string) error {
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 
 	cfg, err := readSettingsFile(settingsPath)
@@ -739,7 +739,7 @@ func configureClaudeHook(claudeDir string, event hook.EventName, command, matche
 	}
 
 	pre := asSlice(hooks[string(event)])
-	entry := map[string]any{"type": "command", "command": command}
+	command := asString(entry["command"])
 
 	// Find an existing matcher group; update it in place if present.
 	updated := false

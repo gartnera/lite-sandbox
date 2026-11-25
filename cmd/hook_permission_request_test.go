@@ -252,3 +252,79 @@ func TestReconcileClaudeHooksPermissionRequest(t *testing.T) {
 		t.Errorf("PermissionRequest groups after switching modes = %v, want only the other tool's", pr)
 	}
 }
+
+// TestClaudeHookBlockOnFailure checks that the PreToolUse hook fails closed
+// ("onFailure": "block") exactly when it governs built-in tools, in both the
+// settings `launch` passes and the settings.json `install` writes, and that
+// the PermissionRequest hook never does.
+func TestClaudeHookBlockOnFailure(t *testing.T) {
+	binPath := "/usr/local/bin/lite-sandbox"
+	for _, tc := range []struct {
+		name string
+		opts claudeOptions
+		want bool
+	}{
+		{"default", claudeOptions{}, false},
+		{"with-tool-hook", claudeOptions{withToolHook: true, redirectBash: true}, true},
+		{"bash-ast-hook-mode", claudeOptions{bashASTHookMode: true}, true},
+		{"bash-ast-hook-mode with-tool-hook", claudeOptions{bashASTHookMode: true, withToolHook: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := tc.opts.plan(binPath)
+			onFailure := func(hooks map[string]any, event string) (string, bool) {
+				t.Helper()
+				groups := asSlice(hooks[event])
+				if len(groups) == 0 {
+					return "", false
+				}
+				entry := asMap(asSlice(asMap(groups[len(groups)-1])["hooks"])[0])
+				return asString(entry["onFailure"]), true
+			}
+			check := func(where string, hooks map[string]any) {
+				t.Helper()
+				got, ok := onFailure(hooks, "PreToolUse")
+				if !ok {
+					t.Fatalf("%s: no PreToolUse hook in %v", where, hooks)
+				}
+				if want := map[bool]string{true: "block"}[tc.want]; got != want {
+					t.Errorf("%s: PreToolUse onFailure = %q, want %q", where, got, want)
+				}
+				if got, ok := onFailure(hooks, "PermissionRequest"); ok && got != "" {
+					t.Errorf("%s: PermissionRequest onFailure = %q, want unset", where, got)
+				}
+			}
+
+			check("settings", plan.settingsHooks())
+
+			tmpDir := t.TempDir()
+			if err := reconcileClaudeHooks(tmpDir, binPath, plan); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatal(err)
+			}
+			check("settings.json", asMap(raw["hooks"]))
+		})
+	}
+
+	// Reinstalling in the default mode over a --with-tool-hook install drops
+	// the setting along with the entry it was on.
+	tmpDir := t.TempDir()
+	for _, opts := range []claudeOptions{{withToolHook: true, redirectBash: true}, {}} {
+		if err := reconcileClaudeHooks(tmpDir, binPath, opts.plan(binPath)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "onFailure") {
+		t.Errorf("settings.json after switching back to the default install = %s, want no onFailure", data)
+	}
+}
