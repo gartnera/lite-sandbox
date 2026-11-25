@@ -893,17 +893,24 @@ func TestFileWriteApproval(t *testing.T) {
 	granted := filepath.Join(home, ".local", "state", "slack-summary")
 	denied := filepath.Join(home, "frozen")
 	outside := t.TempDir()
-	for _, d := range []string{granted, denied, filepath.Join(home, ".ssh")} {
+	for _, d := range []string{granted, denied, filepath.Join(home, ".ssh"), filepath.Join(home, "bin"), filepath.Join(home, "sbin"), filepath.Join(home, ".config", "tool")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// lite-sandbox is on PATH in ~/sbin, after ~/bin: a program planted in
+	// ~/bin would run in its place outside the sandbox.
+	if err := os.WriteFile(filepath.Join(home, "sbin", "lite-sandbox"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(home, "bin")+string(os.PathListSeparator)+filepath.Join(home, "sbin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	writeCfg := func(mode string) {
 		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 		t.Setenv("LITE_SANDBOX_CONFIG", cfgPath)
 		cfg := "mode: " + mode + "\npaths:\n" +
 			"  - path: " + home + "\n    write: true\n" +
-			"  - path: " + denied + "\n    write: false\n"
+			"  - path: " + denied + "\n    write: false\n" +
+			"  - path: " + filepath.Join(home, ".config", "tool") + "\n    read: true\n    internal: true\n    commands: [tool]\n"
 		if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -927,7 +934,17 @@ func TestFileWriteApproval(t *testing.T) {
 	}{
 		{"write to a granted path outside the project", write(filepath.Join(granted, "state.json")), hook.DecisionAllow},
 		{"edit inside the project", edit(filepath.Join(cwd, "main.go")), hook.DecisionAllow},
-		{"relative notebook edit inside the project", notebook("nb/a.ipynb"), hook.DecisionAllow},
+		{"absolute notebook edit inside the project", notebook(filepath.Join(cwd, "nb", "a.ipynb")), hook.DecisionAllow},
+		{"relative notebook edit defers", notebook("nb/a.ipynb"), ""},
+		{"write to a ~ path defers", write("~/.ssh/authorized_keys"), ""},
+		{"write to a ~/ path in a granted directory defers", write("~/.local/bin/git"), ""},
+		{"write with a leading space defers", write(" " + filepath.Join(granted, "state.json")), ""},
+		{"write with a trailing newline defers", write(filepath.Join(granted, "state.json") + "\n"), ""},
+		{"write to a PATH directory before lite-sandbox's defers", write(filepath.Join(home, "bin", "git")), ""},
+		{"write to a PATH directory case-folded defers", write(filepath.Join(home, "BIN", "git")), ""},
+		{"write to a command-scoped grant defers", write(filepath.Join(home, ".config", "tool", "token")), ""},
+		{"write to a write-denied path case-folded defers", write(filepath.Join(home, "FROZEN", "f")), ""},
+		{"write into an outside .claude/worktrees is allowed", write(filepath.Join(home, "repo", ".claude", "worktrees", "feat", "a.go")), hook.DecisionAllow},
 		{"write outside the writable paths", write(filepath.Join(outside, "x")), hook.DecisionDeny},
 		{"write into .git", write(filepath.Join(cwd, ".git", "hooks", "pre-commit")), hook.DecisionDeny},
 		{"write in plan mode defers", planWrite, ""},
@@ -969,6 +986,18 @@ func TestFileWriteApproval(t *testing.T) {
 	}
 	if got := evaluatePathPolicy(write(filepath.Join(cwd, "cfg", "git", "config"))); got != nil {
 		t.Errorf("symlink to ~/.config/git: expected defer, got %+v", got)
+	}
+
+	// The lite-sandbox binary (here, the test binary) is never approved, even
+	// inside the project.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := write(exe)
+	ev.CWD = filepath.Dir(exe)
+	if got := evaluatePathPolicy(ev); got != nil && got.HookSpecificOutput.PermissionDecision == hook.DecisionAllow {
+		t.Errorf("write to the lite-sandbox binary: expected no allow, got %+v", got)
 	}
 
 	// Open mode enforces nothing, so a passing check approves nothing.

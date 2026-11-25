@@ -83,7 +83,8 @@ func TestClaudeCode(t *testing.T) {
 		}
 		runAgent(t, project, environ, bins.claude, "-p", "--output-format", "json", prompt)
 
-		lastResults(t, model)
+		results := lastResults(t, model)
+		t.Logf("tool results: %q", results)
 		for _, p := range []string{inside, outside} {
 			if data, err := os.ReadFile(p); err != nil || string(data) != "written-by-claude" {
 				t.Errorf("checked write to %s did not apply (%v): %q", p, err, data)

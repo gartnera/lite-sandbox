@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -655,9 +656,9 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 // the working directory and additionalDirectories, so a `paths allow
 // <dir> --write` grant reached by sandboxed bash without a prompt still
 // prompted for the agent's file tools. Allowing here keeps the two in step.
-// It grants nothing sandboxed bash can't already do: the same writable
-// boundary, and it defers wherever bash would be refused or Claude Code
-// singles a path out:
+// It is meant to grant nothing sandboxed bash can't already do: the same
+// writable boundary, and it defers wherever bash would be refused or Claude
+// Code singles a path out:
 //
 //   - Only in allowlist and denylist mode, where the boundary is enforced. In
 //     open mode a passing boundary check says nothing (it only audits).
@@ -666,15 +667,22 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     decided by its own extension.
 //   - Not in plan mode, which is for reading: Claude Code ignores a hook's
 //     allow on a write there anyway.
-//   - Not for a path sandboxed commands may not write or read (the config's
-//     effective deny lists, built-ins included: shell startup files, ~/.ssh,
-//     the sandbox's own config and audit log, credentials).
+//   - Only for a path given absolute and without surrounding white space.
+//     Claude Code trims the path and expands a leading ~ before writing, which
+//     the checks above don't, so "~/.ssh/x" would be judged as <cwd>/~/.ssh/x.
+//   - Not for a path sandboxed commands may not write or read
+//     (hookWriteDenied): the config's deny lists, built-ins included, the
+//     paths granted only to some commands, and the programs the host runs.
 //   - Not for one of Claude Code's protected paths (claudeProtectedPath):
 //     its docs don't say whether a hook's allow lifts the prompt it puts on
-//     those, so the hook stays out of that decision.
+//     those, so the hook stays out of that decision. (The e2e suite's pinned
+//     Claude Code keeps the prompt either way; this doesn't rely on that.)
 func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
 	if event.FromGrok() || event.FromCodex() || event.FromPi() ||
 		event.PermissionMode == hook.PermissionModePlan {
+		return nil
+	}
+	if !filepath.IsAbs(path) || strings.TrimFunc(path, isTrimmedByJS) != path {
 		return nil
 	}
 	cfg, err := config.LoadForDirectory(cwd)
@@ -684,22 +692,63 @@ func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
 	if mode := cfg.EffectiveMode(); mode != config.ModeAllowlist && mode != config.ModeDenylist {
 		return nil
 	}
-	abs := path
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(cwd, abs)
-	}
-	abs = filepath.Clean(abs)
+	abs := filepath.Clean(path)
 	resolved := bash_sandboxed.ResolvePath(abs, cwd)
 	if claudeProtectedPath(abs) || claudeProtectedPath(resolved) {
 		return nil
 	}
-	denied := append(cfg.EffectiveDeniedWritePaths(), cfg.EffectiveDeniedReadPaths()...)
-	if bash_sandboxed.IsUnderAllowedPaths(abs, denied) || bash_sandboxed.IsUnderAllowedPaths(resolved, denied) {
+	if hookWriteDenied(cfg, cwd, abs, resolved) {
 		return nil
 	}
 	return hook.NewDecision(hook.DecisionAllow, fmt.Sprintf(
 		"Validated by lite-sandbox: %q is inside the sandbox's writable paths, the same ones sandboxed commands may write.",
 		resolved))
+}
+
+// isTrimmedByJS reports whether JavaScript's String.prototype.trim, which
+// Claude Code applies to a file tool's path, strips r: Unicode white space,
+// line terminators, and the byte order mark.
+func isTrimmedByJS(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }
+
+// hookWriteDenied reports whether a file-tool write to abs (resolving to
+// resolved) lands where sandboxed commands can't write, so the hook must not
+// approve it: the config's effective write and read deny lists, the paths
+// granted only to some commands (which the shared worker hides), the
+// lite-sandbox binary, the directories on PATH up to lite-sandbox's and Go's
+// install directory outside the project (config.HostProgramDirs, as
+// bash_sandboxed's hostProgramDenies), and buildx's builder state. Paths are
+// compared ignoring case, so a case-insensitive file system (macOS) can't
+// spell its way past an entry.
+func hookWriteDenied(cfg *config.Config, cwd, abs, resolved string) bool {
+	denied := append(cfg.EffectiveDeniedWritePaths(), cfg.EffectiveDeniedReadPaths()...)
+	for _, d := range cfg.ScopedDeniedReadEntries() {
+		denied = append(denied, d.Path)
+	}
+	denied = append(denied, config.ServerExecutable()...)
+	for _, dir := range cfg.HostProgramDirs(os.Getenv("PATH")) {
+		if !bash_sandboxed.IsUnderAllowedPaths(dir, []string{cwd}) {
+			denied = append(denied, dir)
+		}
+	}
+	if dir := config.BuildxConfigDir(); filepath.IsAbs(dir) {
+		denied = append(denied, filepath.Join(dir, "instances"), filepath.Join(dir, "defaults"), filepath.Join(dir, "current"))
+	}
+	for _, d := range denied {
+		forms := []string{filepath.Clean(d)}
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			forms = append(forms, r)
+		}
+		for _, f := range forms {
+			lf := strings.ToLower(f)
+			for _, p := range []string{abs, resolved} {
+				lp := strings.ToLower(p)
+				if lp == lf || strings.HasPrefix(lp, strings.TrimSuffix(lf, string(filepath.Separator))+string(filepath.Separator)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // claudeProtectedDirs and claudeProtectedFiles mirror the protected paths
@@ -728,6 +777,10 @@ var (
 func claudeProtectedPath(path string) bool {
 	parts := strings.Split(path, string(filepath.Separator))
 	for i, p := range parts {
+		// Claude Code's own worktrees are exempt, as in IsClaudeConfigPath.
+		if strings.EqualFold(p, ".claude") && i+1 < len(parts) && strings.EqualFold(parts[i+1], "worktrees") {
+			continue
+		}
 		for _, d := range claudeProtectedDirs {
 			if strings.EqualFold(p, d) {
 				return true

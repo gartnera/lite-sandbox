@@ -109,29 +109,39 @@ make plan mode read-only.
 
 With the tool hook (`--with-tool-hook`, and `launch`), the PreToolUse hook
 also **allows** a Claude Code `Write`, `Edit` or `NotebookEdit` call that
-passed every check: the target, as written and after following symlinks, is
-inside the writable paths, not in a `.git` directory and not agent
-configuration. That keeps the file tools in step with the sandboxed bash tool,
-which writes the same paths without a prompt; without it, a write to a
-`paths allow <dir> --write` grant outside the project still prompted, since
-Claude Code's `acceptEdits` covers only the working directory and
-`additionalDirectories`. The hook leaves the call to Claude Code's own
-permission flow instead (so `default` mode still prompts and a `deny` or
-`ask` rule in settings still applies) when:
+passed every check: the target, after following symlinks, is inside the
+writable paths, not in a `.git` directory and not agent configuration. That
+keeps the file tools in step with the sandboxed bash tool, which writes the
+same paths without a prompt; without it, a write to a `paths allow <dir>
+--write` grant outside the project still prompted, since Claude Code's
+`acceptEdits` covers only the working directory and `additionalDirectories`.
+It also means Claude Code's `default` permission mode no longer prompts for
+edits inside the project: the sandbox's boundary, not a per-edit prompt, is
+what governs them. To review each edit, use `open` mode or leave the tool hook
+off. The hook leaves the call to Claude Code's own permission flow instead
+(so a `deny` or `ask` rule in settings still applies, as it does over any
+hook allow) when:
 - the mode is `open`, where the boundary is only audited;
 - the session is in plan mode;
-- the target is under one of the config's effective deny lists (a
-  `write: false` or `read: false` entry, or a built-in one: shell startup
-  files, `~/.ssh`, `~/.local/bin`, the sandbox's own config and audit log, the
-  agents' settings and credentials), which sandboxed commands can't write;
+- the path isn't absolute, or starts or ends with white space: Claude Code
+  trims it and expands a leading `~`, which the boundary check doesn't;
+- the target, as written or after following symlinks and ignoring case, is
+  somewhere sandboxed commands can't write: under one of the config's
+  effective deny lists (a `write: false` or `read: false` entry, or a built-in
+  one: shell startup files, `~/.ssh`, `~/.local/bin`, the sandbox's own config
+  and audit log, the agents' settings and credentials), a path granted only to
+  some commands (`--commands`), the lite-sandbox binary, a directory on `PATH`
+  up to lite-sandbox's or Go's install directory outside the project, or
+  buildx's builder state;
 - the target is one of Claude Code's
   [protected paths](https://code.claude.com/docs/en/permission-modes) (`.git`,
-  `.vscode`, `.idea`, `.husky`, `.claude`, `.envrc`, `.gitconfig`, `.npmrc`,
-  `.pre-commit-config.yaml`, ..., matched by path component and ignoring
-  case), which Claude Code prompts before writing in `default` and
-  `acceptEdits` mode. Its documentation doesn't say whether a hook's allow
-  lifts that prompt, so the hook stays out of it. Sandboxed bash can still
-  write such a file inside the writable paths (a project's `.envrc`).
+  `.vscode`, `.idea`, `.husky`, `.claude` but not `.claude/worktrees`,
+  `.envrc`, `.gitconfig`, `.npmrc`, `.pre-commit-config.yaml`, ..., matched by
+  path component and ignoring case), which Claude Code prompts before writing
+  in `default` and `acceptEdits` mode. Its documentation doesn't say whether
+  a hook's allow lifts that prompt (in testing it doesn't), so the hook stays
+  out of it. Sandboxed bash can still write such a file inside the writable
+  paths (a project's `.envrc`).
 Codex, Grok Build and pi file-tool writes get no allow: their hooks defer or
 are decided as before.
 
