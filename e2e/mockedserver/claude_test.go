@@ -54,12 +54,69 @@ func TestClaudeCode(t *testing.T) {
 		assertResult(t, results, 0, hookBlockedShell)
 		assertResult(t, results, 1, hookOutsideWritable)
 	})
+	t.Run("with-tool-hook fails closed", func(t *testing.T) {
+		// The hook is all that stands between the model and the built-in Bash
+		// here (there is no permission deny), so it is registered with
+		// "onFailure": "block". Point it at a binary that doesn't exist and run
+		// with permission checks bypassed: Bash must still be refused rather
+		// than run.
+		calls := []mockmodel.ToolCall{bash(hookFailedOpenCommand)}
+		model := startModel(t, calls)
+		configDir, environ := claudeEnv(t, model)
+		installSandbox(t, "claude", environ, "--with-tool-hook")
+		breakClaudeHook(t, filepath.Join(configDir, "settings.json"))
+		runAgent(t, newProject(t), append(environ, "IS_SANDBOX=1"), bins.claude,
+			"-p", "--output-format", "json", "--dangerously-skip-permissions", prompt)
+		results := lastResults(t, model)
+		if len(results) != 1 {
+			t.Fatalf("tool results = %q, want one for the Bash call", results)
+		}
+		if strings.Contains(results[0], hookFailedOpenOutput) {
+			t.Errorf("built-in Bash ran although its hook could not start: %q", results[0])
+		}
+		// Refused for the right reason: the hook's failure, not something else.
+		assertResult(t, results, 0, `onFailure is "block"`)
+	})
 	t.Run("bash-ast-hook-mode", func(t *testing.T) {
 		calls := []mockmodel.ToolCall{bash(blockedCommand), bash(allowedCommand)}
 		model := runClaude(t, calls, "--bash-ast-hook-mode")
 		assertConversation(t, model.output, model.Server, calls, claudeSandboxTool, false)
 		assertResult(t, lastResults(t, model.Server), 0, hookRejectedCommand)
 	})
+}
+
+// hookFailedOpenCommand prints hookFailedOpenOutput, which its own text
+// doesn't contain, so the output shows up in a tool result only if the
+// built-in Bash ran it.
+const (
+	hookFailedOpenCommand = "echo ran-without-hook-$((40+2))"
+	hookFailedOpenOutput  = "ran-without-hook-42"
+)
+
+// breakClaudeHook points every PreToolUse hook in the settings.json at path
+// to a binary that doesn't exist, leaving the rest of each entry (its
+// onFailure in particular) as installed.
+func breakClaudeHook(t *testing.T, path string) {
+	t.Helper()
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks["PreToolUse"].([]any)
+	if len(groups) == 0 {
+		t.Fatalf("no PreToolUse hook installed in %s", path)
+	}
+	for _, g := range groups {
+		for _, h := range g.(map[string]any)["hooks"].([]any) {
+			h.(map[string]any)["command"] = "/nonexistent/lite-sandbox hook"
+		}
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(data))
 }
 
 // TestClaudeCodeLaunch drives `lite-sandbox launch claude`, the temporary

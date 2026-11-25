@@ -59,6 +59,14 @@ type claudePlan struct {
 	// command means no hook.
 	hookCommand string
 	hookMatcher string
+	// hookBlockOnFailure registers the PreToolUse hook with Claude Code's
+	// "onFailure": "block", so a hook that can't start, times out, or exits
+	// with an unexpected code blocks the call instead of letting it through.
+	// It is set when the hook governs built-in tools (--with-tool-hook,
+	// --bash-ast-hook-mode), where it is what stands between the model and an
+	// unconfined Bash, Read or Write; a hook that only pre-approves the
+	// sandbox's own MCP tools fails open, falling back to permissions.allow.
+	hookBlockOnFailure bool
 	// permissionHookCommand is the PermissionRequest hook to register for the
 	// sandbox's MCP tools (matcher mcpToolMatcher), or "" for none. It
 	// pre-approves them in plan mode, where Claude Code ignores both the
@@ -84,6 +92,7 @@ func (o claudeOptions) plan(binPath string) claudePlan {
 	p.denyBash = !(o.redirectBash || o.bashASTHookMode)
 	p.alwaysLoad = o.alwaysLoad && p.configMCP
 	p.hookCommand, p.hookMatcher = claudeHookPlan(binPath, wantHook, p.validateBash, p.governFS, p.configMCP)
+	p.hookBlockOnFailure = wantHook
 	if p.configMCP {
 		// The same command as the PreToolUse hook, so both read the call with
 		// the same flags (--config-requests in particular).
@@ -172,22 +181,33 @@ func (p claudePlan) claudePermissions() permissionsConfig {
 // registers none.
 func (p claudePlan) settingsHooks() map[string]any {
 	hooks := map[string]any{}
-	group := func(matcher, command string) []any {
+	group := func(matcher string, entry map[string]any) []any {
 		return []any{map[string]any{
 			"matcher": matcher,
-			"hooks":   []any{map[string]any{"type": "command", "command": command}},
+			"hooks":   []any{entry},
 		}}
 	}
 	if p.hookCommand != "" {
-		hooks[string(hook.EventPreToolUse)] = group(p.hookMatcher, p.hookCommand)
+		hooks[string(hook.EventPreToolUse)] = group(p.hookMatcher, claudeHookEntry(p.hookCommand, p.hookBlockOnFailure))
 	}
 	if p.permissionHookCommand != "" {
-		hooks[string(hook.EventPermissionRequest)] = group(mcpToolMatcher, p.permissionHookCommand)
+		hooks[string(hook.EventPermissionRequest)] = group(mcpToolMatcher, claudeHookEntry(p.permissionHookCommand, false))
 	}
 	if len(hooks) == 0 {
 		return nil
 	}
 	return hooks
+}
+
+// claudeHookEntry is one settings.json command hook entry running command.
+// blockOnFailure adds "onFailure": "block" (Claude Code 2.1.295 and later),
+// so a hook that can't run blocks the call rather than letting it through.
+func claudeHookEntry(command string, blockOnFailure bool) map[string]any {
+	entry := map[string]any{"type": "command", "command": command}
+	if blockOnFailure {
+		entry["onFailure"] = "block"
+	}
+	return entry
 }
 
 // claudeSettings is the subset of Claude Code's settings.json that lite-sandbox
