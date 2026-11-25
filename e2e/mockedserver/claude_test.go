@@ -74,6 +74,8 @@ func TestClaudeCode(t *testing.T) {
 		if strings.Contains(results[0], hookFailedOpenOutput) {
 			t.Errorf("built-in Bash ran although its hook could not start: %q", results[0])
 		}
+		// Refused for the right reason: the hook's failure, not something else.
+		assertResult(t, results, 0, `onFailure is "block"`)
 	})
 	t.Run("bash-ast-hook-mode", func(t *testing.T) {
 		calls := []mockmodel.ToolCall{bash(blockedCommand), bash(allowedCommand)}

@@ -614,9 +614,10 @@ func setStringList(obj map[string]json.RawMessage, key string, list []string) er
 // match the requested install mode. It first removes any stale lite-sandbox hook
 // entry (so switching between modes — or back to no hook — doesn't leave a
 // conflicting one behind), then registers `command` under `matcher` when command
-// is non-empty. binPath identifies our hook entries to remove.
+// is non-empty, without "onFailure" (claudeOptions.plan decides that for a
+// real install). binPath identifies our hook entries to remove.
 func reconcilePreToolUseHook(claudeDir, binPath, command, matcher string) error {
-	return reconcileClaudeHooks(claudeDir, binPath, claudePlan{hookCommand: command, hookMatcher: matcher, hookBlockOnFailure: command != ""})
+	return reconcileClaudeHooks(claudeDir, binPath, claudePlan{hookCommand: command, hookMatcher: matcher})
 }
 
 // reconcileClaudeHooks makes the registered lite-sandbox hooks match the
@@ -644,8 +645,24 @@ func reconcileClaudeHooks(claudeDir, binPath string, plan claudePlan) error {
 // registers entries under.
 var liteSandboxHookEvents = []hook.EventName{hook.EventPreToolUse, hook.EventPermissionRequest}
 
+// isLiteSandboxHookCommand reports whether a settings.json hook command runs
+// `lite-sandbox hook`: the binary at binPath, or a lite-sandbox binary
+// elsewhere, such as one an earlier install registered before the binary moved
+// (a `go install` replaced by install.sh). Those are replaced too: the hooks
+// that govern built-in tools block every call they match when they can't
+// start ("onFailure": "block"), so a stale one left behind for a deleted
+// binary would lock the user out of those tools.
+func isLiteSandboxHookCommand(cmd, binPath string) bool {
+	hookPrefix := binPath + " hook"
+	if cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ") {
+		return true
+	}
+	exe, rest, _ := strings.Cut(cmd, " ")
+	return filepath.Base(exe) == "lite-sandbox" && (rest == "hook" || strings.HasPrefix(rest, "hook "))
+}
+
 // removeLiteSandboxHooks strips any PreToolUse or PermissionRequest hook entry
-// that invokes the lite-sandbox binary (command `<binPath> hook ...`),
+// that invokes a lite-sandbox binary (see isLiteSandboxHookCommand),
 // dropping matcher groups that become empty. Other hooks and settings are
 // preserved. It is a no-op when no hooks are configured.
 func removeLiteSandboxHooks(claudeDir, binPath string) error {
@@ -664,10 +681,7 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 		return fmt.Errorf("failed to parse hooks in settings.json: %w", err)
 	}
 
-	hookPrefix := binPath + " hook"
-	isOurs := func(cmd string) bool {
-		return cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ")
-	}
+	isOurs := func(cmd string) bool { return isLiteSandboxHookCommand(cmd, binPath) }
 
 	for _, event := range liteSandboxHookEvents {
 		key := string(event)
@@ -708,8 +722,8 @@ func removeLiteSandboxHooks(claudeDir, binPath string) error {
 }
 
 // configurePreToolUseHook registers (or updates) a PreToolUse hook entry in
-// settings.json that invokes `command` for the given tool matcher (see
-// configureClaudeHook).
+// settings.json that invokes `command` for the given tool matcher, without
+// "onFailure" (see configureClaudeHook).
 func configurePreToolUseHook(claudeDir, command, matcher string) error {
 	return configureClaudeHook(claudeDir, hook.EventPreToolUse, claudeHookEntry(command, false), matcher)
 }
