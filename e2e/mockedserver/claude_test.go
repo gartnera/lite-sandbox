@@ -3,6 +3,7 @@ package mockedserver
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +23,9 @@ const claudeSandboxTool = "mcp__lite-sandbox__bash"
 //     sandbox tools are offered, the built-in Bash tool is gone (permission
 //     deny), and the CLAUDE.md directive reached the model;
 //   - --with-tool-hook: Bash stays offered but the PreToolUse hook blocks it
-//     with a redirect, and a Write outside the writable paths is denied;
+//     with a redirect, a Write outside the writable paths is denied, and one
+//     inside them (a grant outside the project included) is allowed without a
+//     prompt, except to Claude Code's own protected paths;
 //   - --bash-ast-hook-mode: no MCP server; the hook validates Bash commands in
 //     place, rejecting curl and letting echo run.
 func TestClaudeCode(t *testing.T) {
@@ -53,6 +56,42 @@ func TestClaudeCode(t *testing.T) {
 		results := lastResults(t, model.Server)
 		assertResult(t, results, 0, hookBlockedShell)
 		assertResult(t, results, 1, hookOutsideWritable)
+	})
+	t.Run("with-tool-hook allows checked writes", func(t *testing.T) {
+		// Claude Code's default permission mode, where `claude -p` refuses
+		// every write that would need a prompt. A write the hook checked —
+		// inside the project, or in a `paths allow --write` grant outside it,
+		// which acceptEdits would not cover either — applies all the same,
+		// while a write to one of Claude Code's protected paths (.envrc) is
+		// left to Claude Code, which refuses it here.
+		project := newProject(t)
+		granted := t.TempDir()
+		write := func(path string) mockmodel.ToolCall {
+			return mockmodel.ToolCall{Name: "Write", Arguments: map[string]string{"file_path": path, "content": "written-by-claude"}}
+		}
+		inside := filepath.Join(project, "inside.txt")
+		outside := filepath.Join(granted, "state.json")
+		envrc := filepath.Join(project, ".envrc")
+		calls := []mockmodel.ToolCall{write(inside), write(outside), write(envrc)}
+		model := startModel(t, calls)
+		_, environ := claudeEnv(t, model)
+		installSandbox(t, "claude", environ, "--with-tool-hook")
+		grant := exec.Command(bins.sandbox, "config", "paths", "allow", "--global", "--write", granted)
+		grant.Env = environ
+		if out, err := grant.CombinedOutput(); err != nil {
+			t.Fatalf("config paths allow: %v\n%s", err, out)
+		}
+		runAgent(t, project, environ, bins.claude, "-p", "--output-format", "json", prompt)
+
+		lastResults(t, model)
+		for _, p := range []string{inside, outside} {
+			if data, err := os.ReadFile(p); err != nil || string(data) != "written-by-claude" {
+				t.Errorf("checked write to %s did not apply (%v): %q", p, err, data)
+			}
+		}
+		if _, err := os.Stat(envrc); err == nil {
+			t.Errorf("write to the protected .envrc applied without a prompt")
+		}
 	})
 	t.Run("with-tool-hook fails closed", func(t *testing.T) {
 		// The hook is all that stands between the model and the built-in Bash

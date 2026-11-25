@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -591,7 +592,8 @@ func validateBuiltinBash(event *hook.Event) *hook.Decision {
 // path outside the sandbox boundary, or nil to defer to Claude Code's normal
 // flow. Read-family tools (Read/Glob/Grep) are checked against the readable
 // paths; write-family tools (Edit/Write/NotebookEdit) against the writable
-// paths.
+// paths. A Claude Code write that passes every check is allowed outright
+// (fileWriteApproval).
 func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	// Codex's apply_patch can touch several files in one call; check every write
 	// target against the writable boundary.
@@ -637,7 +639,116 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if d := boundaryDenial(sb, cwd, what, path, write, event.FromGrok()); d != nil || !write {
 		return d
 	}
-	return agentConfigWriteDecision(event, cwd, what, path)
+	if d := agentConfigWriteDecision(event, cwd, what, path); d != nil {
+		return d
+	}
+	return fileWriteApproval(event, cwd, path)
+}
+
+// fileWriteApproval returns an allow decision for a Claude Code file-tool
+// write (Edit/Write/NotebookEdit) that has passed every check above — inside
+// the writable paths, not into .git, not into agent configuration — or nil to
+// defer to Claude Code's normal permission flow.
+//
+// Without it, a write the hook has checked still prompts whenever Claude
+// Code's own rules don't cover it: acceptEdits auto-approves only paths under
+// the working directory and additionalDirectories, so a `paths allow
+// <dir> --write` grant reached by sandboxed bash without a prompt still
+// prompted for the agent's file tools. Allowing here keeps the two in step.
+// It grants nothing sandboxed bash can't already do: the same writable
+// boundary, and it defers wherever bash would be refused or Claude Code
+// singles a path out:
+//
+//   - Only in allowlist and denylist mode, where the boundary is enforced. In
+//     open mode a passing boundary check says nothing (it only audits).
+//   - Only for Claude Code. Codex and Grok Build send no Edit/Write events
+//     (and can't take an allow on a file tool), and pi's file tools are
+//     decided by its own extension.
+//   - Not in plan mode, which is for reading: Claude Code ignores a hook's
+//     allow on a write there anyway.
+//   - Not for a path sandboxed commands may not write or read (the config's
+//     effective deny lists, built-ins included: shell startup files, ~/.ssh,
+//     the sandbox's own config and audit log, credentials).
+//   - Not for one of Claude Code's protected paths (claudeProtectedPath):
+//     its docs don't say whether a hook's allow lifts the prompt it puts on
+//     those, so the hook stays out of that decision.
+func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
+	if event.FromGrok() || event.FromCodex() || event.FromPi() ||
+		event.PermissionMode == hook.PermissionModePlan {
+		return nil
+	}
+	cfg, err := config.LoadForDirectory(cwd)
+	if err != nil || cfg == nil {
+		return nil
+	}
+	if mode := cfg.EffectiveMode(); mode != config.ModeAllowlist && mode != config.ModeDenylist {
+		return nil
+	}
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(cwd, abs)
+	}
+	abs = filepath.Clean(abs)
+	resolved := bash_sandboxed.ResolvePath(abs, cwd)
+	if claudeProtectedPath(abs) || claudeProtectedPath(resolved) {
+		return nil
+	}
+	denied := append(cfg.EffectiveDeniedWritePaths(), cfg.EffectiveDeniedReadPaths()...)
+	if bash_sandboxed.IsUnderAllowedPaths(abs, denied) || bash_sandboxed.IsUnderAllowedPaths(resolved, denied) {
+		return nil
+	}
+	return hook.NewDecision(hook.DecisionAllow, fmt.Sprintf(
+		"Validated by lite-sandbox: %q is inside the sandbox's writable paths, the same ones sandboxed commands may write.",
+		resolved))
+}
+
+// claudeProtectedDirs and claudeProtectedFiles mirror the protected paths
+// Claude Code prompts before writing in default and acceptEdits mode
+// (https://code.claude.com/docs/en/permission-modes.md#protected-paths). The
+// hook defers on them rather than allowing (see fileWriteApproval). Matching
+// is by path component and case-insensitive, so it errs toward deferring.
+var (
+	claudeProtectedDirs = []string{
+		".git", ".vscode", ".idea", ".husky", ".cargo", ".devcontainer", ".yarn", ".mvn", ".claude",
+	}
+	claudeProtectedFiles = []string{
+		".gitconfig", ".gitmodules",
+		".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".bash_logout",
+		".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout", ".profile", ".envrc",
+		".npmrc", ".yarnrc", ".yarnrc.yml", ".pnp.cjs", ".pnp.loader.mjs", ".pnpmfile.cjs",
+		"bunfig.toml", ".bunfig.toml", ".bazelrc", ".bazelversion", ".bazeliskrc",
+		".pre-commit-config.yaml", "gradle-wrapper.properties", "maven-wrapper.properties",
+		".devcontainer.json", ".ripgreprc", "pyrightconfig.json",
+		".mcp.json", ".claude.json", "remote-settings.json",
+	}
+)
+
+// claudeProtectedPath reports whether path (absolute and clean) is one of
+// Claude Code's protected paths, or lies inside a protected directory.
+func claudeProtectedPath(path string) bool {
+	parts := strings.Split(path, string(filepath.Separator))
+	for i, p := range parts {
+		for _, d := range claudeProtectedDirs {
+			if strings.EqualFold(p, d) {
+				return true
+			}
+		}
+		// ~/.config/git (git's XDG config).
+		if strings.EqualFold(p, ".config") && i+1 < len(parts) && strings.EqualFold(parts[i+1], "git") {
+			return true
+		}
+	}
+	base := strings.ToLower(filepath.Base(path))
+	if slices.Contains(claudeProtectedFiles, base) {
+		return true
+	}
+	// lefthook's config in all its spellings (lefthook.yml, .lefthook.yaml,
+	// lefthook-local.yml, ...).
+	if l := strings.TrimPrefix(base, "."); strings.HasPrefix(l, "lefthook") &&
+		(strings.HasSuffix(l, ".yml") || strings.HasSuffix(l, ".yaml")) {
+		return true
+	}
+	return false
 }
 
 // agentConfigWriteDecision returns the decision for a file tool's write to
