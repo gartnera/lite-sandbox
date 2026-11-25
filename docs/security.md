@@ -126,7 +126,8 @@ hook allow) when:
 - the session is in plan mode;
 - the path isn't absolute, or starts or ends with white space: Claude Code
   trims it and expands a leading `~`, which the boundary check doesn't;
-- the path has a non-ASCII character: a case-insensitive file system folds
+- the path, as written or after following symlinks, has a non-ASCII
+  character: a case-insensitive file system folds
   more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
   so a deny-list comparison could miss the file the system opens;
 - an existing component of the path is a symlink that doesn't resolve, so its
@@ -141,7 +142,8 @@ hook allow) when:
   effective deny lists (a `write: false` or `read: false` entry, or a built-in
   one: shell startup files, `~/.ssh`, `~/.local/bin`, the sandbox's own config
   and audit log, the agents' settings and credentials), a path granted only to
-  some commands (`--commands`), the lite-sandbox binary, a directory on `PATH`
+  some commands (`--commands`), the credential files the hidden home masks
+  (`~/.git-credentials`), the lite-sandbox binary, a directory on `PATH`
   up to lite-sandbox's or Go's install directory outside the project, or
   buildx's builder state;
 - the target is one of Claude Code's

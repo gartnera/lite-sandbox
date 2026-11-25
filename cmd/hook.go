@@ -678,10 +678,11 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     Linux the OS sandbox gives commands a private /tmp, so bash never
 //     writes the host's, and /tmp/claude-<uid> is a name in a shared
 //     directory that another user could have planted as a symlink.
-//   - Only for a path of ASCII characters. A case-insensitive file system
-//     folds more than ASCII case (ſ for s), and non-ASCII spellings can
-//     differ in Unicode normalization, so the deny-list comparison below
-//     could miss the entry the file system would open.
+//   - Only for a path of ASCII characters, as given and resolved. A
+//     case-insensitive file system folds more than ASCII case (ſ for s),
+//     and non-ASCII spellings can differ in Unicode normalization, so the
+//     deny-list comparison below could miss the entry the file system
+//     would open.
 //   - Not through a symlink that doesn't resolve: ResolvePath stops at it, so
 //     the checks would judge the link's own path rather than its target.
 //   - Not for one of Claude Code's protected paths (claudeProtectedPath):
@@ -711,6 +712,10 @@ func fileWriteApproval(event *hook.Event, sb *bash_sandboxed.Sandbox, cwd, path 
 		return nil
 	}
 	resolved := bash_sandboxed.ResolvePath(abs, cwd)
+	// The resolved path can spell what a symlink names, not what was asked.
+	if !isASCII(resolved) {
+		return nil
+	}
 	approvable := append([]string{cwd}, sb.ConfigWritePaths()...)
 	if parent := sb.WorktreeParentPath(cwd); parent != "" {
 		approvable = append(approvable, parent)
@@ -771,6 +776,7 @@ func hasDanglingSymlink(p string) bool {
 // resolved) lands where sandboxed commands can't write, so the hook must not
 // approve it: the config's effective write and read deny lists, the paths
 // granted only to some commands (which the shared worker hides), the
+// credential files the hidden home masks, the
 // lite-sandbox binary, the directories on PATH up to lite-sandbox's and Go's
 // install directory outside the project (config.HostProgramDirs, as
 // bash_sandboxed's hostProgramDenies), and buildx's builder state. Paths are
@@ -779,7 +785,7 @@ func hasDanglingSymlink(p string) bool {
 // with an ASCII path).
 func hookWriteDenied(cfg *config.Config, cwd, abs, resolved string) bool {
 	denied := append(cfg.EffectiveDeniedWritePaths(), cfg.EffectiveDeniedReadPaths()...)
-	for _, d := range cfg.ScopedDeniedReadEntries() {
+	for _, d := range append(cfg.ScopedDeniedReadEntries(), cfg.HiddenHomeDeniedReadEntries()...) {
 		denied = append(denied, d.Path)
 	}
 	denied = append(denied, config.ServerExecutable()...)
@@ -792,10 +798,9 @@ func hookWriteDenied(cfg *config.Config, cwd, abs, resolved string) bool {
 		denied = append(denied, filepath.Join(dir, "instances"), filepath.Join(dir, "defaults"), filepath.Join(dir, "current"))
 	}
 	for _, d := range denied {
-		forms := []string{filepath.Clean(d)}
-		if r, err := filepath.EvalSymlinks(d); err == nil {
-			forms = append(forms, r)
-		}
+		// An entry that doesn't exist yet is resolved through its longest
+		// existing prefix, so a symlinked $HOME or ~/.config still matches.
+		forms := []string{filepath.Clean(d), bash_sandboxed.ResolvePath(filepath.Clean(d), string(filepath.Separator))}
 		for _, f := range forms {
 			lf := strings.ToLower(f)
 			for _, p := range []string{abs, resolved} {

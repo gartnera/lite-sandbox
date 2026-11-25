@@ -893,10 +893,30 @@ func TestFileWriteApproval(t *testing.T) {
 	granted := filepath.Join(home, ".local", "state", "slack-summary")
 	denied := filepath.Join(home, "frozen")
 	outside := t.TempDir()
+	// ~/.config is a dotfiles symlink to home/dotfiles/config, and
+	// ~/.config/autostart (write-denied) doesn't exist yet.
+	realCfg := filepath.Join(home, "dotfiles", "config")
+	if err := os.MkdirAll(realCfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realCfg, filepath.Join(home, ".config")); err != nil {
+		t.Fatal(err)
+	}
 	for _, d := range []string{granted, denied, filepath.Join(home, ".ssh"), filepath.Join(home, "bin"), filepath.Join(home, "sbin"), filepath.Join(home, ".config", "tool")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A symlink to a non-ASCII spelling of ~/.ssh, which a case-insensitive
+	// file system could fold onto the real one.
+	if err := os.MkdirAll(filepath.Join(home, ".\u017fsh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".\u017fsh"), filepath.Join(cwd, "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".git-credentials"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	// A repository's symlink to a directory that doesn't exist (yet).
 	if err := os.Symlink(filepath.Join(home, ".config", "nvim"), filepath.Join(cwd, "dangling")); err != nil {
@@ -953,6 +973,9 @@ func TestFileWriteApproval(t *testing.T) {
 		{"write under the scratchpad root defers", write(filepath.Join(claudeScratchpadPath(), "hook-test", "x")), ""},
 		{"write through a dangling symlink defers", write(filepath.Join(cwd, "dangling", "init.lua")), ""},
 		{"write to .pnp.js defers", write(filepath.Join(cwd, ".pnp.js")), ""},
+		{"write through a symlink to a non-ASCII spelling defers", write(filepath.Join(cwd, "s", "authorized_keys")), ""},
+		{"write to a missing deny dir under a symlinked ancestor defers", write(filepath.Join(realCfg, "autostart", "x.desktop")), ""},
+		{"write to ~/.git-credentials defers", write(filepath.Join(home, ".git-credentials")), ""},
 		{"write into an outside .claude/worktrees is allowed", write(filepath.Join(home, "repo", ".claude", "worktrees", "feat", "a.go")), hook.DecisionAllow},
 		{"write outside the writable paths", write(filepath.Join(outside, "x")), hook.DecisionDeny},
 		{"write into .git", write(filepath.Join(cwd, ".git", "hooks", "pre-commit")), hook.DecisionDeny},
