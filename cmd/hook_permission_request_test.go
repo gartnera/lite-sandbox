@@ -252,3 +252,132 @@ func TestReconcileClaudeHooksPermissionRequest(t *testing.T) {
 		t.Errorf("PermissionRequest groups after switching modes = %v, want only the other tool's", pr)
 	}
 }
+
+// TestClaudeHookBlockOnFailure checks that the PreToolUse hook fails closed
+// ("onFailure": "block") exactly when it governs built-in tools, in both the
+// settings `launch` passes and the settings.json `install` writes, and that
+// the PermissionRequest hook never does.
+func TestClaudeHookBlockOnFailure(t *testing.T) {
+	binPath := "/usr/local/bin/lite-sandbox"
+	for _, tc := range []struct {
+		name string
+		opts claudeOptions
+		want bool
+	}{
+		{"default", claudeOptions{}, false},
+		{"install --with-tool-hook", claudeOptions{withToolHook: true, redirectBash: true}, true},
+		{"launch", claudeOptions{withToolHook: true}, true},
+		{"bash-ast-hook-mode", claudeOptions{bashASTHookMode: true}, true},
+		{"bash-ast-hook-mode with-tool-hook", claudeOptions{bashASTHookMode: true, withToolHook: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := tc.opts.plan(binPath)
+			onFailure := func(hooks map[string]any, event string) (string, bool) {
+				t.Helper()
+				groups := asSlice(hooks[event])
+				if len(groups) == 0 {
+					return "", false
+				}
+				entry := asMap(asSlice(asMap(groups[len(groups)-1])["hooks"])[0])
+				return asString(entry["onFailure"]), true
+			}
+			check := func(where string, hooks map[string]any) {
+				t.Helper()
+				got, ok := onFailure(hooks, "PreToolUse")
+				if !ok {
+					t.Fatalf("%s: no PreToolUse hook in %v", where, hooks)
+				}
+				if want := map[bool]string{true: "block"}[tc.want]; got != want {
+					t.Errorf("%s: PreToolUse onFailure = %q, want %q", where, got, want)
+				}
+				if got, ok := onFailure(hooks, "PermissionRequest"); ok && got != "" {
+					t.Errorf("%s: PermissionRequest onFailure = %q, want unset", where, got)
+				}
+			}
+
+			check("settings", plan.settingsHooks())
+
+			tmpDir := t.TempDir()
+			if err := reconcileClaudeHooks(tmpDir, binPath, plan); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatal(err)
+			}
+			check("settings.json", asMap(raw["hooks"]))
+		})
+	}
+
+	// Reinstalling in the default mode over a --with-tool-hook install drops
+	// the setting along with the entry it was on.
+	tmpDir := t.TempDir()
+	for _, opts := range []claudeOptions{{withToolHook: true, redirectBash: true}, {}} {
+		if err := reconcileClaudeHooks(tmpDir, binPath, opts.plan(binPath)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "onFailure") {
+		t.Errorf("settings.json after switching back to the default install = %s, want no onFailure", data)
+	}
+}
+
+// TestReconcileClaudeHooksReplacesMovedBinary checks that an install replaces
+// the hook entries a lite-sandbox binary at another path registered (a fail-
+// closed one would block every tool it matches once that binary is gone), and
+// leaves other tools' hooks alone, including ones whose name merely contains
+// lite-sandbox.
+func TestReconcileClaudeHooksReplacesMovedBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+	binPath := "/home/u/.local/bin/lite-sandbox"
+	existing := `{"hooks":{"PreToolUse":[` +
+		`{"matcher":"Bash","hooks":[{"type":"command","command":"/home/u/go/bin/lite-sandbox hook --config-requests","onFailure":"block"}]},` +
+		`{"matcher":"Read","hooks":[{"type":"command","command":"/opt/my-lite-sandbox hook"},{"type":"command","command":"/usr/bin/lite-sandbox hookish"}]}` +
+		`],"PermissionRequest":[{"matcher":"mcp__lite-sandbox__.*","hooks":[{"type":"command","command":"/home/u/go/bin/lite-sandbox hook"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileClaudeHooks(tmpDir, binPath, claudeOptions{withToolHook: true, redirectBash: true}.plan(binPath)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "/home/u/go/bin/lite-sandbox") {
+		t.Errorf("the moved binary's hooks survived: %s", data)
+	}
+	for _, keep := range []string{"/opt/my-lite-sandbox hook", "/usr/bin/lite-sandbox hookish", binPath + " hook --config-requests"} {
+		if !strings.Contains(string(data), keep) {
+			t.Errorf("settings.json lost %q: %s", keep, data)
+		}
+	}
+}
+
+func TestIsLiteSandboxHookCommand(t *testing.T) {
+	const bin = "/a b/lite-sandbox" // a path with a space, as install writes it unquoted
+	for cmd, want := range map[string]bool{
+		bin + " hook":                         true,
+		bin + " hook --validate-bash":         true,
+		"/elsewhere/lite-sandbox hook":        true,
+		"lite-sandbox hook --config-requests": true,
+		"/elsewhere/lite-sandbox hooks":       false,
+		"/elsewhere/lite-sandbox":             false,
+		"/elsewhere/lite-sandbox serve-mcp":   false,
+		"/opt/not-lite-sandbox hook":          false,
+		"/other/tool hook":                    false,
+	} {
+		if got := isLiteSandboxHookCommand(cmd, bin); got != want {
+			t.Errorf("isLiteSandboxHookCommand(%q) = %v, want %v", cmd, got, want)
+		}
+	}
+}

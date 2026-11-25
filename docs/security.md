@@ -107,6 +107,57 @@ so it can't stand in for the PreToolUse ask. Commands allowed in plan mode
 run with the same read and write paths as outside it. The sandbox doesn't
 make plan mode read-only.
 
+With the tool hook (`--with-tool-hook`, and `launch`), the PreToolUse hook
+also **allows** a Claude Code `Write`, `Edit` or `NotebookEdit` call that
+passed every check: the target, after following symlinks, is inside the
+project or a `paths` write grant, not in a `.git` directory and not agent
+configuration. That
+keeps the file tools in step with the sandboxed bash tool, which writes the
+same paths without a prompt; without it, a write to a `paths allow <dir>
+--write` grant outside the project still prompted, since Claude Code's
+`acceptEdits` covers only the working directory and `additionalDirectories`.
+It also means Claude Code's `default` permission mode no longer prompts for
+edits inside the project: the sandbox's boundary, not a per-edit prompt, is
+what governs them. To review each edit, use `open` mode or leave the tool hook
+off. The hook leaves the call to Claude Code's own permission flow instead
+(so a `deny` or `ask` rule in settings still applies, as it does over any
+hook allow) when:
+- the mode is `open`, where the boundary is only audited;
+- the session is in plan mode;
+- the path isn't absolute, or starts or ends with white space: Claude Code
+  trims it and expands a leading `~`, which the boundary check doesn't;
+- the path, as written or after following symlinks, has a non-ASCII
+  character: a case-insensitive file system folds
+  more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
+  so a deny-list comparison could miss the file the system opens;
+- an existing component of the path is a symlink that doesn't resolve, so its
+  target can't be checked;
+- the target lies outside the project, the `paths` write grants and the
+  worktree parent, and is writable only through the temp and scratchpad
+  roots the boundary also admits (`/tmp/claude-<uid>`, a per-user `$TMPDIR`).
+  On Linux the OS sandbox gives commands a private `/tmp`, so they never write
+  the host's, and `/tmp/claude-<uid>` is a name in a shared directory;
+- the target, as written or after following symlinks and ignoring ASCII case, is
+  somewhere sandboxed commands can't write: under one of the config's
+  effective deny lists (a `write: false` or `read: false` entry, or a built-in
+  one: shell startup files, `~/.ssh`, `~/.local/bin`, the sandbox's own config
+  and audit log, the agents' settings and credentials), a path granted only to
+  some commands (`--commands`), the credential files the hidden home masks
+  (`~/.git-credentials`), the lite-sandbox binary, a directory on `PATH`
+  up to lite-sandbox's or Go's install directory outside the project, or
+  buildx's builder state;
+- the target is one of Claude Code's
+  [protected paths](https://code.claude.com/docs/en/permission-modes) (`.git`,
+  `.vscode`, `.idea`, `.husky`, `.claude` but not `.claude/worktrees`,
+  `.envrc`, `.gitconfig`, `.npmrc`, `.pre-commit-config.yaml`, ..., matched by
+  path component and ignoring case), which Claude Code prompts before writing
+  in `default` and `acceptEdits` mode. Its documentation doesn't say whether
+  a hook's allow lifts that prompt (in testing it doesn't), so the hook stays
+  out of it. Sandboxed bash can still write such a file inside the writable
+  paths (a project's `.envrc`).
+Codex, Grok Build and pi file-tool writes get no allow: their hooks defer or
+are decided as before.
+
 A config request lands either in the agent's project scope or, with
 `--global`, in the global config. Config commands write a change to the scope
 for the git root of the working directory (in a linked git worktree, the
@@ -383,6 +434,7 @@ This is a lightweight, best-effort sandbox based on static analysis. It is **not
 ### General limitations
 
 - **Not a complete security boundary**: the AST-level sandbox limits an LLM's access to the host as one layer of defense. Don't rely on it alone for untrusted workloads. The optional OS sandbox adds filesystem isolation but still shares the network namespace and has no seccomp-level syscall filtering. For maximum isolation of untrusted workloads, use VMs.
+- **Claude Code's hook fails closed only from 2.1.295**: with `--with-tool-hook` or `--bash-ast-hook-mode` (and `launch`), the `PreToolUse` hook is registered with `"onFailure": "block"`, so a hook that can't start, times out, or exits with an unexpected code blocks the built-in tool call. Claude Code before 2.1.295 ignores the setting and lets such a call through to its normal permission flow, which in `bypassPermissions` mode runs it unchecked. The hook's own internal errors fail open by design (it defers), and the default install's hook, which only pre-approves the sandbox's tools, has the built-in `Bash` deny behind it. See [Bash: hook vs. permission deny](installation.md#bash-hook-vs-permission-deny).
 - **pi's checks run in an extension**: pi has no hook protocol, so its file tools are confined, and its built-in shell redirected, by lite-sandbox's pi extension, which runs `lite-sandbox hook` from pi's `tool_call` event and blocks the call when the hook can't answer. Extensions are trusted code in the pi process: another extension that handles `tool_call` after lite-sandbox's can still change a call's arguments, and running pi with `--no-extensions`, or an extension that fails to load, drops the checks: the built-in `bash` stays disabled through `defaultTools`, so pi then has no shell, but its file tools run unconfined. The sandbox's bash tool itself validates every command in `serve-mcp` whatever the extension does.
 - **Interpreter differences**: commands run in the mvdan.cc/sh interpreter, not GNU bash. It supports standard POSIX and bash features, but some GNU bash extensions may behave differently.
 - **Allowed commands bypass argument validation**: invocations a `commands` entry (`allow: true`) admits run without the command's argument validators; the rest of the command line is still parsed and validated, and the deny list still applies. A bare allow of a script path (`./scripts/build.sh`) also trusts the script: it runs through the interpreter with the whitelist, argument validators, structural rules, and the deny list lifted for everything it runs, at any depth; only `ask` entries and the path boundary (which confines the interpreter's own file I/O, made on the host) still apply. Everything the script runs is routed the way the script is, to the shared worker; another command's `no_sandbox` entry (a script's included) and command-scoped grants don't apply inside it. A script allowed with `no_sandbox` skips the interpreter entirely: it runs natively on the host (its shebang's program, or `bash`), and nothing it runs is checked, `ask` entries and the path boundary included. So the agent can't make that shell run code of its own before the script's first line, every `no_sandbox` command gets the server's own values (none, unless the user's environment sets them) for the variables a native shell acts on there (`BASH_ENV`, `ENV`, `SHELLOPTS` with `PS4`, `BASHOPTS`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions, and `CDPATH`, which redirects the script's own `cd`), whatever the agent set; assigning them is also refused. Run directly or as `bash <script>`, the script runs as the file its entry names, by its resolved path (not through a symlinked directory the invocation names), with the server's `PATH` (which finds its shell) and `HOME` (where zsh reads `.zshenv`); under a wrapper (`timeout`, `env`) it gets the agent's, as any wrapped `no_sandbox` command does. Its other environment is the agent's to set, as for any `no_sandbox` command. A sourced script isn't trusted. A script the agent can edit can therefore run any command, but with the OS sandbox enabled those commands are still confined (write restrictions, masked paths, no scoped credentials), though they can write files in the working directory that host programs act on later (`.git/config`), the sandbox's own config included, so a `lite-sandbox config` the script runs can't change the policy; without it there is no confinement beyond the path boundary on the interpreter's own I/O, and the deny list was never a boundary there (see below). `ask` entries are enforced only on commands the interpreter runs: a native program the script starts (`/bin/sh -c`) runs its children unseen. Only allow commands and scripts you trust.

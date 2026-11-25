@@ -3,6 +3,7 @@ package mockedserver
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +23,9 @@ const claudeSandboxTool = "mcp__lite-sandbox__bash"
 //     sandbox tools are offered, the built-in Bash tool is gone (permission
 //     deny), and the CLAUDE.md directive reached the model;
 //   - --with-tool-hook: Bash stays offered but the PreToolUse hook blocks it
-//     with a redirect, and a Write outside the writable paths is denied;
+//     with a redirect, a Write outside the writable paths is denied, and one
+//     inside them (a grant outside the project included) is allowed without a
+//     prompt, except to Claude Code's own protected paths;
 //   - --bash-ast-hook-mode: no MCP server; the hook validates Bash commands in
 //     place, rejecting curl and letting echo run.
 func TestClaudeCode(t *testing.T) {
@@ -54,12 +57,106 @@ func TestClaudeCode(t *testing.T) {
 		assertResult(t, results, 0, hookBlockedShell)
 		assertResult(t, results, 1, hookOutsideWritable)
 	})
+	t.Run("with-tool-hook allows checked writes", func(t *testing.T) {
+		// Claude Code's default permission mode, where `claude -p` refuses
+		// every write that would need a prompt. A write the hook checked —
+		// inside the project, or in a `paths allow --write` grant outside it,
+		// which acceptEdits would not cover either — applies all the same,
+		// while a write to one of Claude Code's protected paths (.envrc) is
+		// left to Claude Code, which refuses it here.
+		project := newProject(t)
+		granted := t.TempDir()
+		write := func(path string) mockmodel.ToolCall {
+			return mockmodel.ToolCall{Name: "Write", Arguments: map[string]string{"file_path": path, "content": "written-by-claude"}}
+		}
+		inside := filepath.Join(project, "inside.txt")
+		outside := filepath.Join(granted, "state.json")
+		envrc := filepath.Join(project, ".envrc")
+		calls := []mockmodel.ToolCall{write(inside), write(outside), write(envrc)}
+		model := startModel(t, calls)
+		_, environ := claudeEnv(t, model)
+		installSandbox(t, "claude", environ, "--with-tool-hook")
+		grant := exec.Command(bins.sandbox, "config", "paths", "allow", "--global", "--write", granted)
+		grant.Env = environ
+		if out, err := grant.CombinedOutput(); err != nil {
+			t.Fatalf("config paths allow: %v\n%s", err, out)
+		}
+		runAgent(t, project, environ, bins.claude, "-p", "--output-format", "json", prompt)
+
+		results := lastResults(t, model)
+		t.Logf("tool results: %q", results)
+		for _, p := range []string{inside, outside} {
+			if data, err := os.ReadFile(p); err != nil || string(data) != "written-by-claude" {
+				t.Errorf("checked write to %s did not apply (%v): %q", p, err, data)
+			}
+		}
+		if _, err := os.Stat(envrc); err == nil {
+			t.Errorf("write to the protected .envrc applied without a prompt")
+		}
+	})
+	t.Run("with-tool-hook fails closed", func(t *testing.T) {
+		// The hook is all that stands between the model and the built-in Bash
+		// here (there is no permission deny), so it is registered with
+		// "onFailure": "block". Point it at a binary that doesn't exist and run
+		// with permission checks bypassed: Bash must still be refused rather
+		// than run.
+		calls := []mockmodel.ToolCall{bash(hookFailedOpenCommand)}
+		model := startModel(t, calls)
+		configDir, environ := claudeEnv(t, model)
+		installSandbox(t, "claude", environ, "--with-tool-hook")
+		breakClaudeHook(t, filepath.Join(configDir, "settings.json"))
+		runAgent(t, newProject(t), append(environ, "IS_SANDBOX=1"), bins.claude,
+			"-p", "--output-format", "json", "--dangerously-skip-permissions", prompt)
+		results := lastResults(t, model)
+		if len(results) != 1 {
+			t.Fatalf("tool results = %q, want one for the Bash call", results)
+		}
+		if strings.Contains(results[0], hookFailedOpenOutput) {
+			t.Errorf("built-in Bash ran although its hook could not start: %q", results[0])
+		}
+		// Refused for the right reason: the hook's failure, not something else.
+		assertResult(t, results, 0, `onFailure is "block"`)
+	})
 	t.Run("bash-ast-hook-mode", func(t *testing.T) {
 		calls := []mockmodel.ToolCall{bash(blockedCommand), bash(allowedCommand)}
 		model := runClaude(t, calls, "--bash-ast-hook-mode")
 		assertConversation(t, model.output, model.Server, calls, claudeSandboxTool, false)
 		assertResult(t, lastResults(t, model.Server), 0, hookRejectedCommand)
 	})
+}
+
+// hookFailedOpenCommand prints hookFailedOpenOutput, which its own text
+// doesn't contain, so the output shows up in a tool result only if the
+// built-in Bash ran it.
+const (
+	hookFailedOpenCommand = "echo ran-without-hook-$((40+2))"
+	hookFailedOpenOutput  = "ran-without-hook-42"
+)
+
+// breakClaudeHook points every PreToolUse hook in the settings.json at path
+// to a binary that doesn't exist, leaving the rest of each entry (its
+// onFailure in particular) as installed.
+func breakClaudeHook(t *testing.T, path string) {
+	t.Helper()
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks["PreToolUse"].([]any)
+	if len(groups) == 0 {
+		t.Fatalf("no PreToolUse hook installed in %s", path)
+	}
+	for _, g := range groups {
+		for _, h := range g.(map[string]any)["hooks"].([]any) {
+			h.(map[string]any)["command"] = "/nonexistent/lite-sandbox hook"
+		}
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(data))
 }
 
 // TestClaudeCodeLaunch drives `lite-sandbox launch claude`, the temporary
