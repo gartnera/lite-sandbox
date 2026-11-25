@@ -110,7 +110,8 @@ make plan mode read-only.
 With the tool hook (`--with-tool-hook`, and `launch`), the PreToolUse hook
 also **allows** a Claude Code `Write`, `Edit` or `NotebookEdit` call that
 passed every check: the target, after following symlinks, is inside the
-writable paths, not in a `.git` directory and not agent configuration. That
+project or a `paths` write grant, not in a `.git` directory and not agent
+configuration. That
 keeps the file tools in step with the sandboxed bash tool, which writes the
 same paths without a prompt; without it, a write to a `paths allow <dir>
 --write` grant outside the project still prompted, since Claude Code's
@@ -125,7 +126,17 @@ hook allow) when:
 - the session is in plan mode;
 - the path isn't absolute, or starts or ends with white space: Claude Code
   trims it and expands a leading `~`, which the boundary check doesn't;
-- the target, as written or after following symlinks and ignoring case, is
+- the path has a non-ASCII character: a case-insensitive file system folds
+  more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
+  so a deny-list comparison could miss the file the system opens;
+- an existing component of the path is a symlink that doesn't resolve, so its
+  target can't be checked;
+- the target lies outside the project, the `paths` write grants and the
+  worktree parent, and is writable only through the temp and scratchpad
+  roots the boundary also admits (`/tmp/claude-<uid>`, a per-user `$TMPDIR`).
+  On Linux the OS sandbox gives commands a private `/tmp`, so they never write
+  the host's, and `/tmp/claude-<uid>` is a name in a shared directory;
+- the target, as written or after following symlinks and ignoring ASCII case, is
   somewhere sandboxed commands can't write: under one of the config's
   effective deny lists (a `write: false` or `read: false` entry, or a built-in
   one: shell startup files, `~/.ssh`, `~/.local/bin`, the sandbox's own config

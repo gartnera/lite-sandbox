@@ -643,7 +643,7 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if d := agentConfigWriteDecision(event, cwd, what, path); d != nil {
 		return d
 	}
-	return fileWriteApproval(event, cwd, path)
+	return fileWriteApproval(event, sb, cwd, path)
 }
 
 // fileWriteApproval returns an allow decision for a Claude Code file-tool
@@ -673,11 +673,22 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //   - Not for a path sandboxed commands may not write or read
 //     (hookWriteDenied): the config's deny lists, built-ins included, the
 //     paths granted only to some commands, and the programs the host runs.
+//   - Only under the project, a `paths` write grant, or the worktree parent:
+//     not under the temp and scratchpad roots the boundary also admits. On
+//     Linux the OS sandbox gives commands a private /tmp, so bash never
+//     writes the host's, and /tmp/claude-<uid> is a name in a shared
+//     directory that another user could have planted as a symlink.
+//   - Only for a path of ASCII characters. A case-insensitive file system
+//     folds more than ASCII case (ſ for s), and non-ASCII spellings can
+//     differ in Unicode normalization, so the deny-list comparison below
+//     could miss the entry the file system would open.
+//   - Not through a symlink that doesn't resolve: ResolvePath stops at it, so
+//     the checks would judge the link's own path rather than its target.
 //   - Not for one of Claude Code's protected paths (claudeProtectedPath):
 //     its docs don't say whether a hook's allow lifts the prompt it puts on
 //     those, so the hook stays out of that decision. (The e2e suite's pinned
 //     Claude Code keeps the prompt either way; this doesn't rely on that.)
-func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
+func fileWriteApproval(event *hook.Event, sb *bash_sandboxed.Sandbox, cwd, path string) *hook.Decision {
 	if event.FromGrok() || event.FromCodex() || event.FromPi() ||
 		event.PermissionMode == hook.PermissionModePlan {
 		return nil
@@ -692,8 +703,21 @@ func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
 	if mode := cfg.EffectiveMode(); mode != config.ModeAllowlist && mode != config.ModeDenylist {
 		return nil
 	}
+	if !isASCII(path) {
+		return nil
+	}
 	abs := filepath.Clean(path)
+	if hasDanglingSymlink(abs) {
+		return nil
+	}
 	resolved := bash_sandboxed.ResolvePath(abs, cwd)
+	approvable := append([]string{cwd}, sb.ConfigWritePaths()...)
+	if parent := sb.WorktreeParentPath(cwd); parent != "" {
+		approvable = append(approvable, parent)
+	}
+	if !bash_sandboxed.IsUnderAllowedPaths(resolved, approvable) {
+		return nil
+	}
 	if claudeProtectedPath(abs) || claudeProtectedPath(resolved) {
 		return nil
 	}
@@ -710,6 +734,39 @@ func fileWriteApproval(event *hook.Event, cwd, path string) *hook.Decision {
 // line terminators, and the byte order mark.
 func isTrimmedByJS(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }
 
+// isASCII reports whether s holds only ASCII characters.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// hasDanglingSymlink reports whether a component of the absolute, clean path
+// p that exists is a symlink whose target can't be resolved. Components after
+// the first one that doesn't exist are not looked at: nothing is there yet.
+func hasDanglingSymlink(p string) bool {
+	cur := string(filepath.Separator)
+	for _, part := range strings.Split(p, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if _, err := filepath.EvalSymlinks(cur); err != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hookWriteDenied reports whether a file-tool write to abs (resolving to
 // resolved) lands where sandboxed commands can't write, so the hook must not
 // approve it: the config's effective write and read deny lists, the paths
@@ -717,8 +774,9 @@ func isTrimmedByJS(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }
 // lite-sandbox binary, the directories on PATH up to lite-sandbox's and Go's
 // install directory outside the project (config.HostProgramDirs, as
 // bash_sandboxed's hostProgramDenies), and buildx's builder state. Paths are
-// compared ignoring case, so a case-insensitive file system (macOS) can't
-// spell its way past an entry.
+// compared ignoring ASCII case, so a case-insensitive file system (macOS)
+// can't spell its way past an entry (fileWriteApproval only gets this far
+// with an ASCII path).
 func hookWriteDenied(cfg *config.Config, cwd, abs, resolved string) bool {
 	denied := append(cfg.EffectiveDeniedWritePaths(), cfg.EffectiveDeniedReadPaths()...)
 	for _, d := range cfg.ScopedDeniedReadEntries() {
@@ -764,7 +822,7 @@ var (
 		".gitconfig", ".gitmodules",
 		".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".bash_logout",
 		".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout", ".profile", ".envrc",
-		".npmrc", ".yarnrc", ".yarnrc.yml", ".pnp.cjs", ".pnp.loader.mjs", ".pnpmfile.cjs",
+		".npmrc", ".yarnrc", ".yarnrc.yml", ".pnp.cjs", ".pnp.js", ".pnp.data.json", ".pnp.loader.mjs", ".pnpmfile.cjs",
 		"bunfig.toml", ".bunfig.toml", ".bazelrc", ".bazelversion", ".bazeliskrc",
 		".pre-commit-config.yaml", "gradle-wrapper.properties", "maven-wrapper.properties",
 		".devcontainer.json", ".ripgreprc", "pyrightconfig.json",

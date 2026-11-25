@@ -898,6 +898,10 @@ func TestFileWriteApproval(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A repository's symlink to a directory that doesn't exist (yet).
+	if err := os.Symlink(filepath.Join(home, ".config", "nvim"), filepath.Join(cwd, "dangling")); err != nil {
+		t.Fatal(err)
+	}
 	// lite-sandbox is on PATH in ~/sbin, after ~/bin: a program planted in
 	// ~/bin would run in its place outside the sandbox.
 	if err := os.WriteFile(filepath.Join(home, "sbin", "lite-sandbox"), []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -944,6 +948,11 @@ func TestFileWriteApproval(t *testing.T) {
 		{"write to a PATH directory case-folded defers", write(filepath.Join(home, "BIN", "git")), ""},
 		{"write to a command-scoped grant defers", write(filepath.Join(home, ".config", "tool", "token")), ""},
 		{"write to a write-denied path case-folded defers", write(filepath.Join(home, "FROZEN", "f")), ""},
+		{"write with a long s past a deny entry defers", write(filepath.Join(home, ".\u017fsh", "authorized_keys")), ""},
+		{"write to a non-ASCII name defers", write(filepath.Join(cwd, "caf\u00e9.txt")), ""},
+		{"write under the scratchpad root defers", write(filepath.Join(claudeScratchpadPath(), "hook-test", "x")), ""},
+		{"write through a dangling symlink defers", write(filepath.Join(cwd, "dangling", "init.lua")), ""},
+		{"write to .pnp.js defers", write(filepath.Join(cwd, ".pnp.js")), ""},
 		{"write into an outside .claude/worktrees is allowed", write(filepath.Join(home, "repo", ".claude", "worktrees", "feat", "a.go")), hook.DecisionAllow},
 		{"write outside the writable paths", write(filepath.Join(outside, "x")), hook.DecisionDeny},
 		{"write into .git", write(filepath.Join(cwd, ".git", "hooks", "pre-commit")), hook.DecisionDeny},
