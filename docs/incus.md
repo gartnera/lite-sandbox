@@ -29,11 +29,15 @@ remotes) whatever your own `~/.config/incus` holds; your remotes and aliases
 are not used inside the sandbox.
 
 **Requires the OS sandbox.** The worker masks the daemon's directories
-(`/run/incus`, `/var/lib/incus`, `/var/snap/lxd/common/lxd`, `/var/lib/lxd`,
-with the admin and `incus-user` sockets in them), the upstream socket, and the
-CLIs' client keys (`client.key` under `~/.config/incus`, `~/.config/lxc`,
-`~/snap/lxd/common/config`, `$INCUS_CONF`, `$LXD_CONF`), which a remote daemon
-may trust over HTTPS. Without the OS sandbox a command could point
+(`/run/incus`, `/var/lib/incus`, `/var/snap/lxd/common/lxd`,
+`/var/snap/lxd/common/lxd-user`, `/var/lib/lxd`, with the admin, `incus-user`
+and `lxd-user` sockets in them), the upstream socket, and the CLIs' own client
+configuration directories (`~/.config/incus`, `~/.config/lxc`,
+`~/snap/lxd/common/config`, `$INCUS_CONF`, `$LXD_CONF`), whose client keys,
+OIDC tokens and remotes reach a daemon over HTTPS.
+
+The proxy reads its settings when lite-sandbox starts: restart it (the agent
+session) after changing the `incus` section or the path grants. Without the OS sandbox a command could point
 `INCUS_SOCKET` at the real socket, so incus and lxc are refused unless
 `os_sandbox` is enabled or `allow_unsandboxed: true` is set (not recommended).
 
@@ -41,14 +45,21 @@ may trust over HTTPS. Without the OS sandbox a command could point
 
 - **One project**: requests are pinned to `project`. A request naming another
   project (`--project`, `INCUS_PROJECT`), `--all-projects`, or a body that
-  copies or moves an instance across projects is refused. For a boundary the
+  copies or moves an instance across projects is refused, and only the pinned
+  project can be read (`incus project list` shows just it). For a boundary the
   daemon enforces as well, point `project` at a restricted project.
 - **Tagged-only (default)**: instances created through the proxy get
   `user.lite-sandbox=true` in their own config (a profile cannot lend it), and
   every per-instance request — exec, files, state, snapshots, config, delete,
-  copying or publishing it — needs the tag. Instance listings show only tagged
-  instances. Profiles are shared with every instance, so profile writes are
-  refused in this mode. `tagged_only: false` opens every instance in the
+  copying, refreshing a copy onto it, publishing it — needs the tag. Instance
+  listings show only tagged instances. Profiles are shared with every
+  instance, so profile writes are refused in this mode. Images are shared too:
+  the ones the sandbox publishes or uploads get a `user.lite-sandbox` property,
+  and only those can be changed or deleted; an existing alias can be changed,
+  renamed or deleted only when it points at one of them (new aliases can be
+  created). Images copied from a remote server are not tagged (the daemon may
+  merge the copy into an image someone else already has), so the sandbox can
+  launch from them but not change or delete them. `tagged_only: false` opens every instance in the
   project, and profile writes then pass the same policy as instances.
 - **Endpoint allowlist**: the server, events and operations reads; instances
   and their sub-resources; images and aliases; profiles; creating and deleting
@@ -69,8 +80,11 @@ may trust over HTTPS. Without the OS sandbox a command could point
   - devices other than `disk`, `nic`, `tpm` and `none` (`unix-char`,
     `unix-block`, `unix-hotplug`, `usb`, `gpu`, `pci`, `infiniband`, `proxy` —
     a proxy device can forward a host socket into the container), physical
-    NICs, and disks with `raw.mount.options`, shared propagation, or a Ceph
-    source.
+    NICs (`nictype=physical`, or `network=` naming a managed physical
+    network), and disks with `raw.mount.options`, shared propagation, or a
+    Ceph source.
+  - restoring another instance's snapshot (`restore: other/snap`), which
+    would apply that instance's configuration.
 - **Disk confinement (always)**: a disk device with a host-path `source` is a
   bind mount and must resolve inside the sandbox boundary: `readonly=true`
   within the readable paths, otherwise within the writable paths. Pool-backed
@@ -80,6 +94,9 @@ may trust over HTTPS. Without the OS sandbox a command could point
   from the daemon's current copy, so `incus config set` and `config edit` keep
   working on an instance carrying volatile state or settings an administrator
   added.
+- **Request bodies** are decoded the way the daemon decodes them; a body with
+  two fields that differ only in case (`config` and `Config`) is refused, since
+  which one the daemon uses depends on their order.
 - **Profiles**: an instance's profiles are checked whole when it is created and
   when one is added, so it cannot pick up a privileged profile defined by
   someone else. A create that names no profiles is sent with `["default"]`

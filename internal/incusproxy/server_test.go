@@ -36,6 +36,7 @@ type fakeDaemon struct {
 	profiles  map[string]instance
 	got       []string // "METHOD path?query"
 	bodies    []string
+	headers   []http.Header
 }
 
 func (fd *fakeDaemon) last() (string, string) {
@@ -45,6 +46,31 @@ func (fd *fakeDaemon) last() (string, string) {
 		return "", ""
 	}
 	return fd.got[len(fd.got)-1], fd.bodies[len(fd.bodies)-1]
+}
+
+// lookup serves the networks, images and aliases the proxy's policy looks up.
+func lookup(p string) (any, bool) {
+	objs := map[string]any{
+		"/1.0/networks/incusbr0":         map[string]any{"name": "incusbr0", "type": "bridge"},
+		"/1.0/networks/uplink":           map[string]any{"name": "uplink", "type": "physical"},
+		"/1.0/images/ownimg":             map[string]any{"properties": map[string]string{"user.lite-sandbox": "true"}},
+		"/1.0/images/adminimg":           map[string]any{"properties": map[string]string{"os": "debian"}},
+		"/1.0/images/aliases/mine-alias": map[string]any{"name": "mine-alias", "target": "ownimg"},
+		"/1.0/images/aliases/debian":     map[string]any{"name": "debian", "target": "adminimg"},
+		"/1.0/images/aliases/export":     map[string]any{"name": "export", "target": "adminimg"},
+	}
+	for _, prefix := range []string{"/1.0/networks/", "/1.0/images/"} {
+		if strings.HasPrefix(p, prefix) {
+			if strings.Count(strings.TrimPrefix(p, prefix), "/") > 0 && !strings.HasPrefix(p, "/1.0/images/aliases/") {
+				return nil, false
+			}
+			if o, ok := objs[p]; ok {
+				return o, true
+			}
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 func sync200(w http.ResponseWriter, md any) {
@@ -78,6 +104,23 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 		defer fd.mu.Unlock()
 		p := r.URL.Path
 		if r.Method == "GET" {
+			if obj, ok := lookup(p); ok && r.Header.Get("X-Test-Client") == "" {
+				if obj == nil {
+					w.WriteHeader(404)
+					io.WriteString(w, `{"type":"error","error":"not found","error_code":404}`)
+				} else {
+					sync200(w, obj)
+				}
+				return
+			}
+			if p == "/1.0/projects" {
+				md := []any{"/1.0/projects/default", "/1.0/projects/other"}
+				if r.URL.Query().Get("recursion") == "1" {
+					md = []any{map[string]any{"name": "default"}, map[string]any{"name": "other"}}
+				}
+				sync200(w, md)
+				return
+			}
 			if name, ok := strings.CutPrefix(p, "/1.0/profiles/"); ok {
 				if prof, ok := fd.profiles[name]; ok {
 					sync200(w, prof)
@@ -115,6 +158,7 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 		}
 		fd.got = append(fd.got, r.Method+" "+r.URL.RequestURI())
 		fd.bodies = append(fd.bodies, string(body))
+		fd.headers = append(fd.headers, r.Header.Clone())
 		sync200(w, map[string]any{})
 	})}
 	go srv.Serve(ln)
@@ -310,7 +354,8 @@ func TestCreatePolicy(t *testing.T) {
 
 func TestCreateTagsAndPinsProfiles(t *testing.T) {
 	p := newTestProxy(t, nil)
-	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"image","alias":"x"},"config":{"limits.cpu":"1"},"CONFIG":{"user.lite-sandbox":"false"}}`, 200)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"image","alias":"x"},"config":{"limits.cpu":"1"},"CONFIG":{"user.lite-sandbox":"false"}}`, 403)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"image","alias":"x"},"config":{"limits.cpu":"1","user.lite-sandbox":"false"}}`, 200)
 	_, body := p.fd.last()
 	var got struct {
 		Config   map[string]string `json:"config"`
@@ -436,6 +481,79 @@ func TestNameFromURL(t *testing.T) {
 	} {
 		if got := nameFromURL(in); got != want {
 			t.Errorf("nameFromURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestReviewFindings(t *testing.T) {
+	p := newTestProxy(t, nil)
+	img := `"source":{"type":"image","alias":"x"}`
+
+	// Case-variant duplicate keys would be reordered by a rewrite.
+	p.expect("POST", "/1.0/instances", `{"name":"c",`+img+`,"config":{"security.privileged":"true"},"Config":{"security.privileged":"false"}}`, 403)
+	p.expect("POST", "/1.0/instances", `{"name":"c",`+img+`,"config":{"security.privileged":"true"},"Config":null}`, 403)
+
+	// Publish bodies are inspected the way the daemon decodes them.
+	if got, _ := p.do("POST", "/1.0/images", `{"source":{"type":"instance","name":"theirs"}}garbage`, "Content-Type", "application/octet-stream"); got != 403 {
+		t.Errorf("publish with trailing data: status %d, want 403", got)
+	}
+	if got, _ := p.do("POST", "/1.0/images", strings.Repeat(" ", 5000)+`{"source":{"type":"instance","name":"theirs"}}`, "Content-Type", "application/octet-stream"); got != 403 {
+		t.Errorf("publish after long whitespace: status %d, want 403", got)
+	}
+
+	// Refresh copies onto an existing instance.
+	p.expect("POST", "/1.0/instances", `{"name":"theirs","source":{"type":"copy","source":"mine","refresh":true}}`, 403)
+
+	// Restoring another instance's snapshot.
+	p.expect("PUT", "/1.0/instances/mine", `{"restore":"theirs/snap0"}`, 403)
+	p.expect("PUT", "/1.0/instances/mine", `{"restore":"snap0"}`, 200)
+
+	// NICs on a managed physical network.
+	p.expect("POST", "/1.0/instances", `{"name":"c",`+img+`,"devices":{"e":{"type":"nic","network":"uplink"}}}`, 403)
+	p.expect("POST", "/1.0/instances", `{"name":"c",`+img+`,"devices":{"e":{"type":"nic","network":"incusbr0"}}}`, 200)
+
+	// LXD's spelling of the guest image API key.
+	p.expect("POST", "/1.0/instances", `{"name":"c",`+img+`,"config":{"security.devlxd.images":"true"}}`, 403)
+
+	// Images and aliases someone else's launches use.
+	p.expect("PATCH", "/1.0/images/adminimg", `{"profiles":["priv"]}`, 403)
+	p.expect("DELETE", "/1.0/images/adminimg", "", 403)
+	p.expect("PATCH", "/1.0/images/ownimg", `{"profiles":["default"]}`, 200)
+	p.expect("PUT", "/1.0/images/aliases/debian", `{"target":"ownimg"}`, 403)
+	p.expect("DELETE", "/1.0/images/aliases/debian", "", 403)
+	p.expect("POST", "/1.0/images/aliases/export", `{"name":"renamed"}`, 403)
+	p.expect("PUT", "/1.0/images/aliases/mine-alias", `{"target":"ownimg"}`, 200)
+	p.expect("POST", "/1.0/images/aliases", `{"name":"new","target":"adminimg"}`, 200)
+	p.expect("POST", "/1.0/images", `{"source":{"type":"image","server":"https://images.example","alias":"x"},"properties":{"user.lite-sandbox":"true"}}`, 403)
+
+	// The sandbox's own images are tagged.
+	p.expect("POST", "/1.0/images", `{"source":{"type":"instance","name":"mine"},"properties":{"description":"d"}}`, 200)
+	_, body := p.fd.last()
+	var pub struct {
+		Properties map[string]string `json:"properties"`
+	}
+	json.Unmarshal([]byte(body), &pub)
+	if pub.Properties["user.lite-sandbox"] != "true" || pub.Properties["description"] != "d" {
+		t.Errorf("published image properties %v: want the tag added", pub.Properties)
+	}
+	if got, _ := p.do("POST", "/1.0/images", "\x1f\x8btarball", "Content-Type", "application/octet-stream"); got != 200 {
+		t.Fatalf("upload: status %d", got)
+	}
+	p.fd.mu.Lock()
+	h := p.fd.headers[len(p.fd.headers)-1]
+	p.fd.mu.Unlock()
+	if h.Get("X-Incus-properties") != "user.lite-sandbox=true" || h.Get("X-LXD-properties") != "user.lite-sandbox=true" {
+		t.Errorf("upload headers %v: want the tag property", h)
+	}
+
+	// Projects other than the pinned one.
+	p.expect("GET", "/1.0/projects/other", "", 403)
+	p.expect("GET", "/1.0/projects/other/state", "", 403)
+	p.expect("GET", "/1.0/projects/default", "", 200)
+	for _, rec := range []string{"", "?recursion=1"} {
+		out := p.expect("GET", "/1.0/projects"+rec, "", 200)
+		if md, _ := out["metadata"].([]any); len(md) != 1 {
+			t.Errorf("project listing%s: %v, want only the pinned project", rec, md)
 		}
 	}
 }

@@ -581,14 +581,9 @@ func startIncusProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readPa
 		}
 	}()
 
-	var keys []string
-	for _, d := range config.IncusClientConfigDirs() {
-		keys = append(keys, filepath.Join(d, "client.key"))
-	}
 	sandbox.SetIncusSocket(srv.SocketPath(), srv.SocketDir(), bash_sandboxed.IncusMasks{
-		Sockets:  config.IncusMaskSockets(upstream),
-		Dirs:     config.IncusDaemonDirs(),
-		ReadDeny: keys,
+		Sockets: config.IncusMaskSockets(upstream),
+		Dirs:    append(config.IncusDaemonDirs(), config.IncusClientConfigDirs()...),
 	})
 
 	cleanup := func() {

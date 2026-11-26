@@ -590,13 +590,12 @@ func (s *Sandbox) SetDockerHost(host, socketDir string, maskSockets ...string) {
 }
 
 // IncusMasks are what the OS sandbox worker hides while the incus proxy runs,
-// so the proxy is the only way to the daemon: its socket files, the daemon
-// directories holding the admin and incus-user sockets, and the files (client
-// keys) that would reach a daemon over HTTPS.
+// so the proxy is the only way to the daemon: its socket files, and whole
+// directories — the daemon's, holding the admin and per-user sockets, and the
+// CLIs' client configuration, whose keys and tokens reach a daemon over HTTPS.
 type IncusMasks struct {
-	Sockets  []string
-	Dirs     []string
-	ReadDeny []string
+	Sockets []string
+	Dirs    []string
 }
 
 // IncusSocketConfigured reports whether the incus proxy is wired in; the
@@ -2017,7 +2016,20 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 	s.mu.RUnlock()
 	if incusSocketDir != "" {
 		extraBinds = append(extraBinds, incusSocketDir)
-		dockerMaskPaths = append(dockerMaskPaths, existingPaths(incusMasks.Sockets)...)
+		// A socket inside a masked directory is masked with it; bubblewrap
+		// could not create its mount point inside the masked tmpfs anyway.
+		for _, sock := range existingPaths(incusMasks.Sockets) {
+			inDir := false
+			for _, d := range incusMasks.Dirs {
+				if underAny(sock, d) {
+					inDir = true
+					break
+				}
+			}
+			if !inDir {
+				dockerMaskPaths = append(dockerMaskPaths, sock)
+			}
+		}
 	}
 
 	opts := os_sandbox.WorkerOptions{
@@ -2044,11 +2056,6 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 	opts.DeniedWritePaths = append(opts.DeniedWritePaths, buildxDenied...)
 	// The ssh agent sockets this worker is not granted (ssh_agent.go).
 	opts.MaskPaths = append(opts.MaskPaths, s.sshAgentMasks(cfg)...)
-	if incusSocketDir != "" {
-		for _, p := range existingPaths(incusMasks.ReadDeny) {
-			opts.DeniedReadPaths = append(opts.DeniedReadPaths, os_sandbox.DenyPath{Path: p})
-		}
-	}
 
 	// Hide the user's private state from the code commands run (see
 	// config/hidden_home.go): $HOME (allowlist mode) and the runtime

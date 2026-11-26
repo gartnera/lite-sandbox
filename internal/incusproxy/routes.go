@@ -15,7 +15,11 @@ const (
 	instanceRename       // POST /instances/{name}: no migration, same project
 	snapshotRename       // POST /instances/{name}/snapshots/{snap}: no migration
 	instanceRebuild      // source checked
-	imageCreate          // publish source tag-checked, same project
+	imageCreate          // publish source tag-checked, same project; new images tagged
+	imageWrite           // PUT/PATCH/DELETE an image: tagged images only in tagged_only mode
+	aliasWrite           // change/rename/delete an alias: of a tagged image only in tagged_only mode
+	projectList          // listing filtered to the pinned project
+	projectScoped        // the pinned project only
 	profileCreate        // body checked; refused in tagged_only mode
 	profileUpdate        // changed config/devices checked; refused in tagged_only mode
 	profileOther         // rename/delete; refused in tagged_only mode
@@ -94,15 +98,18 @@ var routes = func() []route {
 	add(many("GET,POST,PUT,DELETE", "instances/*/metadata/templates", instanceScoped)...)
 	add(r("POST", "instances/*/rebuild", instanceRebuild))
 
-	// Images (an image cannot carry instance configuration)
+	// Images. Aliases come first: "images/aliases/<name>" must not match the
+	// "images/<fingerprint>/<op>" routes below for an alias named like an op.
+	add(many("GET,POST", "images/aliases", plain)...)
+	add(r("GET", "images/aliases/*", plain))
+	add(many("PUT,PATCH,POST,DELETE", "images/aliases/*", aliasWrite)...)
 	add(r("GET", "images", plain))
 	add(r("POST", "images", imageCreate))
-	add(many("GET,PUT,PATCH,DELETE", "images/*", plain)...)
+	add(r("GET", "images/*", plain))
+	add(many("PUT,PATCH,DELETE", "images/*", imageWrite)...)
 	add(many("GET,POST", "images/*/export", plain)...)
 	add(r("POST", "images/*/refresh", plain))
 	add(r("POST", "images/*/secret", plain))
-	add(many("GET,POST", "images/aliases", plain)...)
-	add(many("GET,PUT,PATCH,POST,DELETE", "images/aliases/*", plain)...)
 
 	// Profiles
 	add(r("GET", "profiles", plain))
@@ -112,7 +119,7 @@ var routes = func() []route {
 	add(many("POST,DELETE", "profiles/*", profileOther)...)
 
 	// Read-only: projects, networks, storage pools and volumes
-	add(r("GET", "projects", plain), r("GET", "projects/*", plain), r("GET", "projects/*/state", plain))
+	add(r("GET", "projects", projectList), r("GET", "projects/*", projectScoped), r("GET", "projects/*/state", projectScoped))
 	add(r("GET", "networks", plain), r("GET", "networks/*", plain))
 	add(r("GET", "networks/*/state", plain), r("GET", "networks/*/leases", plain))
 	add(r("GET", "storage-pools", plain), r("GET", "storage-pools/*", plain), r("GET", "storage-pools/*/resources", plain))

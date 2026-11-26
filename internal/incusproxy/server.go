@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Options configures a Server.
@@ -49,6 +50,8 @@ type Options struct {
 type Server struct {
 	opts       Options
 	socketPath string
+	ctx        context.Context // for the policy's own daemon lookups
+	cancel     context.CancelFunc
 	listener   net.Listener
 	server     *http.Server
 	proxy      *httputil.ReverseProxy
@@ -80,11 +83,29 @@ func NewServer(opts Options) (*Server, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", opts.Upstream)
 		},
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
+		ctx:        ctx,
+		cancel:     cancel,
 		opts:       opts,
 		socketPath: socketPath,
 		listener:   listener,
 		client:     &http.Client{Transport: transport},
+	}
+	// A NIC naming a managed network takes its type from the network.
+	s.opts.Policy.NetworkType = func(name string) (string, error) {
+		var n struct {
+			Type string `json:"type"`
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		if err := s.getJSON(ctx, "/1.0/networks/"+url.PathEscape(name), nil, &n); err != nil {
+			if err == errNotFound {
+				return "", nil
+			}
+			return "", err
+		}
+		return n.Type, nil
 	}
 	s.proxy = &httputil.ReverseProxy{
 		Transport: transport,
@@ -116,6 +137,7 @@ func (s *Server) Start() error {
 // Shutdown stops the server and removes the socket file.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
+	s.cancel()
 	if s.server != nil {
 		err = s.server.Shutdown(ctx)
 	}
@@ -175,7 +197,23 @@ func (s *Server) serve(w http.ResponseWriter, req *http.Request) error {
 		}
 	case instanceList:
 		if tagged {
-			return s.serveInstanceList(w, req)
+			return s.serveFilteredList(w, req, s.taggedFilter())
+		}
+	case projectList:
+		return s.serveFilteredList(w, req, func(_ context.Context, name string, _ json.RawMessage) (bool, error) {
+			return name == s.opts.Project, nil
+		})
+	case projectScoped:
+		if segs[1] != s.opts.Project {
+			return deny("project %q is not permitted; the sandbox is confined to project %q", segs[1], s.opts.Project)
+		}
+	case imageWrite:
+		if err := s.requireImage(req.Context(), segs[1]); err != nil {
+			return err
+		}
+	case aliasWrite:
+		if err := s.requireAlias(req.Context(), segs[2]); err != nil {
+			return err
 		}
 	case instanceCreate:
 		if err := s.checkInstanceCreate(req); err != nil {
@@ -292,10 +330,33 @@ func readJSON(req *http.Request, v any) ([]byte, error) {
 		return nil, deny("request body too large")
 	}
 	setBody(req, body)
-	if err := json.Unmarshal(body, v); err != nil {
-		return nil, deny("failed to parse request body: %v", err)
+	if err := decodeStrict(body, v); err != nil {
+		return nil, err
 	}
 	return body, nil
+}
+
+// decodeStrict decodes a JSON body as the daemon's encoding/json does, after
+// refusing an object with two top-level keys that differ only in case:
+// encoding/json folds case when matching fields, so "config" and "Config"
+// both land in one field and which wins depends on their order — an order a
+// re-encoded body would not keep.
+func decodeStrict(body []byte, v any) error {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) == nil {
+		seen := map[string]string{}
+		for k := range obj {
+			lk := strings.ToLower(k)
+			if prev, ok := seen[lk]; ok {
+				return deny("request body has both %q and %q; send each field once", prev, k)
+			}
+			seen[lk] = k
+		}
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return deny("failed to parse request body: %v", err)
+	}
+	return nil
 }
 
 func setBody(req *http.Request, body []byte) {

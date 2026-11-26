@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // IncusConfig controls access to an Incus (or LXD) daemon. When enabled, a
@@ -56,6 +57,7 @@ var incusDaemonDirs = []string{
 	"/run/incus",
 	"/var/lib/incus",
 	"/var/snap/lxd/common/lxd",
+	"/var/snap/lxd/common/lxd-user", // lxd-user's per-user socket
 	"/var/lib/lxd",
 }
 
@@ -135,7 +137,9 @@ func DetectIncusSocket() string {
 func incusSocketCandidates() []string {
 	var out []string
 	for _, d := range incusDaemonDirs {
-		out = append(out, filepath.Join(d, "unix.socket"))
+		if !strings.HasSuffix(d, "-user") {
+			out = append(out, filepath.Join(d, "unix.socket"))
+		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		out = append(out, filepath.Join(home, ".colima", "default", "incus.sock"))
@@ -166,9 +170,9 @@ func IncusMaskSockets(upstream string) []string {
 
 // IncusClientConfigDirs returns the client configuration directories of the
 // incus and lxc CLIs ($INCUS_CONF / $LXD_CONF, else under the XDG config
-// directory, and the LXD snap's). They hold the client certificate and key
-// trusted by remote daemons, which would let a command reach a daemon over
-// HTTPS around the proxy.
+// directory, and the LXD snap's). They hold what reaches a remote daemon
+// over HTTPS around the proxy: the client certificate and key, OIDC tokens
+// (oidctokens/), and the remotes in config.yml.
 func IncusClientConfigDirs() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {

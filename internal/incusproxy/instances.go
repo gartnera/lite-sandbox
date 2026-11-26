@@ -29,6 +29,7 @@ type source struct {
 	Type    string `json:"type"`
 	Source  string `json:"source"`
 	Project string `json:"project"`
+	Refresh bool   `json:"refresh"`
 }
 
 // errNotFound means the daemon answered 404; the proxy then forwards the
@@ -170,6 +171,13 @@ func (s *Server) checkInstanceCreate(req *http.Request) error {
 		if profiles == nil && src != nil {
 			profiles = src.Profiles
 		}
+		// A refresh copies onto an instance that already exists (body.Name),
+		// replacing its root filesystem: it must be the sandbox's own.
+		if body.Source.Refresh && s.opts.TagKey != "" {
+			if _, err := s.requireInstance(ctx, body.Name); err != nil {
+				return err
+			}
+		}
 	} else if profiles == nil {
 		// Without a profile list the daemon falls back to the image's own
 		// profiles, which the proxy cannot see; name the daemon's final
@@ -184,7 +192,7 @@ func (s *Server) checkInstanceCreate(req *http.Request) error {
 	if s.opts.TagKey == "" && !setProfiles {
 		return nil
 	}
-	return rewriteCreate(req, raw, s.opts.TagKey, profiles, setProfiles)
+	return rewriteCreate(req, raw, s.opts.TagKey, &body.instance, profiles, setProfiles)
 }
 
 // checkCopySource checks the instance (or "instance/snapshot") a copy is made
@@ -224,39 +232,39 @@ func (s *Server) checkCopySource(ctx context.Context, name string) (*instance, e
 }
 
 // rewriteCreate re-encodes a create body with the tag added to its config
-// (when tagKey is set) and, when setProfiles, an explicit profile list. Keys
-// are matched the way encoding/json (and so the daemon) matches them,
-// case-insensitively, so no differently-cased duplicate survives to override
-// the rewritten one.
-func rewriteCreate(req *http.Request, raw []byte, tagKey string, profiles []string, setProfiles bool) error {
+// (when tagKey is set) and, when setProfiles, an explicit profile list. The
+// config, devices and profiles written are the ones the policy checked
+// (checked), not re-read from the raw body; decodeStrict already refused
+// bodies whose keys differ only in case, so no other spelling survives to
+// override them.
+func rewriteCreate(req *http.Request, raw []byte, tagKey string, checked *instance, profiles []string, setProfiles bool) error {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return deny("failed to parse request body: %v", err)
 	}
-	if tagKey != "" {
-		cfg := map[string]string{}
-		for _, k := range sortedKeys(obj) {
-			if strings.EqualFold(k, "config") {
-				if string(obj[k]) != "null" {
-					if err := json.Unmarshal(obj[k], &cfg); err != nil {
-						return deny("failed to parse instance config: %v", err)
-					}
-				}
+	for k := range obj {
+		switch strings.ToLower(k) {
+		case "config", "devices":
+			delete(obj, k)
+		case "profiles":
+			if setProfiles {
 				delete(obj, k)
 			}
 		}
+	}
+	cfg := map[string]string{}
+	for k, v := range checked.Config {
+		cfg[k] = v
+	}
+	if tagKey != "" {
 		cfg[tagKey] = "true"
-		b, _ := json.Marshal(cfg)
-		obj["config"] = b
+	}
+	obj["config"], _ = json.Marshal(cfg)
+	if checked.Devices != nil {
+		obj["devices"], _ = json.Marshal(checked.Devices)
 	}
 	if setProfiles {
-		for k := range obj {
-			if strings.EqualFold(k, "profiles") {
-				delete(obj, k)
-			}
-		}
-		b, _ := json.Marshal(profiles)
-		obj["profiles"] = b
+		obj["profiles"], _ = json.Marshal(profiles)
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -280,9 +288,17 @@ func newProfiles(next, cur []string) []string {
 // checkInstanceUpdate validates PUT/PATCH /1.0/instances/{name}: the config
 // keys, devices and profiles the request changes.
 func (s *Server) checkInstanceUpdate(req *http.Request, name string) error {
-	var body instance
+	var body struct {
+		instance
+		Restore string `json:"restore"`
+	}
 	if _, err := readJSON(req, &body); err != nil {
 		return err
+	}
+	// The daemon reads "other/snap" as another instance's snapshot and
+	// applies its configuration to this one.
+	if strings.Contains(body.Restore, "/") {
+		return deny("restoring another instance's snapshot (%q) is not permitted by the lite-sandbox incus proxy", body.Restore)
 	}
 	cur, err := s.currentForUpdate(req.Context(), name)
 	if err != nil || cur == nil {
@@ -367,77 +383,185 @@ func (s *Server) checkRebuild(req *http.Request, name string) error {
 }
 
 // checkImageCreate validates POST /1.0/images. A JSON body publishes an
-// instance or snapshot, or copies an image; the daemon treats any body that
-// decodes as JSON that way, whatever its Content-Type, so the body is peeked
-// and inspected whenever it starts like a JSON object. Other bodies are image
-// file uploads and stream through unread.
+// instance or snapshot, or copies an image from a server or URL; anything else
+// is an image file upload. The daemon decodes the first JSON value of the body
+// (trailing data ignored) whatever the Content-Type and treats the body as an
+// upload only when that fails, so the proxy decides the same way.
+//
+// In tagged-only mode the images the sandbox creates are tagged with the
+// user.lite-sandbox property: a publish through its properties, an upload
+// through the X-Incus-properties / X-LXD-properties headers. Both are refused
+// by the daemon when the image already exists, so the tag never lands on
+// someone else's image. A copy from a server or URL can merge properties into
+// an image that is already there, so it is left untagged and may not set the
+// tag itself.
 func (s *Server) checkImageCreate(req *http.Request) error {
-	if !strings.HasPrefix(req.Header.Get("Content-Type"), "application/json") {
-		br := bufio.NewReader(req.Body)
-		first := firstNonSpace(br)
-		req.Body = struct {
-			io.Reader
-			io.Closer
-		}{br, req.Body}
+	isJSON := strings.HasPrefix(req.Header.Get("Content-Type"), "application/json")
+	br := bufio.NewReaderSize(req.Body, 8192) // room to peek past firstNonSpace's limit
+	orig := req.Body
+	req.Body = struct {
+		io.Reader
+		io.Closer
+	}{br, orig}
+	if !isJSON {
+		first, ok := firstNonSpace(br)
+		if !ok {
+			return deny("image upload starts with too much whitespace")
+		}
 		if first != '{' && first != 'n' {
+			s.tagUpload(req)
 			return nil
 		}
-		body, err := io.ReadAll(io.LimitReader(br, maxBody+1))
-		req.Body.Close()
-		if err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
-		}
-		if len(body) > maxBody {
-			return deny("request body too large")
-		}
-		setBody(req, body)
-		var probe any
-		if json.Unmarshal(body, &probe) != nil {
-			return nil // not JSON after all: an upload
-		}
-		req.Header.Set("Content-Type", "application/json")
 	}
-	var body struct {
+	body, err := io.ReadAll(io.LimitReader(br, maxBody+1))
+	orig.Close()
+	if err != nil {
+		return fmt.Errorf("failed to read request body: %w", err)
+	}
+	if len(body) > maxBody {
+		return deny("request body too large")
+	}
+	setBody(req, body)
+
+	var post struct {
 		Source struct {
 			Type    string `json:"type"`
 			Name    string `json:"name"`
 			Project string `json:"project"`
 		} `json:"source"`
+		Properties map[string]string `json:"properties"`
 	}
-	if _, err := readJSON(req, &body); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&post); err != nil {
+		if isJSON {
+			return deny("failed to parse request body: %v", err)
+		}
+		s.tagUpload(req) // not JSON after all: an upload
+		return nil
+	}
+	if err := s.checkProject("source project", post.Source.Project); err != nil {
 		return err
 	}
-	if err := s.checkProject("source project", body.Source.Project); err != nil {
-		return err
+	if s.opts.TagKey == "" {
+		return nil
 	}
-	switch body.Source.Type {
+	switch post.Source.Type {
 	case "container", "instance", "virtual-machine", "snapshot":
-		instName, _, _ := strings.Cut(body.Source.Name, "/")
+		instName, _, _ := strings.Cut(post.Source.Name, "/")
 		if _, err := s.requireInstance(req.Context(), instName); err != nil {
 			return err
 		}
+		return rewriteImagePublish(req, body, s.opts.TagKey, post.Properties)
+	}
+	if _, ok := post.Properties[s.opts.TagKey]; ok {
+		return deny("the %s property is set by the proxy on the images the sandbox creates", s.opts.TagKey)
+	}
+	return nil
+}
+
+// tagUpload tags an uploaded image in tagged-only mode.
+func (s *Server) tagUpload(req *http.Request) {
+	if s.opts.TagKey == "" {
+		return
+	}
+	v := url.Values{s.opts.TagKey: {"true"}}.Encode()
+	req.Header.Add("X-Incus-properties", v)
+	req.Header.Add("X-LXD-properties", v)
+}
+
+// rewriteImagePublish re-encodes a publish body (its first JSON value) with
+// the tag added to its properties.
+func rewriteImagePublish(req *http.Request, body []byte, tagKey string, props map[string]string) error {
+	var obj map[string]json.RawMessage
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&obj); err != nil {
+		return deny("failed to parse request body: %v", err)
+	}
+	seen := map[string]bool{}
+	for k := range obj {
+		lk := strings.ToLower(k)
+		if seen[lk] {
+			return deny("request body has field %q more than once", k)
+		}
+		seen[lk] = true
+		if lk == "properties" {
+			delete(obj, k)
+		}
+	}
+	merged := map[string]string{}
+	for k, v := range props {
+		merged[k] = v
+	}
+	merged[tagKey] = "true"
+	obj["properties"], _ = json.Marshal(merged)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	setBody(req, out)
+	req.Header.Set("Content-Type", "application/json")
+	return nil
+}
+
+// requireImage enforces tagged-only mode for a change to an image: only the
+// images the sandbox created (tagged) may be changed or deleted, since an
+// image's profiles and the image itself are what other launches use.
+func (s *Server) requireImage(ctx context.Context, fingerprint string) error {
+	if s.opts.TagKey == "" {
+		return nil
+	}
+	var img struct {
+		Properties map[string]string `json:"properties"`
+	}
+	if err := s.getJSON(ctx, "/1.0/images/"+url.PathEscape(fingerprint), nil, &img); err != nil {
+		if err == errNotFound {
+			return nil
+		}
+		return err
+	}
+	if !isTrue(img.Properties[s.opts.TagKey]) {
+		return deny("image %q was not created by the sandbox (no %s property); only the sandbox's own images can be changed", fingerprint, s.opts.TagKey)
+	}
+	return nil
+}
+
+// requireAlias enforces tagged-only mode for a change to an existing alias:
+// it must point at one of the sandbox's own images, so the sandbox cannot
+// repoint (or delete and recreate) an alias someone else launches from.
+func (s *Server) requireAlias(ctx context.Context, name string) error {
+	if s.opts.TagKey == "" {
+		return nil
+	}
+	var alias struct {
+		Target string `json:"target"`
+	}
+	if err := s.getJSON(ctx, "/1.0/images/aliases/"+url.PathEscape(name), nil, &alias); err != nil {
+		if err == errNotFound {
+			return nil
+		}
+		return err
+	}
+	if err := s.requireImage(ctx, alias.Target); err != nil {
+		return deny("alias %q points at an image the sandbox did not create; only aliases of the sandbox's own images can be changed", name)
 	}
 	return nil
 }
 
 // firstNonSpace returns the first byte of br that is not JSON whitespace,
-// without consuming it (0 at EOF).
-func firstNonSpace(br *bufio.Reader) byte {
-	for i := 1; ; i++ {
+// without consuming it, and false when more than 4096 bytes of whitespace
+// come first. It returns 0, true at EOF.
+func firstNonSpace(br *bufio.Reader) (byte, bool) {
+	for i := 1; i <= 4097; i++ {
 		b, err := br.Peek(i)
-		if err != nil || len(b) < i {
-			return 0
+		if len(b) < i {
+			return 0, err == io.EOF
 		}
 		switch c := b[i-1]; c {
 		case ' ', '\t', '\r', '\n':
-			if i >= 4096 {
-				return 0
-			}
 			continue
 		default:
-			return c
+			return c, true
 		}
 	}
+	return 0, false
 }
 
 // checkProfileCreate validates POST /1.0/profiles.
@@ -488,11 +612,11 @@ func (s *Server) checkVolumeCreate(req *http.Request) error {
 	return s.checkProject("source project", body.Source.Project)
 }
 
-// serveInstanceList forwards GET /1.0/instances and filters the reply to the
-// instances carrying the tag. Entries are either URLs (recursion=0) or objects
-// with their config (recursion>=1); URL entries are matched against a
-// recursion=1 listing the proxy makes itself.
-func (s *Server) serveInstanceList(w http.ResponseWriter, req *http.Request) error {
+// serveFilteredList forwards a listing (GET /1.0/instances, /1.0/projects)
+// and keeps only the entries keep accepts. Entries are either URLs
+// (recursion=0) or objects with a name (recursion>=1); keep gets the name and,
+// for an object, its JSON.
+func (s *Server) serveFilteredList(w http.ResponseWriter, req *http.Request, keep func(ctx context.Context, name string, obj json.RawMessage) (bool, error)) error {
 	out := req.Clone(req.Context())
 	out.RequestURI = ""
 	out.URL.Scheme, out.URL.Host, out.Host = "http", "unix.socket", "unix.socket"
@@ -507,33 +631,38 @@ func (s *Server) serveInstanceList(w http.ResponseWriter, req *http.Request) err
 		return fmt.Errorf("reading the daemon's reply: %w", err)
 	}
 
-	var env map[string]json.RawMessage
-	var entries []json.RawMessage
-	if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &env) == nil && json.Unmarshal(env["metadata"], &entries) == nil {
-		var tagged map[string]bool
+	if resp.StatusCode == http.StatusOK {
+		var env map[string]json.RawMessage
+		var entries []json.RawMessage
+		if json.Unmarshal(body, &env) != nil || json.Unmarshal(env["metadata"], &entries) != nil {
+			return fmt.Errorf("unexpected listing from the daemon")
+		}
 		kept := make([]json.RawMessage, 0, len(entries))
 		for _, e := range entries {
+			var name string
+			var obj json.RawMessage
 			var urlEntry string
 			if json.Unmarshal(e, &urlEntry) == nil {
-				if tagged == nil {
-					if tagged, err = s.taggedNames(req.Context()); err != nil {
-						return err
-					}
+				name = nameFromURL(urlEntry)
+			} else {
+				var named struct {
+					Name string `json:"name"`
 				}
-				if tagged[nameFromURL(urlEntry)] {
-					kept = append(kept, e)
+				if json.Unmarshal(e, &named) != nil {
+					continue
 				}
-				continue
+				name, obj = named.Name, e
 			}
-			var inst instance
-			if json.Unmarshal(e, &inst) == nil && s.isTagged(&inst) {
+			ok, err := keep(req.Context(), name, obj)
+			if err != nil {
+				return err
+			}
+			if ok {
 				kept = append(kept, e)
 			}
 		}
 		env["metadata"], _ = json.Marshal(kept)
 		body, _ = json.Marshal(env)
-	} else if resp.StatusCode == http.StatusOK {
-		return fmt.Errorf("unexpected instance listing from the daemon")
 	}
 	for k, vs := range resp.Header {
 		if k == "Content-Length" || k == "Content-Encoding" {
@@ -544,6 +673,29 @@ func (s *Server) serveInstanceList(w http.ResponseWriter, req *http.Request) err
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, bytes.NewReader(body))
 	return nil
+}
+
+// taggedFilter returns a serveFilteredList filter keeping the instances that
+// carry the tag. URL entries are matched against the tagged set, looked up
+// once per listing.
+func (s *Server) taggedFilter() func(context.Context, string, json.RawMessage) (bool, error) {
+	var tagged map[string]bool
+	return func(ctx context.Context, name string, obj json.RawMessage) (bool, error) {
+		if obj != nil {
+			var inst instance
+			if json.Unmarshal(obj, &inst) != nil {
+				return false, nil
+			}
+			return s.isTagged(&inst), nil
+		}
+		if tagged == nil {
+			var err error
+			if tagged, err = s.taggedNames(ctx); err != nil {
+				return false, err
+			}
+		}
+		return tagged[name], nil
+	}
 }
 
 // taggedNames returns the names of the tagged instances in the pinned project.

@@ -80,39 +80,36 @@ func TestIncusEnvInjection(t *testing.T) {
 func TestIncusWorkerOptions(t *testing.T) {
 	base := t.TempDir()
 	daemonDir := filepath.Join(base, "var-lib-incus")
+	clientDir := filepath.Join(base, "config-incus")
 	socketDir := filepath.Join(base, "proxy")
-	key := filepath.Join(base, "client.key")
-	upstream := filepath.Join(base, "upstream.sock")
-	for _, d := range []string{daemonDir, socketDir} {
+	inDir := filepath.Join(daemonDir, "unix.socket") // the default layout
+	outside := filepath.Join(base, "colima.sock")
+	for _, d := range []string{daemonDir, clientDir, socketDir} {
 		os.MkdirAll(d, 0o700)
 	}
-	os.WriteFile(key, []byte("k"), 0o600)
-	os.WriteFile(upstream, nil, 0o600)
+	os.WriteFile(inDir, nil, 0o600)
+	os.WriteFile(outside, nil, 0o600)
 
 	s := NewSandbox()
-	cfg := &config.Config{}
-	s.updateConfig(cfg, base)
+	s.updateConfig(&config.Config{}, base)
 	s.SetIncusSocket(filepath.Join(socketDir, "incus.sock"), socketDir, IncusMasks{
-		Sockets:  []string{upstream, filepath.Join(base, "missing.sock")},
-		Dirs:     []string{daemonDir},
-		ReadDeny: []string{key, filepath.Join(base, "missing.key")},
+		Sockets: []string{inDir, outside, filepath.Join(base, "missing.sock")},
+		Dirs:    []string{daemonDir, clientDir, filepath.Join(base, "missing-dir")},
 	})
 	opts := s.workerOptions(s.getConfig())
 	if !slices.Contains(opts.ExtraBinds, socketDir) {
 		t.Errorf("socket dir not bound: %v", opts.ExtraBinds)
 	}
-	if !slices.Contains(opts.MaskPaths, upstream) || slices.Contains(opts.MaskPaths, filepath.Join(base, "missing.sock")) {
-		t.Errorf("mask paths %v: want the existing upstream socket only", opts.MaskPaths)
+	// A socket inside a masked directory is masked with it: bubblewrap
+	// cannot bind over a path inside the directory's masking tmpfs.
+	if slices.Contains(opts.MaskPaths, inDir) {
+		t.Errorf("socket inside a masked directory also masked on its own: %v", opts.MaskPaths)
 	}
-	if !slices.Contains(opts.MaskDirs, daemonDir) {
-		t.Errorf("daemon dir not masked: %v", opts.MaskDirs)
+	if !slices.Contains(opts.MaskPaths, outside) || slices.Contains(opts.MaskPaths, filepath.Join(base, "missing.sock")) {
+		t.Errorf("mask paths %v: want the existing socket outside the masked directories only", opts.MaskPaths)
 	}
-	var denied []string
-	for _, d := range opts.DeniedReadPaths {
-		denied = append(denied, d.Path)
-	}
-	if !slices.Contains(denied, key) || slices.Contains(denied, filepath.Join(base, "missing.key")) {
-		t.Errorf("denied reads %v: want the existing client key only", denied)
+	if !slices.Contains(opts.MaskDirs, daemonDir) || !slices.Contains(opts.MaskDirs, clientDir) {
+		t.Errorf("daemon and client config dirs not masked: %v", opts.MaskDirs)
 	}
 
 	// Without the proxy nothing incus-related is added.
@@ -120,5 +117,58 @@ func TestIncusWorkerOptions(t *testing.T) {
 	opts = s.workerOptions(s.getConfig())
 	if slices.Contains(opts.MaskDirs, daemonDir) || slices.Contains(opts.ExtraBinds, socketDir) {
 		t.Errorf("incus masks applied without the proxy: %+v", opts)
+	}
+}
+
+func TestIncusArgRoles(t *testing.T) {
+	for _, c := range []struct {
+		argv            []string
+		nonPath, writes []int
+	}{
+		{[]string{"incus", "exec", "c1", "--cwd", "/root", "--", "cat", "/etc/hostname"}, []int{1, 2, 3, 4, 5, 6, 7}, nil},
+		{[]string{"incus", "file", "pull", "c1/etc/hostname", "c1/etc/hosts", "out"}, []int{3, 4}, []int{5}},
+		{[]string{"incus", "file", "pull", "-r", "c1/etc", "/tmp/x"}, []int{4}, []int{5}},
+		{[]string{"incus", "file", "push", "/etc/hosts", "c1/etc/hosts"}, []int{4}, nil},
+		{[]string{"lxc", "export", "c1", "--compression", "none", "b.tar"}, []int{2}, []int{5}},
+		{[]string{"incus", "image", "export", "img", "dir"}, []int{3}, []int{4}},
+		{[]string{"incus", "list", "/etc"}, nil, nil},
+	} {
+		nonPath, writes := incusRoles(c.argv)
+		for _, i := range c.nonPath {
+			if !nonPath[i] {
+				t.Errorf("%q: word %d (%q) should be a non-path", c.argv, i, c.argv[i])
+			}
+		}
+		if len(nonPath) != len(c.nonPath) {
+			t.Errorf("%q: non-paths %v, want %v", c.argv, nonPath, c.nonPath)
+		}
+		if !slices.Equal(writes, c.writes) {
+			t.Errorf("%q: writes %v, want %v", c.argv, writes, c.writes)
+		}
+	}
+}
+
+func TestIncusPathChecks(t *testing.T) {
+	yes := true
+	tmpDir := t.TempDir()
+	proxyDir := t.TempDir() // the CLI, where installed, creates its config dirs here
+	s := NewSandbox()
+	s.updateConfig(&config.Config{Incus: &config.IncusConfig{Enabled: &yes, AllowUnsandboxed: &yes}}, tmpDir)
+	s.SetIncusSocket(filepath.Join(proxyDir, "incus.sock"), proxyDir, IncusMasks{})
+	for cmd, wantRefused := range map[string]bool{
+		"incus exec c1 -- cat /etc/hostname":          false,
+		"incus exec c1 --cwd /etc -- ls":              false,
+		"incus file pull c1/etc/hostname out.txt":     false,
+		"incus file pull c1/etc/hostname /etc/passwd": true,
+		"lxc export c1 /etc/backup.tar":               true,
+	} {
+		out, err := s.Execute(context.Background(), cmd, tmpDir, []string{tmpDir}, []string{tmpDir})
+		if err != nil {
+			out += err.Error()
+		}
+		refused := strings.Contains(out, "outside allowed") || strings.Contains(out, "not allowed")
+		if refused != wantRefused {
+			t.Errorf("%s: refused=%v, want %v (%q)", cmd, refused, wantRefused, out)
+		}
 	}
 }

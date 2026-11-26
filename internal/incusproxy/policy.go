@@ -21,6 +21,9 @@ type Policy struct {
 	WorkDir         string
 	ReadPaths       []string
 	WritePaths      []string
+	// NetworkType returns the type of a managed network ("" when it does not
+	// exist); the server sets it. nil skips the lookup.
+	NetworkType func(name string) (string, error)
 }
 
 // lowLevelKeys are the instance options Incus's restricted.containers.lowlevel
@@ -34,6 +37,7 @@ var lowLevelKeys = []string{
 	"limits.memory.hugepages",
 	"limits.memory.oom_priority",
 	"limits.memory.swap",
+	"security.devlxd.images", // LXD's name for security.guestapi.images
 	"security.guestapi.images",
 	"security.idmap.base",
 	"security.idmap.size",
@@ -120,9 +124,22 @@ func (p *Policy) checkDevice(name string, dev map[string]string) error {
 	case "disk":
 		return p.checkDisk(name, dev)
 	case "nic":
-		// Any NIC except one that takes a host interface away from the host.
-		if dev["nictype"] == "physical" && !p.AllowPrivileged {
+		// Any NIC except one that takes a host interface away from the host,
+		// whether by nictype or by naming a managed physical network.
+		if p.AllowPrivileged {
+			return nil
+		}
+		if dev["nictype"] == "physical" {
 			return fmt.Errorf("device %q: physical NICs are not allowed in the sandbox", name)
+		}
+		if network := dev["network"]; network != "" && p.NetworkType != nil {
+			typ, err := p.NetworkType(network)
+			if err != nil {
+				return fmt.Errorf("device %q: looking up network %q: %v", name, network, err)
+			}
+			if typ == "physical" {
+				return fmt.Errorf("device %q: network %q is a physical network, which is not allowed in the sandbox", name, network)
+			}
 		}
 		return nil
 	case "none", "tpm":
