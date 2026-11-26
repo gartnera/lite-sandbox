@@ -2,6 +2,7 @@ package hook
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -16,12 +17,27 @@ import (
 // returned as "": Claude Code resolves it to the working directory.
 func ClaudeModelPath(p string) string {
 	out := strings.TrimFunc(p, IsTrimmedByJS)
-	if out == "~" || strings.HasPrefix(out, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, out[1:])
-		}
+	if out == "~" {
+		return claudeHomeDir()
+	}
+	if rest, ok := strings.CutPrefix(out, "~/"); ok {
+		return filepath.Join(claudeHomeDir(), rest)
 	}
 	return out
+}
+
+// claudeHomeDir is the directory Node's os.homedir() reports, which Claude
+// Code expands ~ to: $HOME when it is set, even to "", otherwise the user's
+// passwd entry. With an empty home, Claude Code joins "~/x" to the relative
+// "x", as filepath.Join does here.
+func claudeHomeDir() string {
+	if home, ok := os.LookupEnv("HOME"); ok {
+		return home
+	}
+	if u, err := user.Current(); err == nil {
+		return u.HomeDir
+	}
+	return ""
 }
 
 // IsTrimmedByJS reports whether JavaScript's String.prototype.trim strips r:

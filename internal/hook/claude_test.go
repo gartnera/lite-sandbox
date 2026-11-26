@@ -1,6 +1,8 @@
 package hook
 
 import (
+	"os"
+	"os/user"
 	"path/filepath"
 	"testing"
 	"unicode/utf8"
@@ -49,5 +51,26 @@ func TestClaudeModelPath(t *testing.T) {
 		if got := ClaudeModelPath(tt.in); got != tt.want {
 			t.Errorf("ClaudeModelPath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestClaudeModelPathHome checks ~ against the home directory Node's
+// os.homedir() reports: an empty $HOME is kept, an unset one falls back to the
+// passwd entry.
+func TestClaudeModelPathHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	if got := ClaudeModelPath("~/.aws/credentials"); got != filepath.Join(".aws", "credentials") {
+		t.Errorf("empty HOME: got %q, want .aws/credentials", got)
+	}
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		t.Skip("no passwd entry for the current user")
+	}
+	os.Unsetenv("HOME")
+	if got, want := ClaudeModelPath("~/.aws/credentials"), filepath.Join(u.HomeDir, ".aws", "credentials"); got != want {
+		t.Errorf("unset HOME: got %q, want %q", got, want)
+	}
+	if got := ClaudeModelPath("~"); got != u.HomeDir {
+		t.Errorf("unset HOME: got %q for ~, want %q", got, u.HomeDir)
 	}
 }

@@ -623,16 +623,20 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	// The path Claude Code opens: it trims the path and expands a leading ~
 	// before resolving it (see hook.ClaudeModelPath), so "~/.aws/credentials"
 	// must be judged as the home directory's file, not <cwd>/~/.aws/....
-	// The boundary checks below look at both spellings; the .claude deferral
-	// looks only at what is opened, so it can't be reached by a spelling that
-	// merely looks like a .claude path.
+	// The boundary checks below look at both spellings, the opened path
+	// first so a denial names it; the .claude deferral looks only at what is
+	// opened, so it can't be reached by a spelling that merely looks like a
+	// .claude path. A path that trims to nothing opens the working directory.
 	target := hook.ClaudeModelPath(path)
-	paths := []string{path}
-	if target != path && target != "" {
-		paths = append(paths, target)
+	if target == "" {
+		target = "."
+	}
+	paths := []string{target}
+	if path != target {
+		paths = append(paths, path)
 	}
 
-	if isClaudeConfigTarget(paths[len(paths)-1], eventCWD(event), write) {
+	if isClaudeConfigTarget(target, eventCWD(event), write) {
 		return nil
 	}
 
@@ -686,9 +690,10 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     decided by its own extension.
 //   - Not in plan mode, which is for reading: Claude Code ignores a hook's
 //     allow on a write there anyway.
-//   - Only for a path given absolute and without surrounding white space.
-//     Claude Code trims the path and expands a leading ~ before writing, which
-//     the checks above don't, so "~/.ssh/x" would be judged as <cwd>/~/.ssh/x.
+//   - Only for a path given absolute and without surrounding white space,
+//     so that the path as written is the one Claude Code opens: it trims the
+//     path and expands a leading ~ (hook.ClaudeModelPath). The checks above
+//     judge both spellings, but an allow is kept to a path with only one.
 //   - Not for a path sandboxed commands may not write or read
 //     (hookWriteDenied): the config's deny lists, built-ins included, the
 //     paths granted only to some commands, and the programs the host runs.

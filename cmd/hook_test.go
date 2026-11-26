@@ -416,6 +416,12 @@ func TestEvaluatePathPolicyClaudePathCleanup(t *testing.T) {
 			}
 		})
 	}
+
+	// A denial names the file Claude Code opens, not <cwd>/~/....
+	got := evaluatePathPolicy(&hook.Event{ToolName: hook.ToolRead, CWD: cwd, ToolInput: &hook.ReadInput{FilePath: "~/.aws/credentials"}})
+	if want := filepath.Join(home, ".aws", "credentials"); got == nil || !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, want) {
+		t.Fatalf("expected a denial naming %s, got %+v", want, got)
+	}
 }
 
 // TestRunHookDenyOutput verifies the end-to-end stdin→stdout contract: a
