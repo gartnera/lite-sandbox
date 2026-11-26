@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/gartnera/lite-sandbox/internal/hook"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // claudeOptions are the composable knobs that decide how Claude Code is
@@ -106,11 +108,16 @@ func (o claudeOptions) plan(binPath string) claudePlan {
 // additionally extends the matcher to the sandbox's own MCP tools so the hook
 // can pre-approve them in subagents and skills.
 func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP bool) (command, matcher string) {
+	// Claude Code runs a command hook through a shell, so the binary path is
+	// quoted: unquoted, a path with a space splits into two words and the hook
+	// never starts (blocking every tool it matches, or confining nothing on a
+	// Claude Code without "onFailure").
+	exe := shellQuotePath(binPath)
 	if wantHook {
 		if validateBash {
-			command = binPath + " hook --validate-bash"
+			command = exe + " hook --validate-bash"
 		} else {
-			command = binPath + " hook"
+			command = exe + " hook"
 		}
 		// On its own, --bash-ast-hook-mode governs only Bash; with --with-tool-hook
 		// it also confines the filesystem tools, so it matches all of them.
@@ -121,7 +128,7 @@ func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP 
 	}
 	if configMCP {
 		if command == "" {
-			command = binPath + " hook"
+			command = exe + " hook"
 		}
 		// The MCP server runs config requests (mcpServerEntry), which only the
 		// hook can put before the user.
@@ -133,6 +140,19 @@ func claudeHookPlan(binPath string, wantHook, validateBash, governFS, configMCP 
 		}
 	}
 	return command, matcher
+}
+
+// shellQuotePath quotes a path as one word for a POSIX shell. A path that
+// needs no quoting is returned unchanged, so the hook command of an ordinary
+// install stays exactly as it was. syntax.Quote refuses a path it can only
+// write with bash's $'...' (a control character or invalid UTF-8); single
+// quotes keep every byte literal in any POSIX shell, so those fall back to
+// them, with each single quote closed, escaped and reopened.
+func shellQuotePath(path string) string {
+	if q, err := syntax.Quote(path, syntax.LangPOSIX); err == nil {
+		return q
+	}
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // claudeDirective is the usage directive that points Claude Code at the

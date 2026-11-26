@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -387,6 +388,64 @@ func TestConfigureCLAUDEMD(t *testing.T) {
 	}
 	if !contains(content, expectedDirective) {
 		t.Error("directive was not added")
+	}
+}
+
+// TestClaudeHookPlanQuotesBinPath: Claude Code runs the hook command through
+// a shell, so a binary path with a space (or any other shell syntax) is
+// quoted, and the command really starts that binary with the right arguments.
+func TestClaudeHookPlanQuotesBinPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := filepath.Join(t.TempDir(), "Jane Doe's $HOME", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "lite-sandbox")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name                                        string
+		wantHook, validateBash, governFS, configMCP bool
+		wantArgs                                    string
+	}{
+		{name: "default", configMCP: true, wantArgs: "hook --config-requests"},
+		{name: "tool hook", wantHook: true, governFS: true, configMCP: true, wantArgs: "hook --config-requests"},
+		{name: "bash-ast", wantHook: true, validateBash: true, wantArgs: "hook --validate-bash"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			command, _ := claudeHookPlan(bin, tt.wantHook, tt.validateBash, tt.governFS, tt.configMCP)
+			out, err := exec.Command("sh", "-c", command).CombinedOutput()
+			if err != nil {
+				t.Fatalf("sh -c %q: %v: %s", command, err, out)
+			}
+			if got := string(out); got != tt.wantArgs+"\n" {
+				t.Errorf("sh -c %q ran with %q, want %q", command, got, tt.wantArgs)
+			}
+			if !isLiteSandboxHookCommand(command, bin) {
+				t.Errorf("isLiteSandboxHookCommand(%q) = false for the command install writes", command)
+			}
+		})
+	}
+	// An ordinary path is written as it was before quoting, so existing
+	// installs' entries don't change.
+	if command, _ := claudeHookPlan("/usr/local/bin/lite-sandbox", true, false, true, true); command != "/usr/local/bin/lite-sandbox hook --config-requests" {
+		t.Errorf("command = %q, want the path unquoted", command)
+	}
+}
+
+func TestShellQuotePath(t *testing.T) {
+	for _, path := range []string{"/usr/bin/lite-sandbox", "/a b/lite-sandbox", "/a'b/c d", "/a$b/x", "/a\nb/x", "/a\xffb'c/x"} {
+		q := shellQuotePath(path)
+		out, err := exec.Command("sh", "-c", `printf %s `+q).Output()
+		if err != nil {
+			t.Fatalf("sh -c printf %s: %v", q, err)
+		}
+		if string(out) != path {
+			t.Errorf("shellQuotePath(%q) = %s, which the shell reads as %q", path, q, out)
+		}
 	}
 }
 
