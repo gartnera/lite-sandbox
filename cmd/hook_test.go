@@ -368,6 +368,62 @@ func TestEvaluatePathPolicyClaudeDir(t *testing.T) {
 	}
 }
 
+// TestEvaluatePathPolicyClaudePathCleanup checks Claude Code file-tool paths
+// that Claude Code trims and ~-expands before opening (hook.ClaudeModelPath):
+// they are judged as the file Claude Code opens, not as a name under cwd.
+func TestEvaluatePathPolicyClaudePathCleanup(t *testing.T) {
+	isolateConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		input    hook.ToolInput
+		tool     string
+		wantDeny bool
+	}{
+		{"read ~/.aws/credentials is denied", &hook.ReadInput{FilePath: "~/.aws/credentials"}, hook.ToolRead, true},
+		{"read ~ is denied", &hook.ReadInput{FilePath: "~"}, hook.ToolRead, true},
+		{"read with a leading space outside is denied", &hook.ReadInput{FilePath: " " + filepath.Join(outside, "secret")}, hook.ToolRead, true},
+		{"read with a trailing line separator outside is denied", &hook.ReadInput{FilePath: filepath.Join(outside, "secret") + "\u2028"}, hook.ToolRead, true},
+		{"read with a leading BOM outside is denied", &hook.ReadInput{FilePath: "\uFEFF" + filepath.Join(outside, "secret")}, hook.ToolRead, true},
+		{"read ~/.claude credentials is denied", &hook.ReadInput{FilePath: "~/.claude/.credentials.json"}, hook.ToolRead, true},
+		{"read ~/.claude settings defers", &hook.ReadInput{FilePath: "~/.claude/settings.json"}, hook.ToolRead, false},
+		{"glob in ~ is denied", &hook.GlobInput{Pattern: "**/*", Path: "~/"}, hook.ToolGlob, true},
+		{"grep in ~/.ssh is denied", &hook.GrepInput{Pattern: "BEGIN", Path: " ~/.ssh"}, hook.ToolGrep, true},
+		{"write to ~/.bashrc is denied", &hook.WriteInput{FilePath: "~/.bashrc"}, hook.ToolWrite, true},
+		{"edit with a leading tab outside is denied", &hook.EditInput{FilePath: "\t" + filepath.Join(outside, "f")}, hook.ToolEdit, true},
+		{"notebook edit under ~ is denied", &hook.NotebookEditInput{NotebookPath: "~/nb.ipynb"}, hook.ToolNotebook, true},
+		{"read with a leading space inside cwd defers", &hook.ReadInput{FilePath: " " + filepath.Join(cwd, "a.txt")}, hook.ToolRead, false},
+		{"relative read with surrounding space defers", &hook.ReadInput{FilePath: " a.txt\n"}, hook.ToolRead, false},
+		{"relative ~user path stays under cwd and defers", &hook.ReadInput{FilePath: "~user/a.txt"}, hook.ToolRead, false},
+		{"read of a name under cwd/~ defers", &hook.ReadInput{FilePath: filepath.Join(cwd, "~", "a.txt")}, hook.ToolRead, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := evaluatePathPolicy(&hook.Event{ToolName: tt.tool, CWD: cwd, ToolInput: tt.input})
+			if tt.wantDeny && (got == nil || got.HookSpecificOutput.PermissionDecision != hook.DecisionDeny) {
+				t.Fatalf("expected deny, got %+v", got)
+			}
+			if !tt.wantDeny && got != nil {
+				t.Fatalf("expected defer (nil), got %s", got.HookSpecificOutput.PermissionDecisionReason)
+			}
+		})
+	}
+
+	// A denial names the file Claude Code opens, not <cwd>/~/....
+	got := evaluatePathPolicy(&hook.Event{ToolName: hook.ToolRead, CWD: cwd, ToolInput: &hook.ReadInput{FilePath: "~/.aws/credentials"}})
+	if want := filepath.Join(home, ".aws", "credentials"); got == nil || !strings.Contains(got.HookSpecificOutput.PermissionDecisionReason, want) {
+		t.Fatalf("expected a denial naming %s, got %+v", want, got)
+	}
+}
+
 // TestRunHookDenyOutput verifies the end-to-end stdin→stdout contract: a
 // boundary-violating event yields a deny decision document, and an in-bounds
 // event yields no output (defer).

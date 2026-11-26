@@ -124,8 +124,9 @@ off. The hook leaves the call to Claude Code's own permission flow instead
 hook allow) when:
 - the mode is `open`, where the boundary is only audited;
 - the session is in plan mode;
-- the path isn't absolute, or starts or ends with white space: Claude Code
-  trims it and expands a leading `~`, which the boundary check doesn't;
+- the path isn't absolute, or starts or ends with white space: the
+  hook judges the path Claude Code opens (see below), but approves only a
+  path whose spelling already is that path;
 - the path, as written or after following symlinks, has a non-ASCII
   character: a case-insensitive file system folds
   more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
@@ -157,6 +158,18 @@ hook allow) when:
   paths (a project's `.envrc`).
 Codex, Grok Build and pi file-tool writes get no allow: their hooks defer or
 are decided as before.
+
+Claude Code cleans a file tool's path before opening it: it trims surrounding
+white space (JavaScript's `trim()`: Unicode spaces, line terminators and the
+byte order mark) and expands a leading `~` or `~/` to the home directory
+(`$HOME`, or the user's passwd entry when it is unset or empty, as Bun's
+`os.homedir()` reports it), then resolves what's left against the working directory. The hook does the
+same before its checks, for `Read`, `Write`, `Edit`, `NotebookEdit` and the
+`Grep`/`Glob` path, so `~/.aws/credentials` or ` /etc/shadow` (with a leading
+space) is denied as the file it names rather than passing as a name under
+the project. The boundary check also looks at the path as written, and the
+`.claude` deferral looks only at the cleaned path. Grok Build's and pi's paths
+get the equivalent clean-up for those agents.
 
 A config request lands either in the agent's project or, with `--global`, in
 the base config. Config commands scope a change to the git root of the working

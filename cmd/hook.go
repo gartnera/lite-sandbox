@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -621,8 +620,23 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		// (e.g. Glob/Grep without a path default to cwd, which is allowed).
 		return nil
 	}
+	// The path Claude Code opens: it trims the path and expands a leading ~
+	// before resolving it (see hook.ClaudeModelPath), so "~/.aws/credentials"
+	// must be judged as the home directory's file, not <cwd>/~/.aws/....
+	// The boundary checks below look at both spellings, the opened path
+	// first so a denial names it; the .claude deferral looks only at what is
+	// opened, so it can't be reached by a spelling that merely looks like a
+	// .claude path. A path that trims to nothing opens the working directory.
+	target := hook.ClaudeModelPath(path)
+	if target == "" {
+		target = "."
+	}
+	paths := []string{target}
+	if path != target {
+		paths = append(paths, path)
+	}
 
-	if isClaudeConfigTarget(path, eventCWD(event), write) {
+	if isClaudeConfigTarget(target, eventCWD(event), write) {
 		return nil
 	}
 
@@ -637,12 +651,21 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if event.ToolInput != nil {
 		what = event.ToolInput.Describe()
 	}
-	if d := boundaryDenial(sb, cwd, what, path, write, event.FromGrok()); d != nil || !write {
-		return d
+	for _, p := range paths {
+		if d := boundaryDenial(sb, cwd, what, p, write, event.FromGrok()); d != nil {
+			return d
+		}
 	}
-	if d := agentConfigWriteDecision(event, cwd, what, path); d != nil {
-		return d
+	if !write {
+		return nil
 	}
+	for _, p := range paths {
+		if d := agentConfigWriteDecision(event, cwd, what, p); d != nil {
+			return d
+		}
+	}
+	// fileWriteApproval gets the path as written: it approves only an
+	// absolute path that Claude Code's clean-up leaves unchanged.
 	return fileWriteApproval(event, sb, cwd, path)
 }
 
@@ -667,9 +690,10 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     decided by its own extension.
 //   - Not in plan mode, which is for reading: Claude Code ignores a hook's
 //     allow on a write there anyway.
-//   - Only for a path given absolute and without surrounding white space.
-//     Claude Code trims the path and expands a leading ~ before writing, which
-//     the checks above don't, so "~/.ssh/x" would be judged as <cwd>/~/.ssh/x.
+//   - Only for a path given absolute and without surrounding white space,
+//     so that the path as written is the one Claude Code opens: it trims the
+//     path and expands a leading ~ (hook.ClaudeModelPath). The checks above
+//     judge both spellings, but an allow is kept to a path with only one.
 //   - Not for a path sandboxed commands may not write or read
 //     (hookWriteDenied): the config's deny lists, built-ins included, the
 //     paths granted only to some commands, and the programs the host runs.
@@ -694,7 +718,7 @@ func fileWriteApproval(event *hook.Event, sb *bash_sandboxed.Sandbox, cwd, path 
 		event.PermissionMode == hook.PermissionModePlan {
 		return nil
 	}
-	if !filepath.IsAbs(path) || strings.TrimFunc(path, isTrimmedByJS) != path {
+	if !filepath.IsAbs(path) || hook.ClaudeModelPath(path) != path {
 		return nil
 	}
 	cfg, err := config.LoadForDirectory(cwd)
@@ -733,11 +757,6 @@ func fileWriteApproval(event *hook.Event, sb *bash_sandboxed.Sandbox, cwd, path 
 		"Validated by lite-sandbox: %q is inside the sandbox's writable paths, the same ones sandboxed commands may write.",
 		resolved))
 }
-
-// isTrimmedByJS reports whether JavaScript's String.prototype.trim, which
-// Claude Code applies to a file tool's path, strips r: Unicode white space,
-// line terminators, and the byte order mark.
-func isTrimmedByJS(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }
 
 // isASCII reports whether s holds only ASCII characters.
 func isASCII(s string) bool {
