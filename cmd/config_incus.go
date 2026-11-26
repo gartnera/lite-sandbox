@@ -40,7 +40,7 @@ var incusShowCmd = &cobra.Command{
 		fmt.Println("  Instances: " + onOff(c.RequiresTag(),
 			"tagged only (instances the sandbox created, tagged "+config.IncusTagKey+"=true)",
 			"ALL instances in the project"))
-		fmt.Println("  Disk devices: host paths restricted to readable/writable sandbox paths")
+		fmt.Println("  Disk devices: host paths only within the sandbox paths, and only in a restricted project with restricted.devices.disk.paths")
 		fmt.Println("  Privileged: " + onOff(c.AllowsPrivileged(),
 			"ALLOWED (security.privileged, raw.*, passthrough devices permitted)",
 			"blocked (security.privileged, raw.*, volatile.*, passthrough devices rejected)"))
@@ -102,6 +102,8 @@ In this mode:
 - Privileged containers, raw.* and other low-level options, and passthrough
   devices are rejected, as in an Incus restricted project
 - Host-path disk devices must fall within the sandbox's readable/writable paths
+  and need a restricted project with restricted.devices.disk.paths (see
+  docs/incus.md), since the daemon re-resolves the path at every start
 
 Use --socket to point at a non-default daemon socket (for example incus-user's
 unix.socket.user).`,

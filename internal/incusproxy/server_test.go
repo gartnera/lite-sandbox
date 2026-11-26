@@ -51,13 +51,25 @@ func (fd *fakeDaemon) last() (string, string) {
 // lookup serves the networks, images and aliases the proxy's policy looks up.
 func lookup(p string) (any, bool) {
 	objs := map[string]any{
-		"/1.0/networks/incusbr0":         map[string]any{"name": "incusbr0", "type": "bridge"},
-		"/1.0/networks/uplink":           map[string]any{"name": "uplink", "type": "physical"},
-		"/1.0/images/ownimg":             map[string]any{"properties": map[string]string{"user.lite-sandbox": "true"}},
-		"/1.0/images/adminimg":           map[string]any{"properties": map[string]string{"os": "debian"}},
-		"/1.0/images/aliases/mine-alias": map[string]any{"name": "mine-alias", "target": "ownimg"},
-		"/1.0/images/aliases/debian":     map[string]any{"name": "debian", "target": "adminimg"},
-		"/1.0/images/aliases/export":     map[string]any{"name": "export", "target": "adminimg"},
+		"/1.0/networks/incusbr0":                           map[string]any{"name": "incusbr0", "type": "bridge"},
+		"/1.0/networks/uplink":                             map[string]any{"name": "uplink", "type": "physical"},
+		"/1.0/images/ownimg":                               map[string]any{"properties": map[string]string{"user.lite-sandbox": "true"}},
+		"/1.0/images/adminimg":                             map[string]any{"properties": map[string]string{"os": "debian"}},
+		"/1.0/images/aliases/mine-alias":                   map[string]any{"name": "mine-alias", "target": "ownimg"},
+		"/1.0/images/aliases/debian":                       map[string]any{"name": "debian", "target": "adminimg"},
+		"/1.0/images/aliases/export":                       map[string]any{"name": "export", "target": "adminimg"},
+		"/1.0/projects/default":                            map[string]any{"name": "default", "config": map[string]string{}},
+		"/1.0/projects/sandbox":                            map[string]any{"name": "sandbox", "config": map[string]string{"restricted": "true", "restricted.devices.disk": "allow", "restricted.devices.disk.paths": "/elsewhere,/work,/ref"}},
+		"/1.0/projects/deep":                               map[string]any{"name": "deep", "config": map[string]string{"restricted": "true", "restricted.devices.disk.paths": "/work/sub"}},
+		"/1.0/projects/wide":                               map[string]any{"name": "wide", "config": map[string]string{"restricted": "true", "restricted.devices.disk.paths": "/"}},
+		"/1.0/storage-pools/default/volumes/custom/v":      map[string]any{"name": "v", "config": map[string]string{}},
+		"/1.0/storage-pools/default/volumes/custom/mine-v": map[string]any{"name": "mine-v", "config": map[string]string{"user.lite-sandbox": "true"}},
+	}
+	if strings.HasPrefix(p, "/1.0/projects/") || strings.HasPrefix(p, "/1.0/storage-pools/") {
+		if o, ok := objs[p]; ok {
+			return o, true
+		}
+		return nil, false
 	}
 	for _, prefix := range []string{"/1.0/networks/", "/1.0/images/"} {
 		if strings.HasPrefix(p, prefix) {
@@ -325,8 +337,9 @@ func TestCreatePolicy(t *testing.T) {
 		{"proxy", `{"name":"c",` + img + `,"devices":{"d":{"type":"proxy","listen":"unix:/run/d.sock","connect":"unix:/var/run/docker.sock","bind":"container"}}}`, 403},
 		{"no type", `{"name":"c",` + img + `,"devices":{"d":{"path":"/x"}}}`, 403},
 		{"disk outside", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/etc","path":"/h"}}}`, 403},
-		{"disk inside", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 200},
-		{"disk ro read path", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/ref","path":"/h","readonly":"true"}}}`, 200},
+		// The default project cannot be restricted, so the daemon would
+		// follow a symlink swapped in after the check: see TestHostPathDisks.
+		{"disk inside, unrestricted project", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 403},
 		{"disk rw read path", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/ref","path":"/h"}}}`, 403},
 		{"disk traversal", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/work/../etc","path":"/h"}}}`, 403},
 		{"disk relative", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"src","path":"/h"}}}`, 403},
@@ -469,7 +482,18 @@ func TestVolumes(t *testing.T) {
 	if got, _ := p.do("POST", "/1.0/storage-pools/default/volumes/custom", "backup", "Content-Type", "application/octet-stream"); got != 403 {
 		t.Errorf("volume import: status %d, want 403", got)
 	}
-	p.expect("DELETE", "/1.0/storage-pools/default/volumes/custom/v", "", 200)
+	p.expect("DELETE", "/1.0/storage-pools/default/volumes/custom/v", "", 403)
+	p.expect("DELETE", "/1.0/storage-pools/default/volumes/custom/mine-v", "", 200)
+	p.expect("POST", "/1.0/storage-pools/default/volumes/custom", `{"name":"v","source":{"type":"backup","backup":{"type":"url","url":"http://x"}}}`, 403)
+	p.expect("POST", "/1.0/storage-pools/default/volumes/custom", `{"name":"v2","config":{"size":"1GiB"}}`, 200)
+	_, body := p.fd.last()
+	var vol struct {
+		Config map[string]string `json:"config"`
+	}
+	json.Unmarshal([]byte(body), &vol)
+	if vol.Config["user.lite-sandbox"] != "true" || vol.Config["size"] != "1GiB" {
+		t.Errorf("created volume config %v: want the tag added", vol.Config)
+	}
 	p.expect("PUT", "/1.0/storage-pools/default/volumes/custom/v", `{}`, 403)
 }
 
@@ -525,6 +549,10 @@ func TestReviewFindings(t *testing.T) {
 	p.expect("PUT", "/1.0/images/aliases/mine-alias", `{"target":"ownimg"}`, 200)
 	p.expect("POST", "/1.0/images/aliases", `{"name":"new","target":"adminimg"}`, 200)
 	p.expect("POST", "/1.0/images", `{"source":{"type":"image","server":"https://images.example","alias":"x"},"properties":{"user.lite-sandbox":"true"}}`, 403)
+	p.expect("POST", "/1.0/images", `{"source":{"type":"image","fingerprint":"admin"},"public":true,"profiles":["priv"]}`, 403)
+	p.expect("POST", "/1.0/images/adminimg/secret", "", 403)
+	p.expect("POST", "/1.0/images/adminimg/refresh", "", 403)
+	p.expect("POST", "/1.0/images/ownimg/secret", "", 200)
 
 	// The sandbox's own images are tagged.
 	p.expect("POST", "/1.0/images", `{"source":{"type":"instance","name":"mine"},"properties":{"description":"d"}}`, 200)
@@ -556,4 +584,42 @@ func TestReviewFindings(t *testing.T) {
 			t.Errorf("project listing%s: %v, want only the pinned project", rec, md)
 		}
 	}
+}
+
+func TestHostPathDisks(t *testing.T) {
+	disk := func(src string, extra string) string {
+		return `{"name":"c","source":{"type":"none"},"devices":{"h":{"type":"disk","source":"` + src + `","path":"/h"` + extra + `}}}`
+	}
+	p := newTestProxy(t, func(o *Options) { o.Project = "sandbox" })
+	p.expect("POST", "/1.0/instances", disk("/work/src", ""), 200)
+	p.expect("POST", "/1.0/instances", disk("/ref/doc", `,"readonly":"true"`), 200)
+	p.expect("POST", "/1.0/instances", disk("/ref/doc", ""), 403) // read-only grant, read-write disk
+	p.expect("POST", "/1.0/instances", disk("/etc", ""), 403)
+	p.expect("POST", "/1.0/instances", disk("/work/src", `,"shift":"true"`), 403)
+
+	// A prefix the sandbox could replace, or one wider than the boundary.
+	q := newTestProxy(t, func(o *Options) { o.Project = "deep" })
+	q.expect("POST", "/1.0/instances", disk("/work/sub/x", ""), 403)
+	w := newTestProxy(t, func(o *Options) { o.Project = "wide" })
+	w.expect("POST", "/1.0/instances", disk("/work/src", ""), 403)
+
+	// allow_privileged opts out of the confinement, not of the boundary.
+	a := newTestProxy(t, func(o *Options) { o.Policy.AllowPrivileged = true })
+	a.expect("POST", "/1.0/instances", disk("/work/src", ""), 200)
+	a.expect("POST", "/1.0/instances", disk("/etc", ""), 403)
+}
+
+func TestNICHostOptions(t *testing.T) {
+	p := newTestProxy(t, nil)
+	nic := func(dev string) string {
+		return `{"name":"c","source":{"type":"none"},"devices":{"e":` + dev + `}}`
+	}
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"bridged","parent":"br0","ipv4.address":"10.0.0.5"}`), 200)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"macvlan","parent":"eth0"}`), 200)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"p2p"}`), 200)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"p2p","ipv4.routes":"0.0.0.0/1"}`), 403)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"routed","ipv4.address":"192.168.1.10"}`), 403)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"ipvlan","parent":"eth0","ipv4.address":"192.168.1.10"}`), 403)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"sriov","parent":"eth0"}`), 403)
+	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"bridged","parent":"br0","host_name":"eth0"}`), 403)
 }

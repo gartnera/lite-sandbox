@@ -107,6 +107,17 @@ func NewServer(opts Options) (*Server, error) {
 		}
 		return n.Type, nil
 	}
+	s.opts.Policy.ProjectConfig = func() (string, map[string]string, error) {
+		var p struct {
+			Config map[string]string `json:"config"`
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		if err := s.getJSON(ctx, "/1.0/projects/"+url.PathEscape(s.opts.Project), nil, &p); err != nil {
+			return "", nil, err
+		}
+		return s.opts.Project, p.Config, nil
+	}
 	s.proxy = &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -206,6 +217,10 @@ func (s *Server) serve(w http.ResponseWriter, req *http.Request) error {
 	case projectScoped:
 		if segs[1] != s.opts.Project {
 			return deny("project %q is not permitted; the sandbox is confined to project %q", segs[1], s.opts.Project)
+		}
+	case volumeDelete:
+		if err := s.requireVolume(req.Context(), segs[1], segs[4]); err != nil {
+			return err
 		}
 	case imageWrite:
 		if err := s.requireImage(req.Context(), segs[1]); err != nil {

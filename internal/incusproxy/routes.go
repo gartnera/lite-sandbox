@@ -18,6 +18,7 @@ const (
 	imageCreate          // publish source tag-checked, same project; new images tagged
 	imageWrite           // PUT/PATCH/DELETE an image: tagged images only in tagged_only mode
 	aliasWrite           // change/rename/delete an alias: of a tagged image only in tagged_only mode
+	volumeDelete         // tagged volumes only in tagged_only mode
 	projectList          // listing filtered to the pinned project
 	projectScoped        // the pinned project only
 	profileCreate        // body checked; refused in tagged_only mode
@@ -108,8 +109,8 @@ var routes = func() []route {
 	add(r("GET", "images/*", plain))
 	add(many("PUT,PATCH,DELETE", "images/*", imageWrite)...)
 	add(many("GET,POST", "images/*/export", plain)...)
-	add(r("POST", "images/*/refresh", plain))
-	add(r("POST", "images/*/secret", plain))
+	add(r("POST", "images/*/refresh", imageWrite))
+	add(r("POST", "images/*/secret", imageWrite)) // a token to download the image unauthenticated
 
 	// Profiles
 	add(r("GET", "profiles", plain))
@@ -128,7 +129,7 @@ var routes = func() []route {
 	// Custom storage volumes: create and delete (attaching one is a pool-backed
 	// disk device, which the policy allows).
 	add(r("POST", "storage-pools/*/volumes", volumeCreate), r("POST", "storage-pools/*/volumes/custom", volumeCreate))
-	add(r("DELETE", "storage-pools/*/volumes/custom/*", plain))
+	add(r("DELETE", "storage-pools/*/volumes/custom/*", volumeDelete))
 	return rs
 }()
 

@@ -24,7 +24,25 @@ type Policy struct {
 	// NetworkType returns the type of a managed network ("" when it does not
 	// exist); the server sets it. nil skips the lookup.
 	NetworkType func(name string) (string, error)
+	// ProjectConfig returns the pinned project's name and configuration; the
+	// server sets it. nil refuses host-path disks (unless AllowPrivileged).
+	ProjectConfig func() (string, map[string]string, error)
 }
+
+// nicHostKeys are the NIC options that change the host's own routing or
+// neighbour tables or name the host-side interface, which a NIC on a host
+// bridge does not need: routes through the instance would capture the
+// host's traffic, proxy ARP would claim addresses on the host's LAN.
+var nicHostKeys = []string{
+	"ipv4.routes", "ipv6.routes", "ipv4.routes.external", "ipv6.routes.external",
+	"ipv4.host_address", "ipv6.host_address", "ipv4.host_table", "ipv6.host_table",
+	"ipv4.host_tables", "ipv6.host_tables", "host_name",
+}
+
+// nicHostTypes are the nictypes that install host routes and proxy ARP
+// (routed, ipvlan), pass hardware through (sriov), or hand a host interface
+// over (physical).
+var nicHostTypes = []string{"physical", "routed", "ipvlan", "sriov"}
 
 // lowLevelKeys are the instance options Incus's restricted.containers.lowlevel
 // and restricted.virtual-machines.lowlevel block (raw.* and
@@ -129,8 +147,13 @@ func (p *Policy) checkDevice(name string, dev map[string]string) error {
 		if p.AllowPrivileged {
 			return nil
 		}
-		if dev["nictype"] == "physical" {
-			return fmt.Errorf("device %q: physical NICs are not allowed in the sandbox", name)
+		if slices.Contains(nicHostTypes, dev["nictype"]) {
+			return fmt.Errorf("device %q: %s NICs are not allowed in the sandbox", name, dev["nictype"])
+		}
+		for _, k := range nicHostKeys {
+			if dev[k] != "" {
+				return fmt.Errorf("device %q: NIC option %s (host routing) is not allowed in the sandbox", name, k)
+			}
 		}
 		if network := dev["network"]; network != "" && p.NetworkType != nil {
 			typ, err := p.NetworkType(network)
@@ -165,6 +188,9 @@ func (p *Policy) checkDisk(name string, dev map[string]string) error {
 		return nil
 	}
 	if !p.AllowPrivileged {
+		if isTrue(dev["shift"]) {
+			return fmt.Errorf("device %q: shift (idmapped host mounts) is not allowed in the sandbox", name)
+		}
 		if dev["raw.mount.options"] != "" {
 			return fmt.Errorf("device %q: raw.mount.options is not allowed in the sandbox", name)
 		}
@@ -194,7 +220,54 @@ func (p *Policy) checkDisk(name string, dev map[string]string) error {
 	if !bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
 		return fmt.Errorf("device %q: %s disk source %q resolves to %q which is outside the sandbox boundary", name, access, src, resolved)
 	}
-	return nil
+	if p.AllowPrivileged {
+		return nil
+	}
+	return p.checkDiskConfinement(name, src, allowed)
+}
+
+// checkDiskConfinement allows a host-path disk only where the daemon itself
+// keeps it inside the boundary. The daemon opens the source path afresh at
+// every start, following symlinks, so a check made when the device is added
+// says nothing about where a path the sandbox can write points later (ln -sfn
+// / dir). Only a restricted project with restricted.devices.disk.paths makes
+// the daemon open the source beneath the listed prefix (openat2
+// RESOLVE_BENEATH); the prefix it uses, the first that contains the source,
+// must then itself lie inside the boundary, and must not be a path the
+// sandbox can replace (one strictly inside a writable path), since the daemon
+// opens the prefix itself following symlinks.
+func (p *Policy) checkDiskConfinement(name, src string, allowed []string) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("device %q: host-path disk %q is not allowed in the sandbox (%s); see docs/incus.md#host-path-disks", name, src, why)
+	}
+	if p.ProjectConfig == nil {
+		return refuse("the project is unknown")
+	}
+	project, cfg, err := p.ProjectConfig()
+	if err != nil {
+		return fmt.Errorf("device %q: looking up the project: %v", name, err)
+	}
+	if project == "default" || !isTrue(cfg["restricted"]) || cfg["restricted.devices.disk.paths"] == "" {
+		return refuse(fmt.Sprintf("project %q does not set restricted.devices.disk.paths", project))
+	}
+	clean := filepath.Clean(src) + "/"
+	for _, prefix := range strings.Split(cfg["restricted.devices.disk.paths"], ",") {
+		if !strings.HasPrefix(clean, filepath.Clean(prefix)+"/") {
+			continue
+		}
+		resolved := bash_sandboxed.ResolvePath(prefix, p.WorkDir)
+		if !bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
+			return refuse(fmt.Sprintf("its restricted.devices.disk.paths prefix %q is outside the sandbox boundary", prefix))
+		}
+		for _, w := range p.WritePaths {
+			w = bash_sandboxed.ResolvePath(w, p.WorkDir)
+			if resolved != w && bash_sandboxed.IsUnderAllowedPaths(resolved, []string{w}) {
+				return refuse(fmt.Sprintf("its restricted.devices.disk.paths prefix %q is inside writable %q, so the sandbox could replace it", prefix, w))
+			}
+		}
+		return nil
+	}
+	return refuse("it is under no restricted.devices.disk.paths prefix")
 }
 
 // checkChanges validates the config keys and devices of newCfg/newDevs that

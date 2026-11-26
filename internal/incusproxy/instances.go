@@ -452,10 +452,11 @@ func (s *Server) checkImageCreate(req *http.Request) error {
 		}
 		return rewriteImagePublish(req, body, s.opts.TagKey, post.Properties)
 	}
-	if _, ok := post.Properties[s.opts.TagKey]; ok {
-		return deny("the %s property is set by the proxy on the images the sandbox creates", s.opts.TagKey)
-	}
-	return nil
+	// A copy from a server or URL (or of a local image by fingerprint) that
+	// the project already holds is merged into that image: the daemon
+	// overwrites its profiles, visibility, auto-update and properties.
+	// Launching from the remote (`incus launch images:...`) needs none of this.
+	return deny("copying images (source type %q) is not permitted in tagged-only mode, as it can rewrite an image the sandbox did not create; launch from the remote image instead", post.Source.Type)
 }
 
 // tagUpload tags an uploaded image in tagged-only mode.
@@ -602,14 +603,66 @@ func (s *Server) checkVolumeCreate(req *http.Request) error {
 			Type    string `json:"type"`
 			Project string `json:"project"`
 		} `json:"source"`
+		Config map[string]string `json:"config"`
 	}
-	if _, err := readJSON(req, &body); err != nil {
+	raw, err := readJSON(req, &body)
+	if err != nil {
 		return err
 	}
-	if body.Source.Type == "migration" {
-		return deny("migrating storage volumes is not permitted by the lite-sandbox incus proxy")
+	// An empty volume or a copy of one in the project; migrations and backup
+	// imports (which also make the daemon fetch a URL) are refused.
+	if body.Source.Type != "" && body.Source.Type != "copy" {
+		return deny("storage volume source type %q is not permitted by the lite-sandbox incus proxy", body.Source.Type)
 	}
-	return s.checkProject("source project", body.Source.Project)
+	if err := s.checkProject("source project", body.Source.Project); err != nil {
+		return err
+	}
+	if s.opts.TagKey == "" {
+		return nil
+	}
+	// Tag the volume so the sandbox can delete it later.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return deny("failed to parse request body: %v", err)
+	}
+	for k := range obj {
+		if strings.EqualFold(k, "config") {
+			delete(obj, k)
+		}
+	}
+	cfg := map[string]string{}
+	for k, v := range body.Config {
+		cfg[k] = v
+	}
+	cfg[s.opts.TagKey] = "true"
+	obj["config"], _ = json.Marshal(cfg)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	setBody(req, out)
+	return nil
+}
+
+// requireVolume enforces tagged-only mode for deleting a custom volume: only
+// the volumes the sandbox created (tagged) may be deleted.
+func (s *Server) requireVolume(ctx context.Context, pool, name string) error {
+	if s.opts.TagKey == "" {
+		return nil
+	}
+	var vol struct {
+		Config map[string]string `json:"config"`
+	}
+	if err := s.getJSON(ctx, "/1.0/storage-pools/"+url.PathEscape(pool)+"/volumes/custom/"+url.PathEscape(name), nil, &vol); err != nil {
+		if err == errNotFound {
+			return nil
+		}
+		return err
+	}
+	if !isTrue(vol.Config[s.opts.TagKey]) {
+		return deny("storage volume %q was not created by the sandbox (no %s key); only the sandbox's own volumes can be deleted", name, s.opts.TagKey)
+	}
+	return nil
 }
 
 // serveFilteredList forwards a listing (GET /1.0/instances, /1.0/projects)

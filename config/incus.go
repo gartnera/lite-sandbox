@@ -180,6 +180,11 @@ func IncusClientConfigDirs() []string {
 	}
 	xdg := xdgConfigHome(home)
 	out := []string{filepath.Join(xdg, "incus"), filepath.Join(xdg, "lxc"), filepath.Join(home, "snap", "lxd", "common", "config")}
+	// Current clients use the OS configuration directory, which on macOS is
+	// ~/Library/Application Support.
+	if d, err := os.UserConfigDir(); err == nil && d != xdg {
+		out = append(out, filepath.Join(d, "incus"), filepath.Join(d, "lxc"))
+	}
 	if d := os.Getenv("INCUS_CONF"); d != "" {
 		out = append(out, d)
 	}
