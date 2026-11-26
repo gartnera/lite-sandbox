@@ -169,6 +169,8 @@ func commandTable() map[string]commandSpec {
 		// Gated by the config (commands.go).
 		"aws":    {validate: validateAWSCommand},
 		"docker": {validate: validateDockerCommand},
+		"incus":  {validate: validateIncusCommand},
+		"lxc":    {validate: validateIncusCommand},
 
 		// The ssh section's commands (validators_ssh*.go).
 		"ssh": {

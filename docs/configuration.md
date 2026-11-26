@@ -211,7 +211,8 @@ commands:
 
 These commands also bypass the docker filtering proxy: the proxy's
 `DOCKER_HOST` override isn't applied, so `docker` reaches the real daemon (or
-whatever `DOCKER_HOST` the host environment sets). A restricted entry
+whatever `DOCKER_HOST` the host environment sets), and the incus proxy's
+`INCUS_SOCKET`/`LXD_SOCKET`, so `incus` and `lxc` reach the real daemon. A restricted entry
 unsandboxes only matching invocations; e.g. `git push` leaves other `git`
 subcommands confined. They start from the same environment as every other
 command: with the OS sandbox on, variables named like credentials are left
@@ -931,7 +932,7 @@ restricted one (`./gradlew build`) does not lift this gate.
 The top-level `overrides` list changes configuration for specific working
 directories. Each entry pairs a `path` with config sections that replace the
 base for commands run **at or under** that path. Any section can be
-overridden: `aws`, `docker`, `profiles`, `paths`, `os_sandbox`, and the rest.
+overridden: `aws`, `docker`, `incus`, `profiles`, `paths`, `os_sandbox`, and the rest.
 
 ```yaml
 os_sandbox: true
@@ -1119,6 +1120,21 @@ ssh:
   agent: true                # default true
   unrestricted_agent: false  # default false
   git_signing: false         # default false
+```
+
+## Incus / LXD
+
+The `incus` section lets the `incus` and `lxc` CLIs reach the daemon through a
+filtering proxy confined to one project and, by default, to the instances the
+sandbox created. See [Incus / LXD access](incus.md).
+
+```yaml
+incus:
+  enabled: true
+  project: default           # default "default"
+  tagged_only: true          # default true
+  allow_privileged: false    # default false
+  allow_nesting: false       # default false
 ```
 
 ## Git Support

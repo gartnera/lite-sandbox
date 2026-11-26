@@ -1,0 +1,441 @@
+package incusproxy
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// shortSocketDir returns a short temp dir for unix sockets (macOS limits
+// sun_path to ~104 bytes).
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// fakeDaemon is a minimal Incus daemon: it serves the instances and profiles
+// it holds for the proxy's own lookups and records every other request.
+type fakeDaemon struct {
+	socket    string
+	mu        sync.Mutex
+	instances map[string]instance
+	profiles  map[string]instance
+	got       []string // "METHOD path?query"
+	bodies    []string
+}
+
+func (fd *fakeDaemon) last() (string, string) {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if len(fd.got) == 0 {
+		return "", ""
+	}
+	return fd.got[len(fd.got)-1], fd.bodies[len(fd.bodies)-1]
+}
+
+func sync200(w http.ResponseWriter, md any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"type": "sync", "status_code": 200, "metadata": md})
+}
+
+func startFakeDaemon(t *testing.T) *fakeDaemon {
+	t.Helper()
+	fd := &fakeDaemon{
+		socket: filepath.Join(shortSocketDir(t), "d.sock"),
+		instances: map[string]instance{
+			"mine":   {Name: "mine", Config: map[string]string{"user.lite-sandbox": "true", "volatile.idmap.next": "[...]"}, Devices: map[string]map[string]string{"data": {"type": "disk", "source": "/srv/admin", "path": "/data"}}, Profiles: []string{"default"}},
+			"theirs": {Name: "theirs", Config: map[string]string{}, Profiles: []string{"default"}},
+		},
+		profiles: map[string]instance{
+			"default": {Name: "default", Devices: map[string]map[string]string{
+				"root": {"type": "disk", "path": "/", "pool": "default"},
+				"eth0": {"type": "nic", "nictype": "bridged", "parent": "br0"},
+			}},
+			"priv": {Name: "priv", Config: map[string]string{"security.privileged": "true"}},
+		},
+	}
+	ln, err := net.Listen("unix", fd.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fd.mu.Lock()
+		defer fd.mu.Unlock()
+		p := r.URL.Path
+		if r.Method == "GET" {
+			if name, ok := strings.CutPrefix(p, "/1.0/profiles/"); ok {
+				if prof, ok := fd.profiles[name]; ok {
+					sync200(w, prof)
+				} else {
+					w.WriteHeader(404)
+					io.WriteString(w, `{"type":"error","error":"not found","error_code":404}`)
+				}
+				return
+			}
+			if name, ok := strings.CutPrefix(p, "/1.0/instances/"); ok && !strings.Contains(name, "/") && r.Header.Get("X-Test-Client") == "" {
+				if inst, ok := fd.instances[name]; ok {
+					sync200(w, inst)
+				} else {
+					w.WriteHeader(404)
+					io.WriteString(w, `{"type":"error","error":"not found","error_code":404}`)
+				}
+				return
+			}
+			if p == "/1.0/instances" {
+				var md []any
+				for _, n := range []string{"mine", "theirs"} {
+					if r.URL.Query().Get("recursion") == "" || r.URL.Query().Get("recursion") == "0" {
+						md = append(md, "/1.0/instances/"+n)
+					} else {
+						md = append(md, fd.instances[n])
+					}
+				}
+				if r.Header.Get("X-Test-Client") != "" {
+					fd.got = append(fd.got, r.Method+" "+r.URL.RequestURI())
+					fd.bodies = append(fd.bodies, string(body))
+				}
+				sync200(w, md)
+				return
+			}
+		}
+		fd.got = append(fd.got, r.Method+" "+r.URL.RequestURI())
+		fd.bodies = append(fd.bodies, string(body))
+		sync200(w, map[string]any{})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return fd
+}
+
+type testProxy struct {
+	t      *testing.T
+	fd     *fakeDaemon
+	client *http.Client
+}
+
+func newTestProxy(t *testing.T, mod func(*Options)) *testProxy {
+	t.Helper()
+	fd := startFakeDaemon(t)
+	opts := Options{
+		SocketDir: shortSocketDir(t),
+		Upstream:  fd.socket,
+		TagKey:    "user.lite-sandbox",
+		Policy: Policy{
+			WorkDir:    "/work",
+			ReadPaths:  []string{"/work", "/ref"},
+			WritePaths: []string{"/work"},
+		},
+	}
+	if mod != nil {
+		mod(&opts)
+	}
+	srv, err := NewServer(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Start()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	})
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", srv.SocketPath())
+	}}}
+	return &testProxy{t: t, fd: fd, client: client}
+}
+
+// do sends a request and returns the status and the decoded reply.
+func (p *testProxy) do(method, path, body string, hdr ...string) (int, map[string]any) {
+	p.t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, _ := http.NewRequest(method, "http://unix.socket"+path, rd)
+	req.Header.Set("X-Test-Client", "1")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+func (p *testProxy) expect(method, path, body string, want int) map[string]any {
+	p.t.Helper()
+	got, out := p.do(method, path, body)
+	if got != want {
+		p.t.Fatalf("%s %s %s: status %d, want %d (%v)", method, path, body, got, want, out["error"])
+	}
+	return out
+}
+
+func TestAllowlist(t *testing.T) {
+	p := newTestProxy(t, nil)
+	for _, c := range []struct {
+		method, path string
+		want         int
+	}{
+		{"GET", "/", 200},
+		{"GET", "/1.0", 200},
+		{"GET", "/1.0/events", 200},
+		{"GET", "/1.0/operations/abc/wait", 200},
+		{"GET", "/1.0/networks", 200},
+		{"GET", "/1.0/images/aliases/debian", 200},
+		{"POST", "/1.0/instances/mine/exec", 200},
+		{"PUT", "/1.0/instances/mine/state", 200},
+		{"GET", "/1.0/instances/mine/sftp", 200},
+		{"PUT", "/1.0", 403},
+		{"PATCH", "/1.0", 403},
+		{"POST", "/1.0/certificates", 403},
+		{"GET", "/1.0/certificates", 403},
+		{"POST", "/1.0/networks", 403},
+		{"PUT", "/1.0/networks/incusbr0", 403},
+		{"POST", "/1.0/storage-pools", 403},
+		{"POST", "/1.0/projects", 403},
+		{"PUT", "/1.0/projects/default", 403},
+		{"GET", "/1.0/cluster", 403},
+		{"POST", "/1.0/instances/mine/debug/repair", 403},
+		{"GET", "/1.0/instances/mine/debug/memory", 403},
+		{"GET", "/1.0/containers", 403},
+		{"GET", "/1.0/instances/a%2Fb", 403},
+		{"GET", "/1.0/instances/../certificates", 403},
+		{"GET", "/2.0/instances", 403},
+		{"POST", "/", 403},
+	} {
+		if got, out := p.do(c.method, c.path, ""); got != c.want {
+			t.Errorf("%s %s: status %d, want %d (%v)", c.method, c.path, got, c.want, out["error"])
+		}
+	}
+}
+
+func TestProjectPinning(t *testing.T) {
+	p := newTestProxy(t, nil)
+	p.expect("GET", "/1.0/images?project=other", "", 403)
+	p.expect("GET", "/1.0/images?all-projects=true", "", 403)
+	p.expect("GET", "/1.0/images?project=default&project=other", "", 403)
+	p.expect("GET", "/1.0/images?project=default", "", 200)
+	p.expect("GET", "/1.0/images", "", 200)
+	if got, _ := p.fd.last(); got != "GET /1.0/images" {
+		t.Errorf("default project: forwarded %q, want no project parameter added", got)
+	}
+
+	q := newTestProxy(t, func(o *Options) { o.Project = "sandbox" })
+	q.expect("GET", "/1.0/images", "", 200)
+	if got, _ := q.fd.last(); got != "GET /1.0/images?project=sandbox" {
+		t.Errorf("pinned project: forwarded %q", got)
+	}
+	q.expect("GET", "/1.0/images?project=default", "", 403)
+	// Body fields naming another project.
+	q.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"copy","source":"mine","project":"default"}}`, 403)
+	q.expect("POST", "/1.0/instances/mine", `{"name":"c","project":"default"}`, 403)
+}
+
+func TestCreatePolicy(t *testing.T) {
+	p := newTestProxy(t, nil)
+	img := `"source":{"type":"image","alias":"debian/12","server":"https://images.linuxcontainers.org","protocol":"simplestreams"}`
+	for _, c := range []struct {
+		name, body string
+		want       int
+	}{
+		{"plain launch", `{"name":"c",` + img + `}`, 200},
+		{"empty", `{"name":"c","source":{"type":"none"}}`, 200},
+		{"privileged", `{"name":"c",` + img + `,"config":{"security.privileged":"true"}}`, 403},
+		{"privileged false", `{"name":"c",` + img + `,"config":{"security.privileged":"false"}}`, 200},
+		{"nesting", `{"name":"c",` + img + `,"config":{"security.nesting":"true"}}`, 403},
+		{"raw.lxc", `{"name":"c",` + img + `,"config":{"raw.lxc":"lxc.apparmor.profile=unconfined"}}`, 403},
+		{"raw.idmap", `{"name":"c",` + img + `,"config":{"raw.idmap":"both 0 0"}}`, 403},
+		{"kernel modules", `{"name":"c",` + img + `,"config":{"linux.kernel_modules":"dummy"}}`, 403},
+		{"intercept mount", `{"name":"c",` + img + `,"config":{"security.syscalls.intercept.mount":"true"}}`, 403},
+		{"syscall deny", `{"name":"c",` + img + `,"config":{"security.syscalls.deny":"kexec_load"}}`, 200},
+		{"deny_default off", `{"name":"c",` + img + `,"config":{"security.syscalls.deny_default":"false"}}`, 403},
+		{"volatile idmap", `{"name":"c",` + img + `,"config":{"volatile.idmap.next":"[]"}}`, 403},
+		{"volatile hwaddr", `{"name":"c",` + img + `,"config":{"volatile.eth0.hwaddr":"00:16:3e:00:00:01"}}`, 200},
+		{"limits", `{"name":"c",` + img + `,"config":{"limits.cpu":"2","environment.FOO":"bar"}}`, 200},
+		{"unix-char", `{"name":"c",` + img + `,"devices":{"kvm":{"type":"unix-char","path":"/dev/kvm"}}}`, 403},
+		{"gpu", `{"name":"c",` + img + `,"devices":{"g":{"type":"gpu"}}}`, 403},
+		{"proxy", `{"name":"c",` + img + `,"devices":{"d":{"type":"proxy","listen":"unix:/run/d.sock","connect":"unix:/var/run/docker.sock","bind":"container"}}}`, 403},
+		{"no type", `{"name":"c",` + img + `,"devices":{"d":{"path":"/x"}}}`, 403},
+		{"disk outside", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/etc","path":"/h"}}}`, 403},
+		{"disk inside", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 200},
+		{"disk ro read path", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/ref","path":"/h","readonly":"true"}}}`, 200},
+		{"disk rw read path", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/ref","path":"/h"}}}`, 403},
+		{"disk traversal", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"/work/../etc","path":"/h"}}}`, 403},
+		{"disk relative", `{"name":"c",` + img + `,"devices":{"h":{"type":"disk","source":"src","path":"/h"}}}`, 403},
+		{"disk pool", `{"name":"c",` + img + `,"devices":{"v":{"type":"disk","pool":"default","source":"vol","path":"/v"}}}`, 200},
+		{"disk raw opts", `{"name":"c",` + img + `,"devices":{"v":{"type":"disk","pool":"default","source":"vol","path":"/v","raw.mount.options":"x"}}}`, 403},
+		{"cloud-init drive", `{"name":"c",` + img + `,"devices":{"ci":{"type":"disk","source":"cloud-init:config"}}}`, 200},
+		{"nic bridged", `{"name":"c",` + img + `,"devices":{"e":{"type":"nic","nictype":"bridged","parent":"br0"}}}`, 200},
+		{"nic physical", `{"name":"c",` + img + `,"devices":{"e":{"type":"nic","nictype":"physical","parent":"eth0"}}}`, 403},
+		{"privileged profile", `{"name":"c",` + img + `,"profiles":["default","priv"]}`, 403},
+		{"migration source", `{"name":"c","source":{"type":"migration","mode":"pull","operation":"https://evil/1.0/operations/x"}}`, 403},
+		{"conversion source", `{"name":"c","source":{"type":"conversion"}}`, 403},
+		{"copy untagged", `{"name":"c","source":{"type":"copy","source":"theirs"}}`, 403},
+		{"copy tagged", `{"name":"c","source":{"type":"copy","source":"mine"}}`, 403}, // its /srv/admin disk is outside the boundary
+		{"case-folded key", `{"name":"c",` + img + `,"Config":{"security.privileged":"true"}}`, 403},
+		{"not json", `{"name":`, 403},
+	} {
+		if got, out := p.do("POST", "/1.0/instances", c.body); got != c.want {
+			t.Errorf("%s: status %d, want %d (%v)", c.name, got, c.want, out["error"])
+		}
+	}
+	if got, _ := p.do("POST", "/1.0/instances", "tarball", "Content-Type", "application/octet-stream"); got != 403 {
+		t.Errorf("backup import: status %d, want 403", got)
+	}
+}
+
+func TestCreateTagsAndPinsProfiles(t *testing.T) {
+	p := newTestProxy(t, nil)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"image","alias":"x"},"config":{"limits.cpu":"1"},"CONFIG":{"user.lite-sandbox":"false"}}`, 200)
+	_, body := p.fd.last()
+	var got struct {
+		Config   map[string]string `json:"config"`
+		Profiles []string          `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Config["user.lite-sandbox"] != "true" || got.Config["limits.cpu"] != "1" {
+		t.Errorf("forwarded config %v: want the tag added and limits.cpu kept", got.Config)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0] != "default" {
+		t.Errorf("forwarded profiles %v: want [default] named explicitly", got.Profiles)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal([]byte(body), &raw)
+	if _, ok := raw["CONFIG"]; ok {
+		t.Errorf("differently-cased config key survived: %s", body)
+	}
+
+	// Outside tagged-only mode the body is left alone when profiles are given.
+	q := newTestProxy(t, func(o *Options) { o.TagKey = "" })
+	in := `{"name":"c","source":{"type":"image","alias":"x"},"profiles":["default"]}`
+	q.expect("POST", "/1.0/instances", in, 200)
+	if _, body := q.fd.last(); body != in {
+		t.Errorf("body rewritten: %s", body)
+	}
+	q.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"copy","source":"theirs"}}`, 200)
+}
+
+func TestTaggedOnly(t *testing.T) {
+	p := newTestProxy(t, nil)
+	p.expect("POST", "/1.0/instances/mine/exec", `{"command":["sh"]}`, 200)
+	p.expect("POST", "/1.0/instances/theirs/exec", `{"command":["sh"]}`, 403)
+	p.expect("DELETE", "/1.0/instances/theirs", "", 403)
+	p.expect("GET", "/1.0/instances/theirs/sftp", "", 403)
+	p.expect("PUT", "/1.0/instances/theirs/state", `{"action":"stop"}`, 403)
+	p.expect("POST", "/1.0/instances/theirs/snapshots", `{"name":"s"}`, 403)
+	p.expect("GET", "/1.0/instances/missing", "", 200) // the daemon reports its own 404
+	p.expect("POST", "/1.0/profiles", `{"name":"p"}`, 403)
+	p.expect("PATCH", "/1.0/profiles/default", `{"config":{"limits.cpu":"1"}}`, 403)
+	p.expect("DELETE", "/1.0/profiles/default", "", 403)
+	p.expect("POST", "/1.0/images", `{"source":{"type":"instance","name":"theirs"}}`, 403)
+	p.expect("POST", "/1.0/images", `{"source":{"type":"instance","name":"mine"}}`, 200)
+	// A JSON body is still a publish whatever its Content-Type says.
+	if got, _ := p.do("POST", "/1.0/images", ` {"source":{"type":"snapshot","name":"theirs/s0"}}`, "Content-Type", "application/octet-stream"); got != 403 {
+		t.Errorf("publish disguised as upload: status %d, want 403", got)
+	}
+	if got, _ := p.do("POST", "/1.0/images", "\x1f\x8bnot-json-tarball", "Content-Type", "application/octet-stream"); got != 200 {
+		t.Errorf("image upload: status %d, want 200", got)
+	}
+
+	for _, rec := range []string{"", "?recursion=1", "?recursion=2"} {
+		out := p.expect("GET", "/1.0/instances"+rec, "", 200)
+		md, _ := out["metadata"].([]any)
+		if len(md) != 1 {
+			t.Fatalf("listing%s: %v, want only the tagged instance", rec, md)
+		}
+		if s, ok := md[0].(string); ok && s != "/1.0/instances/mine" {
+			t.Errorf("listing%s: kept %v", rec, s)
+		}
+		if m, ok := md[0].(map[string]any); ok && m["name"] != "mine" {
+			t.Errorf("listing%s: kept %v", rec, m["name"])
+		}
+	}
+
+	q := newTestProxy(t, func(o *Options) { o.TagKey = "" })
+	q.expect("POST", "/1.0/instances/theirs/exec", `{"command":["sh"]}`, 200)
+	q.expect("PATCH", "/1.0/profiles/default", `{"config":{"limits.cpu":"1"}}`, 200)
+	q.expect("PATCH", "/1.0/profiles/default", `{"config":{"raw.lxc":"x"}}`, 403)
+	q.expect("PUT", "/1.0/profiles/default", `{"devices":{"root":{"type":"disk","path":"/","pool":"default"},"eth0":{"type":"nic","nictype":"bridged","parent":"br0"},"k":{"type":"unix-char","path":"/dev/kvm"}}}`, 403)
+	out := q.expect("GET", "/1.0/instances", "", 200)
+	if md, _ := out["metadata"].([]any); len(md) != 2 {
+		t.Errorf("unfiltered listing: %v", md)
+	}
+}
+
+func TestUpdateChecksOnlyChanges(t *testing.T) {
+	p := newTestProxy(t, nil)
+	// `incus config set mine limits.cpu 2`: a PUT of the whole config,
+	// volatile state and the admin's out-of-boundary disk included.
+	p.expect("PUT", "/1.0/instances/mine", `{"config":{"user.lite-sandbox":"true","volatile.idmap.next":"[...]","limits.cpu":"2"},"devices":{"data":{"type":"disk","source":"/srv/admin","path":"/data"}},"profiles":["default"]}`, 200)
+	p.expect("PUT", "/1.0/instances/mine", `{"config":{"volatile.idmap.next":"[{\"Isuid\":true,\"Hostid\":0}]"}}`, 403)
+	p.expect("PATCH", "/1.0/instances/mine", `{"config":{"raw.lxc":"x"}}`, 403)
+	p.expect("PATCH", "/1.0/instances/mine", `{"devices":{"data":{"type":"disk","source":"/srv/admin","path":"/elsewhere"}}}`, 403)
+	p.expect("PATCH", "/1.0/instances/mine", `{"profiles":["default","priv"]}`, 403)
+	p.expect("PATCH", "/1.0/instances/theirs", `{"config":{"limits.cpu":"1"}}`, 403)
+	p.expect("POST", "/1.0/instances/mine", `{"name":"renamed"}`, 200)
+	p.expect("POST", "/1.0/instances/mine", `{"name":"x","migration":true}`, 403)
+	p.expect("POST", "/1.0/instances/mine/snapshots/s0", `{"name":"s1"}`, 200)
+	p.expect("POST", "/1.0/instances/mine/snapshots/s0", `{"name":"s1","migration":true}`, 403)
+	p.expect("POST", "/1.0/instances/mine/rebuild", `{"source":{"type":"image","alias":"x"}}`, 200)
+	p.expect("POST", "/1.0/instances/mine/rebuild", `{"source":{"type":"migration"}}`, 403)
+}
+
+func TestAllowFlags(t *testing.T) {
+	p := newTestProxy(t, func(o *Options) { o.Policy.AllowNesting = true })
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"config":{"security.nesting":"true"}}`, 200)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"config":{"security.privileged":"true"}}`, 403)
+
+	q := newTestProxy(t, func(o *Options) { o.Policy.AllowPrivileged = true })
+	q.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"config":{"security.privileged":"true","raw.lxc":"x"},"devices":{"g":{"type":"gpu"}}}`, 200)
+	// Host paths stay confined to the boundary.
+	q.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"devices":{"h":{"type":"disk","source":"/etc","path":"/h"}}}`, 403)
+}
+
+func TestVolumes(t *testing.T) {
+	p := newTestProxy(t, nil)
+	p.expect("POST", "/1.0/storage-pools/default/volumes/custom", `{"name":"v","type":"custom"}`, 200)
+	p.expect("POST", "/1.0/storage-pools/default/volumes/custom", `{"name":"v","source":{"type":"migration"}}`, 403)
+	if got, _ := p.do("POST", "/1.0/storage-pools/default/volumes/custom", "backup", "Content-Type", "application/octet-stream"); got != 403 {
+		t.Errorf("volume import: status %d, want 403", got)
+	}
+	p.expect("DELETE", "/1.0/storage-pools/default/volumes/custom/v", "", 200)
+	p.expect("PUT", "/1.0/storage-pools/default/volumes/custom/v", `{}`, 403)
+}
+
+func TestNameFromURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"/1.0/instances/c1":                       "c1",
+		"/1.0/instances/c1?project=default":       "c1",
+		"/1.0/instances/" + url.PathEscape("a b"): "a b",
+	} {
+		if got := nameFromURL(in); got != want {
+			t.Errorf("nameFromURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

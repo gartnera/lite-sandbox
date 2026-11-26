@@ -162,7 +162,8 @@ func protectedOverlap(protected []string, path string) bool {
 // and never for the agent's own reads and writes, and what the OS sandbox
 // worker alone guards: the lite-sandbox binary and the PATH directories ahead
 // of it, the coding agents' control sockets and configuration directories
-// (installed or not), and docker's state (buildx builders, daemon sockets).
+// (installed or not), docker's state (buildx builders, daemon sockets), and
+// the incus daemon's sockets and client keys.
 func protectedEntries(cfg *config.Config) []string {
 	var out []string
 	if d := config.UserRuntimeDir(); d != "" {
@@ -187,6 +188,12 @@ func protectedEntries(cfg *config.Config) []string {
 	}
 	out = append(out, cfg.HostProgramDirs(os.Getenv("PATH"))...)
 	out = append(out, cfg.Docker.UpstreamSocket()) // nil-safe: detects the daemon's socket
+	if cfg.Incus.IncusEnabled() {
+		// The incus proxy masks these (incus.go).
+		out = append(out, config.IncusDaemonDirs()...)
+		out = append(out, config.IncusClientConfigDirs()...)
+		out = append(out, cfg.Incus.UpstreamSocket())
+	}
 	out = append(out, cfg.EffectiveDeniedReadPaths()...)
 	out = append(out, cfg.EffectiveDeniedWritePaths()...)
 	for _, d := range cfg.HiddenHomeDeniedReadEntries() {

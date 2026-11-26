@@ -24,7 +24,8 @@ type IncusConfig struct {
 	// instances created through the proxy are tagged with the
 	// user.lite-sandbox config key, every per-instance request needs the tag,
 	// instance listings are filtered to tagged instances, and profile writes
-	// (which would reach untagged instances too) are refused. Default false.
+	// (which would reach untagged instances too) are refused. Default true;
+	// set false to reach every instance in the project.
 	TaggedOnly *bool `yaml:"tagged_only,omitempty"`
 	// AllowPrivileged permits privileged containers, low-level options
 	// (raw.*, volatile.*, syscall interception, ...) and passthrough device
@@ -80,9 +81,10 @@ func (c *IncusConfig) ProjectName() string {
 	return c.Project
 }
 
-// RequiresTag returns whether only instances the sandbox created are reachable.
+// RequiresTag returns whether only instances the sandbox created are reachable
+// (default true).
 func (c *IncusConfig) RequiresTag() bool {
-	return c != nil && c.TaggedOnly != nil && *c.TaggedOnly
+	return c == nil || c.TaggedOnly == nil || *c.TaggedOnly
 }
 
 // AllowsPrivileged returns whether privileged instances and low-level options

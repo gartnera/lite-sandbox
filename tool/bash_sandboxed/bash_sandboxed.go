@@ -116,6 +116,13 @@ type Sandbox struct {
 	// worker (e.g. /var/run/docker.sock) so the proxy is the only reachable
 	// daemon and cannot be bypassed.
 	dockerMaskPaths []string
+	// incusSocket is the incus/lxd filtering proxy's socket, handed to
+	// sandboxed commands as INCUS_SOCKET and LXD_SOCKET; incusSocketDir holds
+	// it (and the CLIs' per-session config directories) and is bound into the
+	// OS sandbox worker. See SetIncusSocket.
+	incusSocket    string
+	incusSocketDir string
+	incusMasks     IncusMasks
 	// sshAgentProxy is the restricted ssh agent socket the server serves and
 	// sshAgentUpstream the real agent's (SetSSHAgent); sshAgentSocket is the
 	// one the current config grants ssh, sshpass, and git's remote commands
@@ -580,6 +587,55 @@ func (s *Sandbox) SetDockerHost(host, socketDir string, maskSockets ...string) {
 	s.dockerHost = host
 	s.dockerSocketDir = socketDir
 	s.dockerMaskPaths = dedupeMaskPaths(maskSockets)
+}
+
+// IncusMasks are what the OS sandbox worker hides while the incus proxy runs,
+// so the proxy is the only way to the daemon: its socket files, the daemon
+// directories holding the admin and incus-user sockets, and the files (client
+// keys) that would reach a daemon over HTTPS.
+type IncusMasks struct {
+	Sockets  []string
+	Dirs     []string
+	ReadDeny []string
+}
+
+// IncusSocketConfigured reports whether the incus proxy is wired in; the
+// incus and lxc commands are refused otherwise, as they would reach the real
+// daemon socket.
+func (s *Sandbox) IncusSocketConfigured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.incusSocket != ""
+}
+
+// SetIncusSocket points sandboxed commands at the incus proxy's socket (in
+// socketDir) and sets what the worker masks. The incus and lxc CLIs are given
+// fresh configuration directories inside socketDir (INCUS_CONF, LXD_CONF), so
+// they start from their defaults — the local daemon, the public image
+// remotes — rather than the user's remotes and client certificates. An empty
+// socket disables incus access for subsequent commands.
+func (s *Sandbox) SetIncusSocket(socket, socketDir string, masks IncusMasks) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.incusSocket = socket
+	s.incusSocketDir = socketDir
+	s.incusMasks = masks
+}
+
+// incusEnv adds the incus proxy's environment to a sandboxed command's.
+func (s *Sandbox) incusEnv(env map[string]string) {
+	s.mu.RLock()
+	socket, dir := s.incusSocket, s.incusSocketDir
+	s.mu.RUnlock()
+	if socket == "" {
+		return
+	}
+	env["INCUS_SOCKET"] = socket
+	env["LXD_SOCKET"] = socket
+	env["INCUS_CONF"] = filepath.Join(dir, "incus-conf")
+	env["LXD_CONF"] = filepath.Join(dir, "lxc-conf")
+	delete(env, "INCUS_DIR")
+	delete(env, "LXD_DIR")
 }
 
 // dedupeMaskPaths returns the non-empty, de-duplicated socket paths to mask,
@@ -1533,6 +1589,7 @@ func (s *Sandbox) commandEnv(hc interp.HandlerContext, injectDockerProxy bool) (
 		if proxyHost != "" {
 			envMap["DOCKER_HOST"] = proxyHost
 		}
+		s.incusEnv(envMap)
 	}
 	return envMap, nil
 }
@@ -1951,6 +2008,18 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		}
 	}
 
+	// Likewise the incus proxy: its socket directory in, the daemon's sockets
+	// and directories and the CLIs' client keys out (existing paths only:
+	// bubblewrap can only overlay what exists).
+	s.mu.RLock()
+	incusSocketDir := s.incusSocketDir
+	incusMasks := s.incusMasks
+	s.mu.RUnlock()
+	if incusSocketDir != "" {
+		extraBinds = append(extraBinds, incusSocketDir)
+		dockerMaskPaths = append(dockerMaskPaths, existingPaths(incusMasks.Sockets)...)
+	}
+
 	opts := os_sandbox.WorkerOptions{
 		WorkDir:    workerWorkDir,
 		ExtraBinds: extraBinds,
@@ -1975,6 +2044,11 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 	opts.DeniedWritePaths = append(opts.DeniedWritePaths, buildxDenied...)
 	// The ssh agent sockets this worker is not granted (ssh_agent.go).
 	opts.MaskPaths = append(opts.MaskPaths, s.sshAgentMasks(cfg)...)
+	if incusSocketDir != "" {
+		for _, p := range existingPaths(incusMasks.ReadDeny) {
+			opts.DeniedReadPaths = append(opts.DeniedReadPaths, os_sandbox.DenyPath{Path: p})
+		}
+	}
 
 	// Hide the user's private state from the code commands run (see
 	// config/hidden_home.go): $HOME (allowlist mode) and the runtime
@@ -2000,7 +2074,21 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 		}
 	}
 	guardHost(cfg, &opts)
+	if incusSocketDir != "" {
+		opts.MaskDirs = append(opts.MaskDirs, incusMasks.Dirs...)
+	}
 	return opts
+}
+
+// existingPaths returns the paths that exist (symlinks not followed).
+func existingPaths(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if _, err := os.Lstat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // buildxPaths returns the buildx state directory the worker binds writable
