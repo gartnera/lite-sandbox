@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -364,20 +365,76 @@ func TestReconcileClaudeHooksReplacesMovedBinary(t *testing.T) {
 }
 
 func TestIsLiteSandboxHookCommand(t *testing.T) {
-	const bin = "/a b/lite-sandbox" // a path with a space, as install writes it unquoted
+	const bin = "/a b/lite-sandbox" // a path with a space
 	for cmd, want := range map[string]bool{
-		bin + " hook":                         true,
-		bin + " hook --validate-bash":         true,
-		"/elsewhere/lite-sandbox hook":        true,
-		"lite-sandbox hook --config-requests": true,
-		"/elsewhere/lite-sandbox hooks":       false,
-		"/elsewhere/lite-sandbox":             false,
-		"/elsewhere/lite-sandbox serve-mcp":   false,
-		"/opt/not-lite-sandbox hook":          false,
-		"/other/tool hook":                    false,
+		"'/a b/lite-sandbox' hook":                   true, // as install writes it now
+		"'/a b/lite-sandbox' hook --config-requests": true,
+		bin + " hook":                                       true, // as earlier installs wrote it
+		bin + " hook --validate-bash":                       true,
+		"/elsewhere/lite-sandbox hook":                      true,
+		"lite-sandbox hook --config-requests":               true,
+		"'/old dir/lite-sandbox' hook":                      true, // moved binary, quoted
+		`"/old dir/it's/lite-sandbox" hook --validate-bash`: true,
+		"/old dir/lite-sandbox hook --config-requests":      true, // moved binary, legacy unquoted
+		"/old dir/lite-sandbox hook":                        true,
+		"'/old dir/lite-sandbox' hooks":                     false,
+		"/old dir/lite-sandbox hooks":                       false,
+		"/elsewhere/lite-sandbox hooks":                     false,
+		"/elsewhere/lite-sandbox":                           false,
+		"/elsewhere/lite-sandbox serve-mcp":                 false,
+		"'/old dir/lite-sandbox' serve-mcp hook":            false,
+		"/opt/not-lite-sandbox hook":                        false,
+		"'/opt/not-lite-sandbox' hook":                      false,
+		"/other/tool hook":                                  false,
+		"echo /x/lite-sandbox hook":                         false,
+		"other dir/lite-sandbox hook":                       false,
 	} {
 		if got := isLiteSandboxHookCommand(cmd, bin); got != want {
 			t.Errorf("isLiteSandboxHookCommand(%q) = %v, want %v", cmd, got, want)
 		}
+	}
+}
+
+// TestReconcileClaudeHooksPathWithSpace: an install from a binary whose path
+// has a space writes the hook with the path quoted, and replaces the entries
+// earlier installs wrote for it (unquoted) and for a binary that moved
+// (quoted or not), instead of leaving a second, fail-closed hook behind.
+func TestReconcileClaudeHooksPathWithSpace(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+	binPath := "/Users/Jane Doe/bin/lite-sandbox"
+	existing := `{"hooks":{"PreToolUse":[` +
+		`{"matcher":"Bash","hooks":[{"type":"command","command":"/Users/Jane Doe/bin/lite-sandbox hook --config-requests","onFailure":"block"}]},` +
+		`{"matcher":"Read","hooks":[{"type":"command","command":"'/Users/Jane Doe/old/lite-sandbox' hook"},{"type":"command","command":"/Users/Jane Doe/go/bin/lite-sandbox hook"},{"type":"command","command":"/other/tool hook"}]}` +
+		`]}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileClaudeHooks(tmpDir, binPath, claudeOptions{withToolHook: true, redirectBash: true}.plan(binPath)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	for _, group := range cfg.Hooks["PreToolUse"] {
+		for _, h := range group.Hooks {
+			commands = append(commands, h.Command)
+		}
+	}
+	want := []string{"/other/tool hook", "'/Users/Jane Doe/bin/lite-sandbox' hook --config-requests"}
+	if !slices.Equal(commands, want) {
+		t.Errorf("PreToolUse commands = %q, want %q", commands, want)
 	}
 }

@@ -124,8 +124,9 @@ off. The hook leaves the call to Claude Code's own permission flow instead
 hook allow) when:
 - the mode is `open`, where the boundary is only audited;
 - the session is in plan mode;
-- the path isn't absolute, or starts or ends with white space: Claude Code
-  trims it and expands a leading `~`, which the boundary check doesn't;
+- the path isn't absolute, or starts or ends with white space: the
+  hook judges the path Claude Code opens (see below), but approves only a
+  path whose spelling already is that path;
 - the path, as written or after following symlinks, has a non-ASCII
   character: a case-insensitive file system folds
   more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
@@ -157,6 +158,18 @@ hook allow) when:
   paths (a project's `.envrc`).
 Codex, Grok Build and pi file-tool writes get no allow: their hooks defer or
 are decided as before.
+
+Claude Code cleans a file tool's path before opening it: it trims surrounding
+white space (JavaScript's `trim()`: Unicode spaces, line terminators and the
+byte order mark) and expands a leading `~` or `~/` to the home directory
+(`$HOME`, or the user's passwd entry when it is unset or empty, as Bun's
+`os.homedir()` reports it), then resolves what's left against the working directory. The hook does the
+same before its checks, for `Read`, `Write`, `Edit`, `NotebookEdit` and the
+`Grep`/`Glob` path, so `~/.aws/credentials` or ` /etc/shadow` (with a leading
+space) is denied as the file it names rather than passing as a name under
+the project. The boundary check also looks at the path as written, and the
+`.claude` deferral looks only at the cleaned path. Grok Build's and pi's paths
+get the equivalent clean-up for those agents.
 
 A config request lands either in the agent's project scope or, with
 `--global`, in the global config. Config commands write a change to the scope
@@ -434,7 +447,7 @@ This is a lightweight, best-effort sandbox based on static analysis. It is **not
 ### General limitations
 
 - **Not a complete security boundary**: the AST-level sandbox limits an LLM's access to the host as one layer of defense. Don't rely on it alone for untrusted workloads. The optional OS sandbox adds filesystem isolation but still shares the network namespace and has no seccomp-level syscall filtering. For maximum isolation of untrusted workloads, use VMs.
-- **Claude Code's hook fails closed only from 2.1.295**: with `--with-tool-hook` or `--bash-ast-hook-mode` (and `launch`), the `PreToolUse` hook is registered with `"onFailure": "block"`, so a hook that can't start, times out, or exits with an unexpected code blocks the built-in tool call. Claude Code before 2.1.295 ignores the setting and lets such a call through to its normal permission flow, which in `bypassPermissions` mode runs it unchecked. The hook's own internal errors fail open by design (it defers), and the default install's hook, which only pre-approves the sandbox's tools, has the built-in `Bash` deny behind it. See [Bash: hook vs. permission deny](installation.md#bash-hook-vs-permission-deny).
+- **Claude Code's hook fails closed only from 2.1.295**: with `--with-tool-hook` or `--bash-ast-hook-mode` (and `launch`), the `PreToolUse` hook is registered with `"onFailure": "block"`, so a hook that can't start, times out, or exits with an unexpected code blocks the built-in tool call. Claude Code before 2.1.295 ignores the setting and lets such a call through to its normal permission flow, which in `bypassPermissions` mode runs it unchecked. The hook's own internal errors fail open by design (it defers), and the default install's hook, which only pre-approves the sandbox's tools, has the built-in `Bash` deny behind it. The binary path in the hook command is shell-quoted, so a path with a space doesn't keep the hook from starting. See [Bash: hook vs. permission deny](installation.md#bash-hook-vs-permission-deny).
 - **pi's checks run in an extension**: pi has no hook protocol, so its file tools are confined, and its built-in shell redirected, by lite-sandbox's pi extension, which runs `lite-sandbox hook` from pi's `tool_call` event and blocks the call when the hook can't answer. Extensions are trusted code in the pi process: another extension that handles `tool_call` after lite-sandbox's can still change a call's arguments, and running pi with `--no-extensions`, or an extension that fails to load, drops the checks: the built-in `bash` stays disabled through `defaultTools`, so pi then has no shell, but its file tools run unconfined. The sandbox's bash tool itself validates every command in `serve-mcp` whatever the extension does.
 - **Interpreter differences**: commands run in the mvdan.cc/sh interpreter, not GNU bash. It supports standard POSIX and bash features, but some GNU bash extensions may behave differently.
 - **Allowed commands bypass argument validation**: invocations a `commands` entry (`allow: true`) admits run without the command's argument validators; the rest of the command line is still parsed and validated, and the deny list still applies. A bare allow of a script path (`./scripts/build.sh`) also trusts the script: it runs through the interpreter with the whitelist, argument validators, structural rules, and the deny list lifted for everything it runs, at any depth; only `ask` entries and the path boundary (which confines the interpreter's own file I/O, made on the host) still apply. Everything the script runs is routed the way the script is, to the shared worker; another command's `no_sandbox` entry (a script's included) and command-scoped grants don't apply inside it. A script allowed with `no_sandbox` skips the interpreter entirely: it runs natively on the host (its shebang's program, or `bash`), and nothing it runs is checked, `ask` entries and the path boundary included. So the agent can't make that shell run code of its own before the script's first line, every `no_sandbox` command gets the server's own values (none, unless the user's environment sets them) for the variables a native shell acts on there (`BASH_ENV`, `ENV`, `SHELLOPTS` with `PS4`, `BASHOPTS`, `BASH_XTRACEFD`, `ZDOTDIR`, exported `BASH_FUNC_*` functions, and `CDPATH`, which redirects the script's own `cd`), whatever the agent set; assigning them is also refused. Run directly or as `bash <script>`, the script runs as the file its entry names, by its resolved path (not through a symlinked directory the invocation names), with the server's `PATH` (which finds its shell) and `HOME` (where zsh reads `.zshenv`); under a wrapper (`timeout`, `env`) it gets the agent's, as any wrapped `no_sandbox` command does. Its other environment is the agent's to set, as for any `no_sandbox` command. A sourced script isn't trusted. A script the agent can edit can therefore run any command, but with the OS sandbox enabled those commands are still confined (write restrictions, masked paths, no scoped credentials), though they can write files in the working directory that host programs act on later (`.git/config`), the sandbox's own config included, so a `lite-sandbox config` the script runs can't change the policy; without it there is no confinement beyond the path boundary on the interpreter's own I/O, and the deny list was never a boundary there (see below). `ask` entries are enforced only on commands the interpreter runs: a native program the script starts (`/bin/sh -c`) runs its children unseen. Only allow commands and scripts you trust.
