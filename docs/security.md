@@ -161,8 +161,9 @@ are decided as before.
 
 Claude Code cleans a file tool's path before opening it: it trims surrounding
 white space (JavaScript's `trim()`: Unicode spaces, line terminators and the
-byte order mark) and expands a leading `~` or `~/` to the home directory,
-then resolves what's left against the working directory. The hook does the
+byte order mark) and expands a leading `~` or `~/` to the home directory
+(`$HOME`, or the user's passwd entry when it is unset or empty, as Bun's
+`os.homedir()` reports it), then resolves what's left against the working directory. The hook does the
 same before its checks, for `Read`, `Write`, `Edit`, `NotebookEdit` and the
 `Grep`/`Glob` path, so `~/.aws/credentials` or ` /etc/shadow` (with a leading
 space) is denied as the file it names rather than passing as a name under

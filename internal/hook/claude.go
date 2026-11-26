@@ -26,12 +26,12 @@ func ClaudeModelPath(p string) string {
 	return out
 }
 
-// claudeHomeDir is the directory Node's os.homedir() reports, which Claude
-// Code expands ~ to: $HOME when it is set, even to "", otherwise the user's
-// passwd entry. With an empty home, Claude Code joins "~/x" to the relative
-// "x", as filepath.Join does here.
+// claudeHomeDir is the directory Claude Code expands ~ to: os.homedir() of
+// the Bun runtime it is built on, which is $HOME when it is set and not
+// empty, otherwise the user's passwd entry. (Node keeps an empty $HOME; Bun
+// doesn't.) If neither is known, "~/x" is judged as the relative "x".
 func claudeHomeDir() string {
-	if home, ok := os.LookupEnv("HOME"); ok {
+	if home := os.Getenv("HOME"); home != "" {
 		return home
 	}
 	if u, err := user.Current(); err == nil {
