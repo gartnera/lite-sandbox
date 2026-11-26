@@ -667,6 +667,11 @@ func isLiteSandboxHookCommand(cmd, binPath string) bool {
 	if exe, sub, ok := leadingWords(cmd); ok && filepath.Base(exe) == "lite-sandbox" && sub == "hook" {
 		return true
 	}
+	// An unquoted path without a space, split at the first space: this also
+	// catches entries the shell couldn't parse ("/Users/O'Brien/bin/...").
+	if exe, rest, _ := strings.Cut(cmd, " "); filepath.Base(exe) == "lite-sandbox" && (rest == "hook" || strings.HasPrefix(rest, "hook ")) {
+		return true
+	}
 	return isLegacyUnquotedHookCommand(cmd)
 }
 
@@ -742,11 +747,22 @@ func unescapeDoubleQuoted(s string) string {
 	return b.String()
 }
 
+// onlyFlags reports whether rest (what follows "hook") is nothing but
+// space-separated --flags, as every hook command lite-sandbox writes is.
+func onlyFlags(rest string) bool {
+	for _, f := range strings.Fields(rest) {
+		if !strings.HasPrefix(f, "--") || strings.ContainsAny(f, legacyDirRejects) {
+			return false
+		}
+	}
+	return true
+}
+
 // legacyDirRejects are what an unquoted legacy directory can't contain: shell
 // syntax that means the command is something else than a lone lite-sandbox
 // path (a wrapper, a chain, a comment), so a user's own hook isn't taken for
 // one of ours.
-const legacyDirRejects = ";&|#<>`$\\'\"(){}\t\n"
+const legacyDirRejects = ";&|#<>`$\\'\"(){}~=\t\n"
 
 // isLegacyUnquotedHookCommand recognizes `<dir>/lite-sandbox hook [flags]`
 // written with the directory unquoted, as installs before claudeHookPlan
@@ -754,13 +770,16 @@ const legacyDirRejects = ";&|#<>`$\\'\"(){}\t\n"
 // split into words; it is taken to be everything before the last
 // "lite-sandbox hook", and must be an absolute directory (or absent) with no
 // shell syntax in it (legacyDirRejects) and no second absolute path (" /"),
-// such as a wrapper program's.
+// such as a wrapper program's. Only flags may follow "hook".
 func isLegacyUnquotedHookCommand(cmd string) bool {
 	const tail = "lite-sandbox hook"
 	for i := strings.LastIndex(cmd, tail); i >= 0; i = strings.LastIndex(cmd[:i], tail) {
 		rest := cmd[i+len(tail):]
 		if rest != "" && !strings.HasPrefix(rest, " ") {
 			continue
+		}
+		if !onlyFlags(rest) {
+			return false
 		}
 		dir := cmd[:i]
 		if dir == "" {
