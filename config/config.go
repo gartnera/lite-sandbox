@@ -489,7 +489,8 @@ type Config struct {
 	Runtimes             *RuntimesConfig             `yaml:"runtimes,omitempty"`
 	AWS                  *AWSConfig                  `yaml:"aws,omitempty"`
 	Docker               *DockerConfig               `yaml:"docker,omitempty"`
-	SSH                  *SSHConfig                  `yaml:"ssh,omitempty"` // ssh hosts and the ssh agent; see SSHConfig
+	Incus                *IncusConfig                `yaml:"incus,omitempty"` // incus/lxc via a filtering proxy; see IncusConfig
+	SSH                  *SSHConfig                  `yaml:"ssh,omitempty"`   // ssh hosts and the ssh agent; see SSHConfig
 	LocalBinaryExecution *LocalBinaryExecutionConfig `yaml:"local_binary_execution,omitempty"`
 	OSSandbox            *bool                       `yaml:"os_sandbox,omitempty"`
 	// OSSandboxHideHome, when enabled (the default), has the OS sandbox worker
