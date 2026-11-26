@@ -18,6 +18,7 @@ import (
 // ones, so a profile cannot lend an instance the tag.
 type instance struct {
 	Name     string                       `json:"name"`
+	Type     string                       `json:"type"`
 	Config   map[string]string            `json:"config"`
 	Devices  map[string]map[string]string `json:"devices"`
 	Profiles []string                     `json:"profiles"`
@@ -107,7 +108,7 @@ func (s *Server) requireInstance(ctx context.Context, name string) (*instance, e
 // checkProfiles validates the profiles an instance is being given: each is
 // fetched and its whole configuration checked, so an instance cannot pick up
 // a privileged profile someone else defined.
-func (s *Server) checkProfiles(ctx context.Context, names []string) error {
+func (s *Server) checkProfiles(ctx context.Context, names []string, vm bool) error {
 	for _, name := range names {
 		var prof instance
 		if err := s.getJSON(ctx, "/1.0/profiles/"+url.PathEscape(name), nil, &prof); err != nil {
@@ -116,7 +117,7 @@ func (s *Server) checkProfiles(ctx context.Context, names []string) error {
 			}
 			return err
 		}
-		if err := s.opts.Policy.checkChanges(prof.Config, nil, prof.Devices, nil); err != nil {
+		if err := s.opts.Policy.checkChanges(prof.Config, nil, prof.Devices, nil, vm); err != nil {
 			return deny("profile %q: %v", name, err)
 		}
 	}
@@ -157,17 +158,17 @@ func (s *Server) checkInstanceCreate(req *http.Request) error {
 		return err
 	}
 	ctx := req.Context()
-	if err := s.opts.Policy.checkChanges(body.Config, nil, body.Devices, nil); err != nil {
-		return deny("%v", err)
-	}
-
+	// The daemon takes a copy's type from its source, and defaults to a
+	// container.
+	vm := isVM(body.Type)
 	profiles := body.Profiles
 	setProfiles := false
 	if body.Source.Type == "copy" {
-		src, err := s.checkCopySource(ctx, body.Source.Source)
+		src, srcVM, err := s.checkCopySource(ctx, body.Source.Source)
 		if err != nil {
 			return err
 		}
+		vm = srcVM
 		if profiles == nil && src != nil {
 			profiles = src.Profiles
 		}
@@ -185,7 +186,10 @@ func (s *Server) checkInstanceCreate(req *http.Request) error {
 		profiles = []string{"default"}
 		setProfiles = true
 	}
-	if err := s.checkProfiles(ctx, profiles); err != nil {
+	if err := s.opts.Policy.checkChanges(body.Config, nil, body.Devices, nil, vm); err != nil {
+		return deny("%v", err)
+	}
+	if err := s.checkProfiles(ctx, profiles, vm); err != nil {
 		return err
 	}
 
@@ -199,23 +203,24 @@ func (s *Server) checkInstanceCreate(req *http.Request) error {
 // from: in tagged-only mode it must be the sandbox's own, and its
 // configuration, which the copy inherits, must pass the policy. Volatile keys
 // are skipped: the daemon regenerates them for the copy.
-func (s *Server) checkCopySource(ctx context.Context, name string) (*instance, error) {
+func (s *Server) checkCopySource(ctx context.Context, name string) (*instance, bool, error) {
 	instName, snap, isSnap := strings.Cut(name, "/")
 	parent, err := s.fetchInstance(ctx, instName)
 	if err != nil || parent == nil {
-		return nil, err
+		return nil, false, err
 	}
 	if s.opts.TagKey != "" && !s.isTagged(parent) {
-		return nil, deny("instance %q was not created by the sandbox (no %s tag); only the sandbox's own instances can be copied", instName, s.opts.TagKey)
+		return nil, false, deny("instance %q was not created by the sandbox (no %s tag); only the sandbox's own instances can be copied", instName, s.opts.TagKey)
 	}
+	vm := isVM(parent.Type)
 	src := parent
 	if isSnap {
 		var sn instance
 		if err := s.getJSON(ctx, instancePath(instName)+"/snapshots/"+url.PathEscape(snap), nil, &sn); err != nil {
 			if err == errNotFound {
-				return nil, nil
+				return nil, vm, nil
 			}
-			return nil, err
+			return nil, false, err
 		}
 		src = &sn
 	}
@@ -225,11 +230,14 @@ func (s *Server) checkCopySource(ctx context.Context, name string) (*instance, e
 			cfg[k] = v
 		}
 	}
-	if err := s.opts.Policy.checkChanges(cfg, nil, src.Devices, nil); err != nil {
-		return nil, deny("copy source %q: %v", name, err)
+	if err := s.opts.Policy.checkChanges(cfg, nil, src.Devices, nil, vm); err != nil {
+		return nil, false, deny("copy source %q: %v", name, err)
 	}
-	return src, nil
+	return src, vm, nil
 }
+
+// isVM reports whether an instance type is a virtual machine.
+func isVM(typ string) bool { return typ == "virtual-machine" }
 
 // rewriteCreate re-encodes a create body with the tag added to its config
 // (when tagKey is set) and, when setProfiles, an explicit profile list. The
@@ -304,10 +312,10 @@ func (s *Server) checkInstanceUpdate(req *http.Request, name string) error {
 	if err != nil || cur == nil {
 		return err
 	}
-	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices); err != nil {
+	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices, isVM(cur.Type)); err != nil {
 		return deny("%v", err)
 	}
-	return s.checkProfiles(req.Context(), newProfiles(body.Profiles, cur.Profiles))
+	return s.checkProfiles(req.Context(), newProfiles(body.Profiles, cur.Profiles), isVM(cur.Type))
 }
 
 // currentForUpdate returns the instance a request modifies, enforcing the tag
@@ -341,13 +349,13 @@ func (s *Server) checkInstanceRename(req *http.Request, name string) error {
 	if err != nil || cur == nil {
 		return err
 	}
-	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices); err != nil {
+	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices, isVM(cur.Type)); err != nil {
 		return deny("%v", err)
 	}
 	if body.Profiles == nil {
 		return nil
 	}
-	return s.checkProfiles(req.Context(), newProfiles(body.Profiles, cur.Profiles))
+	return s.checkProfiles(req.Context(), newProfiles(body.Profiles, cur.Profiles), isVM(cur.Type))
 }
 
 // checkSnapshotRename validates POST /1.0/instances/{name}/snapshots/{snap}.
@@ -571,7 +579,7 @@ func (s *Server) checkProfileCreate(req *http.Request) error {
 	if _, err := readJSON(req, &body); err != nil {
 		return err
 	}
-	if err := s.opts.Policy.checkChanges(body.Config, nil, body.Devices, nil); err != nil {
+	if err := s.opts.Policy.checkChanges(body.Config, nil, body.Devices, nil, true); err != nil { // a profile can apply to a VM
 		return deny("%v", err)
 	}
 	return nil
@@ -588,7 +596,7 @@ func (s *Server) checkProfileUpdate(req *http.Request, name string) error {
 	if err := s.getJSON(req.Context(), "/1.0/profiles/"+url.PathEscape(name), nil, &cur); err != nil && err != errNotFound {
 		return err
 	}
-	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices); err != nil {
+	if err := s.opts.Policy.checkChanges(body.Config, cur.Config, body.Devices, cur.Devices, true); err != nil { // a profile can apply to a VM
 		return deny("%v", err)
 	}
 	return nil
@@ -602,6 +610,7 @@ func (s *Server) checkVolumeCreate(req *http.Request) error {
 		Source struct {
 			Type    string `json:"type"`
 			Project string `json:"project"`
+			Refresh bool   `json:"refresh"`
 		} `json:"source"`
 		Config map[string]string `json:"config"`
 	}
@@ -619,6 +628,11 @@ func (s *Server) checkVolumeCreate(req *http.Request) error {
 	}
 	if s.opts.TagKey == "" {
 		return nil
+	}
+	// A refresh copies onto a volume that already exists, which may be one
+	// the sandbox did not create.
+	if body.Source.Refresh {
+		return deny("refreshing a storage volume copy is not permitted in tagged-only mode")
 	}
 	// Tag the volume so the sandbox can delete it later.
 	var obj map[string]json.RawMessage

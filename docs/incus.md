@@ -63,7 +63,8 @@ session) after changing the `incus` section or the path grants. Without the OS s
   holds and rewrites its profiles and visibility; launching from a remote image
   (`incus launch images:...`) works, and the image the daemon caches for it can
   be used but not changed or deleted. Custom storage volumes the sandbox
-  creates are tagged in their config, and only those can be deleted.
+  creates are tagged in their config, and only those can be deleted; copying
+  onto an existing volume (`refresh`) is refused.
   `tagged_only: false` opens every instance in the project, and profile writes
   then pass the same policy as instances.
 - **Endpoint allowlist**: the server, events and operations reads; instances
@@ -88,10 +89,10 @@ session) after changing the `incus` section or the path grants. Without the OS s
     a proxy device can forward a host socket into the container), and disks
     with `shift`, `raw.mount.options`, shared propagation, or a Ceph source;
   - NICs that hand over or pass through host hardware or rewrite the host's
-    routing: `nictype` `physical` (or `network=` naming a managed physical
-    network), `sriov`, `routed` and `ipvlan` (host routes and proxy ARP), and
-    the options `ipv4/ipv6.routes`, `.routes.external`, `.host_address`,
-    `.host_table(s)` and `host_name`. Other NICs are allowed, managed or not:
+    routing: `nictype` `physical` or `sriov` (or `network=` naming a managed
+    network of either type), OVN `acceleration`, `routed` and `ipvlan` (host
+    routes and proxy ARP), and the options `ipv4/ipv6.routes`,
+    `.routes.external`, `.host_address`, `.host_table(s)` and `host_name`. Other NICs are allowed, managed or not:
     `bridged` (on any host bridge), `macvlan`, `p2p`, `ovn`;
   - restoring another instance's snapshot (`restore: other/snap`), which
     would apply that instance's configuration.
@@ -138,12 +139,15 @@ lite-sandbox config incus enable --project sandbox
 ```
 
 The prefix the daemon uses (the first listed that contains the source) must
-itself lie inside the boundary and must not be strictly inside a writable path,
-since the daemon opens the prefix following symlinks and the sandbox could
-replace it: the working directory itself is the usual choice. `shift` is
-refused, as the daemon refuses it under restricted paths too. A VM's disk share
-is written as the guest's root, so files created through it are owned by root
-on the host. `allow_privileged` lifts all of this except the boundary check.
+itself lie inside the boundary, must not go through a symlink, and must not be
+strictly inside a path the OS sandbox lets commands write: the daemon opens the
+prefix following symlinks, so a command able to rename a directory above it
+could replace it. The working directory itself is the usual choice; in
+`denylist` mode, where all of `$HOME` is writable, a prefix under `$HOME` is
+refused. `shift` is refused, as the daemon refuses it under restricted paths
+too. Host-path disks on virtual machines, and in profiles (which can apply to
+one), are refused: virtiofsd shares them as the host's root, without uid
+translation. `allow_privileged` lifts all of this except the boundary check.
 
 ## Limitations
 
@@ -157,6 +161,14 @@ on the host. `allow_privileged` lifts all of this except the boundary check.
   where that matters.
 - Custom storage volumes are checked only when deleted: any custom volume in
   the project can be attached to the sandbox's instances.
+- A host-path disk is checked when it is added. If an administrator later
+  loosens the project (drops `restricted`, or lists a wider
+  `restricted.devices.disk.paths` prefix first), disks already on the sandbox's
+  instances follow the new setting at their next start.
+- Host-path disk sources are checked against the sandbox's read and write
+  paths, not its deny lists: a read-only disk under a broad read grant shows a
+  container the files there that the container's mapped uid can read (the
+  world-readable ones).
 - The LXD snap's `lxc` wrapper may not run inside the OS sandbox (snap
   confinement); a non-snap `lxc` or `incus` client works against an LXD daemon.
 

@@ -568,6 +568,7 @@ func startIncusProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readPa
 			WorkDir:         workDir,
 			ReadPaths:       readPaths,
 			WritePaths:      writePaths,
+			OSWritePaths:    append(append([]string(nil), writePaths...), sandbox.WorkerWritablePaths()...),
 		},
 	})
 	if err != nil {

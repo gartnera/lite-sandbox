@@ -2087,6 +2087,32 @@ func (s *Sandbox) workerOptions(cfg *config.Config) os_sandbox.WorkerOptions {
 	return opts
 }
 
+// WorkerWritablePaths returns every path a command run in an OS sandbox worker
+// may write, the shared worker's and each scoped worker's: the working
+// directory, the writable binds, and $HOME where the worker binds it writable
+// (denylist mode). The incus proxy uses it to tell which host paths a command
+// could replace.
+func (s *Sandbox) WorkerWritablePaths() []string {
+	cfg := s.getConfig()
+	configs := []*config.Config{cfg}
+	for _, sc := range cfg.CommandScopes() {
+		configs = append(configs, cfg.ForScope(sc))
+	}
+	var out []string
+	home, _ := os.UserHomeDir()
+	for _, c := range configs {
+		opts := s.workerOptions(c)
+		if opts.WorkDir != "" {
+			out = append(out, opts.WorkDir)
+		}
+		out = append(out, opts.ExtraBinds...)
+		if opts.HomeWritable && home != "" {
+			out = append(out, home)
+		}
+	}
+	return out
+}
+
 // existingPaths returns the paths that exist (symlinks not followed).
 func existingPaths(paths []string) []string {
 	var out []string

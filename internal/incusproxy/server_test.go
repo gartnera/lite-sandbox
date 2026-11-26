@@ -53,6 +53,7 @@ func lookup(p string) (any, bool) {
 	objs := map[string]any{
 		"/1.0/networks/incusbr0":                           map[string]any{"name": "incusbr0", "type": "bridge"},
 		"/1.0/networks/uplink":                             map[string]any{"name": "uplink", "type": "physical"},
+		"/1.0/networks/vfs":                                map[string]any{"name": "vfs", "type": "sriov"},
 		"/1.0/images/ownimg":                               map[string]any{"properties": map[string]string{"user.lite-sandbox": "true"}},
 		"/1.0/images/adminimg":                             map[string]any{"properties": map[string]string{"os": "debian"}},
 		"/1.0/images/aliases/mine-alias":                   map[string]any{"name": "mine-alias", "target": "ownimg"},
@@ -95,6 +96,7 @@ func startFakeDaemon(t *testing.T) *fakeDaemon {
 	fd := &fakeDaemon{
 		socket: filepath.Join(shortSocketDir(t), "d.sock"),
 		instances: map[string]instance{
+			"vm1":    {Name: "vm1", Type: "virtual-machine", Config: map[string]string{"user.lite-sandbox": "true"}, Profiles: []string{"default"}},
 			"mine":   {Name: "mine", Config: map[string]string{"user.lite-sandbox": "true", "volatile.idmap.next": "[...]"}, Devices: map[string]map[string]string{"data": {"type": "disk", "source": "/srv/admin", "path": "/data"}}, Profiles: []string{"default"}},
 			"theirs": {Name: "theirs", Config: map[string]string{}, Profiles: []string{"default"}},
 		},
@@ -622,4 +624,65 @@ func TestNICHostOptions(t *testing.T) {
 	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"ipvlan","parent":"eth0","ipv4.address":"192.168.1.10"}`), 403)
 	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"sriov","parent":"eth0"}`), 403)
 	p.expect("POST", "/1.0/instances", nic(`{"type":"nic","nictype":"bridged","parent":"br0","host_name":"eth0"}`), 403)
+}
+
+func TestSecondReviewFindings(t *testing.T) {
+	p := newTestProxy(t, func(o *Options) { o.Project = "sandbox" })
+	// Host-path disks on VMs: virtiofsd shares them as host root.
+	p.expect("POST", "/1.0/instances", `{"name":"v","type":"virtual-machine","source":{"type":"none"},"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 403)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 200)
+	p.expect("PATCH", "/1.0/instances/vm1", `{"devices":{"h":{"type":"disk","source":"/work/src","path":"/h","readonly":"true"}}}`, 403)
+	p.expect("PATCH", "/1.0/instances/vm1", `{"devices":{"v":{"type":"disk","pool":"default","source":"vol","path":"/v"}}}`, 200)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"copy","source":"vm1"},"devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 403)
+
+	// Passthrough through a managed network or OVN acceleration.
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"devices":{"e":{"type":"nic","network":"vfs"}}}`, 403)
+	p.expect("POST", "/1.0/instances", `{"name":"c","source":{"type":"none"},"devices":{"e":{"type":"nic","network":"incusbr0","acceleration":"sriov"}}}`, 403)
+
+	// Volume refresh onto a volume the sandbox did not create.
+	p.expect("POST", "/1.0/storage-pools/default/volumes/custom", `{"name":"v","source":{"type":"copy","pool":"default","name":"mine-v","refresh":true}}`, 403)
+
+	// Profiles can apply to VMs, so host-path disks in them are refused.
+	q := newTestProxy(t, func(o *Options) { o.Project = "sandbox"; o.TagKey = "" })
+	q.expect("POST", "/1.0/profiles", `{"name":"p","devices":{"h":{"type":"disk","source":"/work/src","path":"/h"}}}`, 403)
+}
+
+func TestDiskPrefixReplaceable(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	proj := filepath.Join(home, "src", "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(proj, link); err != nil {
+		t.Fatal(err)
+	}
+	policy := func(prefix string, osWrite []string) *Policy {
+		return &Policy{
+			WorkDir:      proj,
+			ReadPaths:    []string{proj, link},
+			WritePaths:   []string{proj, link},
+			OSWritePaths: osWrite,
+			ProjectConfig: func() (string, map[string]string, error) {
+				return "sandbox", map[string]string{"restricted": "true", "restricted.devices.disk.paths": prefix}, nil
+			},
+		}
+	}
+	disk := func(src string) map[string]string {
+		return map[string]string{"type": "disk", "source": src, "path": "/h"}
+	}
+
+	if err := policy(proj, []string{proj}).checkDevice("h", disk(filepath.Join(proj, "d")), false); err != nil {
+		t.Errorf("prefix = the working directory: %v", err)
+	}
+	// Denylist mode: $HOME is writable, so the directories above the
+	// working directory could be renamed away and replaced.
+	if err := policy(proj, []string{proj, home}).checkDevice("h", disk(filepath.Join(proj, "d")), false); err == nil {
+		t.Error("prefix under a writable $HOME was allowed")
+	}
+	// A prefix going through a symlink is opened through it by the daemon.
+	if err := policy(link, []string{proj}).checkDevice("h", disk(filepath.Join(link, "d")), false); err == nil {
+		t.Error("prefix through a symlink was allowed")
+	}
 }

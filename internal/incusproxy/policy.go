@@ -27,6 +27,11 @@ type Policy struct {
 	// ProjectConfig returns the pinned project's name and configuration; the
 	// server sets it. nil refuses host-path disks (unless AllowPrivileged).
 	ProjectConfig func() (string, map[string]string, error)
+	// OSWritePaths is every path a command in the OS sandbox can write (the
+	// worker's writable binds, $HOME in denylist mode), which can be wider than
+	// WritePaths. A disk prefix under one of them could be replaced. Falls
+	// back to WritePaths when empty.
+	OSWritePaths []string
 }
 
 // nicHostKeys are the NIC options that change the host's own routing or
@@ -41,8 +46,10 @@ var nicHostKeys = []string{
 
 // nicHostTypes are the nictypes that install host routes and proxy ARP
 // (routed, ipvlan), pass hardware through (sriov), or hand a host interface
-// over (physical).
+// over (physical). A NIC naming a managed network of the physical or sriov
+// type gets the same.
 var nicHostTypes = []string{"physical", "routed", "ipvlan", "sriov"}
+var nicHostNetworkTypes = []string{"physical", "sriov"}
 
 // lowLevelKeys are the instance options Incus's restricted.containers.lowlevel
 // and restricted.virtual-machines.lowlevel block (raw.* and
@@ -136,11 +143,12 @@ func (p *Policy) checkConfigKey(key, value string) error {
 	return nil
 }
 
-// checkDevice rejects one device the policy does not allow.
-func (p *Policy) checkDevice(name string, dev map[string]string) error {
+// checkDevice rejects one device the policy does not allow. vm says the
+// device may end up on a virtual machine.
+func (p *Policy) checkDevice(name string, dev map[string]string, vm bool) error {
 	switch typ := dev["type"]; typ {
 	case "disk":
-		return p.checkDisk(name, dev)
+		return p.checkDisk(name, dev, vm)
 	case "nic":
 		// Any NIC except one that takes a host interface away from the host,
 		// whether by nictype or by naming a managed physical network.
@@ -155,13 +163,16 @@ func (p *Policy) checkDevice(name string, dev map[string]string) error {
 				return fmt.Errorf("device %q: NIC option %s (host routing) is not allowed in the sandbox", name, k)
 			}
 		}
+		if a := dev["acceleration"]; a != "" && a != "none" {
+			return fmt.Errorf("device %q: NIC acceleration %q (hardware passthrough) is not allowed in the sandbox", name, a)
+		}
 		if network := dev["network"]; network != "" && p.NetworkType != nil {
 			typ, err := p.NetworkType(network)
 			if err != nil {
 				return fmt.Errorf("device %q: looking up network %q: %v", name, network, err)
 			}
-			if typ == "physical" {
-				return fmt.Errorf("device %q: network %q is a physical network, which is not allowed in the sandbox", name, network)
+			if slices.Contains(nicHostNetworkTypes, typ) {
+				return fmt.Errorf("device %q: network %q is a %s network, which is not allowed in the sandbox", name, network, typ)
 			}
 		}
 		return nil
@@ -182,7 +193,7 @@ func (p *Policy) checkDevice(name string, dev map[string]string) error {
 // volumes) and the generated config drives are allowed; a host-path source is
 // a bind mount and must lie within the sandbox's read (readonly=true) or write
 // boundary, whatever allow_privileged says.
-func (p *Policy) checkDisk(name string, dev map[string]string) error {
+func (p *Policy) checkDisk(name string, dev map[string]string, vm bool) error {
 	src := dev["source"]
 	if dev["path"] == "" && (src == "cloud-init:config" || src == "agent:config") {
 		return nil
@@ -209,6 +220,12 @@ func (p *Policy) checkDisk(name string, dev map[string]string) error {
 	}
 	if !filepath.IsAbs(src) {
 		return fmt.Errorf("device %q: disk source %q must be an absolute host path or a storage volume", name, src)
+	}
+	// A VM's host-path disk is shared through virtiofsd, which runs as host
+	// root without uid translation (raw.idmap is refused), or attached as a
+	// raw device: the guest's root acts as the host's root on it.
+	if vm && !p.AllowPrivileged {
+		return fmt.Errorf("device %q: host-path disks on virtual machines (or in profiles, which can apply to one) are not allowed in the sandbox", name)
 	}
 	readOnly := isTrue(dev["readonly"])
 	allowed := p.WritePaths
@@ -259,7 +276,19 @@ func (p *Policy) checkDiskConfinement(name, src string, allowed []string) error 
 		if !bash_sandboxed.IsUnderAllowedPaths(resolved, allowed) {
 			return refuse(fmt.Sprintf("its restricted.devices.disk.paths prefix %q is outside the sandbox boundary", prefix))
 		}
-		for _, w := range p.WritePaths {
+		// The daemon opens the prefix as written, following symlinks: none
+		// may be in it, and no directory above it may be one the sandbox can
+		// write (it could rename it away and plant a symlink). The prefix
+		// itself may be writable only as a worker bind's root, which a
+		// command cannot rename.
+		if resolved != filepath.Clean(prefix) {
+			return refuse(fmt.Sprintf("its restricted.devices.disk.paths prefix %q goes through a symlink", prefix))
+		}
+		writable := p.OSWritePaths
+		if len(writable) == 0 {
+			writable = p.WritePaths
+		}
+		for _, w := range writable {
 			w = bash_sandboxed.ResolvePath(w, p.WorkDir)
 			if resolved != w && bash_sandboxed.IsUnderAllowedPaths(resolved, []string{w}) {
 				return refuse(fmt.Sprintf("its restricted.devices.disk.paths prefix %q is inside writable %q, so the sandbox could replace it", prefix, w))
@@ -276,7 +305,7 @@ func (p *Policy) checkDiskConfinement(name, src string, allowed []string) error 
 // does not introduce them — which keeps `incus config set` and `config edit`
 // working on instances carrying volatile state. Pass nil currents to check
 // everything, as on create.
-func (p *Policy) checkChanges(newCfg, curCfg map[string]string, newDevs, curDevs map[string]map[string]string) error {
+func (p *Policy) checkChanges(newCfg, curCfg map[string]string, newDevs, curDevs map[string]map[string]string, vm bool) error {
 	for _, k := range sortedKeys(newCfg) {
 		if cur, ok := curCfg[k]; ok && cur == newCfg[k] {
 			continue
@@ -289,7 +318,7 @@ func (p *Policy) checkChanges(newCfg, curCfg map[string]string, newDevs, curDevs
 		if cur, ok := curDevs[name]; ok && maps.Equal(cur, newDevs[name]) {
 			continue
 		}
-		if err := p.checkDevice(name, newDevs[name]); err != nil {
+		if err := p.checkDevice(name, newDevs[name], vm); err != nil {
 			return err
 		}
 	}
