@@ -258,6 +258,10 @@ var allowedCommands = map[string]bool{
 	// Container tooling (config-gated, daemon access via filtering proxy)
 	"docker": true,
 
+	// Incus / LXD CLIs (config-gated, daemon access via filtering proxy)
+	"incus": true,
+	"lxc":   true,
+
 	// Temp file/dir creation. mktemp writes to $TMPDIR (/tmp) by default; those
 	// writes are contained by the OS sandbox's private /tmp when it is enabled.
 	// With the OS sandbox off, temp files land in the host /tmp. Template/-p
@@ -346,6 +350,28 @@ func validateAWSCommand(s *Sandbox, args []*syntax.Word) error {
 	}
 	// AWS CLI credentials will come from IMDS endpoint, not files
 	// No additional argument validation needed - all aws subcommands allowed
+	return nil
+}
+
+// validateIncusCommand gates the incus and lxc CLIs the way docker is gated:
+// enabled in the config, under the OS sandbox (which masks the real daemon
+// socket) unless allow_unsandboxed, and only while the filtering proxy runs.
+// The proxy enforces the policy on the wire, so arguments are not inspected.
+func validateIncusCommand(s *Sandbox, args []*syntax.Word) error {
+	name := "incus"
+	if len(args) > 0 {
+		name = args[0].Lit()
+	}
+	cfg := s.getConfig()
+	if !cfg.Incus.IncusEnabled() {
+		return fmt.Errorf("command %q is not allowed (incus.enabled is disabled)", name)
+	}
+	if !s.osSandboxEnabled() && !cfg.Incus.AllowsUnsandboxed() {
+		return fmt.Errorf("command %q is not allowed without the OS sandbox (enable os_sandbox, or set incus.allow_unsandboxed to accept a bypassable boundary)", name)
+	}
+	if !s.IncusSocketConfigured() {
+		return fmt.Errorf("command %q is not allowed (incus proxy is not running; restart required after enabling incus)", name)
+	}
 	return nil
 }
 

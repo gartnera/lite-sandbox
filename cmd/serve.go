@@ -20,6 +20,7 @@ import (
 	"github.com/gartnera/lite-sandbox/internal/approval"
 	"github.com/gartnera/lite-sandbox/internal/configrequest"
 	"github.com/gartnera/lite-sandbox/internal/dockerproxy"
+	"github.com/gartnera/lite-sandbox/internal/incusproxy"
 	"github.com/gartnera/lite-sandbox/internal/sshagent"
 	bash_sandboxed "github.com/gartnera/lite-sandbox/tool/bash_sandboxed"
 )
@@ -534,6 +535,69 @@ func startDockerProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readP
 	return dockerSrv.Endpoint(), cleanup, nil
 }
 
+// startIncusProxy starts the incus/lxd filtering proxy for sandbox, like
+// startDockerProxy: a temporary directory holds its socket and the incus and
+// lxc CLIs' per-session config directories, disk devices are checked against
+// readPaths/writePaths and workDir, and the sandbox is pointed at the socket
+// with the daemon's real sockets masked. The returned cleanup must be
+// deferred immediately.
+func startIncusProxy(cfg *config.Config, sandbox *bash_sandboxed.Sandbox, readPaths, writePaths []string, workDir string, logStart func(socket string)) (string, func(), error) {
+	upstream := cfg.Incus.UpstreamSocket()
+	socketDir, err := os.MkdirTemp(socketBaseDir(), "ls-incus-")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create incus proxy socket dir: %w", err)
+	}
+	for _, d := range []string{"incus-conf", "lxc-conf"} {
+		if err := os.Mkdir(filepath.Join(socketDir, d), 0o700); err != nil {
+			os.RemoveAll(socketDir)
+			return "", nil, fmt.Errorf("failed to create incus client config dir: %w", err)
+		}
+	}
+	tagKey := ""
+	if cfg.Incus.RequiresTag() {
+		tagKey = config.IncusTagKey
+	}
+	srv, err := incusproxy.NewServer(incusproxy.Options{
+		SocketDir: socketDir,
+		Upstream:  upstream,
+		Project:   cfg.Incus.ProjectName(),
+		TagKey:    tagKey,
+		Policy: incusproxy.Policy{
+			AllowPrivileged: cfg.Incus.AllowsPrivileged(),
+			AllowNesting:    cfg.Incus.AllowsNesting(),
+			WorkDir:         workDir,
+			ReadPaths:       readPaths,
+			WritePaths:      writePaths,
+			OSWritePaths:    append(append([]string(nil), writePaths...), sandbox.WorkerWritablePaths()...),
+		},
+	})
+	if err != nil {
+		os.RemoveAll(socketDir)
+		return "", nil, fmt.Errorf("failed to create incus proxy: %w", err)
+	}
+	go func() {
+		logStart(srv.SocketPath())
+		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+			slog.Error("incus proxy failed", "error", err)
+		}
+	}()
+
+	sandbox.SetIncusSocket(srv.SocketPath(), srv.SocketDir(), bash_sandboxed.IncusMasks{
+		Sockets: config.IncusMaskSockets(upstream),
+		Dirs:    append(config.IncusDaemonDirs(), config.IncusClientConfigDirs()...),
+	})
+
+	cleanup := func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("failed to shutdown incus proxy", "error", err)
+		}
+		os.RemoveAll(socketDir)
+	}
+	return srv.SocketPath(), cleanup, nil
+}
+
 // startSSHAgentProxy serves the restricted ssh agent (internal/sshagent) in
 // front of the user's agent ($SSH_AUTH_SOCK) and hands both sockets to the
 // sandbox, which gives one of them to ssh, sshpass, and git's remote commands
@@ -607,6 +671,18 @@ func runServe(opts serveOptions) error {
 		readPaths, writePaths := sandboxPaths(sandbox, cwd)
 		_, cleanup, err := startDockerProxy(cfg, sandbox, readPaths, writePaths, cwd, func(endpoint string) {
 			slog.Info("docker proxy endpoint", "host", endpoint)
+		})
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+	}
+
+	// Start the incus/lxd proxy likewise.
+	if cfg != nil && cfg.Incus.IncusEnabled() && (cfg.OSSandboxEnabled() || cfg.Incus.AllowsUnsandboxed()) {
+		readPaths, writePaths := sandboxPaths(sandbox, cwd)
+		_, cleanup, err := startIncusProxy(cfg, sandbox, readPaths, writePaths, cwd, func(socket string) {
+			slog.Info("incus proxy socket", "socket", socket)
 		})
 		if err != nil {
 			return err

@@ -120,6 +120,9 @@ var getoptVectors = []struct {
 	{wrapperSpecs["xargs"].opts, []string{"xargs", "-0n", "1", "-a", "list", "--max-args", "2", "-i{}", "--repl", "rm"}},
 	{wrapperSpecs["env"].opts, []string{"env", "-iu", "FOO", "--uns", "BAR", "-C/", "cmd", "-u", "x"}},
 	{wrapperSpecs["timeout"].opts, []string{"timeout", "--sig", "KILL", "-vk1", "5", "cmd"}},
+	{incusOpts, []string{"incus", "exec", "--cwd", "/tmp", "c1", "--env=A=1", "--", "cat", "/etc/hostname"}},
+	{incusOpts, []string{"incus", "file", "pull", "-r", "c1/etc", "--project", "p", "out"}},
+	{incusOpts, []string{"lxc", "export", "c1", "--compression", "none", "backup.tar"}},
 }
 
 // TestGetoptMatchesGlibc runs each vector through util-linux getopt(1),

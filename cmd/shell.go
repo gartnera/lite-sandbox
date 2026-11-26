@@ -114,6 +114,17 @@ func runShell(hasCommand bool, command string) (int, error) {
 		os.Setenv("DOCKER_HOST", endpoint)
 	}
 
+	// Likewise the incus/lxd proxy.
+	if cfg != nil && cfg.Incus.IncusEnabled() && (cfg.OSSandboxEnabled() || cfg.Incus.AllowsUnsandboxed()) {
+		_, cleanup, err := startIncusProxy(cfg, sandbox, readPaths, writePaths, startDir, func(socket string) {
+			slog.Debug("starting incus proxy", "socket", socket)
+		})
+		if err != nil {
+			return 1, err
+		}
+		defer cleanup()
+	}
+
 	// Commands read the shell's stdin, except when the shell reads a script
 	// from it: a terminal is shared, the shell reading at the prompt and the
 	// command while it runs, but a piped script is the shell's alone.

@@ -216,7 +216,8 @@ commands:
 
 These commands also bypass the docker filtering proxy: the proxy's
 `DOCKER_HOST` override isn't applied, so `docker` reaches the real daemon (or
-whatever `DOCKER_HOST` the host environment sets). A restricted entry
+whatever `DOCKER_HOST` the host environment sets), and the incus proxy's
+`INCUS_SOCKET`/`LXD_SOCKET`, so `incus` and `lxc` reach the real daemon. A restricted entry
 unsandboxes only matching invocations; e.g. `git push` leaves other `git`
 subcommands confined. They start from the same environment as every other
 command: with the OS sandbox on, variables named like credentials are left
@@ -936,8 +937,8 @@ restricted one (`./gradlew build`) does not lift this gate.
 Most settings live in a **scope**: an entry of the top-level `scopes` list
 that pairs a `path` with config sections for commands run **at or under** that
 path. Everything outside `scopes` is the **global config**, which applies
-everywhere. A scope can set any section (`aws`, `docker`, `profiles`, `paths`,
-`os_sandbox`, and the rest), and `lite-sandbox config` writes to the scope for
+everywhere. A scope can set any section (`aws`, `docker`, `incus`, `profiles`,
+`paths`, `os_sandbox`, and the rest), and `lite-sandbox config` writes to the scope for
 the current project unless you pass `--global` (see
 [Writing scopes from the CLI](#writing-scopes-from-the-cli)).
 
@@ -1138,6 +1139,21 @@ ssh:
   agent: true                # default true
   unrestricted_agent: false  # default false
   git_signing: false         # default false
+```
+
+## Incus / LXD
+
+The `incus` section lets the `incus` and `lxc` CLIs reach the daemon through a
+filtering proxy confined to one project and, by default, to the instances the
+sandbox created. See [Incus / LXD access](incus.md).
+
+```yaml
+incus:
+  enabled: true
+  project: default           # default "default"
+  tagged_only: true          # default true
+  allow_privileged: false    # default false
+  allow_nesting: false       # default false
 ```
 
 ## Git Support

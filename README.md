@@ -43,6 +43,7 @@ The default is strict: only allowlisted commands run, and toolchains like Go, Ru
 - [Configuration](docs/configuration.md): config file, readable/writable paths, git
 - [Toolchain profiles](docs/profiles.md): built-in Python, Go, pnpm, Rust, Deno, Flutter, Xcode, uv, `gh`, agent-browser
 - [AWS & Docker](docs/aws-and-docker.md): brokered AWS credentials, filtering Docker proxy
+- [Incus / LXD](docs/incus.md): filtering proxy for the incus and lxc CLIs, confined to one project and the sandbox's own instances
 - [SSH](docs/ssh.md): ssh to the hosts you list, filtered ssh agent
 - [Background processes](docs/background-processes.md): long-running commands
 - [Interactive shell](docs/shell.md): `lite-sandbox shell`, a shell for you that follows the same rules
