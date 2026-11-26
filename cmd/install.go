@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/gartnera/lite-sandbox/internal/hook"
 )
@@ -652,13 +653,125 @@ var liteSandboxHookEvents = []hook.EventName{hook.EventPreToolUse, hook.EventPer
 // that govern built-in tools block every call they match when they can't
 // start ("onFailure": "block"), so a stale one left behind for a deleted
 // binary would lock the user out of those tools.
+//
+// The binary path is recognized both shell-quoted, as claudeHookPlan writes
+// it, and unquoted, as installs before that wrote it, including an unquoted
+// path with a space in it.
 func isLiteSandboxHookCommand(cmd, binPath string) bool {
-	hookPrefix := binPath + " hook"
-	if cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ") {
+	for _, exe := range []string{shellQuotePath(binPath), binPath} {
+		hookPrefix := exe + " hook"
+		if cmd == hookPrefix || strings.HasPrefix(cmd, hookPrefix+" ") {
+			return true
+		}
+	}
+	if exe, sub, ok := leadingWords(cmd); ok && filepath.Base(exe) == "lite-sandbox" && sub == "hook" {
 		return true
 	}
-	exe, rest, _ := strings.Cut(cmd, " ")
-	return filepath.Base(exe) == "lite-sandbox" && (rest == "hook" || strings.HasPrefix(rest, "hook "))
+	return isLegacyUnquotedHookCommand(cmd)
+}
+
+// leadingWords parses cmd as a single simple command and returns its first
+// two words, unquoted. ok is false when cmd isn't one, or when either word
+// has an expansion or escape whose value parsing alone can't settle.
+func leadingWords(cmd string) (exe, sub string, ok bool) {
+	f, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(cmd), "")
+	if err != nil || len(f.Stmts) != 1 {
+		return "", "", false
+	}
+	call, isCall := f.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !isCall || len(call.Assigns) > 0 || len(call.Args) < 2 {
+		return "", "", false
+	}
+	if exe, ok = plainWord(call.Args[0]); !ok {
+		return "", "", false
+	}
+	if sub, ok = plainWord(call.Args[1]); !ok {
+		return "", "", false
+	}
+	return exe, sub, true
+}
+
+// plainWord returns a word's value when it is made only of plain text and
+// quoted plain text.
+func plainWord(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(p.Value, `\`) {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, q := range p.Parts {
+				lit, isLit := q.(*syntax.Lit)
+				if !isLit {
+					return "", false
+				}
+				b.WriteString(unescapeDoubleQuoted(lit.Value))
+			}
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// unescapeDoubleQuoted resolves the backslash escapes POSIX honors inside
+// double quotes (\$, \`, \", \\ and a line continuation), which syntax.Quote
+// writes for a path containing both ' and $; any other backslash is literal.
+func unescapeDoubleQuoted(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case '$', '`', '"', '\\':
+				i++
+			case '\n':
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// legacyDirRejects are what an unquoted legacy directory can't contain: shell
+// syntax that means the command is something else than a lone lite-sandbox
+// path (a wrapper, a chain, a comment), so a user's own hook isn't taken for
+// one of ours.
+const legacyDirRejects = ";&|#<>`$\\'\"(){}\t\n"
+
+// isLegacyUnquotedHookCommand recognizes `<dir>/lite-sandbox hook [flags]`
+// written with the directory unquoted, as installs before claudeHookPlan
+// quoted the path did. Such a directory may contain spaces, so it can't be
+// split into words; it is taken to be everything before the last
+// "lite-sandbox hook", and must be an absolute directory (or absent) with no
+// shell syntax in it (legacyDirRejects) and no second absolute path (" /"),
+// such as a wrapper program's.
+func isLegacyUnquotedHookCommand(cmd string) bool {
+	const tail = "lite-sandbox hook"
+	for i := strings.LastIndex(cmd, tail); i >= 0; i = strings.LastIndex(cmd[:i], tail) {
+		rest := cmd[i+len(tail):]
+		if rest != "" && !strings.HasPrefix(rest, " ") {
+			continue
+		}
+		dir := cmd[:i]
+		if dir == "" {
+			return true
+		}
+		if strings.HasPrefix(dir, "/") && strings.HasSuffix(dir, "/") &&
+			!strings.ContainsAny(dir, legacyDirRejects) && !strings.Contains(dir, " /") {
+			return true
+		}
+	}
+	return false
 }
 
 // removeLiteSandboxHooks strips any PreToolUse or PermissionRequest hook entry
