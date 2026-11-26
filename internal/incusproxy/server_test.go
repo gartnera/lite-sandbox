@@ -648,7 +648,12 @@ func TestSecondReviewFindings(t *testing.T) {
 }
 
 func TestDiskPrefixReplaceable(t *testing.T) {
-	base := t.TempDir()
+	// Resolved: macOS's temp dir is under /var, a symlink to /private/var,
+	// and a prefix through a symlink is refused.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(base, "home")
 	proj := filepath.Join(home, "src", "proj")
 	if err := os.MkdirAll(proj, 0o755); err != nil {
