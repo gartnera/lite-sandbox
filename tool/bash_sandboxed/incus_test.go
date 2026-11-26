@@ -50,11 +50,21 @@ func TestIncusEnvInjection(t *testing.T) {
 	s := NewSandbox()
 	s.updateConfig(&config.Config{ExtraCommands: []string{"printenv"}}, tmpDir)
 	s.SetIncusSocket(sock, "/tmp/ls-incus-test", IncusMasks{})
-	out, _ := s.Execute(context.Background(), `true && printenv INCUS_SOCKET LXD_SOCKET INCUS_CONF LXD_CONF; printenv INCUS_DIR || echo no-dir`, tmpDir, []string{tmpDir}, []string{tmpDir})
-	for _, want := range []string{sock, "/tmp/ls-incus-test/incus-conf", "/tmp/ls-incus-test/lxc-conf", "no-dir"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("sandboxed command env: want %q in %q", want, out)
+	// One name per printenv: BSD printenv (macOS) prints only its first operand.
+	for name, want := range map[string]string{
+		"INCUS_SOCKET": sock,
+		"LXD_SOCKET":   sock,
+		"INCUS_CONF":   "/tmp/ls-incus-test/incus-conf",
+		"LXD_CONF":     "/tmp/ls-incus-test/lxc-conf",
+	} {
+		out, _ := s.Execute(context.Background(), "true && printenv "+name, tmpDir, []string{tmpDir}, []string{tmpDir})
+		if strings.TrimSpace(out) != want {
+			t.Errorf("sandboxed command env: %s = %q, want %q", name, strings.TrimSpace(out), want)
 		}
+	}
+	out, _ := s.Execute(context.Background(), `true && printenv INCUS_DIR || echo no-dir`, tmpDir, []string{tmpDir}, []string{tmpDir})
+	if !strings.Contains(out, "no-dir") {
+		t.Errorf("INCUS_DIR should be removed, got %q", out)
 	}
 
 	// Commands allowed with no_sandbox reach the host's own daemon.
