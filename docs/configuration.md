@@ -386,8 +386,8 @@ change never runs unapproved. It needs both halves, the hook registered with
 `--config-requests` and the server started with `serve-mcp --config-requests`.
 `install` and `launch` set both for Claude Code, pi, and opencode v2 (pi's
 extension puts the `ask` to you in a confirmation dialog, and lite-sandbox's
-opencode plugin in opencode's own permission prompt, titled
-`lite-sandbox: <the request>`). Codex, opencode v1, Crush, and
+opencode plugin in opencode's own permission prompt, titled with the request
+and its scope). Codex, opencode v1, Crush, and
 Grok Build don't get either flag, so for them the built-in deny holds exactly
 as before. In a non-interactive `claude -p` run, nobody can answer the
 prompt, so Claude Code denies the call. A non-interactive `opencode run`

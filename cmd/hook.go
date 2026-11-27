@@ -171,6 +171,12 @@ func runHook(cmd *cobra.Command, opts hookOptions) error {
 	}
 
 	decision := evaluate(event, opts)
+	if decision == nil && event.FromOpencode() {
+		// lite-sandbox's opencode plugin forwards only the calls it governs,
+		// and rejects one the hook gives no answer for, so that a hook that
+		// failed before deciding blocks the call. Its deferrals are allows.
+		decision = hook.NewDecision(hook.DecisionAllow, "lite-sandbox: nothing to enforce for this call.")
+	}
 	if decision == nil {
 		// Nothing to enforce: defer to normal permission flow (no JSON).
 		return nil
@@ -352,11 +358,24 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
 	}
+	reason := askReason(prompted)
+	if event.FromOpencode() {
+		// opencode's prompt shows the plugin's request by its title alone, and
+		// a Code Mode program can build the command at run time, so the reason
+		// leads with the command itself, which must then show as it is.
+		if !configrequest.Displayable(command) {
+			return hook.NewDecision(hook.DecisionDeny,
+				"Blocked by lite-sandbox: this command runs a command the sandbox's config asks the user to approve, "+
+					"and it contains characters (such as a line break) the approval prompt cannot show faithfully. "+
+					"Put it on one line.")
+		}
+		reason = command + "\n" + strings.TrimPrefix(reason, "lite-sandbox: ")
+	}
 	if err := approval.Issue(cwd, approval.CommandSubject(command), command); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the command for the user's approval: %v", err))
 	}
-	return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+	return hook.NewDecision(hook.DecisionAsk, reason)
 }
 
 // promptedCommands returns the commands entries with ask: true that command
@@ -488,6 +507,40 @@ func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
 			"Pass each path (and the command) as a plain string.",
 		event.ToolName,
 	))
+}
+
+// opencodeMediaOutputs returns the paths an opencode media tool may write for
+// each requested path: the path itself, and every existing entry beside it
+// whose name starts with the path's name without its extension.
+// generate_image saves to the path with the extension of the image's real
+// format, and generate_video its second and later videos to name-1.ext,
+// name-2.ext, ..., writing through a symlink already at that name; listing
+// the entries lets the boundary check follow such a link.
+func opencodeMediaOutputs(cwd string, paths []string) []string {
+	out := slices.Clone(paths)
+	for _, p := range paths {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			if cwd == "" {
+				continue
+			}
+			abs = filepath.Join(cwd, abs)
+		}
+		dir, base := filepath.Split(abs)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		entries, err := os.ReadDir(dir)
+		if err != nil || stem == "" {
+			continue
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), stem) {
+				if q := filepath.Join(dir, e.Name()); !slices.Contains(out, q) {
+					out = append(out, q)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // denyUninspectableOpencodeInput blocks a governed opencode tool call whose
@@ -666,7 +719,7 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 		if d := evaluatePaths(event, in.Describe(), in.ReadPaths(), false); d != nil {
 			return d
 		}
-		return evaluatePaths(event, in.Describe(), in.WritePaths(), true)
+		return evaluatePaths(event, in.Describe(), opencodeMediaOutputs(eventCWD(event), in.WritePaths()), true)
 	}
 
 	path, write, governed := fsTarget(event)

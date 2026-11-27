@@ -40,12 +40,12 @@ const CONFIG: LiteSandboxConfig = __LITE_SANDBOX_CONFIG__
 
 /**
  * The permission action of the plugin's approval prompts is this prefix and
- * the first line of the hook's reason: opencode's TUI shows a plugin's
- * request by its action alone.
+ * the lines of the hook's reason (the request, then what it does): opencode's
+ * TUI shows a plugin's request by its action alone.
  */
 const ACTION_PREFIX = "lite-sandbox: "
 
-type Decision = { decision: "allow" | "deny" | "ask" | ""; reason: string }
+type Decision = { decision: "allow" | "deny" | "ask"; reason: string }
 
 /** Runs `lite-sandbox hook` on one PreToolUse event and returns its decision. */
 function runHook(event: Record<string, unknown>): Promise<Decision> {
@@ -77,16 +77,19 @@ function runHook(event: Record<string, unknown>): Promise<Decision> {
         return
       }
       if (stdout.trim() === "") {
-        // The hook defers: nothing for the sandbox to enforce.
-        finish(undefined, { decision: "", reason: "" })
+        // The hook answers every call the plugin forwards; no answer means it
+        // failed before deciding.
+        finish(new Error("lite-sandbox hook gave no decision"))
         return
       }
       try {
         const out = JSON.parse(stdout).hookSpecificOutput ?? {}
-        finish(undefined, {
-          decision: out.permissionDecision ?? "",
-          reason: out.permissionDecisionReason ?? "",
-        })
+        const decision = out.permissionDecision
+        if (decision !== "allow" && decision !== "deny" && decision !== "ask") {
+          finish(new Error(`lite-sandbox hook gave no decision: ${stdout.trim()}`))
+          return
+        }
+        finish(undefined, { decision, reason: out.permissionDecisionReason ?? "" })
       } catch (err) {
         finish(new Error(`lite-sandbox hook printed an unreadable decision: ${String(err)}`))
       }
@@ -145,7 +148,7 @@ export default {
           await ctx.permission.assert({
             sessionID: event.sessionID,
             agent: event.agent,
-            action: ACTION_PREFIX + (lines[0] ?? tool),
+            action: ACTION_PREFIX + (lines.length > 0 ? lines.join(" · ") : tool),
             resources: lines.length > 0 ? lines : [tool],
             metadata: { reason: result.reason },
           })

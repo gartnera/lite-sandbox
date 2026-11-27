@@ -171,15 +171,15 @@ func TestOpencodeHookMCPTools(t *testing.T) {
 			t.Errorf("%s: decision = %+v, want allow", tool, d)
 		}
 	}
-	// Other agents' spellings are some other tool to opencode.
-	for _, tool := range []string{mcpToolPrefix + "bash", piMCPToolPrefix + "bash"} {
-		if d := runOpencodeHook(t, cwd, tool, map[string]any{"command": "ls"}, hookOptions{}); d != nil {
-			t.Errorf("%s from opencode: decision = %+v, want defer", tool, d)
+	// Other agents' spellings are some other tool to opencode, as are
+	// opencode's own tools the hook doesn't govern: nothing to enforce. The
+	// hook still answers, since the plugin rejects a call it gets no answer
+	// for.
+	for _, tool := range []string{mcpToolPrefix + "bash", piMCPToolPrefix + "bash", "webfetch"} {
+		d := runOpencodeHook(t, cwd, tool, map[string]any{"command": "ls"}, hookOptions{})
+		if decisionOf(d) != hook.DecisionAllow || !strings.Contains(d.HookSpecificOutput.PermissionDecisionReason, "nothing to enforce") {
+			t.Errorf("%s from opencode: decision = %+v, want the explicit no-objection allow", tool, d)
 		}
-	}
-	// So are opencode's own tools the hook doesn't govern.
-	if d := runOpencodeHook(t, cwd, "webfetch", map[string]any{"url": "https://example.com"}, hookOptions{}); d != nil {
-		t.Errorf("webfetch: decision = %+v, want defer", d)
 	}
 }
 
@@ -216,6 +216,16 @@ func TestOpencodeHookAskCommand(t *testing.T) {
 	d := runOpencodeHook(t, dir, "lite-sandbox_bash", map[string]any{"command": command}, hookOptions{configRequests: true})
 	if decisionOf(d) != hook.DecisionAsk {
 		t.Fatalf("hook decision = %+v, want ask", d)
+	}
+	// The prompt is titled after the reason, so it leads with the command.
+	reason := d.HookSpecificOutput.PermissionDecisionReason
+	if first, rest, _ := strings.Cut(reason, "\n"); first != command || strings.Contains(rest, "lite-sandbox:") {
+		t.Errorf("reason = %q, want the command, then what asks about it", reason)
+	}
+	// A command the prompt can't show as it is is refused rather than asked.
+	d = runOpencodeHook(t, dir, "lite-sandbox_bash", map[string]any{"command": "true\nrm f"}, hookOptions{configRequests: true})
+	if decisionOf(d) != hook.DecisionDeny {
+		t.Errorf("multi-line command: decision = %+v, want deny", d)
 	}
 	if text, isErr := runBash(t, c, command); isErr {
 		t.Fatalf("approved call failed: %s", text)
@@ -282,5 +292,40 @@ func TestOpencodeModelPathHome(t *testing.T) {
 	got := hook.OpencodeModelPath("~/.ssh/id_rsa")
 	if !filepath.IsAbs(got) {
 		t.Errorf("with HOME empty: %q is not absolute", got)
+	}
+}
+
+// TestOpencodeHookMediaOutputs checks the media tools' outputs are checked
+// under the names opencode writes: generate_image swaps the path's extension
+// for the image's, and generate_video numbers later videos, writing through
+// a symlink already there.
+func TestOpencodeHookMediaOutputs(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []string{"cat.png", "clip-1.mp4"} {
+		if err := os.Symlink(filepath.Join(outside, link), filepath.Join(cwd, "out", link)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outside, link), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tt := range []struct {
+		tool, path string
+		wantDeny   bool
+	}{
+		{hook.OpencodeToolGenerateImage, "out/cat", true},
+		{hook.OpencodeToolGenerateImage, "out/cat.jpg", true},
+		{hook.OpencodeToolGenerateVideo, "out/clip.mp4", true},
+		{hook.OpencodeToolGenerateImage, "out/dog", false},
+	} {
+		d := runOpencodeHook(t, cwd, tt.tool, map[string]any{"prompt": "x", "path": tt.path}, hookOptions{})
+		if got := decisionOf(d) == hook.DecisionDeny; got != tt.wantDeny {
+			t.Errorf("%s %s: deny = %v, want %v (%+v)", tt.tool, tt.path, got, tt.wantDeny, d)
+		}
 	}
 }
