@@ -49,7 +49,7 @@ func TestOpencodeV2Plugin(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			project := newProject(t)
-			outside := t.TempDir()
+			outside := outsideDir(t)
 			secret := filepath.Join(outside, "secret.txt")
 			writeFile(t, secret, "TOP-SECRET")
 			inside := filepath.Join(project, "made.txt")
@@ -121,4 +121,27 @@ func TestOpencodeV2Plugin(t *testing.T) {
 			assertResult(t, results, 5, allowedOutput)
 		})
 	}
+}
+
+// outsideDir returns a new directory outside every path the sandbox admits.
+// A t.TempDir() isn't one: it lives under the per-user $TMPDIR on macOS, and
+// /tmp/claude-<uid> on some machines, which the boundary admits as scratch
+// space. The test's working directory (this package's source directory) is
+// outside them, and outside the project.
+func outsideDir(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(wd, ".bin") // gitignored
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(parent, "outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }
