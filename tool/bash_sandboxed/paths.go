@@ -364,7 +364,9 @@ func extractPathFromFlag(flag string) string {
 }
 
 // ResolvePath resolves a potentially relative path to an absolute path,
-// handling symlinks for any existing prefix of the path.
+// following symlinks the way the kernel does when the path is opened for
+// writing: a symlink whose target doesn't exist yet is followed to that
+// target, since creating the path creates the target.
 func ResolvePath(path, workDir string) string {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(workDir, path)
@@ -377,27 +379,67 @@ func ResolvePath(path, workDir string) string {
 		return resolved
 	}
 
-	// Path doesn't fully exist; resolve the longest existing prefix
+	// Path doesn't fully exist; resolve its existing components, following
+	// dangling symlinks, and keep the missing rest as written.
 	return resolveExistingPrefix(path)
 }
 
-// resolveExistingPrefix recursively resolves symlinks on the longest existing
-// ancestor of path, then joins the non-existing suffix back.
+// maxSymlinkFollows bounds how many symlinks resolveExistingPrefix follows, so
+// a link loop ends. It is above the kernel's own limit (40 on Linux, 32 on
+// macOS), so any path the kernel can open is resolved all the way.
+const maxSymlinkFollows = 255
+
+// resolveExistingPrefix resolves the absolute path one component at a time.
+// Each existing component that is a symlink is replaced by its target, read
+// with os.Readlink and resolved the same way, whether or not that target
+// exists: a write to <dir>/link where link points at a missing /outside/file
+// creates /outside/file, so that is the path to check. Components that don't
+// exist are kept as written, and a ".." after one is applied lexically (the
+// kernel would fail there anyway). On a symlink loop it returns the path as
+// resolved so far with the rest joined back, which the kernel can't open.
 func resolveExistingPrefix(path string) string {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	if dir == path {
-		// Reached root
-		return path
+	resolved := string(filepath.Separator)
+	rest := splitPathComponents(path)
+	follows := 0
+	for len(rest) > 0 {
+		part := rest[0]
+		rest = rest[1:]
+		switch part {
+		case ".":
+			continue
+		case "..":
+			// resolved never holds a symlink, so its parent is the physical one.
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		fi, err := os.Lstat(next)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		target, err := os.Readlink(next)
+		if err != nil || follows >= maxSymlinkFollows {
+			return filepath.Join(append([]string{next}, rest...)...)
+		}
+		follows++
+		if filepath.IsAbs(target) {
+			resolved = string(filepath.Separator)
+		}
+		rest = append(splitPathComponents(target), rest...)
 	}
+	return resolved
+}
 
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err == nil {
-		return filepath.Join(resolved, base)
+// splitPathComponents splits a path into its non-empty components.
+func splitPathComponents(p string) []string {
+	var out []string
+	for _, c := range strings.Split(p, string(filepath.Separator)) {
+		if c != "" {
+			out = append(out, c)
+		}
 	}
-
-	return filepath.Join(resolveExistingPrefix(dir), base)
+	return out
 }
 
 // nestedOnlyMarker is the trailing path segment that, when appended to a
