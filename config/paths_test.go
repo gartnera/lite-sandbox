@@ -115,7 +115,7 @@ func TestPaths_Validation(t *testing.T) {
 		"says nothing":        "paths:\n  - path: /x\n",
 		"deny read but write": "paths:\n  - path: /x\n    read: false\n    write: true\n",
 		"internal denial":     "paths:\n  - path: /x\n    write: false\n    internal: true\n",
-		"in an override":      "overrides:\n  - path: /w\n    paths:\n      - path: /x\n",
+		"in a scope":          "scopes:\n  - path: /w\n    paths:\n      - path: /x\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -195,7 +195,7 @@ func TestPaths_SetAndRemove(t *testing.T) {
 
 // TestPaths_Migrate rewrites the deprecated keys as `paths` entries without
 // changing what any directory resolves to — including the awkward case where
-// an old-style override replaced one list and inherited the others, which a
+// an old-style scope replaced one list and inherited the others, which a
 // whole-section `paths` list cannot express without restating them.
 func TestPaths_Migrate(t *testing.T) {
 	writeConfig(t, `
@@ -205,7 +205,7 @@ denied_write_paths: [/ro]
 paths:
   - path: /new
     read: true
-overrides:
+scopes:
   - path: /work/a
     writable_paths: [/work/a/out]      # replaces writable, inherits the rest
   - path: /work/b
@@ -263,8 +263,8 @@ overrides:
 			t.Errorf("%s resolves differently after migrate:\n before %+v\n after  %+v", dir, vb, va)
 		}
 	}
-	// The override that set no path list still inherits rather than carrying a copy.
-	for _, o := range reloaded.Overrides {
+	// The scope that set no path list still inherits rather than carrying a copy.
+	for _, o := range reloaded.Scopes {
 		if o.Path == "/work/b" && o.Paths != nil {
 			t.Errorf("/work/b should keep inheriting, got paths %+v", o.Paths)
 		}
@@ -276,16 +276,16 @@ overrides:
 	}
 }
 
-// TestPaths_OverrideReplacesSection: a replace-mode override's paths list
+// TestPaths_ScopeReplacesSection: a replace-mode scope's paths list
 // replaces the base's for its directory, as every section does there. Only
 // merge: true combines the two entry by entry
 // (TestForDirectory_MergesKeyedSections).
-func TestPaths_OverrideReplacesSection(t *testing.T) {
+func TestPaths_ScopeReplacesSection(t *testing.T) {
 	writeConfig(t, `
 paths:
   - path: /base
     write: true
-overrides:
+scopes:
   - path: /work
     paths:
       - path: /work/out
@@ -299,20 +299,20 @@ overrides:
 		t.Errorf("base writable = %v", got)
 	}
 	if got := cfg.ForDirectory("/work/x").ExpandedWritablePaths(); !slices.Equal(got, []string{"/work/out"}) {
-		t.Errorf("override writable = %v", got)
+		t.Errorf("scope writable = %v", got)
 	}
-	if !(&DirectoryOverride{Path: "/x", Config: Config{Paths: []PathEntry{{Path: "/y"}}}}).SetsAnySection() {
-		t.Error("an override with paths should report a set section")
+	if !(&Scope{Path: "/x", Config: Config{Paths: []PathEntry{{Path: "/y"}}}}).SetsAnySection() {
+		t.Error("a scope with paths should report a set section")
 	}
 }
 
-// TestPaths_MigrateMergeOverride: a merge: true override keeps only its own
+// TestPaths_MigrateMergeScope: a merge: true scope keeps only its own
 // entries, since `paths` merges entry by entry there — migrate must not copy
 // the base's entries into it, which would freeze them.
-func TestPaths_MigrateMergeOverride(t *testing.T) {
+func TestPaths_MigrateMergeScope(t *testing.T) {
 	writeConfig(t, `
 readable_paths: [/ref]
-overrides:
+scopes:
   - path: /work
     merge: true
     writable_paths: [/work/out]
@@ -324,9 +324,9 @@ overrides:
 	if cfg.MigratePaths() == 0 {
 		t.Fatal("MigratePaths reported nothing to do")
 	}
-	o := cfg.Overrides[0]
+	o := cfg.Scopes[0]
 	if len(o.Paths) != 1 || o.Paths[0].Path != "/work/out" || !o.Paths[0].GrantsWrite() {
-		t.Errorf("override paths = %+v, want only its own entry", o.Paths)
+		t.Errorf("scope paths = %+v, want only its own entry", o.Paths)
 	}
 	// The directory resolves as it did: the base's readable path inherited,
 	// its own writable path on top.
@@ -335,6 +335,6 @@ overrides:
 		t.Errorf("readable = %v, want the base entry inherited", got)
 	}
 	if got := scoped.ExpandedWritablePaths(); !slices.Equal(got, []string{"/work/out"}) {
-		t.Errorf("writable = %v, want the override entry", got)
+		t.Errorf("writable = %v, want the scope entry", got)
 	}
 }

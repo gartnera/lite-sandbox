@@ -4,7 +4,7 @@
 // like ~/.superconductor/worktrees rather than next to the checkout — so the
 // sandbox needs the link back to that repository to treat the two as one
 // project (granting access to the main worktree, resolving per-directory
-// config overrides, ...).
+// config scopes, ...).
 package gitworktree
 
 import (

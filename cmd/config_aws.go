@@ -13,12 +13,12 @@ var awsCmd = &cobra.Command{
 	Short: "Manage AWS CLI permission settings",
 }
 
-// findAWSOverride returns the AWS section of the existing directory override for
-// dir, or nil if no override (or no AWS section within it) is configured. The
-// override lookup itself is the generic, section-agnostic one in
+// findAWSScope returns the AWS section of the existing scope for
+// dir, or nil if no scope (or no AWS section within it) is configured. The
+// scope lookup itself is the generic, section-agnostic one in
 // config_overrides.go.
-func findAWSOverride(cfg *config.Config, dir string) *config.AWSConfig {
-	if o := findOverride(cfg, dir); o != nil {
+func findAWSScope(cfg *config.Config, dir string) *config.AWSConfig {
+	if o := findScope(cfg, dir); o != nil {
 		return o.AWS
 	}
 	return nil
@@ -36,17 +36,17 @@ var awsShowCmd = &cobra.Command{
 
 		// With --dir the loaded config is already resolved for that directory,
 		// so print the mode it ends up with rather than the base plus a list of
-		// overrides that do not apply there.
+		// scopes that do not apply there.
 		if configDir != "" {
 			fmt.Printf("AWS configuration for %s:\n", resolveDirArg(configDir))
 			printAWSMode(cfg.AWS, "  ")
 			return nil
 		}
 
-		// Directory overrides can set an aws section without a base aws section
+		// scopes can set an aws section without a base aws section
 		// existing (e.g. `config aws force-profile X --dir Y` with no base), so
-		// don't early-return on a nil base — that would hide those overrides. A
-		// single pass over cfg.Overrides prints them and, lazily on the first one,
+		// don't early-return on a nil base — that would hide those scopes. A
+		// single pass over cfg.Scopes prints them and, lazily on the first one,
 		// the header (plus a note when there is no base to show).
 		if cfg.AWS != nil {
 			fmt.Println("AWS Configuration:")
@@ -54,8 +54,8 @@ var awsShowCmd = &cobra.Command{
 		}
 
 		printedHeader := false
-		for i := range cfg.Overrides {
-			o := &cfg.Overrides[i]
+		for i := range cfg.Scopes {
+			o := &cfg.Scopes[i]
 			if o.AWS == nil {
 				continue
 			}
@@ -63,9 +63,9 @@ var awsShowCmd = &cobra.Command{
 				if cfg.AWS != nil {
 					fmt.Println()
 				} else {
-					fmt.Println("AWS: no base configuration (overrides only)")
+					fmt.Println("AWS: no global configuration (scopes only)")
 				}
-				fmt.Println("Directory overrides (most specific match wins):")
+				fmt.Println("Scopes (most specific match wins):")
 				printedHeader = true
 			}
 			fmt.Printf("  %s:\n", o.Path)
@@ -81,7 +81,7 @@ var awsShowCmd = &cobra.Command{
 }
 
 // printAWSMode prints the resolved credential mode for an AWS config (base or
-// override) with the given indent.
+// scope) with the given indent.
 func printAWSMode(a *config.AWSConfig, indent string) {
 	switch {
 	case a.AllowsRawCredentials():
@@ -196,8 +196,8 @@ These profiles are additionally selectable per command via AWS_PROFILE=<name>, o
 top of the default force_profile (which is always allowed). Each gets its own
 brokered IMDS server. Pass no names to clear the list.
 
-Requires force_profile to be in effect — from the base config, or, under --dir,
-from that directory's override. Set it first with
+Requires force_profile to be in effect — from the global config, or, under --dir,
+from that directory's scope. Set it first with
 "config aws force-profile <profile> [--dir ...]".`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
@@ -234,10 +234,11 @@ func printAllowedProfilesResult(forceProfile string, profiles []string) {
 	fmt.Println("  Each must be a real profile in ~/.aws/config on the host")
 }
 
-var awsRemoveOverrideCmd = &cobra.Command{
+var awsUnsetCmd = &cobra.Command{
 	Annotations: wholeFile,
-	Use:         "remove-override [dir]",
-	Short:       "Remove the AWS directory override for the given path (defaults to --dir)",
+	Use:         "unset [dir]",
+	Aliases:     []string{"remove-override"},
+	Short:       "Remove the AWS section from a directory's scope, so it inherits the global AWS config (defaults to --dir)",
 	Args:        cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := dirArgOrFlag(args)
@@ -245,31 +246,31 @@ var awsRemoveOverrideCmd = &cobra.Command{
 			return err
 		}
 
-		// Edit the stored config directly: this removes a section from an
-		// override rather than setting a value inside one.
+		// Edit the stored config directly: this removes a section from a
+		// scope rather than setting a value inside one.
 		cfg, err := config.Load()
 		if err != nil {
 			return err
 		}
 
-		o := findOverride(cfg, dir)
+		o := findScope(cfg, dir)
 		if o == nil || o.AWS == nil {
-			fmt.Printf("No AWS override configured for %s\n", dir)
+			fmt.Printf("No AWS setting in the scope for %s\n", dir)
 			return nil
 		}
 
 		// Clear only the AWS section, preserving any other sections stored for
-		// this directory. Drop the whole override once it sets nothing.
+		// this directory. Drop the whole scope once it sets nothing.
 		o.AWS = nil
 		if !o.SetsAnySection() {
-			removeOverride(cfg, dir)
+			removeScope(cfg, dir)
 		}
 
 		if err := config.Save(cfg); err != nil {
 			return err
 		}
 
-		fmt.Printf("Removed AWS override for %s\n", dir)
+		fmt.Printf("Removed the AWS setting from the scope for %s\n", dir)
 		return nil
 	},
 }
@@ -307,7 +308,7 @@ func init() {
 	awsCmd.AddCommand(awsAllowRawCredentialsCmd)
 	awsCmd.AddCommand(awsForceProfileCmd)
 	awsCmd.AddCommand(awsAllowedProfilesCmd)
-	awsCmd.AddCommand(awsRemoveOverrideCmd)
+	awsCmd.AddCommand(awsUnsetCmd)
 	awsCmd.AddCommand(awsDisableCmd)
 	configCmd.AddCommand(awsCmd)
 }

@@ -9,15 +9,15 @@ import (
 )
 
 // A linked worktree lives wherever `git worktree add` put it, so it never
-// matches the override written for the repository's path. It should still
+// matches the scope written for the repository's path. It should still
 // resolve to that repository's settings.
-func TestForDirectory_WorktreeInheritsRepoOverride(t *testing.T) {
+func TestForDirectory_WorktreeInheritsRepoScope(t *testing.T) {
 	repo := gitworktreetest.InitRepo(t)
 	wt := gitworktreetest.AddWorktree(t, repo, "feature")
 
 	cfg := &Config{
 		Mode: string(ModeAllowlist),
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: repo, Config: Config{Mode: string(ModeDenylist)}},
 		},
 	}
@@ -38,14 +38,14 @@ func TestForDirectory_WorktreeInheritsRepoOverride(t *testing.T) {
 	}
 }
 
-// An override covering the repo's parent directory reaches the worktree the
+// A scope covering the repo's parent directory reaches the worktree the
 // same way: the fallback re-runs the normal prefix match from the main worktree.
-func TestForDirectory_WorktreeInheritsAncestorOverride(t *testing.T) {
+func TestForDirectory_WorktreeInheritsAncestorScope(t *testing.T) {
 	repo := gitworktreetest.InitRepo(t)
 	wt := gitworktreetest.AddWorktree(t, repo, "feature")
 
 	cfg := &Config{
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: filepath.Dir(repo), Config: Config{Mode: string(ModeOpen)}},
 		},
 	}
@@ -54,7 +54,7 @@ func TestForDirectory_WorktreeInheritsAncestorOverride(t *testing.T) {
 	}
 }
 
-// A directly matching override always wins over the inherited one, so a
+// A directly matching scope always wins over the inherited one, so a
 // worktree (or the container holding several of them) can be configured
 // separately from the repository it came from.
 func TestForDirectory_WorktreeDirectMatchWins(t *testing.T) {
@@ -62,7 +62,7 @@ func TestForDirectory_WorktreeDirectMatchWins(t *testing.T) {
 	wt := gitworktreetest.AddWorktree(t, repo, "feature")
 
 	cfg := &Config{
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: repo, Config: Config{Mode: string(ModeOpen)}},
 			{Path: wt, Config: Config{Mode: string(ModeAllowlist)}},
 		},
@@ -73,14 +73,14 @@ func TestForDirectory_WorktreeDirectMatchWins(t *testing.T) {
 }
 
 // The main worktree of the repo is not a linked worktree, so it never
-// inherits from anywhere; and an unrelated directory stays on the base config.
+// inherits from anywhere; and an unrelated directory stays on the global config.
 func TestForDirectory_NoWorktreeInheritanceElsewhere(t *testing.T) {
 	repo := gitworktreetest.InitRepo(t)
 	_ = gitworktreetest.AddWorktree(t, repo, "feature")
 
 	cfg := &Config{
 		Mode: string(ModeAllowlist),
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: filepath.Join(repo, "sub"), Config: Config{Mode: string(ModeOpen)}},
 		},
 	}
@@ -101,7 +101,7 @@ func TestForDirectory_WorktreeInheritsAllSections(t *testing.T) {
 
 	cfg := &Config{
 		Docker: &DockerConfig{Enabled: &yes},
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{
 				Path:  repo,
 				Merge: true,
@@ -118,7 +118,7 @@ func TestForDirectory_WorktreeInheritsAllSections(t *testing.T) {
 		t.Error("docker.enabled = false, want the base value kept by the merge")
 	}
 	if !got.Docker.AllowsPrivileged() {
-		t.Error("docker.allow_privileged = false, want the override's true")
+		t.Error("docker.allow_privileged = false, want the scope's true")
 	}
 	if want := []string{filepath.Join(repo, "out")}; len(got.ExpandedWritablePaths()) != 1 || got.ExpandedWritablePaths()[0] != want[0] {
 		t.Errorf("writable paths = %v, want %v", got.ExpandedWritablePaths(), want)

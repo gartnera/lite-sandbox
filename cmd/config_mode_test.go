@@ -156,7 +156,7 @@ func TestConfigModeSet_Dir(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "for /work/untrusted") || !strings.Contains(out, "base mode stays allowlist") {
+	if !strings.Contains(out, "for /work/untrusted") || !strings.Contains(out, "global mode stays allowlist") {
 		t.Errorf("output = %q", out)
 	}
 	cfg, err := config.Load()
@@ -167,7 +167,7 @@ func TestConfigModeSet_Dir(t *testing.T) {
 		t.Errorf("base mode changed: %s", cfg.EffectiveMode())
 	}
 	if got := cfg.ForDirectory("/work/untrusted/sub").EffectiveMode(); got != config.ModeDenylist {
-		t.Errorf("override mode = %s", got)
+		t.Errorf("scope mode = %s", got)
 	}
 	if cfg.OSSandbox != nil {
 		t.Error("--dir must not touch os_sandbox")

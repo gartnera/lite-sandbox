@@ -40,7 +40,10 @@ func TestParseConfigRequest(t *testing.T) {
 		{args: []string{"--dir=/", "mode", "set", "open"}, wantErr: "--dir"},
 		// Whole-file and deprecated commands are not requestable.
 		{args: []string{"--log-level", "x", "edit", "--global"}, wantErr: "interactive"},
+		{args: []string{"scopes", "remove", "/other", "--global"}, wantErr: "as a whole"},
 		{args: []string{"overrides", "remove", "/other", "--global"}, wantErr: "as a whole"},
+		{args: []string{"aws", "unset", "/other"}, wantErr: "as a whole"},
+		{args: []string{"aws", "remove-override", "/other"}, wantErr: "as a whole"},
 		{args: []string{"paths", "migrate"}, wantErr: "as a whole"},
 		{args: []string{"writable-paths", "add", "/tmp/x"}, wantErr: "deprecated"},
 		{args: []string{"paths"}, wantErr: "not a config setting"},
@@ -70,6 +73,7 @@ func TestParseConfigRequest(t *testing.T) {
 		{args: []string{"--log-level", "debug", "mode", "show"}, want: configrequest.Scope{ReadOnly: true}},
 		// Whole-file reads are not requestable.
 		{args: []string{"path"}, wantErr: "as a whole"},
+		{args: []string{"scopes", "list"}, wantErr: "as a whole"},
 		{args: []string{"overrides", "list"}, wantErr: "as a whole"},
 		{args: []string{"overrides", "remove", "/x"}, wantErr: "as a whole"},
 		// `show` as a value, not the subcommand.

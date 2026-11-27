@@ -26,7 +26,7 @@ const configCommandTimeout = time.Minute
 // configrequest.DirEnv and GlobalEnv hand the subprocess the approved scope:
 // it scopes the change to scopeDir, the project directory the user saw,
 // rather than resolving its own, and refuses to run if what it parsed is not
-// that scope (or the base config when global). A read-only request has no
+// that scope (or the global config when global). A read-only request has no
 // approved scope; its scopeDir is "" and neither variable is set.
 // A variable so tests can stand in for the binary.
 var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []string, global bool) (string, error) {
@@ -55,7 +55,7 @@ var runConfigCommand = func(ctx context.Context, dir, scopeDir string, args []st
 // it. It runs on the host, not in the sandbox, whose deny list exists to stop
 // exactly this command. It is parsed as the config command will parse it
 // (parseConfigRequest): the change lands in the project's per-directory
-// override (configrequest.DefaultDir), or the base config with --global, and
+// scope (configrequest.DefaultDir), or the global config with --global, and
 // --dir and whole-file commands are refused. The approval is
 // the ticket the PreToolUse hook records
 // when it asks the user (see internal/configrequest); a request without one

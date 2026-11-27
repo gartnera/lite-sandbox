@@ -29,7 +29,7 @@ var configRequestParseMu sync.Mutex
 // usage (Execute returns ErrHelp before any hook or RunE), or one naming a
 // subcommand marked readOnlyAnnotation. Any other request must have displayable
 // arguments (Request.Validate) and may not use --dir (a request lands in the
-// project or, with --global, the base config) or a command that edits the
+// project or, with --global, the global config) or a command that edits the
 // config file as a whole rather than a setting for a directory.
 //
 // The flag values are read and then reset, so parsing leaves no state behind

@@ -134,22 +134,22 @@ func Displayable(s string) bool {
 // request: the directory the request is scoped to (DefaultDir of the working
 // directory it runs in). Under it the config subcommands refuse to run unless
 // the scope they parsed is the one the user approved: exactly that directory,
-// or the base config when GlobalEnv is "1".
+// or the global config when GlobalEnv is "1".
 const DirEnv = "LITE_SANDBOX_CONFIG_REQUEST_DIR"
 
 // GlobalEnv names the environment variable that accompanies DirEnv: "1" when
-// the approved request edits the base config (--global), "0" otherwise.
+// the approved request edits the global config (--global), "0" otherwise.
 const GlobalEnv = "LITE_SANDBOX_CONFIG_REQUEST_GLOBAL"
 
 // DefaultDir is the directory a config command run from cwd is scoped to when
 // it has neither --dir nor --global: the root of the git repository cwd is in,
 // so a change made from a subdirectory applies to the whole repository —
-// inside a linked git worktree, the repository's main worktree, whose override
+// inside a linked git worktree, the repository's main worktree, whose scope
 // every one of its worktrees inherits (config.Config.ForDirectory), so a
 // change made from a throwaway worktree reaches the worktrees created later
 // too. Outside a git repository it is cwd. A repository rooted at the home
 // directory or / (a dotfiles checkout) does not count: every project under it
-// would share one override that reaches nearly everything.
+// would share one scope that reaches nearly everything.
 func DefaultDir(cwd string) string {
 	cwd = filepath.Clean(cwd)
 	broad := func(dir string) bool {
@@ -175,7 +175,7 @@ func DefaultDir(cwd string) string {
 
 // Scope is what a config request does, as the config command itself parses
 // it (the cmd package fills it in with cobra): whether it only reads, whether
-// it edits the base config, and, for `paths allow`, the access it grants.
+// it edits the global config, and, for `paths allow`, the access it grants.
 type Scope struct {
 	// ReadOnly is set when the request changes nothing: cobra parses its help
 	// flag as set (it prints usage before any hook or the command runs), or

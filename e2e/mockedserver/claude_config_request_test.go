@@ -45,7 +45,7 @@ func TestClaudeCodeConfigRequest(t *testing.T) {
 		// The model reads lite-sandbox's reason for asking: the command and
 		// the scope it lands in.
 		assertResult(t, results, 0, configRequest+"\n✓ this project (")
-		if strings.Contains(results[0], "Scoped to") {
+		if strings.Contains(results[0], "Saved to the scope for") {
 			t.Errorf("the config request ran without approval: %q", results[0])
 		}
 		if allowsMake(t, run.configPath, run.project) {
@@ -86,7 +86,7 @@ func TestClaudeCodeConfigRequest(t *testing.T) {
 
 		// The server ran it, scoped to the project, and the next command
 		// still runs.
-		assertResult(t, results, 0, "Scoped to")
+		assertResult(t, results, 0, "Saved to the scope for")
 		if !allowsMake(t, run.configPath, run.project) {
 			data, _ := os.ReadFile(run.configPath)
 			t.Errorf("the approved request did not allow make for %s; config:\n%s", run.project, data)
@@ -152,7 +152,7 @@ func allowsMake(t *testing.T, configPath, project string) bool {
 		t.Fatalf("load %s: %v", configPath, err)
 	}
 	want := realPath(project)
-	for _, o := range cfg.Overrides {
+	for _, o := range cfg.Scopes {
 		if realPath(o.Path) != want {
 			continue
 		}

@@ -94,10 +94,10 @@ func TestEffectiveDeniedCommands(t *testing.T) {
 	}
 }
 
-func TestEffectiveDeniedCommands_DirectoryOverride(t *testing.T) {
+func TestEffectiveDeniedCommands_Scope(t *testing.T) {
 	cfg := &Config{
 		DeniedCommands: []string{"sudo"},
-		Overrides: []DirectoryOverride{
+		Scopes: []Scope{
 			{Path: "/work/repo", Config: Config{DeniedCommands: []string{"gh"}}},
 		},
 	}
@@ -105,13 +105,13 @@ func TestEffectiveDeniedCommands_DirectoryOverride(t *testing.T) {
 	if !slices.Contains(base, "sudo") || slices.Contains(base, "gh") {
 		t.Errorf("base directory list = %v", base)
 	}
-	// An override replaces the section, but the built-in defaults are not part
-	// of the section: they still apply under the override.
+	// A scope replaces the section, but the built-in defaults are not part
+	// of the section: they still apply under the scope.
 	over := cfg.ForDirectory("/work/repo").EffectiveDeniedCommands()
 	if !slices.Contains(over, "gh") || slices.Contains(over, "sudo") {
-		t.Errorf("override list = %v", over)
+		t.Errorf("scope list = %v", over)
 	}
 	if !slices.Contains(over, "lite-sandbox config") {
-		t.Errorf("override dropped the built-in defaults: %v", over)
+		t.Errorf("scope dropped the built-in defaults: %v", over)
 	}
 }
