@@ -41,10 +41,12 @@ var opencodeV2Rules = []opencodeV2Rule{
 // schema. codemode is left unset (unless the user set it), so v2's default
 // applies: the sandbox's tools
 // are reached through Code Mode, as tools["lite-sandbox"].bash(...) in a
-// program the model passes to the execute tool. Code Mode is an interpreter
-// with no filesystem, network, or process access of its own; it can only call
-// the tools opencode offers, so the sandbox stays the only way to run a
-// command.
+// program the model passes to the execute tool. In a release build Code Mode
+// is an interpreter with no filesystem, network, or process access of its
+// own; it can only call the tools opencode offers, so the sandbox stays the
+// only way to run a command. opencode's experimental full_codemode flag gives
+// programs file access of their own, outside every tool hook (see
+// docs/security.md).
 type opencodeV2MCPLocal struct {
 	Type    string   `json:"type"`
 	Command []string `json:"command"`

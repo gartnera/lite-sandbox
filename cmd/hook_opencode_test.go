@@ -89,6 +89,11 @@ func TestOpencodeHookFileTools(t *testing.T) {
 		// header is still a hunk.
 		{"patch indented header", hook.OpencodeToolPatch, patch("   *** Add File: "+filepath.Join(outside, "x"), "+x"), true},
 		{"patch into .git", hook.OpencodeToolPatch, patch("*** Add File: .git/config", "+x"), true},
+		// JavaScript's trim() strips a byte order mark, which Go's TrimSpace
+		// keeps: around a header or a path it must not hide the target.
+		{"patch header after a BOM", hook.OpencodeToolPatch, patch("\uFEFF*** Add File: ~/.bashrc", "+x"), true},
+		{"patch path before a BOM", hook.OpencodeToolPatch, patch("*** Add File: opencode.json\uFEFF", "+x"), true},
+		{"patch path in Unicode spaces", hook.OpencodeToolPatch, patch("*** Add File:\u00a0../x\u3000", "+x"), true},
 		{"image written inside", hook.OpencodeToolGenerateImage, map[string]any{"prompt": "a cat", "path": "out/cat"}, false},
 		{"image written outside", hook.OpencodeToolGenerateImage, map[string]any{"prompt": "a cat", "path": filepath.Join(outside, "cat")}, true},
 		{"image reads outside", hook.OpencodeToolGenerateImage, map[string]any{"prompt": "a cat", "images": []string{"a.png", filepath.Join(outside, "b.png")}}, true},
@@ -223,6 +228,8 @@ func TestOpencodeHookAskCommand(t *testing.T) {
 func TestOpencodeModelPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("OPENCODE_TEST_HOME", "") // restored after the test
+	os.Unsetenv("OPENCODE_TEST_HOME")
 	for _, tt := range []struct{ in, want string }{
 		{"a.go", "a.go"},
 		{"~", home},
@@ -258,5 +265,22 @@ func TestOpencodePluginConfig(t *testing.T) {
 	}
 	if strings.Contains(src, opencodePluginPlaceholder) || !strings.Contains(src, `"bin": "`+testBin+`"`) {
 		t.Errorf("plugin not rendered:\n%s", src)
+	}
+}
+
+// TestOpencodeModelPathHome checks "~" expands to the home directory opencode
+// uses: $OPENCODE_TEST_HOME first, and the passwd entry when $HOME is unset,
+// where Go's os.UserHomeDir would give up and leave "~" a name in the project.
+func TestOpencodeModelPathHome(t *testing.T) {
+	testHome := t.TempDir()
+	t.Setenv("OPENCODE_TEST_HOME", testHome)
+	if got := hook.OpencodeModelPath("~/x"); got != filepath.Join(testHome, "x") {
+		t.Errorf("with OPENCODE_TEST_HOME: %q", got)
+	}
+	os.Unsetenv("OPENCODE_TEST_HOME")
+	t.Setenv("HOME", "")
+	got := hook.OpencodeModelPath("~/.ssh/id_rsa")
+	if !filepath.IsAbs(got) {
+		t.Errorf("with HOME empty: %q is not absolute", got)
 	}
 }

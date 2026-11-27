@@ -3,9 +3,11 @@ package hook
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // opencode v2 has no hook protocol of its own. Its plugins register a
@@ -191,7 +193,9 @@ func (o *OpencodePatchInput) Describe() string {
 // that starts with a header as the start of a hunk, so the hook does too:
 // every line whose trimmed text starts with a file marker names a target. It
 // may over-match (a context line that reads like a header), which only makes
-// a denial more likely, never less.
+// a denial more likely, never less. Lines and paths are trimmed as
+// JavaScript's trim() does (jsTrim), so a byte order mark around a header or
+// path can't hide it.
 func parseOpencodePatchPaths(patch string) []string {
 	markers := []string{
 		"*** Add File:",
@@ -201,16 +205,25 @@ func parseOpencodePatchPaths(patch string) []string {
 	}
 	var paths []string
 	for _, line := range strings.Split(patch, "\n") {
-		line = strings.TrimSpace(line)
+		line = jsTrim(line)
 		for _, m := range markers {
 			if rest, ok := strings.CutPrefix(line, m); ok {
-				if p := strings.TrimSpace(rest); p != "" && !slices.Contains(paths, p) {
+				if p := jsTrim(rest); p != "" && !slices.Contains(paths, p) {
 					paths = append(paths, p)
 				}
 			}
 		}
 	}
 	return paths
+}
+
+// jsTrim trims s as JavaScript's String.prototype.trim() does: its white space
+// is Go's (unicode.IsSpace) without U+0085, which JavaScript keeps, and with
+// U+FEFF, the byte order mark, which Go keeps.
+func jsTrim(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return r == '\uFEFF' || (unicode.IsSpace(r) && r != '\u0085')
+	})
 }
 
 // OpencodeMediaInput is the argument shape of opencode's generate_image
@@ -294,15 +307,33 @@ func opencodePaths(p string) []string {
 
 // OpencodeModelPath mirrors how opencode's file tools resolve a model-supplied
 // path (resolvePath in its core/src/file-access.ts): "~" and a leading "~/"
-// expand to the home directory, and anything else is resolved against the
-// working directory as written. Without this, "~/.ssh/id_rsa" would be judged
-// relative to the working directory and pass, while opencode opens the real
-// file.
+// expand to the home directory (opencodeHome), and anything else is resolved
+// against the working directory as written. Without this, "~/.ssh/id_rsa"
+// would be judged relative to the working directory and pass, while opencode
+// opens the real file.
 func OpencodeModelPath(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[1:])
-		}
+		return filepath.Join(opencodeHome(), p[1:])
 	}
 	return p
+}
+
+// opencodeHome returns the home directory opencode expands "~" to
+// (Global.Path.home in its util/src/global.ts): $OPENCODE_TEST_HOME when set,
+// otherwise Node's os.homedir(), which is $HOME or, when that is unset or
+// empty, the user's passwd entry. The hook runs with the plugin's
+// environment, so it sees the same variables. When no home directory can be
+// found it returns "/", so a "~" path is judged as one outside the project
+// rather than as a name inside it.
+func opencodeHome() string {
+	if home, ok := os.LookupEnv("OPENCODE_TEST_HOME"); ok {
+		return home
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	return string(filepath.Separator)
 }

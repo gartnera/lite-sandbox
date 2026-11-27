@@ -14,8 +14,10 @@
  *    prompt, and the call runs only if they allow it once.
  *
  * Whenever the hook cannot give an answer (it is missing, fails, or times
- * out) the call is rejected. Code Mode calls go through the same hook, so a
- * program's calls are checked one by one.
+ * out) the call is rejected. Code Mode programs' tool calls go through the
+ * same hook, so they are checked one by one. What a program does other than
+ * call a tool (with opencode's experimental full_codemode flag, its own file
+ * access) never reaches this hook.
  */
 import { spawn } from "node:child_process"
 
