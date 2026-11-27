@@ -329,3 +329,31 @@ func TestOpencodeHookMediaOutputs(t *testing.T) {
 		}
 	}
 }
+
+// TestOpencodeHookDanglingSymlinkWrite checks a write through a symlink whose
+// target doesn't exist is refused: the boundary check judges such a link as
+// the file in the project, while opencode creates the target wherever it is.
+func TestOpencodeHookDanglingSymlinkWrite(t *testing.T) {
+	isolateConfig(t)
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "planted"), filepath.Join(cwd, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		tool  string
+		input map[string]any
+	}{
+		{hook.OpencodeToolWrite, map[string]any{"path": "notes.txt", "content": "x"}},
+		{hook.OpencodeToolEdit, map[string]any{"path": filepath.Join(cwd, "notes.txt"), "oldString": "a", "newString": "b"}},
+		{hook.OpencodeToolPatch, map[string]any{"patchText": "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch"}},
+	} {
+		if d := runOpencodeHook(t, cwd, tt.tool, tt.input, hookOptions{}); decisionOf(d) != hook.DecisionDeny {
+			t.Errorf("%s: decision = %+v, want deny", tt.tool, d)
+		}
+	}
+	// Reading through it reads nothing outside: the target doesn't exist.
+	if d := runOpencodeHook(t, cwd, hook.OpencodeToolRead, map[string]any{"path": "notes.txt"}, hookOptions{}); decisionOf(d) == hook.DecisionDeny {
+		t.Errorf("read: decision = %+v, want no denial", d)
+	}
+}

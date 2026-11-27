@@ -1096,9 +1096,43 @@ func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *
 			if d := agentConfigWriteDecision(event, cwd, what, p); d != nil {
 				return d
 			}
+			if event.FromOpencode() {
+				if d := danglingSymlinkWriteDenial(cwd, what, p); d != nil {
+					return d
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// danglingSymlinkWriteDenial denies a write through a symlink whose target
+// doesn't exist yet. The boundary check resolves such a path only up to the
+// link (bash_sandboxed.ResolvePath), so a link in the project pointing at a
+// missing file outside it is judged as a file in the project, while opencode
+// writes through the link and creates its target. Applied to opencode's
+// writes, which the hook otherwise lets through outright.
+func danglingSymlinkWriteDenial(cwd, what, path string) *hook.Decision {
+	abs := path
+	if !filepath.IsAbs(abs) {
+		if cwd == "" {
+			return nil
+		}
+		abs = filepath.Join(cwd, abs)
+	}
+	abs = filepath.Clean(abs)
+	if !hasDanglingSymlink(abs) {
+		return nil
+	}
+	reason := fmt.Sprintf(
+		"Blocked by lite-sandbox: %s\n%q goes through a symlink whose target doesn't exist, so where the write lands "+
+			"can't be checked. Remove the link or write to its target's path.",
+		what, path,
+	)
+	if !auditHookFinding(cwd, what, abs, reason) {
+		return nil
+	}
+	return hook.NewDecision(hook.DecisionDeny, reason)
 }
 
 // boundaryDenial checks a single path against the sandbox boundary for the given
