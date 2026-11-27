@@ -1107,11 +1107,11 @@ func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *
 }
 
 // danglingSymlinkWriteDenial denies a write through a symlink whose target
-// doesn't exist yet. The boundary check resolves such a path only up to the
-// link (bash_sandboxed.ResolvePath), so a link in the project pointing at a
-// missing file outside it is judged as a file in the project, while opencode
-// writes through the link and creates its target. Applied to opencode's
-// writes, which the hook otherwise lets through outright.
+// doesn't exist yet. The boundary check follows such a link to its missing
+// target (bash_sandboxed.ResolvePath), but the link can be repointed between
+// the check and opencode's write, and nothing else stands behind opencode's
+// writes, which the hook otherwise lets through outright, so they are refused
+// whenever the link is still dangling.
 func danglingSymlinkWriteDenial(cwd, what, path string) *hook.Decision {
 	abs := path
 	if !filepath.IsAbs(abs) {

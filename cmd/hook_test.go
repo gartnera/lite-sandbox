@@ -974,6 +974,11 @@ func TestFileWriteApproval(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".git-credentials"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A repository's symlink to a file outside the writable paths that doesn't
+	// exist yet: writing through it would create that file.
+	if err := os.Symlink(filepath.Join(outside, "planted"), filepath.Join(cwd, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
 	// A repository's symlink to a directory that doesn't exist (yet).
 	if err := os.Symlink(filepath.Join(home, ".config", "nvim"), filepath.Join(cwd, "dangling")); err != nil {
 		t.Fatal(err)
@@ -1028,6 +1033,7 @@ func TestFileWriteApproval(t *testing.T) {
 		{"write to a non-ASCII name defers", write(filepath.Join(cwd, "caf\u00e9.txt")), ""},
 		{"write under the scratchpad root defers", write(filepath.Join(claudeScratchpadPath(), "hook-test", "x")), ""},
 		{"write through a dangling symlink defers", write(filepath.Join(cwd, "dangling", "init.lua")), ""},
+		{"write through a dangling symlink to outside is denied", write(filepath.Join(cwd, "notes.txt")), hook.DecisionDeny},
 		{"write to .pnp.js defers", write(filepath.Join(cwd, ".pnp.js")), ""},
 		{"write through a symlink to a non-ASCII spelling defers", write(filepath.Join(cwd, "s", "authorized_keys")), ""},
 		{"write to a missing deny dir under a symlinked ancestor defers", write(filepath.Join(realCfg, "autostart", "x.desktop")), ""},
