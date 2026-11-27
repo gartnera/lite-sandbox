@@ -69,6 +69,11 @@ type Event struct {
 	// pi's own vocabulary.
 	PiEvent string `json:"pi_event,omitempty"`
 
+	// OpencodeEvent marks an event lite-sandbox's opencode plugin forwarded
+	// from opencode v2's tool execute.before hook ("tool.execute.before"; see
+	// FromOpencode). Its tool_input is decoded with opencode's own vocabulary.
+	OpencodeEvent string `json:"opencode_event,omitempty"`
+
 	// ToolInputTruncated is Grok's flag for a tool input over its 128 KiB hook
 	// payload limit. Grok then sends a clipped JSON string in place of the
 	// input object, so the arguments cannot be decoded.
@@ -97,7 +102,8 @@ func (e *Event) FromCodex() bool { return e.TurnID != "" || e.Model != "" }
 // "ask" there would let the call through unchecked. Grok Build does not
 // support it either. lite-sandbox's pi extension does: it puts the ask to the
 // user in a confirmation dialog, and blocks the call when pi has no UI to
-// show one. Misreading a Claude Code event as Codex's only turns an ask into
+// show one. So does its opencode plugin, through opencode's own permission
+// prompt, which rejects the call when nobody is there to answer. Misreading a Claude Code event as Codex's only turns an ask into
 // a denial, the safe direction.
 func (e *Event) CanAsk() bool { return !e.FromGrok() && !e.FromCodex() }
 
@@ -129,8 +135,11 @@ func ParseEvent(r io.Reader) (*Event, error) {
 // parseToolInput decodes RawToolInput into the concrete type for ToolName.
 func (e *Event) parseToolInput() error {
 	factories := toolInputFactories
-	if e.FromPi() {
+	switch {
+	case e.FromPi():
 		factories = piToolInputFactories
+	case e.FromOpencode():
+		factories = opencodeToolInputFactories
 	}
 	factory, ok := factories[e.ToolName]
 	if !ok {

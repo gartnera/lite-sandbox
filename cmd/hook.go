@@ -54,11 +54,22 @@ const grokMCPToolPrefix = grokServerName + "__"
 // _ replaced by _, so lite-sandbox's tools are mcp__lite_sandbox__bash, ...
 const piMCPToolPrefix = "mcp__lite_sandbox__"
 
+// opencodeMCPToolPrefix is how opencode names the sandbox's MCP tools,
+// `<server>_<tool>` (lite-sandbox_bash, ...), in its tool hooks and
+// permission rules. In a Code Mode program the model calls the same tool as
+// tools["lite-sandbox"].bash, and a top-level call may spell it by that
+// qualified name, lite-sandbox.bash; the plugin sends either as
+// lite-sandbox_bash.
+const opencodeMCPToolPrefix = "lite-sandbox_"
+
 // isSandboxBashTool reports whether the event is a call to the sandbox's own
 // bash MCP tool, under the name the sending agent gives it.
 func isSandboxBashTool(event *hook.Event) bool {
-	if event.FromPi() {
+	switch {
+	case event.FromPi():
 		return event.ToolName == piMCPToolPrefix+"bash"
+	case event.FromOpencode():
+		return event.ToolName == opencodeMCPToolPrefix+"bash"
 	}
 	return event.ToolName == mcpToolPrefix+"bash"
 }
@@ -66,8 +77,11 @@ func isSandboxBashTool(event *hook.Event) bool {
 // isSandboxMCPTool reports whether the event is a call to any of the
 // sandbox's MCP tools (bash, kill_shell, list_shells).
 func isSandboxMCPTool(event *hook.Event) bool {
-	if event.FromPi() {
+	switch {
+	case event.FromPi():
 		return strings.HasPrefix(event.ToolName, piMCPToolPrefix)
+	case event.FromOpencode():
+		return strings.HasPrefix(event.ToolName, opencodeMCPToolPrefix)
 	}
 	return strings.HasPrefix(event.ToolName, mcpToolPrefix) || strings.HasPrefix(event.ToolName, grokMCPToolPrefix)
 }
@@ -92,9 +106,9 @@ var hookFlags hookOptions
 
 var hookCmd = &cobra.Command{
 	Use:   "hook",
-	Short: "Evaluate a Claude Code, Codex, Grok Build, or pi PreToolUse event (or a Claude Code PermissionRequest event) from stdin",
+	Short: "Evaluate a Claude Code, Codex, Grok Build, pi, or opencode PreToolUse event (or a Claude Code PermissionRequest event) from stdin",
 	Long: "Reads a PreToolUse hook event as JSON on stdin (Claude Code's protocol, which " +
-		"Codex and Grok Build also speak, and lite-sandbox's pi extension sends) and enforces " +
+		"Codex and Grok Build also speak, and lite-sandbox's pi extension and opencode plugin send) and enforces " +
 		"the sandbox's filesystem boundaries: reads outside the readable paths and " +
 		"writes outside the writable paths are denied. The sandbox's own MCP tools " +
 		"(mcp__lite-sandbox__*) are allowed outright, so they stay prompt-free in " +
@@ -157,6 +171,12 @@ func runHook(cmd *cobra.Command, opts hookOptions) error {
 	}
 
 	decision := evaluate(event, opts)
+	if decision == nil && event.FromOpencode() {
+		// lite-sandbox's opencode plugin forwards only the calls it governs,
+		// and rejects one the hook gives no answer for, so that a hook that
+		// failed before deciding blocks the call. Its deferrals are allows.
+		decision = hook.NewDecision(hook.DecisionAllow, "lite-sandbox: nothing to enforce for this call.")
+	}
 	if decision == nil {
 		// Nothing to enforce: defer to normal permission flow (no JSON).
 		return nil
@@ -210,13 +230,19 @@ func evaluateTool(event *hook.Event, opts hookOptions) *hook.Decision {
 		return nil
 	}
 	// Claude Code's and Codex's Bash, Claude Code's Monitor, one of Grok
-	// Build's shell tools (run_terminal_command, monitor, ...), or pi's bash.
-	// The redirect needs only the name. pi's powershell tool runs PowerShell,
-	// which the bash validator cannot check, so it is always redirected.
-	if event.IsShellTool() && (!validateBash || (event.FromPi() && event.ToolName == hook.PiToolPowerShell)) {
+	// Build's shell tools (run_terminal_command, monitor, ...), pi's bash, or
+	// opencode's shell. The redirect needs only the name. pi's powershell
+	// tool runs PowerShell, which the bash validator cannot check, so it is
+	// always redirected, as is opencode's shell: opencode has no
+	// --bash-ast-hook-mode.
+	if event.IsShellTool() && (!validateBash || event.FromOpencode() ||
+		(event.FromPi() && event.ToolName == hook.PiToolPowerShell)) {
 		return denyBuiltinBash(event)
 	}
 	if d := denyUninspectableGrokInput(event); d != nil {
+		return d
+	}
+	if d := denyUninspectableOpencodeInput(event); d != nil {
 		return d
 	}
 	if event.IsShellTool() {
@@ -332,11 +358,24 @@ func evaluateAskCommand(event *hook.Event, opts hookOptions) *hook.Decision {
 	if err := sb.ValidateCommandContext(bash_sandboxed.WithApproval(context.Background()), command, cwd, readPaths, writePaths); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, "Blocked by lite-sandbox: this command did not pass sandbox validation: "+withConfigRequestHint(err.Error()))
 	}
+	reason := askReason(prompted)
+	if event.FromOpencode() {
+		// opencode's prompt shows the plugin's request by its title alone, and
+		// a Code Mode program can build the command at run time, so the reason
+		// leads with the command itself, which must then show as it is.
+		if !configrequest.Displayable(command) {
+			return hook.NewDecision(hook.DecisionDeny,
+				"Blocked by lite-sandbox: this command runs a command the sandbox's config asks the user to approve, "+
+					"and it contains characters (such as a line break) the approval prompt cannot show faithfully. "+
+					"Put it on one line.")
+		}
+		reason = command + "\n" + strings.TrimPrefix(reason, "lite-sandbox: ")
+	}
 	if err := approval.Issue(cwd, approval.CommandSubject(command), command); err != nil {
 		return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
 			"Blocked by lite-sandbox: could not record the command for the user's approval: %v", err))
 	}
-	return hook.NewDecision(hook.DecisionAsk, askReason(prompted))
+	return hook.NewDecision(hook.DecisionAsk, reason)
 }
 
 // promptedCommands returns the commands entries with ask: true that command
@@ -383,7 +422,7 @@ func promptedCommands(command, cwd string) (*bash_sandboxed.Sandbox, []string) {
 // that confines plan mode to reads instead.
 func evaluatePermissionRequest(event *hook.Event, opts hookOptions) *hook.PermissionRequestDecision {
 	if event.PermissionMode != hook.PermissionModePlan || !isSandboxMCPTool(event) ||
-		event.FromGrok() || event.FromPi() || event.FromCodex() {
+		event.FromGrok() || event.FromPi() || event.FromCodex() || event.FromOpencode() {
 		return nil
 	}
 	if isSandboxBashTool(event) && needsUserApproval(event, opts) {
@@ -470,6 +509,60 @@ func denyUninspectableGrokInput(event *hook.Event) *hook.Decision {
 	))
 }
 
+// opencodeMediaOutputs returns the paths an opencode media tool may write for
+// each requested path: the path itself, and every existing entry beside it
+// whose name starts with the path's name without its extension.
+// generate_image saves to the path with the extension of the image's real
+// format, and generate_video its second and later videos to name-1.ext,
+// name-2.ext, ..., writing through a symlink already at that name; listing
+// the entries lets the boundary check follow such a link.
+func opencodeMediaOutputs(cwd string, paths []string) []string {
+	out := slices.Clone(paths)
+	for _, p := range paths {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			if cwd == "" {
+				continue
+			}
+			abs = filepath.Join(cwd, abs)
+		}
+		dir, base := filepath.Split(abs)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		entries, err := os.ReadDir(dir)
+		if err != nil || stem == "" {
+			continue
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), stem) {
+				if q := filepath.Join(dir, e.Name()); !slices.Contains(out, q) {
+					out = append(out, q)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// denyUninspectableOpencodeInput blocks a governed opencode tool call whose
+// arguments the hook cannot read (a value of the wrong type, or input that is
+// not an object). The plugin forwards a call before the tool decodes it, and
+// deferring would let the call run unchecked if opencode reads the input
+// some other way, so the hook fails closed here, where the mode enforces the
+// checks. A call opencode would reject anyway loses nothing.
+func denyUninspectableOpencodeInput(event *hook.Event) *hook.Decision {
+	if !event.FromOpencode() || !hook.IsOpencodeTool(event.ToolName) || event.ToolInput != nil {
+		return nil
+	}
+	if cfg, _ := config.LoadSettingsForDirectory(eventCWD(event)); cfg.EffectiveMode() == config.ModeOpen {
+		return nil
+	}
+	return hook.NewDecision(hook.DecisionDeny, fmt.Sprintf(
+		"Blocked by lite-sandbox: the %s arguments could not be read, so their paths cannot be checked. "+
+			"Pass each path as a plain string.",
+		event.ToolName,
+	))
+}
+
 // denyBuiltinBash blocks a built-in shell tool and points the model at the
 // sandboxed MCP tool, which runs the same command through lite-sandbox's
 // validation and path boundaries. The built-in shell tools have no sandbox.
@@ -491,6 +584,9 @@ func denyBuiltinBash(event *hook.Event) *hook.Decision {
 	}
 	instead := "Use the " + tool + " tool instead."
 	switch {
+	case event.FromOpencode():
+		instead = "Use the `bash` tool of the `lite-sandbox` MCP server instead " +
+			"(in Code Mode, call `tools[\"lite-sandbox\"].bash({ command })` from `execute`)."
 	case event.FromPi() && event.ToolName == hook.PiToolPowerShell:
 		instead = "Use the " + tool + " tool instead (it runs bash, not PowerShell)."
 	case event.ToolName == hook.ToolMonitor:
@@ -613,6 +709,18 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 	if pt, ok := event.ToolInput.(*hook.PiPathInput); ok {
 		return evaluatePaths(event, pt.Describe(), pt.Paths(), pt.Write())
 	}
+	// opencode's file tools, patch, and media generation tools.
+	switch in := event.ToolInput.(type) {
+	case *hook.OpencodePathInput:
+		return evaluatePaths(event, in.Describe(), in.Paths(), in.Write())
+	case *hook.OpencodePatchInput:
+		return evaluatePaths(event, in.Describe(), in.Paths(), true)
+	case *hook.OpencodeMediaInput:
+		if d := evaluatePaths(event, in.Describe(), in.ReadPaths(), false); d != nil {
+			return d
+		}
+		return evaluatePaths(event, in.Describe(), opencodeMediaOutputs(eventCWD(event), in.WritePaths()), true)
+	}
 
 	path, write, governed := fsTarget(event)
 	if !governed || path == "" {
@@ -686,8 +794,8 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //   - Only in allowlist and denylist mode, where the boundary is enforced. In
 //     open mode a passing boundary check says nothing (it only audits).
 //   - Only for Claude Code. Codex and Grok Build send no Edit/Write events
-//     (and can't take an allow on a file tool), and pi's file tools are
-//     decided by its own extension.
+//     (and can't take an allow on a file tool), and pi's and opencode's file
+//     tools are decided by lite-sandbox's extension and plugin for them.
 //   - Not in plan mode, which is for reading: Claude Code ignores a hook's
 //     allow on a write there anyway.
 //   - Only for a path given absolute and without surrounding white space,
@@ -714,7 +822,7 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     those, so the hook stays out of that decision. (The e2e suite's pinned
 //     Claude Code keeps the prompt either way; this doesn't rely on that.)
 func fileWriteApproval(event *hook.Event, sb *bash_sandboxed.Sandbox, cwd, path string) *hook.Decision {
-	if event.FromGrok() || event.FromCodex() || event.FromPi() ||
+	if event.FromGrok() || event.FromCodex() || event.FromPi() || event.FromOpencode() ||
 		event.PermissionMode == hook.PermissionModePlan {
 		return nil
 	}
@@ -894,7 +1002,8 @@ func claudeProtectedPath(path string) bool {
 // permissions and .opencode's plugins, .grok's hooks, Crush's crushrc. The
 // agents' file tools are held to the same rule. Codex and Grok Build can't put
 // an "ask" to the user, and pi doesn't prompt before a tool call on its own,
-// so their writes are denied; Claude Code's are asked about, so the user
+// so their writes are denied, as are opencode's (whose `run --auto` approves
+// every prompt unattended); Claude Code's are asked about, so the user
 // decides, as Claude Code does itself for .claude (see isClaudeConfigTarget,
 // which runs first) and .mcp.json. In open mode the finding is only audited.
 func agentConfigWriteDecision(event *hook.Event, cwd, what, path string) *hook.Decision {
@@ -911,7 +1020,7 @@ func agentConfigWriteDecision(event *hook.Event, cwd, what, path string) *hook.D
 	if !auditHookFinding(cwd, what, resolved, reason) {
 		return nil
 	}
-	if event.CanAsk() && !event.FromPi() {
+	if event.CanAsk() && !event.FromPi() && !event.FromOpencode() {
 		return hook.NewDecision(hook.DecisionAsk, fmt.Sprintf(
 			"lite-sandbox: %s writes %q, which is %s: a coding agent's configuration, which runs or "+
 				"is obeyed outside the sandbox and is read-only to sandboxed commands.",
@@ -987,9 +1096,43 @@ func evaluatePaths(event *hook.Event, what string, paths []string, write bool) *
 			if d := agentConfigWriteDecision(event, cwd, what, p); d != nil {
 				return d
 			}
+			if event.FromOpencode() {
+				if d := danglingSymlinkWriteDenial(cwd, what, p); d != nil {
+					return d
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// danglingSymlinkWriteDenial denies a write through a symlink whose target
+// doesn't exist yet. The boundary check resolves such a path only up to the
+// link (bash_sandboxed.ResolvePath), so a link in the project pointing at a
+// missing file outside it is judged as a file in the project, while opencode
+// writes through the link and creates its target. Applied to opencode's
+// writes, which the hook otherwise lets through outright.
+func danglingSymlinkWriteDenial(cwd, what, path string) *hook.Decision {
+	abs := path
+	if !filepath.IsAbs(abs) {
+		if cwd == "" {
+			return nil
+		}
+		abs = filepath.Join(cwd, abs)
+	}
+	abs = filepath.Clean(abs)
+	if !hasDanglingSymlink(abs) {
+		return nil
+	}
+	reason := fmt.Sprintf(
+		"Blocked by lite-sandbox: %s\n%q goes through a symlink whose target doesn't exist, so where the write lands "+
+			"can't be checked. Remove the link or write to its target's path.",
+		what, path,
+	)
+	if !auditHookFinding(cwd, what, abs, reason) {
+		return nil
+	}
+	return hook.NewDecision(hook.DecisionDeny, reason)
 }
 
 // boundaryDenial checks a single path against the sandbox boundary for the given

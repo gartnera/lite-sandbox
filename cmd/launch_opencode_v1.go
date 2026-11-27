@@ -11,7 +11,7 @@ import "os"
 //   - permission.bash = "deny" and permission."lite-sandbox*" = "allow";
 //   - instructions naming the directive file.
 func opencodeV1LaunchSpec(binPath string, agentArgs []string) (launchSpec, error) {
-	directivePath, err := opencodeLaunchDirective()
+	directivePath, err := opencodeLaunchDirective("lite-sandbox.md", opencodeDirective)
 	if err != nil {
 		return launchSpec{}, err
 	}

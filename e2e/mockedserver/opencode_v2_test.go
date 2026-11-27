@@ -90,6 +90,9 @@ func TestOpencodeV2(t *testing.T) {
 
 	installSandbox(t, "opencode", environ)
 	assertOpencodeConfigFormat(t, configDir, true)
+	if _, err := os.Stat(filepath.Join(configDir, "plugins", "lite-sandbox", "server.ts")); err != nil {
+		t.Errorf("the install did not write the plugin: %v", err)
+	}
 
 	// serve requires a password (it generates one when none is set); share
 	// one with the clients.

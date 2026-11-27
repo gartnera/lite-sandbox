@@ -41,10 +41,12 @@ var opencodeV2Rules = []opencodeV2Rule{
 // schema. codemode is left unset (unless the user set it), so v2's default
 // applies: the sandbox's tools
 // are reached through Code Mode, as tools["lite-sandbox"].bash(...) in a
-// program the model passes to the execute tool. Code Mode is an interpreter
-// with no filesystem, network, or process access of its own; it can only call
-// the tools opencode offers, so the sandbox stays the only way to run a
-// command.
+// program the model passes to the execute tool. In a release build Code Mode
+// is an interpreter with no filesystem, network, or process access of its
+// own; it can only call the tools opencode offers, so the sandbox stays the
+// only way to run a command. opencode's experimental full_codemode flag gives
+// programs file access of their own, outside every tool hook (see
+// docs/security.md).
 type opencodeV2MCPLocal struct {
 	Type    string   `json:"type"`
 	Command []string `json:"command"`
@@ -54,8 +56,8 @@ type opencodeV2MCPLocal struct {
 // rules in an opencode v2 config, creating the file if needed:
 //
 //   - mcp.servers.lite-sandbox, a local server launched via `lite-sandbox
-//     serve-mcp` (replacing any earlier entry, except for a codemode setting
-//     the user added to it);
+//     serve-mcp --config-requests` (replacing any earlier entry, except for a
+//     codemode setting the user added to it);
 //   - opencodeV2Rules, appended to the permissions array.
 //
 // It also removes what a v1 install left in the same file: the mcp.lite-sandbox
@@ -94,7 +96,7 @@ func configureOpencodeV2(configPath, binPath string, jsonc bool) error {
 	if isV1ServerEntry(servers) {
 		return fmt.Errorf("%s: mcp.servers is a v1 MCP server named \"servers\"; rename it before installing", configPath)
 	}
-	serverVal, err := hujsonMarshal(opencodeV2MCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}})
+	serverVal, err := hujsonMarshal(opencodeV2MCPLocal{Type: "local", Command: append([]string{binPath}, opencodeServeArgs...)})
 	if err != nil {
 		return err
 	}

@@ -65,7 +65,7 @@ func TestConfigureOpencodeV2NewFile(t *testing.T) {
 	if !ok {
 		t.Fatalf("lite-sandbox server not under mcp.servers: %s", raw["mcp"])
 	}
-	if server.Type != "local" || !slices.Equal(server.Command, []string{"/usr/local/bin/lite-sandbox", "serve-mcp"}) {
+	if server.Type != "local" || !slices.Equal(server.Command, []string{"/usr/local/bin/lite-sandbox", "serve-mcp", "--config-requests"}) {
 		t.Errorf("unexpected server config: %+v", server)
 	}
 	if _, ok := raw["permission"]; ok {
