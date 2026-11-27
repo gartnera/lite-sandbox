@@ -324,7 +324,7 @@ func TestConfigureOpencodeJSONCIsIdempotent(t *testing.T) {
 func TestConfigureOpencodeAGENTSMD(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	if err := configureOpencodeAGENTSMD(tmpDir); err != nil {
+	if err := configureOpencodeAGENTSMD(tmpDir, opencodeDirective); err != nil {
 		t.Fatalf("configureOpencodeAGENTSMD failed: %v", err)
 	}
 	content := readFile(t, filepath.Join(tmpDir, "AGENTS.md"))
@@ -333,12 +333,35 @@ func TestConfigureOpencodeAGENTSMD(t *testing.T) {
 	}
 
 	// Idempotent: running again does not duplicate.
-	if err := configureOpencodeAGENTSMD(tmpDir); err != nil {
+	if err := configureOpencodeAGENTSMD(tmpDir, opencodeDirective); err != nil {
 		t.Fatalf("configureOpencodeAGENTSMD failed on second run: %v", err)
 	}
 	content = readFile(t, filepath.Join(tmpDir, "AGENTS.md"))
 	if got := strings.Count(content, opencodeDirective); got != 1 {
 		t.Errorf("expected directive once, got %d", got)
+	}
+}
+
+// TestConfigureOpencodeAGENTSMDSwapsMajor checks an install for one major
+// replaces the other major's directive rather than adding its own beside it.
+func TestConfigureOpencodeAGENTSMDSwapsMajor(t *testing.T) {
+	if strings.Contains(opencodeV2Directive, opencodeDirective) || strings.Contains(opencodeDirective, opencodeV2Directive) {
+		t.Fatal("one directive contains the other, so the swap can't tell them apart")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	for _, step := range []struct{ write, gone string }{
+		{opencodeDirective, ""},
+		{opencodeV2Directive, opencodeDirective},
+		{opencodeDirective, opencodeV2Directive},
+	} {
+		if err := configureOpencodeAGENTSMD(dir, step.write); err != nil {
+			t.Fatal(err)
+		}
+		content := readFile(t, path)
+		if strings.Count(content, step.write) != 1 || (step.gone != "" && strings.Contains(content, step.gone)) {
+			t.Errorf("after writing %.40q:\n%s", step.write, content)
+		}
 	}
 }
 
@@ -433,7 +456,7 @@ func TestConfigureOpencodeAGENTSMDReplacesLegacyDirective(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := configureOpencodeAGENTSMD(tmpDir); err != nil {
+	if err := configureOpencodeAGENTSMD(tmpDir, opencodeDirective); err != nil {
 		t.Fatalf("configureOpencodeAGENTSMD failed: %v", err)
 	}
 	content := readFile(t, path)
@@ -481,8 +504,15 @@ func TestRunInstallOpencodeSelectsDirAndFormat(t *testing.T) {
 		if !strings.Contains(readFile(t, filepath.Join(oc, "opencode.jsonc")), "// mine") {
 			t.Error("comment lost")
 		}
-		if !strings.Contains(readFile(t, filepath.Join(oc, "AGENTS.md")), opencodeDirective) {
-			t.Error("directive not written to OPENCODE_CONFIG_DIR")
+		if !strings.Contains(readFile(t, filepath.Join(oc, "AGENTS.md")), opencodeV2Directive) {
+			t.Error("v2 directive not written to OPENCODE_CONFIG_DIR")
+		}
+		want, err := renderOpencodePlugin("/bin/lite-sandbox")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(t, filepath.Join(oc, "plugins", "lite-sandbox", "server.ts")); got != want {
+			t.Error("plugin not written to OPENCODE_CONFIG_DIR's plugins directory")
 		}
 		if fileExists(filepath.Join(xdg, "opencode")) {
 			t.Error("XDG opencode dir written although v2 reads OPENCODE_CONFIG_DIR")
@@ -505,6 +535,9 @@ func TestRunInstallOpencodeSelectsDirAndFormat(t *testing.T) {
 		}
 		if string(cfg["permission"]) == "" {
 			t.Error("v1 permission map not written")
+		}
+		if fileExists(filepath.Join(xdg, "opencode", "plugins")) {
+			t.Error("v2 plugin written for v1")
 		}
 		if fileExists(oc) {
 			t.Error("OPENCODE_CONFIG_DIR written for v1")

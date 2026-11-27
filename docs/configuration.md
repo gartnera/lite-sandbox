@@ -260,14 +260,17 @@ refused when the hook can't see it in the command line:
 - a command run by a wrapper (`find -exec`, `xargs`, `env`, `timeout`,
   `nice`, `nohup`, `setsid`, `stdbuf`, `xcrun`), which is refused even in an approved call: run it on its own.
 
-Claude Code and pi put the `ask` to you, and existing installs need no
-change: through the sandbox's bash tool they rely on the
-`--config-requests` flags that `install claude`, `launch claude`, `install
-pi` and `launch pi` set, and in `--bash-ast-hook-mode` the hook answers `ask`
+Claude Code, pi and opencode v2 put the `ask` to you. Through the sandbox's
+bash tool they rely on the `--config-requests` flags that `install` and
+`launch` set for those agents (an opencode v2 install made before the plugin
+existed needs `install opencode` re-run to get them), and in
+`--bash-ast-hook-mode` the hook answers `ask`
 for the built-in Bash tool directly (which runs the command once you approve,
 so no ticket is needed). pi's lite-sandbox extension asks in a confirmation
 dialog, and blocks the call in print (`-p`) and JSON mode, which have no UI.
-Codex, opencode, Crush and Grok Build can't ask, so for them a
+lite-sandbox's opencode plugin asks through opencode's permission prompt,
+which a non-interactive `opencode run` rejects unless it runs with `--auto`.
+Codex, opencode v1, Crush and Grok Build can't ask, so for them a
 prompted command is refused, as if denied. Codex in particular parses an
 `ask` but doesn't support it, running the tool call anyway, so the hook tells
 its events apart by the `turn_id` and `model` fields Codex adds and never
@@ -381,11 +384,16 @@ no spelling of the input can make the hook see a different command from the
 one the server runs. Without the hook there is no prompt and so no ticket, and the
 change never runs unapproved. It needs both halves, the hook registered with
 `--config-requests` and the server started with `serve-mcp --config-requests`.
-`install claude`, `launch claude`, `install pi`, and `launch pi` set both (pi's
-extension puts the `ask` to you in a confirmation dialog). Codex, opencode, Crush, and
+`install` and `launch` set both for Claude Code, pi, and opencode v2 (pi's
+extension puts the `ask` to you in a confirmation dialog, and lite-sandbox's
+opencode plugin in opencode's own permission prompt, titled
+`lite-sandbox: <the request>`). Codex, opencode v1, Crush, and
 Grok Build don't get either flag, so for them the built-in deny holds exactly
 as before. In a non-interactive `claude -p` run, nobody can answer the
-prompt, so Claude Code denies the call.
+prompt, so Claude Code denies the call. A non-interactive `opencode run`
+rejects the prompt too, unless it runs with `--auto` (or `--yolo` /
+`--dangerously-skip-permissions`), which allows every prompt unattended,
+config requests included.
 
 The hint pointing the agent at config requests is added to errors about a
 command or path that isn't allowed yet. It isn't added to a

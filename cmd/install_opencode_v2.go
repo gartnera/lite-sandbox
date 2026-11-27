@@ -54,8 +54,8 @@ type opencodeV2MCPLocal struct {
 // rules in an opencode v2 config, creating the file if needed:
 //
 //   - mcp.servers.lite-sandbox, a local server launched via `lite-sandbox
-//     serve-mcp` (replacing any earlier entry, except for a codemode setting
-//     the user added to it);
+//     serve-mcp --config-requests` (replacing any earlier entry, except for a
+//     codemode setting the user added to it);
 //   - opencodeV2Rules, appended to the permissions array.
 //
 // It also removes what a v1 install left in the same file: the mcp.lite-sandbox
@@ -94,7 +94,7 @@ func configureOpencodeV2(configPath, binPath string, jsonc bool) error {
 	if isV1ServerEntry(servers) {
 		return fmt.Errorf("%s: mcp.servers is a v1 MCP server named \"servers\"; rename it before installing", configPath)
 	}
-	serverVal, err := hujsonMarshal(opencodeV2MCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}})
+	serverVal, err := hujsonMarshal(opencodeV2MCPLocal{Type: "local", Command: append([]string{binPath}, opencodeServeArgs...)})
 	if err != nil {
 		return err
 	}

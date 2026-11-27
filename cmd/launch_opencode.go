@@ -25,15 +25,15 @@ func opencodeLaunchSpec(binPath string, agentArgs []string) (launchSpec, error) 
 	return opencodeV1LaunchSpec(binPath, agentArgs)
 }
 
-// opencodeLaunchDirective writes the usage directive to lite-sandbox's cache
-// and returns its path, for the inline config's instructions.
-func opencodeLaunchDirective() (string, error) {
+// opencodeLaunchDirective writes a usage directive to name in lite-sandbox's
+// cache and returns its path, for the inline config's instructions.
+func opencodeLaunchDirective(name, directive string) (string, error) {
 	dir, err := launchCacheDir("opencode")
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "lite-sandbox.md")
-	if err := writeFileAtomic(path, []byte(opencodeDirective+"\n")); err != nil {
+	path := filepath.Join(dir, name)
+	if err := writeFileAtomic(path, []byte(directive+"\n")); err != nil {
 		return "", fmt.Errorf("failed to write %s: %w", path, err)
 	}
 	return path, nil

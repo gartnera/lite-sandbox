@@ -420,8 +420,23 @@ func TestCheckLaunchFlags(t *testing.T) {
 	if err := checkLaunchFlags(target("codex"), flags("permission-mode=plan")); err == nil {
 		t.Error("--permission-mode accepted for codex")
 	}
+	// opencode v1 has no hook; v2's plugin always confines its file tools.
+	stubOpencodeVersion(t, "1.18.29\n", nil)
 	if err := checkLaunchFlags(target("opencode"), flags("with-tool-hook=true")); err == nil {
-		t.Error("explicit --with-tool-hook accepted for opencode")
+		t.Error("explicit --with-tool-hook accepted for opencode v1")
+	}
+	if err := checkLaunchFlags(target("opencode"), flags("with-tool-hook=false")); err != nil {
+		t.Errorf("--with-tool-hook=false refused for opencode v1: %v", err)
+	}
+	stubOpencodeVersion(t, "2.4.1\n", nil)
+	if err := checkLaunchFlags(target("opencode"), flags("with-tool-hook=true")); err != nil {
+		t.Errorf("explicit --with-tool-hook refused for opencode v2: %v", err)
+	}
+	if err := checkLaunchFlags(target("opencode"), flags("with-tool-hook=false")); err == nil {
+		t.Error("--with-tool-hook=false accepted for opencode v2")
+	}
+	if err := checkLaunchFlags(target("opencode"), flags("bash-ast-hook-mode=true")); err == nil {
+		t.Error("--bash-ast-hook-mode accepted for opencode v2")
 	}
 	if err := checkLaunchFlags(target("crush"), flags("with-tool-hook=false")); err != nil {
 		t.Errorf("--with-tool-hook=false refused for crush: %v", err)

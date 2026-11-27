@@ -29,15 +29,26 @@ import (
 // are named <server>_<tool>); v2 by default only through Code Mode, as
 // tools["lite-sandbox"].bash in an execute program, so the directive names
 // both. The built-in shell tool is named bash in v1 and shell in v2, so the
-// directive names neither.
+// directive names neither. A v2 install writes opencodeV2Directive instead.
 const opencodeDirective = "ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell " +
 	"commands (in Code Mode, call `tools[\"lite-sandbox\"].bash({ command })` from `execute`). The built-in " +
 	"shell tool is denied by the permission config and will not run. The sandboxed tool runs commands through " +
 	"lite-sandbox's AST validation and filesystem path boundaries."
 
+// opencodeV2Directive is opencodeDirective for opencode v2, where
+// lite-sandbox's plugin also confines the built-in file tools. Neither
+// directive contains the other, so an install for one major replaces the
+// other's.
+const opencodeV2Directive = "ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell " +
+	"commands (in Code Mode, call `tools[\"lite-sandbox\"].bash({ command })` from `execute`). The built-in " +
+	"shell tool is blocked and will not run. The sandboxed tool runs commands through lite-sandbox's AST " +
+	"validation and filesystem path boundaries. The built-in `read`, `glob`, `grep`, `write`, `edit` and " +
+	"`patch` tools are confined to the same paths: reads outside the sandbox's readable paths and writes " +
+	"outside its writable paths are blocked, as are writes into `.git` and agent configuration."
+
 // opencodeLegacyDirectives are directives earlier releases wrote to AGENTS.md;
-// a re-install replaces them with opencodeDirective instead of appending a
-// near-duplicate.
+// a re-install replaces them with the current directive instead of appending
+// a near-duplicate.
 var opencodeLegacyDirectives = []string{
 	"ALWAYS use the `bash` tool from the `lite-sandbox` MCP server for running shell " +
 		"commands. The built-in bash tool is denied by the permission config and will not run. The sandboxed " +
@@ -177,6 +188,11 @@ func isV1ServerEntry(servers *hujson.Object) bool {
 //   - register the MCP server in the global opencode.json;
 //   - deny the built-in shell tool (the analogue of the Claude installer's
 //     Bash permission deny) and auto-allow the sandbox's tools;
+//   - for v2, write lite-sandbox's plugin to the global plugins directory
+//     (opencode_plugin.go). It runs `lite-sandbox hook` on each built-in
+//     tool call, confining the file tools to the sandbox's paths (so
+//     --with-tool-hook is implied, as for pi), and puts config requests and
+//     commands with ask: true to the user;
 //   - append a usage directive to the global AGENTS.md.
 //
 // opencode v1 and v2 differ in config format (v2 moved servers under
@@ -184,9 +200,10 @@ func isV1ServerEntry(servers *hujson.Object) bool {
 // array), so the installed opencode's version picks which one is written; see
 // detectOpencodeConfigVersion.
 //
-// --with-tool-hook therefore has nothing to attach to (a note is printed), and
-// --bash-ast-hook-mode — which exists to keep using the built-in shell behind a
-// validating hook — skips opencode entirely.
+// v1's plugin API differs and is not supported, so for v1 --with-tool-hook
+// has nothing to attach to (a note is printed). --bash-ast-hook-mode — which
+// exists to keep using the built-in shell behind a validating hook — skips
+// opencode entirely.
 func runInstallOpencode(binPath string) error {
 	if installBashASTHookMode {
 		fmt.Println("⚠ opencode has no PreToolUse hook protocol, so --bash-ast-hook-mode cannot govern its built-in shell tool — skipping opencode.")
@@ -239,43 +256,52 @@ func runInstallOpencode(binPath string) error {
 	if editErr != nil {
 		return fmt.Errorf("failed to configure opencode: %w", editErr)
 	}
+	directive := opencodeDirective
 	if version == opencodeConfigV2 {
 		fmt.Printf("✓ Added MCP server, denied the built-in shell tool, and auto-allowed the sandbox tools in %s (opencode v2 format)\n", configPath)
+		pluginPath, err := writeOpencodePlugin(opencodeInstalledPluginDir(opencodeDir), binPath)
+		if err != nil {
+			return fmt.Errorf("failed to write the opencode plugin: %w", err)
+		}
+		fmt.Printf("✓ Wrote the lite-sandbox plugin to %s (file tools confined to sandbox paths, config requests)\n", pluginPath)
+		directive = opencodeV2Directive
 	} else {
 		fmt.Printf("✓ Added MCP server, denied the built-in bash tool, and auto-allowed the sandbox tools in %s (opencode v1 format)\n", configPath)
 	}
 
-	if err := configureOpencodeAGENTSMD(opencodeDir); err != nil {
+	if err := configureOpencodeAGENTSMD(opencodeDir, directive); err != nil {
 		return fmt.Errorf("failed to configure AGENTS.md: %w", err)
 	}
 	fmt.Printf("✓ Added usage directive to %s\n", filepath.Join(opencodeDir, "AGENTS.md"))
 
 	fmt.Println("\n✓ opencode installation complete!")
-	if installWithToolHook {
-		fmt.Println("(--with-tool-hook: opencode has no PreToolUse hook protocol, so the flag does not apply to it;")
+	if installWithToolHook && version != opencodeConfigV2 {
+		fmt.Println("(--with-tool-hook: lite-sandbox's opencode plugin needs opencode v2, so the flag does not apply to v1;")
 		fmt.Println(" use opencode's own permission config — e.g. edit / external_directory rules — to confine its file tools)")
 	}
 	fmt.Println("Restart opencode for the changes to take effect.")
 	return nil
 }
 
-// configureOpencodeAGENTSMD appends the usage directive to the global
-// AGENTS.md, creating the file if needed, or swaps it in for a directive an
-// earlier release wrote. Idempotent; other content is preserved.
-func configureOpencodeAGENTSMD(opencodeDir string) error {
+// configureOpencodeAGENTSMD appends the usage directive (opencodeDirective or
+// opencodeV2Directive) to the global AGENTS.md, creating the file if needed,
+// or swaps it in for the other major's directive or one an earlier release
+// wrote. Idempotent; other content is preserved.
+func configureOpencodeAGENTSMD(opencodeDir, directive string) error {
 	path := filepath.Join(opencodeDir, "AGENTS.md")
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if !bytes.Contains(data, []byte(opencodeDirective)) {
-		for _, legacy := range opencodeLegacyDirectives {
-			if bytes.Contains(data, []byte(legacy)) {
-				return os.WriteFile(path, bytes.Replace(data, []byte(legacy), []byte(opencodeDirective), 1), 0644)
+	if !bytes.Contains(data, []byte(directive)) {
+		others := append([]string{opencodeDirective, opencodeV2Directive}, opencodeLegacyDirectives...)
+		for _, other := range others {
+			if other != directive && bytes.Contains(data, []byte(other)) {
+				return os.WriteFile(path, bytes.Replace(data, []byte(other), []byte(directive), 1), 0644)
 			}
 		}
 	}
-	return appendDirectiveOnce(path, opencodeDirective)
+	return appendDirectiveOnce(path, directive)
 }
 
 // fileExists reports whether path exists (as any file type).

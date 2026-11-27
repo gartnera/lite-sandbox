@@ -5,16 +5,22 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 // opencodeV2LaunchSpec sets OPENCODE_CONFIG_CONTENT to v2's native format:
 //
 //   - mcp.servers.lite-sandbox, the MCP server (reached through Code Mode, as
-//     with install);
+//     with install), run with --config-requests;
 //   - opencodeV2Rules in permissions. The inline config ranks above the
 //     global and project configs, and arrays are appended to the user's own
 //     OPENCODE_CONFIG_CONTENT, so they are the last rules opencode reads;
+//   - plugins naming lite-sandbox's plugin (opencode_plugin.go), kept in
+//     lite-sandbox's cache, which confines the built-in file tools and puts
+//     config requests to the user. When `install opencode` already put the
+//     plugin in v2's plugins directory, opencode loads that one, and a second
+//     copy is not added;
 //   - instructions naming the directive file.
 //
 // It also runs opencode with --standalone (see opencodeV2LaunchArgs).
@@ -23,11 +29,17 @@ func opencodeV2LaunchSpec(binPath string, agentArgs []string) (launchSpec, error
 	if err != nil {
 		return launchSpec{}, err
 	}
-	directivePath, err := opencodeLaunchDirective()
+	directivePath, err := opencodeLaunchDirective("lite-sandbox-v2.md", opencodeV2Directive)
 	if err != nil {
 		return launchSpec{}, err
 	}
-	content, err := opencodeV2LaunchConfig(binPath, directivePath, os.Getenv("OPENCODE_CONFIG_CONTENT"))
+	pluginDir := ""
+	if !opencodePluginInstalled() {
+		if pluginDir, err = opencodeLaunchPlugin(binPath); err != nil {
+			return launchSpec{}, err
+		}
+	}
+	content, err := opencodeV2LaunchConfig(binPath, directivePath, pluginDir, os.Getenv("OPENCODE_CONFIG_CONTENT"))
 	if err != nil {
 		return launchSpec{}, err
 	}
@@ -39,18 +51,33 @@ func opencodeV2LaunchSpec(binPath string, agentArgs []string) (launchSpec, error
 	}, nil
 }
 
+// opencodePluginInstalled reports whether `install opencode` put the plugin
+// in v2's global plugins directory, which v2 loads on its own.
+func opencodePluginInstalled() bool {
+	dir, err := opencodeV2ConfigDir()
+	if err != nil {
+		return false
+	}
+	return fileExists(filepath.Join(opencodeInstalledPluginDir(dir), opencodePluginEntry))
+}
+
 // opencodeV2LaunchConfig renders v2's inline config, merged over existing (the
-// user's own OPENCODE_CONFIG_CONTENT, or "").
-func opencodeV2LaunchConfig(binPath, directivePath, existing string) (string, error) {
-	return opencodeLaunchContent(map[string]any{
+// user's own OPENCODE_CONFIG_CONTENT, or ""). pluginDir is the plugin's
+// directory, or "" to name none.
+func opencodeV2LaunchConfig(binPath, directivePath, pluginDir, existing string) (string, error) {
+	ours := map[string]any{
 		"mcp": map[string]any{
 			"servers": map[string]any{
-				"lite-sandbox": opencodeV2MCPLocal{Type: "local", Command: []string{binPath, "serve-mcp"}},
+				"lite-sandbox": opencodeV2MCPLocal{Type: "local", Command: append([]string{binPath}, opencodeServeArgs...)},
 			},
 		},
 		"permissions":  opencodeV2Rules,
 		"instructions": []any{directivePath},
-	}, existing)
+	}
+	if pluginDir != "" {
+		ours["plugins"] = []any{pluginDir}
+	}
+	return opencodeLaunchContent(ours, existing)
 }
 
 // opencodeV2LaunchArgs adds --standalone to the agent's arguments. By default

@@ -68,8 +68,11 @@ func (e *Event) FromPi() bool { return e.PiEvent != "" }
 // IsShellTool reports whether the event's tool is a built-in shell tool of the
 // agent that sent it (see the package-level IsShellTool for the other agents).
 func (e *Event) IsShellTool() bool {
-	if e.FromPi() {
+	switch {
+	case e.FromPi():
 		return slices.Contains(piShellTools, e.ToolName)
+	case e.FromOpencode():
+		return e.ToolName == OpencodeToolShell
 	}
 	return IsShellTool(e.ToolName)
 }

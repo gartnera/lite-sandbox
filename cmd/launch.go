@@ -60,9 +60,13 @@ Per agent:
             included; --with-tool-hook=false avoids it.
   opencode  OPENCODE_CONFIG_CONTENT (MCP server, built-in shell denied,
             directive file), in the format of the installed major. For v2
-            also --standalone: v2 otherwise hands the session to its shared
-            background service, which never sees this environment (--server is
-            refused for the same reason).
+            also lite-sandbox's plugin (kept in lite-sandbox's cache, unless
+            "install opencode" put it in v2's plugins directory), which
+            confines the built-in file tools, so --with-tool-hook=false is
+            refused, and puts config requests to you; and --standalone: v2
+            otherwise hands the session to its shared background service,
+            which never sees this environment (--server is refused for the
+            same reason).
   crush     CRUSH_GLOBAL_CONFIG pointing at a generated directory whose
             crushrc sources your own global crushrc (and links your
             crush.json), then adds the MCP server and denies bash.
@@ -73,7 +77,7 @@ Per agent:
             Refused when the extension is already installed: plain pi is then
             sandboxed already.
 
-opencode's directive, Crush's generated config and pi's extension are kept in lite-sandbox's
+opencode's directive and plugin, Crush's generated config and pi's extension are kept in lite-sandbox's
 cache directory (rewritten on each launch), not in the agent's config. Grok
 Build is not supported: its CLI has no way to add an MCP server or hook for a
 single session. Use "lite-sandbox install grok".
@@ -86,8 +90,9 @@ opens, launch is stricter than install by default:
                         Write/Edit/NotebookEdit, Codex's apply_patch) to the
                         sandbox's readable/writable paths. The built-in shell
                         stays blocked outright. Pass --with-tool-hook=false for
-                        install's default posture. opencode and Crush have no
-                        compatible hook, so their file tools are not confined.
+                        install's default posture. opencode v1 and Crush have no
+                        compatible hook, so their file tools are not confined;
+                        opencode v2's and pi's always are.
   --permission-mode     Claude Code only: its permission mode for the session,
                         set as permissions.defaultMode; "acceptEdits" by
                         default, so edits inside the boundary apply without a
@@ -237,6 +242,16 @@ func checkLaunchFlags(target launchTarget, flags *pflag.FlagSet) error {
 	if target.name == "pi" && flags.Changed("with-tool-hook") {
 		if on, _ := flags.GetBool("with-tool-hook"); !on {
 			return fmt.Errorf("pi's file tools are always confined to the sandbox's paths: pi never asks before a tool call, so --with-tool-hook=false is not supported")
+		}
+	}
+	// opencode v2 takes lite-sandbox's plugin, which always confines its file
+	// tools; v1 has no hook, so it is checked as an agent without one.
+	if target.name == "opencode" && flags.Changed("with-tool-hook") {
+		if out, err := opencodeVersionOutput(); err == nil && opencodeMajorVersion(out) >= 2 {
+			if on, _ := flags.GetBool("with-tool-hook"); !on {
+				return fmt.Errorf("opencode v2's file tools are always confined to the sandbox's paths by lite-sandbox's plugin, which also puts config requests to you, so --with-tool-hook=false is not supported")
+			}
+			return nil
 		}
 	}
 	if !target.hooks {
