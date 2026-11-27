@@ -49,7 +49,7 @@ func TestResolvePath_DanglingSymlink(t *testing.T) {
 		{"dir/x", filepath.Join(outside, "missing", "dir", "x")},
 		{"chain", filepath.Join(outside, "planted")},
 		{"rel", filepath.Join(outside, "rel")},
-		{"inlink/new/../y", filepath.Join(project, "sub", "y")},
+		{"inlink/new", filepath.Join(project, "sub", "new")},
 		{"inside", filepath.Join(project, "sub", "new.txt")},
 		{"missing/notes.txt", filepath.Join(project, "missing", "notes.txt")},
 	}
@@ -59,6 +59,15 @@ func TestResolvePath_DanglingSymlink(t *testing.T) {
 				t.Errorf("ResolvePath(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+	// ".." after a link is taken from the link's target. ResolvePath cleans
+	// the path first, so this is only reachable through resolveExistingPrefix
+	// (the clean is tracked separately).
+	if got, want := resolveExistingPrefix(project+"/inlink/../y"), filepath.Join(project, "y"); got != want {
+		t.Errorf("resolveExistingPrefix(inlink/../y) = %q, want %q", got, want)
+	}
+	if got, want := resolveExistingPrefix(project+"/dir/../y"), filepath.Join(outside, "missing", "y"); got != want {
+		t.Errorf("resolveExistingPrefix(dir/../y) = %q, want %q", got, want)
 	}
 	// A link loop can't be opened; it resolves to a path in the project.
 	if got := ResolvePath("loop-a", project); filepath.Dir(got) != project {

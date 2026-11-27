@@ -384,8 +384,9 @@ func ResolvePath(path, workDir string) string {
 	return resolveExistingPrefix(path)
 }
 
-// maxSymlinkFollows bounds how many symlinks resolveExistingPrefix follows,
-// like the kernel's own limit (40 on Linux, 32 on macOS), so a link loop ends.
+// maxSymlinkFollows bounds how many symlinks resolveExistingPrefix follows, so
+// a link loop ends. It is above the kernel's own limit (40 on Linux, 32 on
+// macOS), so any path the kernel can open is resolved all the way.
 const maxSymlinkFollows = 255
 
 // resolveExistingPrefix resolves the absolute path one component at a time.

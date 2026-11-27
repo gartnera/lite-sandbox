@@ -815,8 +815,9 @@ func evaluatePathPolicy(event *hook.Event) *hook.Decision {
 //     and non-ASCII spellings can differ in Unicode normalization, so the
 //     deny-list comparison below could miss the entry the file system
 //     would open.
-//   - Not through a symlink that doesn't resolve: ResolvePath stops at it, so
-//     the checks would judge the link's own path rather than its target.
+//   - Not through a symlink that doesn't resolve: the checks follow it to its
+//     missing target, but the link can be repointed before Claude Code writes
+//     through it, so an allow is left to Claude Code's own flow.
 //   - Not for one of Claude Code's protected paths (claudeProtectedPath):
 //     its docs don't say whether a hook's allow lifts the prompt it puts on
 //     those, so the hook stays out of that decision. (The e2e suite's pinned
@@ -1125,8 +1126,8 @@ func danglingSymlinkWriteDenial(cwd, what, path string) *hook.Decision {
 		return nil
 	}
 	reason := fmt.Sprintf(
-		"Blocked by lite-sandbox: %s\n%q goes through a symlink whose target doesn't exist, so where the write lands "+
-			"can't be checked. Remove the link or write to its target's path.",
+		"Blocked by lite-sandbox: %s\n%q goes through a symlink whose target doesn't exist, and the link could be "+
+			"repointed before the write lands. Remove the link or write to its target's path.",
 		what, path,
 	)
 	if !auditHookFinding(cwd, what, abs, reason) {
