@@ -133,8 +133,9 @@ hook allow) when:
   character: a case-insensitive file system folds
   more than ASCII case (`ſ` for `s`), and Unicode normalization can differ,
   so a deny-list comparison could miss the file the system opens;
-- an existing component of the path is a symlink that doesn't resolve, so its
-  target can't be checked;
+- an existing component of the path is a symlink that doesn't resolve: the
+  checks follow it to its missing target, but the link could be repointed
+  before Claude Code writes through it;
 - the target lies outside the project, the `paths` write grants and the
   worktree parent, and is writable only through the temp and scratchpad
   roots the boundary also admits (`/tmp/claude-<uid>`, a per-user `$TMPDIR`).
